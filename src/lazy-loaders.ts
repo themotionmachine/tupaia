@@ -27,6 +27,7 @@ export const lazy = {
   regimentsOverview: () => import("@/controllers/regiments-overview"),
   religionsEditor: () => import("@/controllers/religions-editor"),
   save: () => import("@/io/save"),
+  sharedMap: () => import("@/io/cloud-cloudflare"),
   statesEditor: () => import("@/controllers/states-editor"),
   supporters: () => import("@/data/supporters"),
   tradeAnimationEditor: () => import("@/controllers/trade-animation-editor"),

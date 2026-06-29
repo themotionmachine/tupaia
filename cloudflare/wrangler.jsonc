@@ -1,0 +1,35 @@
+{
+  // fmg-map — the Tier-A collaborative-map Worker (PRD: cloudflare/PRD-tier-a.md).
+  // Committed config is the source of truth (NFR-1) — reproducible from the repo,
+  // never dashboard-only (the "anna trap"). Paths are relative to THIS file, so
+  // always deploy with the config flag:  wrangler deploy -c cloudflare/wrangler.jsonc
+  "name": "fmg-map",
+  "compatibility_date": "2026-06-01",
+  "main": "worker/src/index.ts",
+
+  // The built FMG SPA (`CF_BUILD=1 npm run build` → ../dist). `run_worker_first`
+  // scopes the Worker to the API; everything else serves straight from assets,
+  // with single-page-application fallback for client routes.
+  "assets": {
+    "directory": "../dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+
+  // Opaque .map blobs + version snapshots live in R2 (never in D1).
+  "r2_buckets": [{ "binding": "MAPS", "bucket_name": "fmg-maps" }],
+
+  // One metadata row per map. Created via the Cloudflare MCP (the env token can
+  // deploy but cannot create D1) — paste the returned id here, then commit it.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "fmg-meta",
+      "database_id": "c7f746dd-873f-4d91-b848-ab8c2e8656d8"
+    }
+  ],
+
+  "routes": [{ "pattern": "map.activationlayer.org", "custom_domain": true }],
+  "observability": { "enabled": true }
+}

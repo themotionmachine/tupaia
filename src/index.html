@@ -3,15 +3,15 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Azgaar's Fantasy Map Generator</title>
-    <meta name="application-name" content="Azgaar's Fantasy Map Generator" />
+    <title>Podcast X Map</title>
+    <meta name="application-name" content="Podcast X Map" />
     <meta name="author" content="Azgaar" />
     <meta
       name="description"
       content="Free web app that helps fantasy writers, game masters, and cartographers create and edit fantasy maps"
     />
     <meta property="og:url" content="https://azgaar.github.io/Fantasy-Map-Generator" />
-    <meta property="og:title" content="Azgaar's Fantasy Map Generator" />
+    <meta property="og:title" content="Podcast X Map" />
     <meta
       property="og:description"
       content="Free web app that helps fantasy writers, game masters, and cartographers create and edit fantasy maps"
@@ -20,7 +20,7 @@
     <meta name="twitter:card" content="summary_large_image" />
     <meta property="twitter:domain" content="azgaar.github.io" />
     <meta property="twitter:url" content="https://azgaar.github.io/Fantasy-Map-Generator/" />
-    <meta name="twitter:title" content="Azgaar's Fantasy Map Generator" />
+    <meta name="twitter:title" content="Podcast X Map" />
     <meta
       name="twitter:description"
       content="Free web app that helps fantasy writers, game masters, and cartographers create and edit fantasy maps"
@@ -6253,6 +6253,9 @@
           <button onclick="window.lazy.save().then(m => m.saveMap('storage'))" data-tip="Save the project to browser storage only" data-shortcut="F6">
             browser
           </button>
+          <button onclick="window.lazy.sharedMap().then(m => m.saveSharedMap())" data-tip="Save to the cloud-hosted shared map (everyone with access sees it)">
+            shared map
+          </button>
         </div>
         <p>
           Maps are saved in <i>.map</i> format, that can be loaded back via the <i>Load</i> in menu. There is no way to
@@ -6272,6 +6275,12 @@
             URL
           </button>
           <button onclick="window.lazy.load().then(m => m.quickLoad())" data-tip="Load map from browser storage (if saved before)">storage</button>
+          <button onclick="window.lazy.sharedMap().then(m => m.loadSharedMap())" data-tip="Load the cloud-hosted shared map">
+            shared map
+          </button>
+          <button onclick="window.lazy.sharedMap().then(m => m.showSharedMapVersions())" data-tip="Browse and restore prior versions of the shared map">
+            history
+          </button>
         </div>
         <p>Click on <i>storage</i> to open the last saved map.</p>
         <div id="loadFromDropbox">

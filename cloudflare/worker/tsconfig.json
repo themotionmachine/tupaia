@@ -1,0 +1,16 @@
+{
+  // Standalone tsconfig for the Worker only — the root build (`tsc`, include: ["src"])
+  // never sees this directory, and wrangler bundles with esbuild (no typecheck on
+  // deploy). For editor type-safety run `npm i -D @cloudflare/workers-types` once.
+  "compilerOptions": {
+    "target": "esnext",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "lib": ["esnext"],
+    "types": ["@cloudflare/workers-types"],
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["src"]
+}

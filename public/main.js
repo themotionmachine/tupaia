@@ -342,6 +342,14 @@ async function checkLoadParameters() {
     return;
   }
 
+  // Cloudflare fork: load the shared cloud map by default on boot (FR-3).
+  // Opt out with `?local` to fall back to the random / last-saved behavior below.
+  if (!params.has("local")) {
+    WARN && console.warn("Loading shared cloud map");
+    const loaded = await window.lazy.sharedMap().then(m => m.loadSharedMapOnBoot());
+    if (loaded) return;
+  }
+
   // check if there is a map saved to indexedDB
   if (ensureEl("onloadBehavior").value === "lastSaved") {
     try {
