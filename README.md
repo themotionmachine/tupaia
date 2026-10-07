@@ -1,4 +1,14 @@
-# Fantasy Map Generator
+# Vespucci
+
+Vespucci is a fork of Azgaar's [Fantasy Map Generator](https://github.com/Azgaar/Fantasy-Map-Generator) (FMG), run as one shared, version-historied map that a small group edits together.
+
+Live: [map.activationlayer.org](https://map.activationlayer.org). A single Cloudflare Worker serves the built app and a small `/api/*` for saving and loading the shared map (R2 for map files, D1 for metadata). Deploy and design notes are in [`cloudflare/README.md`](cloudflare/README.md) and [`cloudflare/PRD-tier-a.md`](cloudflare/PRD-tier-a.md).
+
+The fork keeps its changes small so it can rebase onto upstream cheaply. All of the map generation and editing is Azgaar's work, released under the MIT license (see [LICENSE](LICENSE)). The original README follows.
+
+---
+
+## Fantasy Map Generator (upstream README)
 
 Azgaar's _Fantasy Map Generator_ is a free web application that helps fantasy writers, game masters, and cartographers create and edit fantasy maps.
 

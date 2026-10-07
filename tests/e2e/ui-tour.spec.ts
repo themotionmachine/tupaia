@@ -2,7 +2,7 @@ import { test, expect, Page } from "@playwright/test";
 
 // Tour step titles in order — used to verify we're on the right step.
 const STEP_TITLES = [
-  "Welcome to Fantasy Map Generator", // 0
+  "Welcome to Vespucci", // 0
   "Navigate the Map",                  // 1
   "Hover Tooltips",                    // 2
   "Open the Options Menu",             // 3

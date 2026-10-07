@@ -1,17 +1,20 @@
 {
-  "name": "fantasy-map-generator",
+  "name": "vespucci",
   "version": "1.130.0",
-  "description": "Azgaar's _Fantasy Map Generator_ is a free web application that helps fantasy writers, game masters, and cartographers create and edit fantasy maps.",
-  "homepage": "https://github.com/Azgaar/Fantasy-Map-Generator#readme",
+  "description": "Vespucci: a shared collaborative map, forked from Azgaar's Fantasy Map Generator.",
+  "homepage": "https://map.activationlayer.org",
   "bugs": {
-    "url": "https://github.com/Azgaar/Fantasy-Map-Generator/issues"
+    "url": "https://github.com/themotionmachine/Fantasy-Map-Generator/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Azgaar/Fantasy-Map-Generator.git"
+    "url": "git+https://github.com/themotionmachine/Fantasy-Map-Generator.git"
   },
   "license": "MIT",
   "author": "Azgaar",
+  "contributors": [
+    "Ryan Williams"
+  ],
   "main": "main.js",
   "scripts": {
     "dev": "vite",

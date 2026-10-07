@@ -1,6 +1,7 @@
-# fmg-map — Tier-A collaborative map on Cloudflare
+# Vespucci on Cloudflare (Worker `fmg-map`)
 
-A single Worker serves the built FMG SPA and a small `/api/*` control plane for one
+Vespucci is the project name; the Cloudflare resources still carry their original
+`fmg-*` names (Worker `fmg-map`, R2 `fmg-maps`, D1 `fmg-meta`). A single Worker serves the built FMG SPA and a small `/api/*` control plane for one
 shared, version-historied map. Full design: [`PRD-tier-a.md`](./PRD-tier-a.md).
 
 ```

@@ -601,7 +601,7 @@ function showInfo() {
   const QAA = link("https://github.com/Azgaar/Fantasy-Map-Generator/wiki/Q&A", "Q&A page");
   const VideoTutorial = link("https://youtube.com/playlist?list=PLtgiuDC8iVR2gIG8zMTRn7T_L0arl9h1C", "Video tutorial");
 
-  alertMessage.innerHTML = /* html */ `<b>Fantasy Map Generator</b> (FMG) is a free open-source application. It means that you own all created maps and can use them as
+  alertMessage.innerHTML = /* html */ `<b>Vespucci</b> is a fork of Azgaar's <b>Fantasy Map Generator</b> (FMG), a free open-source application. It means that you own all created maps and can use them as
     you wish.
 
     <p>

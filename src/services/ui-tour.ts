@@ -50,7 +50,7 @@ function start() {
       {
         element: "#map",
         popover: {
-          title: "Welcome to Fantasy Map Generator",
+          title: "Welcome to Vespucci",
           description:
             "This quick tour covers the essential controls. Use Next/Previous to navigate, or press Esc to exit at any time.",
           side: "over",
