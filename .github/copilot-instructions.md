@@ -1,4 +1,4 @@
-# Vespucci (fork of Fantasy Map Generator)
+# Tupaia (fork of Fantasy Map Generator)
 
 Azgaar's Fantasy Map Generator is a client-only web application for creating fantasy maps. It generates detailed fantasy worlds with countries, cities, rivers, biomes, and cultural elements.
 

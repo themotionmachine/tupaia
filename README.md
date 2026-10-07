@@ -1,6 +1,8 @@
-# Vespucci
+# Tupaia
 
-Vespucci is a fork of Azgaar's [Fantasy Map Generator](https://github.com/Azgaar/Fantasy-Map-Generator) (FMG), run as one shared, version-historied map that a small group edits together.
+Tupaia is a fork of Azgaar's [Fantasy Map Generator](https://github.com/Azgaar/Fantasy-Map-Generator) (FMG), run as one shared, version-historied map that a small group edits together.
+
+The name honors Tupaia, a navigator and priest from Raiatea who sailed with James Cook's *Endeavour* in 1769. Working with Cook's officers, he drew a chart of more than 70 Pacific islands, putting Polynesian wayfinding knowledge into the form of a European map. He died at Batavia in 1770, and for a long time the chart was credited to others.
 
 Live: [map.activationlayer.org](https://map.activationlayer.org). A single Cloudflare Worker serves the built app and a small `/api/*` for saving and loading the shared map (R2 for map files, D1 for metadata). Deploy and design notes are in [`cloudflare/README.md`](cloudflare/README.md) and [`cloudflare/PRD-tier-a.md`](cloudflare/PRD-tier-a.md).
 

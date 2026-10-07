@@ -1,14 +1,14 @@
 {
-  "name": "vespucci",
+  "name": "tupaia",
   "version": "1.130.0",
-  "description": "Vespucci: a shared collaborative map, forked from Azgaar's Fantasy Map Generator.",
+  "description": "Tupaia: a shared collaborative map, forked from Azgaar's Fantasy Map Generator.",
   "homepage": "https://map.activationlayer.org",
   "bugs": {
-    "url": "https://github.com/themotionmachine/Fantasy-Map-Generator/issues"
+    "url": "https://github.com/themotionmachine/tupaia/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/themotionmachine/Fantasy-Map-Generator.git"
+    "url": "git+https://github.com/themotionmachine/tupaia.git"
   },
   "license": "MIT",
   "author": "Azgaar",

@@ -52,7 +52,7 @@ if (parseMapVersion(VERSION) !== VERSION) alert("versioning.js: Invalid format o
     const discord = "https://discordapp.com/invite/X7E84HU";
     const patreon = "https://www.patreon.com/azgaar";
 
-    alertMessage.innerHTML = /* html */ `Vespucci is updated up to version <strong>${VERSION}</strong>. This version is compatible with <a href="${changelog}" target="_blank">previous versions</a>, loaded save files will be auto-updated.
+    alertMessage.innerHTML = /* html */ `Tupaia is updated up to version <strong>${VERSION}</strong>. This version is compatible with <a href="${changelog}" target="_blank">previous versions</a>, loaded save files will be auto-updated.
       ${storedVersion ? "<span>In case of errors reload the page to update the code.</span>" : ""}
 
       <ul>
@@ -65,7 +65,7 @@ if (parseMapVersion(VERSION) !== VERSION) alert("versioning.js: Invalid format o
 
     $("#alert").dialog({
       resizable: false,
-      title: "Vespucci update",
+      title: "Tupaia update",
       width: "28em",
       position: { my: "center center-4em", at: "center", of: "svg" },
       buttons: {

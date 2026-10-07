@@ -1,6 +1,6 @@
-# Vespucci on Cloudflare (Worker `fmg-map`)
+# Tupaia on Cloudflare (Worker `fmg-map`)
 
-Vespucci is the project name; the Cloudflare resources still carry their original
+Tupaia is the project name; the Cloudflare resources still carry their original
 `fmg-*` names (Worker `fmg-map`, R2 `fmg-maps`, D1 `fmg-meta`). A single Worker serves the built FMG SPA and a small `/api/*` control plane for one
 shared, version-historied map. Full design: [`PRD-tier-a.md`](./PRD-tier-a.md).
 

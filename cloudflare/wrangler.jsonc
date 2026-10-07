@@ -1,5 +1,5 @@
 {
-  // fmg-map — Vespucci's Tier-A collaborative-map Worker (PRD: cloudflare/PRD-tier-a.md).
+  // fmg-map — Tupaia's Tier-A collaborative-map Worker (PRD: cloudflare/PRD-tier-a.md).
   // Committed config is the source of truth (NFR-1) — reproducible from the repo,
   // never dashboard-only (the "anna trap"). Paths are relative to THIS file, so
   // always deploy with the config flag:  wrangler deploy -c cloudflare/wrangler.jsonc

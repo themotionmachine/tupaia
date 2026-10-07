@@ -1,6 +1,6 @@
 "use strict";
 // Azgaar (azgaar.fmg@yandex.com). Minsk, 2017-2023. MIT License
-// Vespucci, a fork of https://github.com/Azgaar/Fantasy-Map-Generator
+// Tupaia, a fork of https://github.com/Azgaar/Fantasy-Map-Generator
 
 // set debug options
 const PRODUCTION = location.hostname && location.hostname !== "localhost" && location.hostname !== "127.0.0.1";
@@ -282,7 +282,7 @@ oceanLayers
 document.addEventListener("DOMContentLoaded", async () => {
   if (!location.hostname) {
     const wiki = "https://github.com/Azgaar/Fantasy-Map-Generator/wiki/Run-FMG-locally";
-    alertMessage.innerHTML = /* html */ `Vespucci cannot run serverless. Follow the <a href="${wiki}" target="_blank">instructions</a> on how you can easily run a local web-server`;
+    alertMessage.innerHTML = /* html */ `Tupaia cannot run serverless. Follow the <a href="${wiki}" target="_blank">instructions</a> on how you can easily run a local web-server`;
 
     $("#alert").dialog({
       resizable: false,
