@@ -17,6 +17,9 @@ import "./tools/view.ts";
 import "./tools/history.ts";
 import "./tools/eval.ts";
 import "./tools/persist.ts";
+import "./tools/edit.ts";
+import "./tools/generate.ts";
+import "./tools/display.ts";
 
 export const INSTRUCTIONS = `Tupaia MCP drives the Tupaia fantasy-map app (Azgaar's FMG fork) in headless Chromium.
 - Mode is local unless the server was spawned with TUPAIA_MODE=live; nothing here writes the live shared map (map.activationlayer.org) except shared_save/shared_restore, and only when the human explicitly asks in this conversation: preview first, then confirm with the preview token.

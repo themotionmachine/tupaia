@@ -354,3 +354,488 @@ describe("tupaia-mcp smoke (core layer)", () => {
     assert.ok(await waitFor(() => pids.every(p => !alive(p)), 5000), "chrome processes gone");
   });
 });
+
+// Mutations layer: edit, add, paint_cells, display, regenerate, generate_map. Own server so the
+// core block's shutdown test does not interfere.
+describe("tupaia-mcp smoke (mutations)", () => {
+  let h: Harness;
+  const evalRO = async (code: string, args?: unknown) =>
+    (await h.ok("eval", { code, args, readOnly: true })).value as any;
+  const digest = () => evalRO("__tupaia.fns.digest().hash") as Promise<string>;
+  // interior non-capital burgs with unique names: [i, name, x, y, feature, state]
+  let plain: Array<{ i: number; name: string; x: number; y: number; feature: number; state: number }> = [];
+
+  before(async () => {
+    h = await startServer();
+    await h.ok("load_map", { path: "tests/fixtures/demo.map" });
+    plain = await evalRO(`
+      const counts = {};
+      for (const b of pack.burgs) if (b && b.i && !b.removed) counts[b.name] = (counts[b.name] || 0) + 1;
+      return pack.burgs.filter(b => b && b.i && !b.removed && !b.capital && counts[b.name] === 1
+        && b.x > 200 && b.x < 1480 && b.y > 150 && b.y < 700 && !pack.markets?.some(m => m.centerBurgId === b.i))
+        .map(b => ({ i: b.i, name: b.name, x: b.x, y: b.y, feature: b.feature, state: b.state }));`);
+    assert.ok(plain.length > 20);
+  });
+
+  after(async () => {
+    if (h && alive(h.pid)) await h.close();
+  });
+
+  test("tools are listed", async () => {
+    const { tools } = await h.client.listTools();
+    const names = tools.map(t => t.name);
+    for (const n of ["edit", "add", "paint_cells", "generate_map", "regenerate", "display"])
+      assert.ok(names.includes(n), `missing tool ${n}`);
+    for (const t of tools) assert.ok((t.description ?? "").length <= 2048, `${t.name} description too long`);
+  });
+
+  test("h. edit burg batch of 3: dryRun changes nothing; real call renames and relabels", async () => {
+    const [a, b, c] = plain;
+    const ops = [
+      { ref: a.name, set: { name: "Alphaburg" } },
+      { ref: b.name, set: { name: "Betaburg", population: 4321 } },
+      { ref: c.i, set: { name: "Gammaburg" } }
+    ];
+    await h.ok("map_info", { since: "none" }); // checkpoint
+    const before = await digest();
+    const dry = await h.ok("edit", { type: "burg", ops, dryRun: true });
+    assert.equal(dry.dryRun, true);
+    const plan = dry.plan as Array<{ before: { name: string }; after: { name: string } }>;
+    assert.equal(plan.length, 3);
+    assert.equal(plan[0].after.name, "Alphaburg");
+    assert.equal(await digest(), before, "dryRun must leave the digest unchanged");
+    const still = await h.ok("map_info", { since: "checkpoint" });
+    assert.equal(still.changed, false);
+
+    const r = await h.ok("edit", { type: "burg", ops });
+    assert.equal((r.applied as unknown[]).length, 3);
+    const mod = (r.changes as { burg: { counts: { modified: number } } }).burg.counts.modified;
+    assert.equal(mod, 3);
+    const labels = await evalRO("args.map(i => burgLabels.select('#burgLabel' + i).text())", [a.i, b.i, c.i]);
+    assert.deepEqual(labels, ["Alphaburg", "Betaburg", "Gammaburg"]);
+    const pop = await evalRO(`__tupaia.internals.people(pack.burgs[${b.i}])`);
+    assert.ok(Math.abs(pop - 4321) <= 2, `population ${pop}`);
+    const list = await h.ok("snapshot", { action: "list" });
+    assert.equal((list.undo as Array<{ op: string }>)[0].op, "edit burg");
+  });
+
+  test("name generation from namesbase Hawaiian gives non-empty distinct names", async () => {
+    const ids = plain.slice(3, 7).map(b => b.i);
+    const r = await h.ok("edit", {
+      type: "burg",
+      ops: ids.map(i => ({ ref: i, set: { name: { generate: { base: "Hawaiian" } } } }))
+    });
+    const names = (r.applied as Array<{ after: { name: string } }>).map(x => x.after.name);
+    assert.equal(names.length, 4);
+    for (const n of names) assert.ok(typeof n === "string" && n.length > 0);
+    assert.equal(new Set(names).size, 4, `names should be distinct: ${names}`);
+  });
+
+  test("continueOnError applies the valid ops and reports the invalid ones", async () => {
+    const strict = await h.call("edit", {
+      type: "burg",
+      ops: [
+        { ref: 999999, set: { name: "Nope" } },
+        { ref: plain[8].i, set: { name: "Deltaburg" } }
+      ]
+    });
+    assert.equal(errorBody(strict).error.code, "NOT_FOUND");
+    assert.equal(await evalRO(`pack.burgs[${plain[8].i}].name`), plain[8].name, "nothing applied");
+    const r = await h.ok("edit", {
+      type: "burg",
+      continueOnError: true,
+      ops: [
+        { ref: 999999, set: { name: "Nope" } },
+        { ref: plain[8].i, set: { name: "Deltaburg" } }
+      ]
+    });
+    assert.equal((r.applied as unknown[]).length, 1);
+    assert.deepEqual(
+      (r.errors as Array<{ index: number; code: string }>).map(e => [e.index, e.code]),
+      [[0, "NOT_FOUND"]]
+    );
+    assert.equal(await evalRO(`pack.burgs[${plain[8].i}].name`), "Deltaburg");
+  });
+
+  test("removing a capital via edit is refused; province removal is refused", async () => {
+    const capital = await evalRO("pack.burgs.find(b => b && b.i && !b.removed && b.capital).i");
+    const r = await h.call("edit", { type: "burg", ops: [{ ref: capital, remove: true }] });
+    assert.equal(r.isError, true);
+    const body = errorBody(r);
+    assert.equal(body.error.code, "REFUSED");
+    assert.match(body.error.message, /capital/);
+    const still = await evalRO(`!pack.burgs[${capital}].removed`);
+    assert.equal(still, true);
+    const p = await h.call("edit", { type: "province", ops: [{ ref: 1, remove: true }] });
+    assert.equal(errorBody(p).error.code, "REFUSED");
+  });
+
+  test("i. state colours, locked-state rename, capital change", async () => {
+    await h.ok("display", { on: ["states", "borders"] });
+    const states = (await evalRO(
+      "pack.states.filter(s => s.i && !s.removed).slice(0, 2).map(s => ({i: s.i, name: s.name}))"
+    )) as Array<{ i: number; name: string }>;
+    const colors = ["#123456", "#abcdef"];
+    await h.ok("edit", {
+      type: "state",
+      ops: states.map((s, k) => ({ ref: s.name, set: { color: colors[k] } }))
+    });
+    const fills = await evalRO(
+      "args.map(i => document.getElementById('state' + i)?.getAttribute('fill'))",
+      states.map(s => s.i)
+    );
+    assert.deepEqual(fills, colors);
+
+    const s0 = states[0];
+    await h.ok("edit", { type: "state", ops: [{ ref: s0.i, set: { lock: true } }] });
+    const label0 = await evalRO(`document.getElementById('stateLabel${s0.i}')?.textContent ?? ''`);
+    await h.ok("edit", { type: "state", ops: [{ ref: s0.i, set: { name: "Lockedland" } }] });
+    const lab = await evalRO(
+      `({text: document.getElementById('stateLabel${s0.i}')?.textContent ?? '', name: pack.states[${s0.i}].name, fullName: pack.states[${s0.i}].fullName})`
+    );
+    assert.equal(lab.name, "Lockedland");
+    assert.notEqual(lab.text, label0, "the locked state's label was redrawn");
+    const squash = (t: string) => t.replace(/\s+/g, "");
+    assert.ok(
+      [lab.name, lab.fullName].some(n => squash(n) === squash(lab.text)),
+      `label '${lab.text}' shows the new name (${lab.name} / ${lab.fullName})`
+    );
+    const locked = await evalRO(`!!pack.states[${s0.i}].lock`);
+    assert.equal(locked, true, "the lock survives the label redraw");
+
+    // capital change only through the state; the old capital is demoted
+    const pick = await evalRO(
+      `const s = pack.states[${s0.i}]; const b = pack.burgs.find(b => b && b.i && !b.removed && b.state === s.i && !b.capital); return {old: s.capital, next: b.i}`
+    );
+    const bad = await h.call("edit", { type: "burg", ops: [{ ref: pick.next, set: { capital: true } }] });
+    assert.equal(errorBody(bad).error.code, "BAD_ARGS");
+    await h.ok("edit", { type: "state", ops: [{ ref: s0.i, set: { capital: pick.next } }] });
+    const after = await evalRO(
+      `({cap: pack.states[${s0.i}].capital, center: pack.states[${s0.i}].center, cell: pack.burgs[${pick.next}].cell, newCap: pack.burgs[${pick.next}].capital, oldCap: pack.burgs[${pick.old}].capital})`
+    );
+    assert.equal(after.cap, pick.next);
+    assert.equal(after.center, after.cell);
+    assert.equal(after.newCap, 1);
+    assert.equal(after.oldCap, 0);
+  });
+
+  test("j. paint_cells state on a circle; centres stay; provinces stay consistent", async () => {
+    const target = plain.find(b => b.state > 0) as (typeof plain)[number];
+    const other = await evalRO(`pack.states.find(s => s.i && !s.removed && s.i !== ${target.state}).i`);
+    const centersBefore = await evalRO(
+      "pack.states.filter(s => s.i && !s.removed).map(s => [s.i, s.center, pack.cells.state[s.center]])"
+    );
+    // a circle around a capital too, to prove centre cells are skipped
+    const cap = await evalRO(`pack.burgs[pack.states[${target.state}].capital]`);
+    const r = await h.ok("paint_cells", {
+      select: { cells: [cap.cell], circle: { at: { entity: { type: "burg", ref: target.i } }, radius: 30 } },
+      set: { state: other }
+    });
+    const st = (
+      r.set as { state: { changed: number; byPrevious: Record<string, number>; skipped: Record<string, number> } }
+    ).state;
+    assert.ok(st.changed > 0, "some cells change");
+    const sum = Object.values(st.byPrevious).reduce((s, v) => s + v, 0);
+    assert.equal(sum, st.changed);
+    assert.ok((st.skipped.stateCenter ?? 0) + (st.skipped.capital ?? 0) >= 1, "the capital cell is skipped");
+    const changedCells = await evalRO(`pack.cells.state.filter(s => s === ${other}).length`);
+    assert.ok(changedCells > 0);
+    const centersAfter = await evalRO(
+      "pack.states.filter(s => s.i && !s.removed).map(s => [s.i, s.center, pack.cells.state[s.center]])"
+    );
+    assert.deepEqual(centersAfter, centersBefore, "state centres never move");
+    const bad = await evalRO(`
+      const bad = [];
+      for (const p of pack.provinces) {
+        if (!p || !p.i || p.removed) continue;
+        for (let c = 0; c < pack.cells.province.length; c++)
+          if (pack.cells.province[c] === p.i && pack.cells.state[c] !== p.state) { bad.push([p.i, c]); break; }
+      }
+      return bad;`);
+    assert.deepEqual(bad, [], "every province's cells belong to its state");
+  });
+
+  test("k. paint_cells height keep: delta +5 changes grid heights in the selection only", async () => {
+    const at = plain[10];
+    const sel = { circle: { at: { x: at.x, y: at.y }, radius: 25 }, where: { land: true, hMax: 90 } };
+    const cells = (
+      await h.ok("eval", {
+        code: "__tupaia.fns.selectCells({select: args}).cells.map(c => pack.cells.g[c])",
+        args: sel,
+        readOnly: true
+      })
+    ).value as number[];
+    assert.ok(cells.length > 0);
+    const before = (await evalRO("Array.from(grid.cells.h)")) as number[];
+    const r = await h.ok("paint_cells", { select: sel, set: { height: { delta: 5 } } });
+    assert.ok(((r.set as { height: { changed: number } }).height.changed ?? 0) > 0);
+    const afterH = (await evalRO("Array.from(grid.cells.h)")) as number[];
+    const inSel = new Set(cells);
+    for (let g = 0; g < afterH.length; g++) {
+      if (inSel.has(g)) assert.equal(afterH[g], Math.min(100, before[g] + 5), `grid cell ${g}`);
+      else assert.equal(afterH[g], before[g], `grid cell ${g} outside the selection changed`);
+    }
+  });
+
+  test("paint_cells keep mode refuses a change that crosses height 20", async () => {
+    const at = plain[11];
+    const before = await digest();
+    const r = await h.call("paint_cells", {
+      select: { circle: { at: { x: at.x, y: at.y }, radius: 15 } },
+      set: { height: { value: 5 } }
+    });
+    assert.equal(r.isError, true);
+    const body = errorBody(r);
+    assert.equal(body.error.code, "REFUSED");
+    assert.match(body.error.message, /risk/);
+    assert.equal(await digest(), before);
+    const erase = await h.call("paint_cells", {
+      select: { cells: [at.i] },
+      set: { height: { value: 50, rebuild: "erase" } }
+    });
+    assert.equal(errorBody(erase).error.code, "REFUSED", "erase needs confirmErase");
+  });
+
+  test("l. add a marker with a note, then remove it", async () => {
+    await h.ok("display", { on: ["markers"] });
+    const at = plain[12];
+    const r = await h.ok("add", {
+      type: "marker",
+      items: [
+        {
+          at: { x: at.x + 3, y: at.y + 3 },
+          type: "test-marker",
+          icon: "T",
+          note: { name: "Test cairn", legend: "<p>x</p>" }
+        }
+      ]
+    });
+    const m = (r.created as Array<{ i: number; name: string }>)[0];
+    assert.equal(m.name, "Test cairn");
+    const present = await evalRO(
+      `({el: !!document.getElementById('marker${m.i}'), note: notes.find(n => n.id === 'marker${m.i}')?.legend})`
+    );
+    assert.deepEqual(present, { el: true, note: "<p>x</p>" });
+    await h.ok("edit", { type: "marker", ops: [{ ref: m.i, remove: true }] });
+    const gone = await evalRO(
+      `({el: !!document.getElementById('marker${m.i}'), note: notes.some(n => n.id === 'marker${m.i}'), data: pack.markers.some(x => x.i === ${m.i})})`
+    );
+    assert.deepEqual(gone, { el: false, note: false, data: false });
+  });
+
+  test("m. add a route through two burgs: links symmetric, path drawn", async () => {
+    await h.ok("display", { on: ["routes"] });
+    const pair = await evalRO(`
+      const B = pack.burgs.filter(b => b && b.i && !b.removed && pack.cells.h[b.cell] >= 20);
+      for (const a of B) for (const b of B) {
+        if (a.i >= b.i || a.feature !== b.feature) continue;
+        const d = Math.hypot(a.x - b.x, a.y - b.y);
+        if (d > 60 && d < 120) return [a.i, b.i];
+      }
+      return null;`);
+    assert.ok(pair, "need two burgs on the same landmass");
+    const n0 = await evalRO("pack.routes.length");
+    const r = await h.ok("add", {
+      type: "route",
+      items: [
+        {
+          through: [{ entity: { type: "burg", ref: pair[0] } }, { entity: { type: "burg", ref: pair[1] } }],
+          group: "trails",
+          name: "Test trail"
+        }
+      ]
+    });
+    const route = (r.created as Array<{ i: number; length: Record<string, number>; cells: number }>)[0];
+    assert.ok(route.length.px > 0 && route.cells >= 2);
+    const check = await evalRO(`
+      const r = pack.routes.find(x => x.i === ${route.i});
+      const cells = r.points.map(p => p[2]);
+      let symmetric = true;
+      for (let k = 0; k < cells.length - 1; k++) {
+        const a = cells[k], b = cells[k + 1];
+        if (pack.cells.routes[a]?.[b] !== r.i || pack.cells.routes[b]?.[a] !== r.i) symmetric = false;
+      }
+      return {n: pack.routes.length, symmetric, drawn: !!document.getElementById('route' + r.i), name: r.name};`);
+    assert.equal(check.n, n0 + 1);
+    assert.equal(check.symmetric, true);
+    assert.equal(check.drawn, true);
+    assert.equal(check.name, "Test trail");
+    // a route between different landmasses explains why there is no path
+    const far = await evalRO(`
+      const B = pack.burgs.filter(b => b && b.i && !b.removed);
+      const a = B[0]; const b = B.find(x => x.feature !== a.feature && pack.features[x.feature]?.type === 'island');
+      return b ? [a.i, b.i] : null;`);
+    if (far) {
+      const np = await h.call("add", {
+        type: "route",
+        items: [{ through: [{ entity: { type: "burg", ref: far[0] } }, { entity: { type: "burg", ref: far[1] } }] }]
+      });
+      assert.equal(errorBody(np).error.code, "NO_PATH");
+    }
+  });
+
+  test("n. add a burg at lat/lon, then remove it", async () => {
+    const spot = await evalRO(`
+      const used = new Set(pack.burgs.filter(b => b && b.i && !b.removed).map(b => b.cell));
+      const c = pack.cells.i.find(c => pack.cells.h[c] >= 25 && !used.has(c) && pack.cells.c[c].every(n => !used.has(n)) && pack.cells.p[c][0] > 300);
+      return {cell: c, x: pack.cells.p[c][0], y: pack.cells.p[c][1]};`);
+    const ll = await h.ok("inspect", { at: { cell: spot.cell } });
+    const r = await h.ok("add", {
+      type: "burg",
+      items: [{ at: { lat: ll.lat, lon: ll.lon }, name: "Testopolis", population: 2000 }]
+    });
+    const b = (r.created as Array<{ i: number; name: string; cell: number }>)[0];
+    assert.equal(b.name, "Testopolis");
+    assert.equal(b.cell, spot.cell);
+    const found = await h.ok("find", { type: "burg", name: "Testopolis" });
+    assert.equal(found.total, 1);
+    const dup = await h.call("add", { type: "burg", items: [{ at: { cell: spot.cell } }] });
+    assert.equal(errorBody(dup).error.code, "REFUSED");
+    await h.ok("edit", { type: "burg", ops: [{ ref: "Testopolis", remove: true }] });
+    const gone = await h.call("find", { type: "burg", name: "Testopolis" });
+    assert.equal(gone.isError, true);
+  });
+
+  test("add state, zone, label, note; edit label and map", async () => {
+    const spot = await evalRO(`
+      const used = new Set(pack.burgs.filter(b => b && b.i && !b.removed).map(b => b.cell));
+      const c = pack.cells.i.find(c => pack.cells.h[c] >= 25 && pack.cells.state[c] > 0 && !used.has(c) && pack.cells.p[c][0] > 600);
+      return {cell: c};`);
+    const st = await h.ok("add", {
+      type: "state",
+      items: [{ capital: { cell: spot.cell }, name: "Testonia", color: "#884422" }]
+    });
+    const s = (st.created as Array<{ i: number; name: string; center: number }>)[0];
+    assert.equal(s.name, "Testonia");
+    assert.equal(s.center, spot.cell);
+    const sv = await evalRO(
+      `({cell: pack.cells.state[${spot.cell}], cap: pack.burgs[pack.states[${s.i}].capital].capital})`
+    );
+    assert.deepEqual(sv, { cell: s.i, cap: 1 });
+    const z = await h.ok("add", {
+      type: "zone",
+      items: [{ name: "Test zone", type: "Disease", select: { circle: { at: { cell: spot.cell }, radius: 20 } } }]
+    });
+    assert.ok((z.created as Array<{ cells: number }>)[0].cells > 0);
+    const l = await h.ok("add", { type: "label", items: [{ at: { cell: spot.cell }, text: "Here be tests" }] });
+    const lid = (l.created as Array<{ i: string }>)[0].i;
+    await h.ok("edit", { type: "label", ops: [{ ref: lid, set: { text: "Renamed label" } }] });
+    const lt = await evalRO(`document.getElementById('${lid}').textContent`);
+    assert.equal(lt, "Renamed label");
+    await h.ok("add", {
+      type: "note",
+      items: [{ entity: { type: "state", ref: s.i }, name: "Testonia", legend: "A test state" }]
+    });
+    const note = await evalRO(`notes.find(n => n.id === 'stateLabel${s.i}')?.legend`);
+    assert.equal(note, "A test state");
+    await h.ok("edit", { type: "map", ops: [{ set: { name: "Testmap", year: 1234 } }] });
+    const m = await evalRO("({name: mapName.value, year: options.year})");
+    assert.deepEqual(m, { name: "Testmap", year: 1234 });
+    // removing the new state goes through the app's stateRemove
+    await h.ok("edit", { type: "state", ops: [{ ref: s.i, remove: true }] });
+    const removed = await evalRO(`!!pack.states[${s.i}].removed && pack.cells.state[${spot.cell}] !== ${s.i}`);
+    assert.equal(removed, true);
+  });
+
+  test("o. display off labels is idempotent; on restores; stylePreset atlas applies", async () => {
+    const r1 = await h.ok("display", { off: ["labels"] });
+    assert.deepEqual(r1.changed, [{ layer: "labels", to: "off" }]);
+    assert.equal(await evalRO("layerIsOn('toggleLabels')"), false);
+    const r2 = await h.ok("display", { off: ["labels"] });
+    assert.deepEqual(r2.changed, []);
+    const r3 = await h.ok("display", { on: ["labels"], stylePreset: "atlas" });
+    assert.deepEqual(r3.changed, [{ layer: "labels", to: "on" }]);
+    assert.equal(await evalRO("layerIsOn('toggleLabels')"), true);
+    assert.equal(await evalRO("localStorage.getItem('presetStyle')"), "atlas");
+    const bad = await h.call("display", { stylePreset: "nope" });
+    assert.equal(errorBody(bad).error.code, "BAD_ARGS");
+    const only = await h.ok("display", { only: ["states", "borders", "labels"] });
+    assert.deepEqual([...(only.layersOn as string[])].sort(), ["borders", "labels", "states"]);
+  });
+
+  test("x. eval with redraw lists the redrawn layers", async () => {
+    const r = await h.ok("eval", { code: "1", redraw: ["states", "borders"] });
+    const all = [...((r.redrawn as unknown[]) ?? []), ...((r.skippedHidden as unknown[]) ?? [])];
+    assert.ok(all.includes("states") && all.includes("borders"), JSON.stringify(r));
+  });
+
+  test("u. regenerate routes and zones", async () => {
+    const r = await h.ok("regenerate", { parts: ["zones", "routes"] });
+    assert.deepEqual(r.ran, ["routes", "zones"]);
+    const ch = r.changes as Record<string, { counts: Record<string, number> }>;
+    assert.ok(ch.route, "routes changed");
+    const c = ch.route.counts;
+    assert.ok(c.added + c.removed + c.modified > 0);
+    const list = await h.ok("snapshot", { action: "list" });
+    assert.equal((list.undo as Array<{ op: string }>)[0].op, "regenerate");
+  });
+
+  test("paint_cells risk mode turns a lake into land and rebuilds features", async () => {
+    const lake = await evalRO(
+      "pack.features.filter(f => f && f.type === 'lake').sort((a, b) => a.cells - b.cells)[0]?.i"
+    );
+    assert.ok(lake, "the demo map has lakes");
+    const lakeCell = await evalRO(`pack.cells.i.find(c => pack.cells.f[c] === ${lake})`);
+    const g = await evalRO(`pack.cells.g[${lakeCell}]`);
+    const lakes0 = await evalRO("pack.features.filter(f => f && f.type === 'lake').length");
+    const r = await h.ok("paint_cells", {
+      select: { entity: { type: "feature", ref: lake } },
+      set: { height: { value: 25, rebuild: "risk" } }
+    });
+    const hs = (r.set as { height: { features: { before: { lakes: number }; after: { lakes: number } } } }).height;
+    assert.ok(hs.features.after.lakes < hs.features.before.lakes, JSON.stringify(hs.features));
+    const after = await evalRO(`
+      const c = pack.cells.i.find(c => pack.cells.g[c] === ${g});
+      return {h: pack.cells.h[c], type: pack.features[pack.cells.f[c]].type, lakes: pack.features.filter(f => f && f.type === 'lake').length, gh: grid.cells.h[${g}]};`);
+    assert.ok(after.h >= 20, `cell is land now (h ${after.h})`);
+    assert.equal(after.type, "island");
+    assert.equal(after.gh, 25);
+    assert.equal(after.lakes, lakes0 - 1);
+  });
+
+  test("v. generate_map twice with the same args gives the same digest", async () => {
+    const args = {
+      seed: "mcp-test",
+      template: "continents",
+      cells: 4,
+      states: 7,
+      cultures: 5,
+      width: 1280,
+      height: 720
+    };
+    const g1 = await h.ok("generate_map", args);
+    const d1 = await evalRO("__tupaia.fns.digest()");
+    const g2 = await h.ok("generate_map", args);
+    const d2 = await evalRO("__tupaia.fns.digest()");
+    assert.equal(g1.seed, "mcp-test");
+    assert.equal(g2.seed, g1.seed);
+    const differs = [
+      ...Object.keys(d1.types).filter(k => d1.types[k] !== d2.types[k]),
+      ...Object.keys(d1.cells)
+        .filter(k => d1.cells[k] !== d2.cells[k])
+        .map(k => `cells.${k}`)
+    ];
+    assert.equal(g2.digest, g1.digest, `differs: ${differs.join(", ")}`);
+    const counts = g2.counts as Record<string, number>;
+    assert.equal(counts.states, 7);
+    assert.equal(counts.cultures, 5);
+    assert.equal(g2.template, "continents");
+    assert.deepEqual(g2.graph, { w: 1280, h: 720 });
+    assert.equal((g2.origin as { kind: string }).kind, "generated");
+    const tpl = await evalRO("document.getElementById('templateInput').value");
+    assert.equal(tpl, "continents");
+    // options no longer given are unlocked again
+    const g3 = await h.ok("generate_map", { seed: "mcp-test-2" });
+    assert.deepEqual(
+      [...(g3.unlocked as string[])].sort(),
+      ["culturesSet", "cultures", "points", "statesNumber", "template"].sort()
+    );
+    const undo = await h.ok("snapshot", { action: "undo" });
+    assert.equal((undo.undone as Array<{ op: string }>)[0].op, "generate_map");
+  });
+
+  test("no outward requests from the mutation tools", async () => {
+    const status = await h.ok("session", {});
+    assert.deepEqual(status.outwardRequests, []);
+  });
+});

@@ -34,6 +34,13 @@ Client fork surface is just that one file, two buttons in `src/index.html`
 (Save/Load menus), one `lazy-loaders.ts` entry, and the `base` flag in
 `vite.config.ts` — keeps upstream rebases cheap (NFR-3).
 
+The MCP server (`mcp/`) adds two small export hooks, each marked `// tupaia-mcp:`:
+`src/controllers/states-editor.ts` puts the module-private `adjustProvinces` and
+`stateRemove` on `window.__tupaiaInternals` when the states editor module loads, and
+`public/modules/ui/heightmap-editor.js` returns its rebuild closures (`restoreKeptData`,
+`restoreRiskedData`, `regenerateErasedData`) from `editHeightmap({tupaiaExport: true})`
+without opening the editor. Re-check both after an upstream rebase.
+
 ## Local smoke test (no Cloudflare account needed)
 
 `wrangler dev --local` runs the Worker against an in-memory R2 + D1 (miniflare):

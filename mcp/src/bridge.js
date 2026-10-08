@@ -1966,6 +1966,9 @@
   T.setView = setView;
   T.redraw = redraw;
   T.fail = fail;
+  T.resetMemo = () => {
+    memo = null; // per-call caches (labels, notes) go stale after a mutation inside the call
+  };
   // shared internals for later layers (edit/add/paint): resolve refs, anchors, cell scans
   T.internals = {
     rawList,

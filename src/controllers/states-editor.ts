@@ -20,6 +20,8 @@ import {
 const $body = insertEditorHtml();
 addListeners();
 let statesManualHistory: string[] = [];
+// tupaia-mcp: expose module-private helpers to the MCP bridge (mcp/src/bridge-mutations.js)
+(window as any).__tupaiaInternals = { ...(window as any).__tupaiaInternals, adjustProvinces, stateRemove };
 
 export function open(): void {
   closeDialogs("#statesEditor, .stable");

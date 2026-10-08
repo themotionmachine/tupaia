@@ -1,6 +1,8 @@
 "use strict";
 
 function editHeightmap(options) {
+  // tupaia-mcp: hand the rebuild closures to the MCP bridge without opening the editor
+  if (options?.tupaiaExport) return { restoreKeptData, restoreRiskedData, regenerateErasedData };
   const { mode, tool } = options || {};
   restartHistory();
   viewbox.selectAll("#heights").remove();

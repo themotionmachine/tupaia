@@ -85,6 +85,7 @@ export class BrowserManager {
   readonly config: Config;
   readonly modeState: ModeState;
   readonly bridgePath: string;
+  readonly mutationsBridgePath: string;
   readonly appVersion: string | null;
   readonly distEntry: string | null;
 
@@ -110,11 +111,15 @@ export class BrowserManager {
   #restorer: Restorer | null = null;
   #launchHooks: Array<() => Promise<void>> = [];
   #closing = false;
+  /** Current page viewport (generate_map can resize it; a relaunch goes back to config.viewport). */
+  viewport: { width: number; height: number };
 
   constructor(config: Config, modeState: ModeState) {
     this.config = config;
     this.modeState = modeState;
     this.bridgePath = path.join(config.mcpRoot, "src", "bridge.js");
+    this.mutationsBridgePath = path.join(config.mcpRoot, "src", "bridge-mutations.js");
+    this.viewport = { ...config.viewport };
     this.appVersion = readDistVersion(config.distDir);
     this.distEntry = readDistEntry(config.distDir);
   }
@@ -220,7 +225,8 @@ export class BrowserManager {
         }
       });
     }
-    const { width, height } = this.config.viewport;
+    this.viewport = { ...this.config.viewport };
+    const { width, height } = this.viewport;
     const ctx = await this.#browser.newContext({
       viewport: { width, height },
       deviceScaleFactor: 1,
@@ -229,6 +235,7 @@ export class BrowserManager {
     });
     await ctx.addInitScript(initSeed, { version: this.appVersion, w: width, h: height });
     await ctx.addInitScript({ path: this.bridgePath });
+    await ctx.addInitScript({ path: this.mutationsBridgePath });
     await this.#installRoutes(ctx);
     const page = await ctx.newPage();
     page.on("console", msg => {
@@ -475,6 +482,14 @@ export class BrowserManager {
     return "The page stopped responding: it will be relaunched and the newest snapshot restored before the next call.";
   }
 
+  /** Resize the page viewport (the app's svg follows the window size). */
+  async setViewport(width: number, height: number): Promise<void> {
+    const page = await this.getPage();
+    if (width === this.viewport.width && height === this.viewport.height) return;
+    await page.setViewportSize({ width, height });
+    this.viewport = { width, height };
+  }
+
   // ------------------------------------------------------------------ screenshots
 
   /** PNG of the #map element at the current view; scale > 1 renders at a higher device scale. */
@@ -490,7 +505,7 @@ export class BrowserManager {
     // region at scale x CSS pixels (Playwright's own screenshot ignores device-metric overrides).
     const box = await page.locator("#map").boundingBox({ timeout: opts.timeoutMs });
     if (!box) throw new ToolError("BROWSER", "the #map element is not visible");
-    const vp = this.config.viewport;
+    const vp = this.viewport;
     const x = Math.max(0, box.x);
     const y = Math.max(0, box.y);
     const width = Math.min(box.width, vp.width - x);
