@@ -113,7 +113,10 @@ independent locks:
    PUT or POST, not only the tool layer.
 3. **Lineage.** If the page map is not derived from the shared map (it was generated, or
    loaded from a file), the save is refused unless `replaceWithUnrelated:true`. `force` does
-   not override this.
+   not override this. Lineage is bound to the app's map id (`mapId`, stamped on every generate
+   and load): if anything replaced the map without going through load_map/generate_map/
+   snapshot (an eval that calls `generate()`, a failed generate_map, a relaunch), the id no
+   longer matches and the map counts as unrelated.
 4. **Version and lock.** If the shared map moved on since the page map was loaded (STALE),
    or someone holds the edit lock (LOCKED), the save is refused unless `force:true`.
    `expectVersion` adds a hard condition. The PUT always carries `X-Map-Version` and never
@@ -122,7 +125,11 @@ independent locks:
 5. **Build.** The deployed `versioning.js` VERSION is fetched (cached 5 minutes). If the local
    app VERSION is newer, the save is blocked outright: `prepareMapData` stamps the local
    VERSION into the file and live users would get "Newer file". An entry-chunk mismatch with
-   the same VERSION is a warning.
+   the same VERSION is a warning. When the builds cannot be compared (the deployed
+   `versioning.js` is unreachable or unreadable), the save is refused unless
+   `skipBuildCheck:true`, a separate flag the preview names on its own; `force` does not
+   imply it. `shared_status` runs the build check (GET `/versioning.js` and `/`) by default
+   only in live mode; in local mode it sends the single meta GET unless `build:true`.
 6. **Backups.** Before every write the current live blob is downloaded to
    `TUPAIA_OUT/shared-saves/v<N>-live-<time>.map`, and for a save the outgoing body is
    written next to it as `v<N>-outgoing-<time>.map`.

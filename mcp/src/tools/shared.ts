@@ -6,7 +6,8 @@
 //   the body hash (or restore target) and the override flags; the confirmed call must echo it;
 // - lineage (is the page map derived from the shared map?) is separate from the version check;
 //   force overrides only version/lock, replaceWithUnrelated only lineage;
-// - a local build newer than the deployed one is always blocked;
+// - a local build newer than the deployed one is always blocked; an unverifiable build (verdict
+//   'unknown') is refused unless skipBuildCheck:true, a separate flag that force does not imply;
 // - the current live blob and the outgoing body are backed up under TUPAIA_OUT/shared-saves/;
 // - X-Map-Overwrite is never sent. shared-api.ts re-checks mode and token before any write.
 import fs from "node:fs";
@@ -23,7 +24,7 @@ interface BuildCheck {
   live: string | null;
   localEntry: string | null;
   liveEntry: string | null;
-  verdict: "ok" | "warn" | "block" | "unknown";
+  verdict: "ok" | "warn" | "block" | "unknown" | "skipped";
   message: string;
 }
 
@@ -82,12 +83,25 @@ function metaView(m: SharedMeta) {
   };
 }
 
-function lineageOf(ctx: ToolContext) {
+/**
+ * Is the page map derived from the shared map? Provenance alone is not enough: it is bound to
+ * the page's window.mapId recorded when it was set, and anything that replaced the map without
+ * updating provenance shows up as a different id here.
+ */
+async function lineageOf(ctx: ToolContext) {
   const p = ctx.snapshots.provenance;
-  const related = p.kind === "shared" && typeof p.sharedVersion === "number";
+  const claimsShared = p.kind === "shared" && typeof p.sharedVersion === "number";
+  const pageId = claimsShared ? await ctx.pageMapId() : null;
+  const idMatches = pageId !== null && p.mapId !== undefined && p.mapId !== null && pageId === p.mapId;
+  const related = claimsShared && idMatches;
   const origin = ctx.provenanceView();
   let note: string;
-  if (related) {
+  if (claimsShared && !related) {
+    note =
+      pageId === null
+        ? `NOT verifiably derived from the shared map: the origin says shared v${p.sharedVersion}, but the page's map id cannot be read (browser not running), so the map that will be in the page is unknown`
+        : `NOT verifiably derived from the shared map: the origin says shared v${p.sharedVersion}, but the page's map id ${pageId} differs from the one recorded then (${p.mapId ?? "none"}); something replaced the map since (eval, a failed generate_map, a relaunch)`;
+  } else if (related) {
     note = `derived from the shared map v${p.sharedVersion}${p.restoredFrom ? ` (via ${p.restoredFrom})` : ""}, ${p.opsSince} op(s) since`;
   } else if (p.kind === "generated") {
     note = `NOT derived from the shared map: generated here from seed ${p.seed ?? "?"}`;
@@ -140,8 +154,14 @@ export function register(ctx: ToolContext): void {
     {
       title: "Shared map status",
       description:
-        "Read-only: the live shared map's metadata (version, name, who saved it and when, lock holder) compared with the map in the page: lineage (is it derived from the shared map?), stale (has the shared map moved on since it was loaded?), opsSince, and the build check (local app VERSION vs the deployed one: a newer local build blocks shared_save). versions:true adds the retained versions (targets for shared_restore). Works in local mode (GETs from Node to the live origin; session shows which). Does not launch the browser.",
-      inputSchema: z.object({ versions: z.boolean().optional().describe("Also list the retained versions") }),
+        "Read-only: the live shared map's metadata (version, name, who saved it and when, lock holder) compared with the map in the page: lineage (is it derived from the shared map?), stale (has the shared map moved on since it was loaded?), opsSince, and the build check (local app VERSION vs the deployed one: a newer local build blocks shared_save). versions:true adds the retained versions (targets for shared_restore). Works in local mode (GETs from Node to the live origin; session shows which). By default it sends exactly one GET (/api/map/shared/meta) in local mode; the build check (GET /versioning.js and /) runs by default only in live mode, or with build:true. Does not launch the browser.",
+      inputSchema: z.object({
+        versions: z.boolean().optional().describe("Also list the retained versions (one more GET)"),
+        build: z
+          .boolean()
+          .optional()
+          .describe("Run the build check (GET /versioning.js and /). Default: true in live mode, false in local mode")
+      }),
       annotations: { readOnlyHint: true, openWorldHint: true },
       kind: "read",
       launch: false
@@ -149,13 +169,24 @@ export function register(ctx: ToolContext): void {
     async args => {
       const origin = ctx.shared.origin();
       const meta = await ctx.shared.meta();
-      const build = await buildCheck(ctx);
-      const lin = lineageOf(ctx);
+      const writesEnabled = ctx.config.envMode === "live" && ctx.mode.mode === "live";
+      const build: BuildCheck =
+        (args.build ?? writesEnabled)
+          ? await buildCheck(ctx)
+          : {
+              local: ctx.browser.appVersion,
+              live: null,
+              localEntry: ctx.browser.distEntry,
+              liveEntry: null,
+              verdict: "skipped",
+              message: "build check not run (local mode default); pass build:true to compare with the deployed build"
+            };
+      const lin = await lineageOf(ctx);
       const p = ctx.snapshots.provenance;
       const out: Record<string, unknown> = {
         liveOrigin: origin,
         mode: ctx.mode.mode,
-        writesEnabled: ctx.config.envMode === "live" && ctx.mode.mode === "live",
+        writesEnabled,
         meta: meta ? metaView(meta) : null,
         local: {
           browser: ctx.browser.state,
@@ -167,7 +198,7 @@ export function register(ctx: ToolContext): void {
           stale: meta && lin.related ? lin.sharedVersion !== meta.version : null,
           opsSince: p.opsSince
         },
-        buildMatch: build.verdict === "ok",
+        buildMatch: build.verdict === "skipped" ? null : build.verdict === "ok",
         build
       };
       if (!meta) out.note = "the shared map does not exist yet (404)";
@@ -181,7 +212,7 @@ export function register(ctx: ToolContext): void {
     {
       title: "Save over the LIVE shared map",
       description:
-        "OUTWARD WRITE: replaces the live shared map (map.activationlayer.org, used by other people) with the map in the page. Only when the human explicitly asked in this conversation, and only in a server spawned with TUPAIA_MODE=live. Step 1: call without confirm: returns a preview {wouldOverwrite {version, updated_by, updated_at, editing_by}, lineage, stale, buildCheck, bytes, token, refusalReason?}. Step 2: tell the human what would be overwritten. Step 3: call again with confirm:true and the preview's token (valid 10 min, one use) and the SAME flags. Refusals: STALE when the shared map moved on since it was loaded (force:true overrides, only after the human agreed to that overwrite); LOCKED when someone holds the edit lock (force overrides); LINEAGE when the page map is not derived from the shared map (replaceWithUnrelated:true overrides; force does not); BUILD when the local app VERSION is newer than the deployed one (never overridable); expectVersion:n refuses unless the live version is n. Backs up the current live blob and the outgoing body under TUPAIA_OUT/shared-saves/ first, PUTs with X-Map-Version (never an overwrite header); a 409 from the Worker returns CONFLICT with its body.",
+        "OUTWARD WRITE: replaces the live shared map (map.activationlayer.org, used by other people) with the map in the page. Only when the human explicitly asked in this conversation, and only in a server spawned with TUPAIA_MODE=live. Step 1: call without confirm: returns a preview {wouldOverwrite {version, updated_by, updated_at, editing_by}, lineage, stale, buildCheck, bytes, token, refusalReason?}. Step 2: tell the human what would be overwritten. Step 3: call again with confirm:true and the preview's token (valid 10 min, one use) and the SAME flags. Refusals: STALE when the shared map moved on since it was loaded (force:true overrides, only after the human agreed to that overwrite); LOCKED when someone holds the edit lock (force overrides); LINEAGE when the page map is not derived from the shared map (replaceWithUnrelated:true overrides; force does not); BUILD when the local app VERSION is newer than the deployed one (never overridable), or when the builds cannot be compared (skipBuildCheck:true overrides that case only; force does not); expectVersion:n refuses unless the live version is n. Backs up the current live blob and the outgoing body under TUPAIA_OUT/shared-saves/ first, PUTs with X-Map-Version (never an overwrite header); a 409 from the Worker returns CONFLICT with its body.",
       inputSchema: z.object({
         confirm: z.boolean().optional().describe("true = perform the write (needs token); absent = preview"),
         token: z.string().optional().describe("The token from the preview"),
@@ -190,7 +221,13 @@ export function register(ctx: ToolContext): void {
           .boolean()
           .optional()
           .describe("Allow replacing the shared map with a map not derived from it (human-approved only)"),
-        expectVersion: z.number().int().min(1).optional().describe("Refuse unless the live version is exactly this")
+        expectVersion: z.number().int().min(1).optional().describe("Refuse unless the live version is exactly this"),
+        skipBuildCheck: z
+          .boolean()
+          .optional()
+          .describe(
+            "Proceed when the deployed build cannot be verified (human-approved only; never overrides a newer local build)"
+          )
       }),
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
       kind: "heavy"
@@ -222,7 +259,14 @@ export function register(ctx: ToolContext): void {
 async function sharedSave(
   ctx: ToolContext,
   scope: CallScope,
-  args: { confirm?: boolean; token?: string; force?: boolean; replaceWithUnrelated?: boolean; expectVersion?: number }
+  args: {
+    confirm?: boolean;
+    token?: string;
+    force?: boolean;
+    replaceWithUnrelated?: boolean;
+    expectVersion?: number;
+    skipBuildCheck?: boolean;
+  }
 ): Promise<Record<string, unknown>> {
   requireLive(ctx);
   const data = await scope.call<{ text: string; customization: number; fileName: string | null }>(
@@ -240,12 +284,13 @@ async function sharedSave(
   const bodySha = sha256(body);
   const meta = await ctx.shared.meta();
   if (!meta) throw new ToolError("NOT_FOUND", "the shared map does not exist yet; this tool does not create it");
-  const lin = lineageOf(ctx);
+  const lin = await lineageOf(ctx);
   const stale = lin.related ? lin.sharedVersion !== meta.version : false;
   const lockHeld = !!meta.editing_by;
   const build = await buildCheck(ctx);
   const force = !!args.force;
   const unrelatedOk = !!args.replaceWithUnrelated;
+  const skipBuild = !!args.skipBuildCheck;
 
   const refusals: Refusal[] = [];
   if (!lin.related && !unrelatedOk) {
@@ -273,8 +318,11 @@ async function sharedSave(
     });
   }
   if (build.verdict === "block") refusals.push({ code: "BUILD", message: build.message });
-  if (build.verdict === "unknown" && !force) {
-    refusals.push({ code: "BUILD", message: `${build.message}; force:true proceeds without the build check` });
+  if (build.verdict === "unknown" && !skipBuild) {
+    refusals.push({
+      code: "BUILD",
+      message: `${build.message}. A newer local build would make the shared map unloadable for live users; pass skipBuildCheck:true only if the human agrees to save without that check (force does not override this).`
+    });
   }
 
   const fields: GateFields = {
@@ -283,13 +331,14 @@ async function sharedSave(
     subject: bodySha,
     target: ctx.shared.target,
     mode: ctx.mode.mode,
-    flags: JSON.stringify({ force, replaceWithUnrelated: unrelatedOk })
+    flags: JSON.stringify({ force, replaceWithUnrelated: unrelatedOk, skipBuildCheck: skipBuild })
   };
   const overrides: string[] = [];
   if (force && stale)
     overrides.push(`force: overwrites v${meta.version} although the page map came from v${lin.sharedVersion}`);
   if (force && lockHeld) overrides.push(`force: ignores ${meta.editing_by}'s lock`);
-  if (force && build.verdict === "unknown") overrides.push("force: skips the unverifiable build check");
+  if (skipBuild && build.verdict === "unknown")
+    overrides.push("skipBuildCheck: saves although the deployed build could not be compared with the local one");
   if (unrelatedOk && !lin.related)
     overrides.push("replaceWithUnrelated: replaces the shared map with an unrelated map");
   const preview = {
@@ -326,7 +375,7 @@ async function sharedSave(
       ...preview,
       token,
       tokenExpiresAt: expiresAt,
-      next: `Tell the human: this overwrites live v${meta.version} (${meta.name}, saved by ${meta.updated_by} at ${meta.updated_at}). Only after they say yes: shared_save {confirm:true, token:'${token}'${force ? ", force:true" : ""}${unrelatedOk ? ", replaceWithUnrelated:true" : ""}}.`
+      next: `Tell the human: this overwrites live v${meta.version} (${meta.name}, saved by ${meta.updated_by} at ${meta.updated_at}). Only after they say yes: shared_save {confirm:true, token:'${token}'${force ? ", force:true" : ""}${unrelatedOk ? ", replaceWithUnrelated:true" : ""}${skipBuild ? ", skipBuildCheck:true" : ""}}.`
     };
   }
 
@@ -359,6 +408,7 @@ async function sharedSave(
   ctx.snapshots.setProvenance({
     kind: "shared",
     seed: p.seed ?? null,
+    mapId: await ctx.pageMapId(),
     sharedVersion: saved.version,
     sharedUpdatedBy: saved.updated_by,
     sharedUpdatedAt: saved.updated_at,

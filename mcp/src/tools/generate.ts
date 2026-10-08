@@ -83,10 +83,20 @@ export function register(ctx: ToolContext): void {
           { mutating: true, timeoutMs }
         );
       } catch (e) {
-        ctx.snapshots.noteMutation();
+        // The app may have undrawn and regenerated before failing (APP_ALERT 'Generation error'):
+        // keep the provenance only if the page still holds the same map.
+        const id = await ctx.pageMapId();
+        const recorded = ctx.snapshots.provenance.mapId;
+        if (id === null || recorded === undefined || recorded === null || id !== recorded)
+          ctx.snapshots.setProvenance({ kind: "unknown", mapId: id });
+        else ctx.snapshots.noteMutation();
         throw e;
       }
-      ctx.snapshots.setProvenance({ kind: "generated", seed: String(out.seed ?? args.seed ?? "") });
+      ctx.snapshots.setProvenance({
+        kind: "generated",
+        seed: String(out.seed ?? args.seed ?? ""),
+        mapId: await ctx.pageMapId()
+      });
       return { ...out, origin: ctx.provenanceView(), undo: "snapshot {action:'undo'} returns to the previous map" };
     }
   );

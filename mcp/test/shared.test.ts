@@ -42,12 +42,22 @@ describe("shared tools in local mode", () => {
     await fake?.stop();
   });
 
-  test("shared_status reads version 3 without launching the browser", async () => {
+  test("shared_status reads version 3 with one GET and without launching the browser", async () => {
+    fake.clearLog();
     const s = await h.ok("shared_status", {});
     assert.equal((s.meta as { version: number }).version, 3);
     assert.equal(s.mode, "local");
     assert.equal(s.writesEnabled, false);
-    assert.equal(s.buildMatch, true);
+    // local mode default: the meta GET only, no build check
+    assert.deepEqual(
+      fake.requests.map(r => `${r.method} ${r.path}`),
+      ["GET /api/map/shared/meta"]
+    );
+    assert.equal(s.buildMatch, null);
+    assert.equal((s.build as { verdict: string }).verdict, "skipped");
+    const b = await h.ok("shared_status", { build: true });
+    assert.equal(b.buildMatch, true);
+    assert.ok(fake.requests.some(r => r.path === "/versioning.js"));
     assert.equal((s.local as { browser: string }).browser, "not-launched");
     const withVersions = await h.ok("shared_status", { versions: true });
     const v = withVersions.versions as { current: number; snapshots: Array<{ version: number }> };
@@ -246,6 +256,52 @@ describe("shared tools in live mode (fake Worker)", () => {
     assert.equal((w.buildCheck as { verdict: string }).verdict, "warn");
     assert.equal(typeof w.token, "string");
     fake.entry = LOCAL_ENTRY ?? "index-FAKE.js";
+  });
+
+  test("an unverifiable build is refused even with force; only skipBuildCheck lets the preview through", async () => {
+    fake.versioningStatus = 503;
+    try {
+      const f = await h.ok("shared_save", { force: true });
+      assert.equal(f.token, null);
+      assert.equal((f.buildCheck as { verdict: string }).verdict, "unknown");
+      assert.match(String(f.refusalReason), /BUILD/);
+      assert.match(String(f.refusalReason), /skipBuildCheck/);
+      const s = await h.ok("shared_save", { skipBuildCheck: true });
+      assert.equal(typeof s.token, "string");
+      assert.ok((s.overrides as string[]).some(o => /skipBuildCheck/.test(o)));
+      // confirming without the flag is refused (BUILD), and nothing is written
+      const c = await h.call("shared_save", { confirm: true, token: s.token as string });
+      assert.equal(errorBody(c).error.code, "BUILD");
+      const cf = await h.call("shared_save", { confirm: true, token: s.token as string, force: true });
+      assert.equal(errorBody(cf).error.code, "BUILD");
+      assert.equal(puts().length, 3);
+    } finally {
+      fake.versioningStatus = null;
+    }
+  });
+
+  test("an eval that replaces the map drops lineage (map id), and undo brings it back", async () => {
+    const before = await h.ok("shared_status", {});
+    assert.equal((before.local as { lineage: string }).lineage, "shared");
+    const ev = await h.ok("eval", {
+      code: "await generate({ seed: 'lineage-eval' }); return mapId",
+      timeoutMs: 60_000
+    });
+    assert.ok(
+      (ev.notes as string[]).some(n => /replaced the map/.test(n)),
+      JSON.stringify(ev.notes)
+    );
+    const after = await h.ok("shared_status", {});
+    const local = after.local as { lineage: string; originKind: string };
+    assert.equal(local.lineage, "unrelated");
+    assert.equal(local.originKind, "unknown");
+    const p = await h.ok("shared_save", {});
+    assert.equal(p.token, null);
+    assert.match(String(p.refusalReason), /LINEAGE/);
+    await h.ok("snapshot", { action: "undo" });
+    const back = await h.ok("shared_status", {});
+    assert.equal((back.local as { lineage: string }).lineage, "shared");
+    assert.equal(puts().length, 3);
   });
 
   test("an unrelated (generated) map is refused without replaceWithUnrelated; force does not help", async () => {

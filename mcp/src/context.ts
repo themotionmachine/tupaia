@@ -140,6 +140,7 @@ export class CallScope {
 
   /** Take an auto-undo entry for a mutating op. Call before mutating the page. */
   async pushUndo(op: string, args: unknown): Promise<void> {
+    await this.ctx.verifyProvenance();
     const text = await this.mapText();
     const { entry, evicted } = this.ctx.snapshots.pushUndo(op, summarizeArgs(args), text);
     await this.call("setBaseline", { key: entry.baselineKey }, { noAlerts: true, timeoutMs: HOUSEKEEPING_MS });
@@ -191,15 +192,20 @@ export class ToolContext {
   #sharedBootDone = false;
 
   async #afterLaunch(): Promise<void> {
-    // A fresh page holds a random boot map until something is restored or loaded.
-    const env = await this.browser.callBridge<{ seed?: string }>("summary", {}, { timeoutMs: 15_000, noAlerts: true });
-    this.snapshots.setProvenance({ kind: "boot", seed: env.ok ? (env.value?.seed ?? null) : null });
+    // A fresh page holds a random boot map until something is restored or loaded. Set that
+    // before anything that can throw, so a failed hook never leaves an older 'shared' provenance.
+    this.snapshots.setProvenance({ kind: "boot", seed: null, mapId: null });
+    const env = await this.browser
+      .callBridge<{ seed?: string; mapId?: number }>("summary", {}, { timeoutMs: 15_000, noAlerts: true })
+      .catch(() => null);
+    if (env?.ok)
+      this.snapshots.setProvenance({ kind: "boot", seed: env.value?.seed ?? null, mapId: env.value?.mapId ?? null });
     // Live mode: the first launch loads the shared map, so its version is known before any write.
     if (this.mode.mode === "live" && !this.#sharedBootDone) {
       this.#sharedBootDone = true;
       try {
         const blob = await this.shared.getMap();
-        const r = await this.browser.callBridge<{ seed?: string }>(
+        const r = await this.browser.callBridge<{ seed?: string; mapId?: number }>(
           "loadMap",
           { b64: blob.bytes.toString("base64"), keepView: false, timeoutMs: 110_000 },
           { timeoutMs: 120_000, mutating: true }
@@ -208,6 +214,7 @@ export class ToolContext {
         this.snapshots.setProvenance({
           kind: "shared",
           seed: r.value?.seed ?? null,
+          mapId: r.value?.mapId ?? null,
           sharedVersion: blob.version ?? undefined,
           sharedUpdatedBy: blob.updatedBy,
           sharedUpdatedAt: blob.updatedAt,
@@ -225,19 +232,90 @@ export class ToolContext {
   async #restoreNewest(reason: string): Promise<string> {
     const src = this.snapshots.newestRestorable();
     if (!src) return "No snapshot to restore; the page holds a fresh random map.";
-    const env = await this.browser.callBridge(
+    const env = await this.browser.callBridge<{ mapId?: number }>(
       "loadMap",
       { text: src.text, keepView: false, timeoutMs: 110_000 },
       { timeoutMs: 120_000, mutating: true }
     );
     if (!env.ok) return `Restoring ${src.label} failed: ${env.error?.message}`;
-    this.snapshots.provenance = { ...src.provenance, restoredFrom: src.label };
+    // the app stamps a new map id on every load, so lineage is re-bound to the loaded map
+    this.snapshots.provenance = { ...src.provenance, restoredFrom: src.label, mapId: env.value?.mapId ?? null };
+    this.snapshots.afterRestore(src.kind);
     void reason;
-    return `Restored ${src.label}.`;
+    const lost = src.lostOps.length
+      ? ` The map in the page before the relaunch could not be kept; the effects of these calls were LOST and need redoing: ${src.lostOps.join("; ")}.`
+      : "";
+    return `Restored ${src.label}.${lost}`;
   }
 
-  /** Restore the newest snapshot now (session restart {restore:'latest'}). */
-  restoreNewest(): Promise<string> {
+  /**
+   * window.mapId of the map in the page, or null when the browser is not running or the call
+   * fails. Never launches the browser.
+   */
+  async pageMapId(timeoutMs = 10_000): Promise<number | null> {
+    if (!this.browser.healthy) return null;
+    try {
+      const env = await this.browser.callBridge<number | null>("mapId", {}, { timeoutMs, noAlerts: true });
+      return env.ok ? (env.value ?? null) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * A 'shared' provenance whose recorded map id no longer matches the page is downgraded to
+   * 'unknown' before it gets copied into an undo entry or snapshot (which a later restore would
+   * otherwise re-bind to the page, laundering the lineage).
+   */
+  async verifyProvenance(): Promise<void> {
+    const p = this.snapshots.provenance;
+    if (p.kind !== "shared") return;
+    const id = await this.pageMapId();
+    if (id === null || p.mapId === undefined || p.mapId === null || id !== p.mapId)
+      this.snapshots.setProvenance({ kind: "unknown", mapId: id, opsSince: p.opsSince });
+  }
+
+  /**
+   * session restart: relaunch the browser. With restore 'latest', the map in the page is read
+   * first (while the page still answers) and loaded back after the relaunch; only an
+   * unresponsive page falls back to the newest snapshot/undo point.
+   */
+  async restart(restore: "latest" | "none"): Promise<string> {
+    let text: string | null = null;
+    const prov = { ...this.snapshots.provenance };
+    const idBefore = await this.pageMapId();
+    // a fresh boot map nobody touched (e.g. right after a crash relaunch) is not worth keeping
+    // over the newest snapshot; anything else in the page is the user's current work
+    const freshBoot = prov.kind === "boot" && prov.opsSince === 0 && !!this.snapshots.newestRestorable();
+    if (restore === "latest" && this.browser.healthy && !freshBoot) {
+      try {
+        const env = await this.browser.callBridge<{ text: string }>(
+          "mapData",
+          {},
+          { timeoutMs: 30_000, noAlerts: true }
+        );
+        if (env.ok && env.value?.text) text = env.value.text;
+      } catch {
+        text = null;
+      }
+    }
+    await this.browser.relaunch("session restart");
+    if (restore === "none") return "not restored (restore:'none'); the page holds a fresh random map";
+    if (text) {
+      const env = await this.browser.callBridge<{ mapId?: number }>(
+        "loadMap",
+        { text, keepView: false, timeoutMs: 110_000 },
+        { timeoutMs: 120_000, mutating: true }
+      );
+      if (env.ok) {
+        // keep the lineage only if it held before the restart (the reload stamps a new map id)
+        const held = prov.mapId !== undefined && prov.mapId !== null && prov.mapId === idBefore;
+        this.snapshots.provenance = held
+          ? { ...prov, mapId: env.value?.mapId ?? null }
+          : { ...prov, kind: prov.kind === "shared" ? "unknown" : prov.kind, mapId: env.value?.mapId ?? null };
+        return "Reloaded the map that was in the page before the restart (nothing lost).";
+      }
+    }
     return this.#restoreNewest("restart");
   }
 
@@ -303,6 +381,7 @@ export class ToolContext {
     const out: Record<string, unknown> = { kind: p.kind };
     for (const k of [
       "seed",
+      "mapId",
       "path",
       "sharedVersion",
       "sharedUpdatedBy",

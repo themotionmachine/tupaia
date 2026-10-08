@@ -167,6 +167,14 @@ describe("tupaia-mcp smoke (core layer)", () => {
     assert.equal((undo.undone as Array<{ op: string }>)[0].op, "eval");
     const back = await h.ok("find", { type: "burg", name: burg.name });
     assert.equal(back.total, 1);
+
+    // states have no stored population: find derives rural + urban people and sorts by it
+    const st = await h.ok("find", { type: "state", sort: "-population", fields: ["population", "rural", "urban"] });
+    const srows = st.rows as Array<{ population: number; rural: number; urban: number }>;
+    assert.ok(srows.length > 3);
+    for (const r of srows) assert.equal(r.population, r.rural + r.urban);
+    for (let k = 1; k < srows.length; k++) assert.ok(srows[k - 1].population >= srows[k].population, "sorted");
+    assert.ok(srows[0].population > 0);
   });
 
   test("g. inspect entity / lat-lon / xy agree", async () => {
@@ -267,11 +275,27 @@ describe("tupaia-mcp smoke (core layer)", () => {
     assert.equal((redo.redone as Array<{ op: string }>)[0].op, "eval");
     const after = await h.ok("map_info", { since: "checkpoint" });
     assert.equal(after.changed, false, JSON.stringify(after.changes).slice(0, 500));
+    // the undo entry the redo created has a baseline: the default diff is available
+    const sinceRedo = await h.ok("map_info");
+    assert.equal(sinceRedo.changed, true, JSON.stringify(sinceRedo.changes).slice(0, 300));
     // and undo once more brings the original name back
     await h.ok("map_info", { since: "none" });
     await h.ok("snapshot", { action: "undo" });
     const name = await h.ok("eval", { code: `pack.burgs[${burg.i}].name`, readOnly: true });
     assert.equal(name.value, burg.name);
+  });
+
+  test("screenshot keepLayers is undoable like display", async () => {
+    const wasOn = (await h.ok("eval", { code: "layerIsOn('toggleLabels')", readOnly: true })).value as boolean;
+    const layers = wasOn ? { off: ["labels"] } : { on: ["labels"] };
+    await h.ok("screenshot", { layers, keepLayers: true });
+    assert.equal((await h.ok("eval", { code: "layerIsOn('toggleLabels')", readOnly: true })).value, !wasOn);
+    const list = await h.ok("snapshot", { action: "list" });
+    const top = (list.undo as Array<{ op: string; argsSummary: string }>)[0];
+    assert.equal(top.op, "screenshot keepLayers");
+    assert.match(top.argsSummary, /labels/);
+    await h.ok("snapshot", { action: "undo" });
+    assert.equal((await h.ok("eval", { code: "layerIsOn('toggleLabels')", readOnly: true })).value, wasOn);
   });
 
   test("t. restore 'base' then map_info since 'base' is empty", async () => {
@@ -351,6 +375,10 @@ describe("tupaia-mcp smoke (core layer)", () => {
       JSON.stringify(info.notes)
     );
     assert.equal(info.name, "Chanland", "newest snapshot (the pre-eval undo point) restored");
+    assert.ok(
+      (info.notes as string[]).some(n => /LOST/.test(n) && /eval/.test(n)),
+      `the note names the call whose effects were lost: ${JSON.stringify(info.notes)}`
+    );
   });
 
   test("bb. crash relaunches; restart restore:'latest' brings the map back", async () => {
@@ -366,6 +394,28 @@ describe("tupaia-mcp smoke (core layer)", () => {
     const counts = (r.map as { counts: Record<string, number> }).counts;
     assert.equal(counts.states, 20);
     assert.equal(counts.burgs, 753);
+  });
+
+  test("restart keeps the map that is in the page, including the last edit", async () => {
+    await h.ok("eval", { code: "pack.burgs[1].name = 'Restartburg'; return 1" });
+    const r = await h.ok("session", { action: "restart" });
+    assert.match(String(r.restored), /nothing lost/);
+    const name = (await h.ok("eval", { code: "pack.burgs[1].name", readOnly: true })).value;
+    assert.equal(name, "Restartburg");
+    await h.ok("snapshot", { action: "undo" });
+  });
+
+  test("restart restore:'none' after a mutating timeout is not overridden by the dirty flag", async () => {
+    const t = await h.call("eval", { code: "new Promise(() => {})", timeoutMs: 1000 });
+    assert.equal(errorBody(t).error.code, "TIMEOUT");
+    const r = await h.ok("session", { action: "restart", restore: "none" });
+    assert.match(String(r.restored), /not restored/);
+    const info = await h.ok("map_info", { since: "none" });
+    assert.ok(
+      !((info.notes as string[] | undefined) ?? []).some(n => /relaunched|Restored/.test(n)),
+      JSON.stringify(info.notes)
+    );
+    assert.equal((info.origin as { kind: string }).kind, "boot");
   });
 
   test("cc. shutdown on stdin close leaves no chrome behind", async () => {
@@ -542,6 +592,16 @@ describe("tupaia-mcp smoke (mutations)", () => {
     assert.equal(after.center, after.cell);
     assert.equal(after.newCap, 1);
     assert.equal(after.oldCap, 0);
+
+    // moving a capital carries the state's centre with it (as the app's burg relocation does)
+    const dest = await evalRO(
+      `const b = pack.burgs[${pick.next}]; return pack.cells.i.find(c => c !== b.cell && pack.cells.state[c] === b.state && pack.cells.h[c] >= 20 && !pack.cells.burg[c])`
+    );
+    assert.ok(dest !== undefined, "a free land cell in the same state");
+    await h.ok("edit", { type: "burg", ops: [{ ref: pick.next, set: { move: { cell: dest } } }] });
+    const moved = await evalRO(`({cell: pack.burgs[${pick.next}].cell, center: pack.states[${s0.i}].center})`);
+    assert.equal(moved.cell, dest);
+    assert.equal(moved.center, dest);
   });
 
   test("j. paint_cells state on a circle; centres stay; provinces stay consistent", async () => {
@@ -621,6 +681,19 @@ describe("tupaia-mcp smoke (mutations)", () => {
     assert.equal(errorBody(erase).error.code, "REFUSED", "erase needs confirmErase");
   });
 
+  test("paint_cells keep-mode smoothing of low coastal land averages land neighbours only", async () => {
+    // low land cells on the coast: averaging their water neighbours in would sink them below 20
+    const cells = (await evalRO(
+      "pack.cells.i.filter(c => pack.cells.t[c] === 1 && pack.cells.h[c] >= 20 && pack.cells.h[c] <= 23).slice(0, 40)"
+    )) as number[];
+    assert.ok(cells.length >= 5, `found ${cells.length} low coastal land cells`);
+    const r = await h.ok("paint_cells", { select: { cells }, set: { height: { smooth: 2 } } });
+    const hs = (r.set as { height: { crossing: number } }).height;
+    assert.equal(hs.crossing, 0);
+    const low = await evalRO("args.map(c => grid.cells.h[pack.cells.g[c]]).filter(v => v < 20).length", cells);
+    assert.equal(low, 0, "no smoothed land cell went under water");
+  });
+
   test("l. add a marker with a note, then remove it", async () => {
     await h.ok("display", { on: ["markers"] });
     const at = plain[12];
@@ -697,6 +770,15 @@ describe("tupaia-mcp smoke (mutations)", () => {
       });
       assert.equal(errorBody(np).error.code, "NO_PATH");
     }
+    // with the routes layer hidden the route is not drawn, and the result says so
+    await h.ok("display", { off: ["routes"] });
+    const hidden = await h.ok("add", {
+      type: "route",
+      items: [{ through: [{ entity: { type: "burg", ref: pair[0] } }, { entity: { type: "burg", ref: pair[1] } }] }]
+    });
+    assert.deepEqual(hidden.skippedHidden, ["routes"]);
+    await h.ok("snapshot", { action: "undo" });
+    await h.ok("display", { on: ["routes"] });
   });
 
   test("n. add a burg at lat/lon, then remove it", async () => {
@@ -795,7 +877,11 @@ describe("tupaia-mcp smoke (mutations)", () => {
     assert.equal((list.undo as Array<{ op: string }>)[0].op, "regenerate");
   });
 
-  test("paint_cells risk mode turns a lake into land and rebuilds features", async () => {
+  test("paint_cells risk mode turns a lake into land and rebuilds features (rivers shown)", async () => {
+    // the default (erosion off) keeps the rivers; with the rivers layer visible they are redrawn
+    await h.ok("display", { on: ["rivers"] });
+    const rivers0 = await evalRO("pack.rivers.filter(r => r.cells && r.cells.length > 1).length");
+    assert.ok(rivers0 > 0, "the demo map has rivers");
     const lake = await evalRO(
       "pack.features.filter(f => f && f.type === 'lake').sort((a, b) => a.cells - b.cells)[0]?.i"
     );
@@ -816,6 +902,23 @@ describe("tupaia-mcp smoke (mutations)", () => {
     assert.equal(after.type, "island");
     assert.equal(after.gh, 25);
     assert.equal(after.lakes, lakes0 - 1);
+    const rv = await evalRO(`
+      const n = pack.cells.i.length;
+      const live = pack.rivers.filter(r => r.cells && r.cells.length > 1);
+      return {
+        live: live.length,
+        stale: live.filter(r => r.cells.some(c => c !== -1 && (c < 0 || c >= n))).length,
+        drawn: document.querySelectorAll('#rivers path').length,
+        ungrouped: pack.features.filter(f => f && typeof f === 'object' && f.type !== 'ocean' && !f.group).length,
+        unnamedLakes: pack.features.filter(f => f && f.type === 'lake' && !f.name).length
+      };`);
+    assert.equal(rv.stale, 0, "river cells point into the new graph");
+    assert.ok(rv.live >= rivers0 - 3, `rivers kept (${rv.live} of ${rivers0})`);
+    assert.ok(rv.drawn > 0, "rivers were redrawn");
+    assert.equal(rv.ungrouped, 0, "every feature has a group");
+    assert.equal(rv.unnamedLakes, 0, "every lake has a name");
+    const info = await h.ok("map_info", { since: "none" });
+    assert.ok(!JSON.stringify(info.features).includes("undefined"), JSON.stringify(info.features));
   });
 
   test("v. generate_map twice with the same args gives the same digest", async () => {

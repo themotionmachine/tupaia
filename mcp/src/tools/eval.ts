@@ -26,14 +26,27 @@ export function register(ctx: ToolContext): void {
     async (args, scope) => {
       const readOnly = !!args.readOnly;
       if (!readOnly) await scope.pushUndo("eval", { code: args.code });
-      const env = await scope.envelope<Record<string, unknown>>(
-        "evalUser",
-        { code: args.code, args: args.args, redraw: args.redraw },
-        { timeoutMs: args.timeoutMs ?? TIMEOUTS.edit, mutating: !readOnly }
-      );
-      const v = unwrap(env);
-      if (!readOnly) ctx.snapshots.noteMutation();
-      return { ...v, ms: env.ms, ...(readOnly ? {} : { undo: "available (snapshot {action:'undo'})" }) };
+      const idBefore = await ctx.pageMapId();
+      try {
+        const env = await scope.envelope<Record<string, unknown>>(
+          "evalUser",
+          { code: args.code, args: args.args, redraw: args.redraw },
+          { timeoutMs: args.timeoutMs ?? TIMEOUTS.edit, mutating: !readOnly }
+        );
+        const v = unwrap(env);
+        return { ...v, ms: env.ms, ...(readOnly ? {} : { undo: "available (snapshot {action:'undo'})" }) };
+      } finally {
+        // eval can replace the whole map (generate(), uploadMap(), ...). Lineage to the shared
+        // map must not survive that: a new window.mapId drops provenance to 'unknown'.
+        // (a dirty page is relaunched and the newest snapshot restored, with its provenance, next)
+        const idAfter = ctx.browser.dirty ? idBefore : await ctx.pageMapId();
+        if (idBefore !== idAfter) {
+          ctx.snapshots.setProvenance({ kind: "unknown", mapId: idAfter });
+          scope.notes.push(
+            "eval replaced the map in the page (its map id changed); the origin is now 'unknown', so shared_save treats it as unrelated to the shared map"
+          );
+        } else if (!readOnly) ctx.snapshots.noteMutation();
+      }
     }
   );
 }

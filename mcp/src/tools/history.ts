@@ -6,12 +6,17 @@ import { resolveWritePath } from "../paths.ts";
 import { META_TEXT_HEAVY, ToolError } from "../result.ts";
 import { defineTools } from "./registry.ts";
 
+function mapIdOf(summary: Record<string, unknown>): number | null {
+  return typeof summary.mapId === "number" ? summary.mapId : null;
+}
+
 function brief(summary: Record<string, unknown>): Record<string, unknown> {
   return { name: summary.name, seed: summary.seed, graph: summary.graph, counts: summary.counts };
 }
 
 async function take(ctx: ToolContext, scope: CallScope, label: string | undefined, saveTo: string | undefined) {
   const t0 = Date.now();
+  await ctx.verifyProvenance();
   const text = await scope.mapText();
   const { snap, evicted } = ctx.snapshots.add(text, label ?? null);
   await scope.call("setBaseline", { key: snap.baselineKey }, { noAlerts: true });
@@ -78,7 +83,12 @@ export function register(ctx: ToolContext): void {
             });
           await scope.pushUndo("snapshot restore", { index: s.id, label: s.label });
           const summary = await scope.loadMap({ text: s.text }, true);
-          snaps.provenance = { ...s.provenance, restoredFrom: `snapshot ${s.id}${s.label ? ` '${s.label}'` : ""}` };
+          // the app stamps a new map id on every load (showStatistics), so re-record it
+          snaps.provenance = {
+            ...s.provenance,
+            restoredFrom: `snapshot ${s.id}${s.label ? ` '${s.label}'` : ""}`,
+            mapId: mapIdOf(summary)
+          };
           return {
             restored: { index: s.id, label: s.label, at: s.at },
             map: brief(summary),
@@ -92,6 +102,7 @@ export function register(ctx: ToolContext): void {
           if (!plan) throw new ToolError("REFUSED", `cannot undo ${n}: the undo stack holds ${snaps.undoStack.length}`);
           const summary = await scope.loadMap({ text: plan.load.text }, true);
           const dropped = snaps.commitUndo(plan);
+          snaps.provenance.mapId = mapIdOf(summary);
           await scope.call("dropBaseline", { keys: dropped }, { noAlerts: true });
           return {
             undone: plan.undone.map(e => ({ op: e.op, args: e.argsSummary, at: e.at })),
@@ -107,8 +118,19 @@ export function register(ctx: ToolContext): void {
           if (!entries)
             throw new ToolError("REFUSED", `cannot redo ${n}: the redo stack holds ${snaps.redoStack.length}`);
           const current = await scope.mapText();
-          const summary = await scope.loadMap({ text: entries[entries.length - 1].text }, true);
-          snaps.commitRedo(entries, current);
+          // the first undo entry the redo creates holds the current page state: baseline it now
+          const preKey = snaps.nextHistKey;
+          await scope.call("setBaseline", { key: preKey }, { noAlerts: true });
+          let summary: Record<string, unknown>;
+          try {
+            summary = await scope.loadMap({ text: entries[entries.length - 1].text }, true);
+          } catch (e) {
+            await scope.call("dropBaseline", { key: preKey }, { noAlerts: true }).catch(() => {});
+            throw e;
+          }
+          const { dropped } = snaps.commitRedo(entries, current);
+          snaps.provenance.mapId = mapIdOf(summary);
+          if (dropped.length) await scope.call("dropBaseline", { keys: dropped }, { noAlerts: true });
           return {
             redone: entries.map(e => ({ op: e.op, args: e.argsSummary })),
             map: brief(summary),

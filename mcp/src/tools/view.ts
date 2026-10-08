@@ -51,7 +51,10 @@ export const ScreenshotInput = z.object({
   full: z.boolean().optional().describe("Whole map rasterised at graph size x scale (ignores target/zoom)"),
   view: z.string().optional().describe("Reuse the exact view of an earlier shot: 'last' or a shotId"),
   layers: z.object({ on: z.array(LayerName).optional(), off: z.array(LayerName).optional() }).optional(),
-  keepLayers: z.boolean().optional().describe("Keep the layer changes after the shot (default: revert)"),
+  keepLayers: z
+    .boolean()
+    .optional()
+    .describe("Keep the layer changes after the shot (default: revert); kept changes are undoable like display"),
   hideUi: z.boolean().optional().describe("Hide UI overlays and dialogs (default true)"),
   format: z.enum(["jpeg", "png"]).optional().describe("Returned image format (default jpeg)"),
   quality: z.number().min(0.3).max(1).optional().describe("JPEG quality (default 0.85)"),
@@ -61,6 +64,7 @@ export const ScreenshotInput = z.object({
     .string()
     .optional()
     .describe(".png path for the full-resolution capture (default TUPAIA_OUT/shots/<id>.png)"),
+  overwrite: z.boolean().optional().describe("saveTo: replace an existing file"),
   compare: z
     .string()
     .optional()
@@ -92,7 +96,10 @@ export async function takeScreenshot(
   let view: ViewInfo;
   try {
     if (args.layers && (args.layers.on?.length ?? 0) + (args.layers.off?.length ?? 0) > 0) {
+      // kept layer changes are part of the saved map (the SVG), so they are undoable like display
+      if (args.keepLayers) await scope.pushUndo("screenshot keepLayers", { layers: args.layers });
       layerChange = await scope.call("setLayers", { on: args.layers.on ?? [], off: args.layers.off ?? [] });
+      if (args.keepLayers && layerChange?.changed.length) ctx.snapshots.noteMutation();
     }
     if (full) {
       const r = await scope.call<Encoded>("rasterize", { scale, format: "png" }, { noAlerts: true });
@@ -135,7 +142,7 @@ export async function takeScreenshot(
 
   const id = ctx.shots.nextId();
   const file = args.saveTo
-    ? resolveWritePath(ctx.config, args.saveTo, { exts: [".png"], overwrite: true })
+    ? resolveWritePath(ctx.config, args.saveTo, { exts: [".png"], overwrite: !!args.overwrite })
     : path.join(ctx.config.outDir, "shots", `${id}.png`);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, png);

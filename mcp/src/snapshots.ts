@@ -15,6 +15,12 @@ export interface Provenance {
   sharedUpdatedBy?: string | null;
   sharedUpdatedAt?: string | null;
   fetchedAt?: string;
+  /**
+   * The page's window.mapId when this provenance was recorded. The app stamps a new id on every
+   * generate and reads it back from the file on load, so a different id in the page means the map
+   * was replaced by something that did not update provenance (eval, a failed generate, a relaunch).
+   */
+  mapId?: number | null;
   /** Snapshot/undo restore that produced this map (lineage stays with the restored provenance). */
   restoredFrom?: string;
   /** Mutating operations applied since the map was generated/loaded. */
@@ -134,8 +140,14 @@ export class SnapshotStore {
     return this.#ring[this.#ring.length - 1];
   }
 
-  /** Newest state we can restore after a crash: the newest of ring and undo entries by time. */
-  newestRestorable(): { kind: "snapshot" | "undo"; text: string; label: string; provenance: Provenance } | undefined {
+  /**
+   * Newest state we can restore after a crash or hang: the newest of ring and undo entries by
+   * time. An undo entry holds the state from BEFORE its op, so restoring one loses that op; a
+   * snapshot loses every op recorded after it. lostOps names them (oldest first).
+   */
+  newestRestorable():
+    | { kind: "snapshot" | "undo"; text: string; label: string; provenance: Provenance; lostOps: string[] }
+    | undefined {
     const s = this.latestSnapshot();
     const u = this.#undo[this.#undo.length - 1];
     if (!s && !u) return undefined;
@@ -144,11 +156,34 @@ export class SnapshotStore {
         kind: "snapshot",
         text: s.text,
         label: `snapshot ${s.id}${s.label ? ` '${s.label}'` : ""}`,
-        provenance: s.provenance
+        provenance: s.provenance,
+        lostOps: this.#undo.filter(e => e.at > s.at).map(e => `${e.op} ${e.argsSummary}`)
       };
     }
     if (!u) return undefined;
-    return { kind: "undo", text: u.text, label: `undo point before '${u.op}' (${u.at})`, provenance: u.provenance };
+    return {
+      kind: "undo",
+      text: u.text,
+      label: `undo point before '${u.op}' (${u.at})`,
+      provenance: u.provenance,
+      lostOps: [`${u.op} ${u.argsSummary}`]
+    };
+  }
+
+  /**
+   * After newestRestorable() was loaded into a fresh page: an undo point that is now the current
+   * state is popped (undoing to it again would do nothing), and redo entries are dropped (they
+   * were relative to a page state that no longer exists). Returns the baseline keys dropped.
+   */
+  afterRestore(kind: "snapshot" | "undo"): string[] {
+    const dropped: string[] = [];
+    if (kind === "undo") {
+      const top = this.#undo.pop();
+      if (top) dropped.push(top.baselineKey);
+    }
+    for (const r of this.#redo) dropped.push(r.baselineKey);
+    this.#redo = [];
+    return dropped;
   }
 
   /** Push the pre-op state; clears redo. Returns baseline keys that fell off. */
@@ -214,27 +249,49 @@ export class SnapshotStore {
     return this.#redo.slice(-n).reverse();
   }
 
-  /** Apply a redo after loading entries[last].text; pushes matching undo entries. */
-  commitRedo(entries: HistoryEntry[], currentText: string): void {
+  /**
+   * Apply a redo after loading entries[last].text; pushes matching undo entries. Returns the
+   * new undo entries' baseline keys (oldest first; the first one is nextHistKey as it was before
+   * the call, i.e. the page state before the redo) and the keys to drop (replayed redo entries
+   * and undo entries evicted by the depth limit).
+   */
+  commitRedo(entries: HistoryEntry[], currentText: string): { added: string[]; dropped: string[] } {
     this.#redo.splice(this.#redo.length - entries.length, entries.length);
+    const dropped = entries.map(e => e.baselineKey);
+    const added: string[] = [];
     let before = currentText;
     let beforeProv = cloneProv(this.provenance);
     for (const e of entries) {
-      this.#undo.push({
-        id: this.#nextHist++,
+      const id = this.#nextHist++;
+      const entry: HistoryEntry = {
+        id,
         op: e.op,
         argsSummary: e.argsSummary,
         at: new Date().toISOString(),
         bytes: Buffer.byteLength(before),
         text: before,
         provenance: beforeProv,
-        baselineKey: `undo:${this.#nextHist}`
-      });
+        baselineKey: `undo:${id}`
+      };
+      this.#undo.push(entry);
+      added.push(entry.baselineKey);
       before = e.text;
       beforeProv = cloneProv(e.provenance);
     }
-    while (this.#undo.length > this.undoDepth) this.#undo.shift();
+    while (this.#undo.length > this.undoDepth) {
+      const old = this.#undo.shift();
+      if (!old) break;
+      dropped.push(old.baselineKey);
+      const k = added.indexOf(old.baselineKey);
+      if (k >= 0) added.splice(k, 1);
+    }
     this.provenance = cloneProv(entries[entries.length - 1].provenance);
+    return { added, dropped };
+  }
+
+  /** Baseline key the next undo entry will get (redo sets it before loading). */
+  get nextHistKey(): string {
+    return `undo:${this.#nextHist}`;
   }
 
   noteMutation(): void {
@@ -266,8 +323,12 @@ export class SnapshotStore {
         origin: s.provenance.kind,
         savedTo: s.savedTo
       })),
-      undo: [...this.#undo].reverse().map((e, k) => ({ n: k + 1, op: e.op, args: e.argsSummary, at: e.at })),
-      redo: [...this.#redo].reverse().map((e, k) => ({ n: k + 1, op: e.op, args: e.argsSummary, at: e.at })),
+      undo: [...this.#undo]
+        .reverse()
+        .map((e, k) => ({ n: k + 1, op: e.op, argsSummary: e.argsSummary, args: e.argsSummary, at: e.at })),
+      redo: [...this.#redo]
+        .reverse()
+        .map((e, k) => ({ n: k + 1, op: e.op, argsSummary: e.argsSummary, args: e.argsSummary, at: e.at })),
       max: this.max,
       undoDepth: this.undoDepth
     };

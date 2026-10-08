@@ -9,11 +9,11 @@ human spawned with `TUPAIA_MODE=live`, behind a preview and a one-time token.
 
 | tool | one line |
 | --- | --- |
-| `session {action?:'status'\|'set_mode'\|'restart', mode?:'local', restore?, clear?}` | status: mode, origin reads hit, app version, browser, map provenance, snapshot/undo counts, console errors (`clear:true`), outward requests. `set_mode` only drops live to local. `restart {restore:'latest'}`. |
+| `session {action?:'status'\|'set_mode'\|'restart', mode?:'local', restore?, clear?}` | status: mode, origin reads hit, app version, browser, map provenance, snapshot/undo counts, console errors (`clear:true`), outward requests. `set_mode` only drops live to local. `restart {restore:'latest'}` reloads the map that was in the page (newest snapshot/undo point only if the page no longer answers; lost calls are named). |
 | `map_info {since?, detail?}` | overview + diff since the newest snapshot/undo point, `'checkpoint'` (the previous map_info), a snapshot index/label, or `'none'`. |
 | `find {type, name?, where?, near?, radius?, sort?, fields?, limit?, offset?}` | list/filter entities of one type; `type:'namesbase'` lists name bases. |
 | `inspect {entity:{type,ref}} \| {at:Place} \| {at:{screen:[px,py], shot}}` | everything about one entity or one cell; id/name and x,y/lat,lon conversion. |
-| `screenshot {target?, zoom?, full?, view?, layers?, compare?, format?, maxSide?, scale?, saveTo?}` | JPEG (maxSide 1024) + full PNG on disk + shotId; `compare:shotId` returns a diff image and changedPct. |
+| `screenshot {target?, zoom?, full?, view?, layers?, keepLayers?, compare?, format?, maxSide?, scale?, saveTo?, overwrite?}` | JPEG (maxSide 1024) + full PNG on disk + shotId; `compare:shotId` returns a diff image and changedPct. |
 | `display {on?, off?, only?, layersPreset?, stylePreset?, styleRules?}` | persistent layer visibility and style (undoable). |
 | `edit {type, ops:[{ref, set}\|{ref, remove:true}], dryRun?, continueOnError?, redraw?}` | change or remove many entities of one type. |
 | `add {type, items:[...], dryRun?, continueOnError?, redraw?}` | create burgs, states, markers, routes, zones, labels, notes, cultures, religions. |
@@ -25,8 +25,8 @@ human spawned with `TUPAIA_MODE=live`, behind a preview and a one-time token.
 | `load_map {path} \| {source:'shared'}` | load a .map file, or the live shared map (a read-only GET). |
 | `save_map {path?, overwrite?, allowOutside?}` | write the map as a .map file. |
 | `export {format, path?, scale?, quality?, fullMap?, noLabels?, noWater?, noScaleBar?, noIce?, noVignette?, overwrite?, allowOutside?}` | svg, png, jpeg, json-full, json-minimal, geojson-cells/-routes/-rivers/-markers/-zones. |
-| `shared_status {versions?}` | live shared map metadata vs the page map: lineage, stale, build check; `versions:true` lists retained versions. |
-| `shared_save {confirm?, token?, force?, replaceWithUnrelated?, expectVersion?}` | OUTWARD: overwrite the live shared map (preview, then confirm + token). |
+| `shared_status {versions?, build?}` | live shared map metadata vs the page map: lineage, stale, build check (default only in live mode); `versions:true` lists retained versions. |
+| `shared_save {confirm?, token?, force?, replaceWithUnrelated?, expectVersion?, skipBuildCheck?}` | OUTWARD: overwrite the live shared map (preview, then confirm + token). |
 | `shared_restore {version, confirm?, token?, expectCurrent?, force?, reload?}` | OUTWARD: roll the live shared map back to a retained version. |
 
 ## Mutating tools: common rules
@@ -203,9 +203,12 @@ heightmap, physical, poi, goods, trade, military, emblems, landmass.
 ## Files: save_map and export
 
 - Relative paths go under TUPAIA_OUT (default `<repo>/.tupaia-mcp-out`). A path in the
-  repo is allowed outside `src/`, `public/`, `mcp/`, `cloudflare/`, `docs/` and dot-folders.
-  Anything else needs `allowOutside:true` (only when the human named that place).
-- `overwrite:true` to replace an existing file. `tests/fixtures` is always refused.
+  repo is allowed only in a subfolder outside `src/`, `public/`, `mcp/`, `cloudflare/`,
+  `docs/`, `dist/`, `tests/`, `node_modules/` and dot-folders, never in the repo root and
+  never over a git-tracked file. Anything else needs `allowOutside:true` (only when the human
+  named that place).
+- `overwrite:true` to replace an existing file (also for `screenshot {saveTo}`).
+  `tests/fixtures` is always refused.
 - Extensions: save_map `.map`; export svg `.svg`, png `.png`, jpeg `.jpg`/`.jpeg`, json-* `.json`,
   geojson-* `.geojson`/`.json`.
 - Both refuse while an app editor is open (`customization != 0`).
@@ -217,16 +220,20 @@ heightmap, physical, poi, goods, trade, military, emblems, landmass.
 ## Shared map (outward)
 
 - Reads work in both modes: `shared_status`, `load_map {source:'shared'}`. They GET the
-  origin `session` names (TUPAIA_LIVE_ORIGIN; `none` disables them).
+  origin `session` names (TUPAIA_LIVE_ORIGIN; `none` disables them). In local mode
+  `shared_status` sends one GET (meta); `build:true` adds the build check (two more GETs).
 - Writes need a server spawned with `TUPAIA_MODE=live` (a second `.mcp.json` entry a human
   adds by hand). `session {action:'set_mode', mode:'local'}` turns them off for good.
 - A live-mode server loads the shared map on its first launch.
 - `shared_save` without `confirm` = preview `{wouldOverwrite, base, lineage, stale,
   buildCheck, bytes, sha256, sends, overrides?, token, refusalReason?}`. The token is valid
   10 minutes, for one write, and only for the same live version, the same page map and the
-  same flags (`force`, `replaceWithUnrelated`). Preview with the flags you will confirm with.
-- Checks: LINEAGE (only `replaceWithUnrelated` overrides), STALE and LOCKED (`force`
-  overrides), BUILD block (nothing overrides), `expectVersion` (nothing overrides).
+  same flags (`force`, `replaceWithUnrelated`, `skipBuildCheck`). Preview with the flags you
+  will confirm with.
+- Checks: LINEAGE (only `replaceWithUnrelated` overrides; bound to the page's map id, so an
+  eval that regenerates or loads a map breaks it), STALE and LOCKED (`force` overrides),
+  BUILD block (nothing overrides), BUILD unknown (only `skipBuildCheck` overrides),
+  `expectVersion` (nothing overrides).
 - Before the PUT: the live blob and the outgoing body are written to
   `TUPAIA_OUT/shared-saves/v<N>-live-<time>.map` and `v<N>-outgoing-<time>.map`. The PUT
   carries `X-Map-Version: <N>` and never `X-Map-Overwrite`.

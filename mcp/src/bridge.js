@@ -890,7 +890,17 @@
       const s = String(x.legend || "").replace(/<[^>]+>/g, " ");
       return s.length > 160 ? `${s.slice(0, 160)}…` : s;
     }
-    if ((type === "state" || type === "province") && (field === "rural" || field === "urban")) {
+    if (
+      (type === "state" || type === "province" || type === "culture" || type === "religion") &&
+      field === "population"
+    ) {
+      // not stored: the app shows rural + urban people (states editor)
+      return fieldValue(type, x, "rural") + fieldValue(type, x, "urban");
+    }
+    if (
+      (type === "state" || type === "province" || type === "culture" || type === "religion") &&
+      (field === "rural" || field === "urban")
+    ) {
       const rate = typeof populationRate !== "undefined" ? populationRate : 1000;
       const urb = typeof urbanization !== "undefined" ? urbanization : 1;
       return Math.round((x[field] || 0) * rate * (field === "urban" ? urb : 1));
@@ -1330,10 +1340,19 @@
       view: typeof svgWidth !== "undefined" ? getView() : null,
       layersOn: layersOn(),
       customization: typeof customization !== "undefined" ? customization : 0,
-      mapId: typeof window !== "undefined" ? window.mapId : null
+      mapId: currentMapId()
     };
   }
+  /**
+   * The app's map identity: stamped on generate, read back from params[6] on load. It is a
+   * global `let` (main.js); window.mapId is only refreshed on generate, so read the binding.
+   */
+  function currentMapId() {
+    if (typeof mapId !== "undefined" && mapId !== undefined) return mapId;
+    return typeof window !== "undefined" && window.mapId !== undefined ? window.mapId : null;
+  }
   FNS.summary = () => summary();
+  FNS.mapId = () => currentMapId();
 
   const DIFF_TYPES = [
     "burg",

@@ -135,6 +135,11 @@ The shared map at map.activationlayer.org is used by other people. `shared_save`
   overrides it, and only when the human asked for exactly that.
 - BUILD block (local app VERSION newer than the deployed one): nothing overrides it. The
   shared map would become unloadable for live users. Tell the human to deploy first.
+- BUILD unknown (the deployed build could not be read): `force` does not help. Only
+  `skipBuildCheck:true` overrides it, and only after the human agreed to save without that
+  check.
+- Never replace the map with eval (`generate()`, `uploadMap()`): lineage is bound to the
+  app's map id, so the shared map then counts as unrelated. Use load_map/generate_map.
 - CONFLICT (the Worker answered 409): someone saved in between. Report it; do not retry
   with force on your own.
 - `shared_restore` follows the same rules: preview `{version}`, tell the human, then

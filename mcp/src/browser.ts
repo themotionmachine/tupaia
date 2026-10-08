@@ -145,6 +145,11 @@ export class BrowserManager {
     return !!(this.#page && !this.#page.isClosed() && this.#browser?.isConnected());
   }
 
+  /** Launched, not crashed and not marked dirty: the map in the page can be trusted. */
+  get healthy(): boolean {
+    return this.isLaunched && !this.#crashed && !this.dirty;
+  }
+
   /** Serialise work on the single page. Tools wrap their whole handler in this. */
   exclusive<T>(fn: () => Promise<T>): Promise<T> {
     const run = this.#chain.then(fn, fn);
@@ -361,6 +366,8 @@ export class BrowserManager {
     await this.#teardownContext();
     if (this.#browser && !this.#browser.isConnected()) this.#browser = null;
     this.#crashed = null;
+    // an explicit relaunch supersedes a pending dirty relaunch (restore is the caller's choice)
+    this.dirty = null;
     this.lastRelaunch = { reason, at: new Date().toISOString() };
     return this.getPage();
   }

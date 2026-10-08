@@ -71,7 +71,9 @@ export function register(ctx: ToolContext): void {
     restore: z
       .enum(["latest", "none"])
       .optional()
-      .describe("restart only: reload the newest snapshot/undo point after relaunch (default latest)"),
+      .describe(
+        "restart only: 'latest' (default) reloads the map that was in the page (or, if the page no longer answers, the newest snapshot/undo point); 'none' leaves a fresh random map"
+      ),
     clear: z.boolean().optional().describe("status: clear the captured console errors after reporting them")
   });
 
@@ -80,7 +82,7 @@ export function register(ctx: ToolContext): void {
     {
       title: "Server session",
       description:
-        "Status of the Tupaia MCP server: mode (local by default), live origin that reads would hit, app/build version, browser state, the map's name/seed/provenance and ops since load, snapshot/undo counts, captured page console errors (clear:true clears) and the outward request log. The first status call launches headless Chromium (~1 s). action 'set_mode' {mode:'local'} drops live to local for the rest of the process (there is no way to switch to live at run time). action 'restart' relaunches the browser and, with restore:'latest' (default), reloads the newest snapshot or undo point.",
+        "Status of the Tupaia MCP server: mode (local by default), live origin that reads would hit, app/build version, browser state, the map's name/seed/provenance and ops since load, snapshot/undo counts, captured page console errors (clear:true clears) and the outward request log. The first status call launches headless Chromium (~1 s). action 'set_mode' {mode:'local'} drops live to local for the rest of the process (there is no way to switch to live at run time). action 'restart' relaunches the browser and, with restore:'latest' (default), reloads the map that was in the page (the newest snapshot or undo point only if the page no longer answers; lost calls are named).",
       inputSchema: Input,
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
       kind: "heavy",
@@ -99,12 +101,7 @@ export function register(ctx: ToolContext): void {
         };
       }
       if (action === "restart") {
-        await ctx.browser.relaunch("session restart");
-        const restore = args.restore ?? "latest";
-        const restored =
-          restore === "latest"
-            ? await ctx.restoreNewest()
-            : "not restored (restore:'none'); the page holds a fresh random map";
+        const restored = await ctx.restart(args.restore ?? "latest");
         scope.notes.push(...ctx.browser.pendingNotes.splice(0));
         return { restarted: true, restored, ...(await status(ctx, scope, false)) };
       }

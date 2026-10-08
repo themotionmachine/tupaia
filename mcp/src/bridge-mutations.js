@@ -40,7 +40,8 @@
       args: a,
       notes: new Set(),
       claimed: new Set(),
-      R: { add: (layer, ids) => req.push(ids ? { layer, ids } : layer), list: req },
+      // hidden: layers drawn directly by an op (not through redraw) that were skipped as hidden
+      R: { add: (layer, ids) => req.push(ids ? { layer, ids } : layer), list: req, hidden: new Set() },
       used(type) {
         if (!usedCache[type]) usedCache[type] = new Set(I.liveList(type).map(x => fold(I.nameOf(type, x))));
         return usedCache[type];
@@ -49,10 +50,13 @@
   }
 
   async function finishRedraw(a, R) {
-    if (a.redraw === false) return { redrawn: [], skippedHidden: [] };
+    const direct = [...(R.hidden || [])];
+    if (a.redraw === false) return { redrawn: [], skippedHidden: direct };
     const layers = Array.isArray(a.redraw) ? a.redraw : R.list;
-    if (!layers.length) return { redrawn: [], skippedHidden: [] };
-    return T.redraw({ layers });
+    if (!layers.length) return { redrawn: [], skippedHidden: direct };
+    const out = await T.redraw({ layers });
+    for (const l of direct) if (!out.skippedHidden.includes(l)) out.skippedHidden.push(l);
+    return out;
   }
 
   /** Module-private app helpers exposed by the `tupaia-mcp:` hook in states-editor.ts. */
@@ -276,6 +280,11 @@
           b.y = p.y;
           pack.cells.burg[p.cell] = b.i;
           if (!b.capital) b.state = pack.cells.state[p.cell];
+          // as the app's burg relocation does (burg-editor.js): a capital carries its state's centre
+          if (b.capital && pack.states[b.state]) {
+            pack.states[b.state].center = p.cell;
+            c.R.add("stateLabels", [b.state]);
+          }
           b.feature = pack.cells.f[p.cell];
           drawBurgIcon(b);
           drawBurgLabel(b);
@@ -475,10 +484,11 @@
           return v;
         },
         get: r => r.group ?? null,
-        set: (r, v) => {
+        set: (r, v, c) => {
           r.group = v;
           document.getElementById(`route${r.i}`)?.remove();
           if (layerIsOn("toggleRoutes")) drawRoute(r);
+          else c.R.hidden.add("routes");
         }
       },
       name: { check: str("name"), get: r => r.name ?? null, set: (r, v) => (r.name = v) },
@@ -1163,7 +1173,7 @@
           links[b][a] = id;
         }
         if (layerIsOn("toggleRoutes")) drawRoute(route);
-        void c;
+        else c.R.hidden.add("routes");
         const len =
           polylineAt(
             points.map(pt => [pt[0], pt[1]]),
@@ -1753,6 +1763,82 @@
     };
   }
 
+  // grid ids of each river's cells, source and mouth (-1 kept), for rebuild:'risk' without erosion
+  function saveRiversAsGrid() {
+    const g = pack.cells.g;
+    const toG = x => (x === -1 || x === undefined || x === null ? x : g[x]);
+    return (pack.rivers || []).map(r => ({
+      i: r.i,
+      cells: Array.isArray(r.cells) ? r.cells.map(toG) : null,
+      source: toG(r.source),
+      mouth: toG(r.mouth)
+    }));
+  }
+
+  function restoreRiversFromGrid(saved) {
+    const first = new Map();
+    for (const i of pack.cells.i) {
+      const g = pack.cells.g[i];
+      if (!first.has(g)) first.set(g, i);
+    }
+    const toP = x => (x === -1 || x === undefined || x === null ? x : first.get(x));
+    const byId = new Map(saved.map(s => [s.i, s]));
+    const kept = [];
+    let dropped = 0;
+    for (const r of pack.rivers || []) {
+      const s = byId.get(r.i);
+      if (!s?.cells) {
+        kept.push(r);
+        continue;
+      }
+      const cells = [];
+      const points = [];
+      const hasPoints = Array.isArray(r.points) && r.points.length === s.cells.length;
+      s.cells.forEach((gc, j) => {
+        const pc = toP(gc);
+        if (pc === undefined) return;
+        if (cells.length && cells[cells.length - 1] === pc) return;
+        cells.push(pc);
+        if (hasPoints) points.push(r.points[j]);
+      });
+      if (cells.filter(x => x !== -1).length < 2) {
+        dropped++;
+        continue;
+      }
+      r.cells = cells;
+      if (hasPoints) r.points = points;
+      else delete r.points;
+      const src = toP(s.source);
+      const mouth = toP(s.mouth);
+      r.source = src === undefined ? cells[0] : src;
+      r.mouth = mouth === undefined ? cells.filter(x => x !== -1).at(-1) : mouth;
+      kept.push(r);
+    }
+    if (dropped) {
+      const keptIds = new Set(kept.map(r => r.i));
+      for (const i of pack.cells.i) if (pack.cells.r[i] && !keptIds.has(pack.cells.r[i])) pack.cells.r[i] = 0;
+    }
+    pack.rivers = kept;
+    return dropped;
+  }
+
+  // restoreRiskedData only groups and names features when erosion runs; do it here otherwise
+  function finishRiskFeatures() {
+    try {
+      Features.defineGroups();
+    } catch (e) {
+      console.warn("tupaia-mcp: defineGroups after risk rebuild failed", e);
+    }
+    for (const f of pack.features || []) {
+      if (!f || f.type !== "lake" || f.name) continue;
+      try {
+        f.name = Lakes.getName(f);
+      } catch {
+        /* unnamed lake; harmless */
+      }
+    }
+  }
+
   async function paintHeight(H, packCells, write, c) {
     const C = pack.cells;
     const gh = grid.cells.h;
@@ -1764,8 +1850,15 @@
       for (let it = 0; it < H.smooth; it++) {
         const next = new Map();
         for (const g of gcells) {
-          const nb = grid.cells.c[g].map(n => (inSel.has(n) ? cur.get(n) : gh[n]));
-          const mean = nb.reduce((s, v) => s + v, 0) / (nb.length || 1);
+          let nb = grid.cells.c[g].map(n => (inSel.has(n) ? cur.get(n) : gh[n]));
+          // keep mode works on land only: like the app's land smoothing brush, average land
+          // neighbours only, so smoothing never drags a coastal cell below 20
+          if (H.rebuild === "keep" && cur.get(g) >= 20) nb = nb.filter(v => v >= 20);
+          if (!nb.length) {
+            next.set(g, cur.get(g));
+            continue;
+          }
+          const mean = nb.reduce((s, v) => s + v, 0) / nb.length;
           next.set(g, (cur.get(g) + mean) / 2);
         }
         for (const [g, v] of next) cur.set(g, v);
@@ -1844,7 +1937,16 @@
           defs.selectAll("#land, #water").selectAll("path").remove();
           defs.select("#featurePaths").selectAll("path").remove();
           viewbox.selectAll("#coastline use, #lakes path, #oceanLayers path").remove();
+          // Without erosion the app keeps pack.rivers, whose cells/source/mouth are pack ids of
+          // the old graph; reGraph renumbers cells, so drawRivers would read p[staleId] and
+          // throw. Record them as grid ids here and map them back after the rebuild.
+          const riverGrid = H.erosion ? null : saveRiversAsGrid();
           hm.restoreRiskedData();
+          if (riverGrid) {
+            const dropped = restoreRiversFromGrid(riverGrid);
+            if (dropped) c.notes.add(`${dropped} rivers lost their course in the rebuild and were removed`);
+            finishRiskFeatures();
+          }
           c.notes.add(
             "rebuild:'risk' re-ran features, climate and the pack graph; cell ids changed, burgs were kept (non-capital burgs that ended in water were removed)"
           );

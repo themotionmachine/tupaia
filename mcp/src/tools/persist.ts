@@ -44,7 +44,12 @@ export function register(ctx: ToolContext): void {
         const bytes = fs.readFileSync(abs);
         await scope.pushUndo("load_map", { path: args.path });
         const s = await scope.loadMap({ b64: bytes.toString("base64") });
-        ctx.snapshots.setProvenance({ kind: "file", path: abs, seed: (s.seed as string) ?? null });
+        ctx.snapshots.setProvenance({
+          kind: "file",
+          path: abs,
+          seed: (s.seed as string) ?? null,
+          mapId: (s.mapId as number) ?? null
+        });
         return { ...brief(s), origin: ctx.provenanceView(), bytes: bytes.length, ms: Date.now() - t0 };
       }
       const { summary, bytes } = await loadShared(ctx, scope, "load_map");
@@ -260,6 +265,7 @@ export async function loadShared(
   ctx.snapshots.setProvenance({
     kind: "shared",
     seed: (summary.seed as string) ?? null,
+    mapId: (summary.mapId as number) ?? null,
     sharedVersion: blob.version ?? undefined,
     sharedUpdatedBy: blob.updatedBy,
     sharedUpdatedAt: blob.updatedAt,

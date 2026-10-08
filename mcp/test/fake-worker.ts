@@ -47,6 +47,8 @@ export class FakeWorker {
   readonly retained = new Map<number, { bytes: Buffer; saved_at: string }>();
   appVersion: string;
   entry: string;
+  /** When set, /versioning.js answers with this status (build check cannot compare). */
+  versioningStatus: number | null = null;
   #fail409 = 0;
   #server: http.Server | null = null;
   origin = "";
@@ -171,6 +173,7 @@ export class FakeWorker {
     const caller = headers["cf-access-authenticated-user-email"] || "anonymous";
 
     if (p === "/versioning.js" && method === "GET") {
+      if (this.versioningStatus) return send(this.versioningStatus, "unavailable");
       return send(200, `"use strict";\nconst VERSION = "${this.appVersion}";\n`, { "content-type": "text/javascript" });
     }
     if (p === "/" && method === "GET") {
