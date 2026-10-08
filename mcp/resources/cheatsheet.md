@@ -1,11 +1,12 @@
 # Tupaia MCP cheatsheet
 
 The `tupaia` MCP server drives the built Tupaia app (Azgaar's Fantasy Map Generator fork) in
-headless Chromium. 20 tools. Local mode by default: nothing writes the live shared map
-(map.activationlayer.org) except `shared_save`/`shared_restore`, and those only in a server a
-human spawned with `TUPAIA_MODE=live`, behind a preview and a one-time token.
+headless Chromium. 21 tools. Local mode by default: nothing writes the live shared map
+(map.activationlayer.org) except `shared_save`/`shared_restore`/`sketch_promote`, and those
+only in a server a human spawned with `TUPAIA_MODE=live`, behind a preview and a one-time token.
+`sketch` save/discard write only the Worker's `sketch-<slug>` maps (live mode too).
 
-## The 20 tools
+## The 21 tools
 
 | tool | one line |
 | --- | --- |
@@ -28,7 +29,8 @@ human spawned with `TUPAIA_MODE=live`, behind a preview and a one-time token.
 | `shared_status {versions?, build?}` | live shared map metadata vs the page map: lineage, stale, build check (default only in live mode); `versions:true` lists retained versions. |
 | `shared_save {confirm?, token?, force?, replaceWithUnrelated?, expectVersion?, skipBuildCheck?}` | OUTWARD: overwrite the live shared map (preview, then confirm + token). |
 | `shared_restore {version, confirm?, token?, expectCurrent?, force?, reload?}` | OUTWARD: roll the live shared map back to a retained version. |
-| `sketch {action:'start'\|'status'\|'summary'\|'stop'\|'rebase', slug?, note?, onConflict?, shots?, full?}` | provisional sketch: log every mutating call against base version N of the shared map; summarise it for humans; replay it onto a newer map. |
+| `sketch {action:'start'\|'status'\|'summary'\|'stop'\|'rebase'\|'save'\|'list'\|'open'\|'discard', slug?, note?, onConflict?, confirm?, shots?, full?}` | provisional sketch: log every mutating call against base version N of the shared map; summarise it; save it as `sketch-<slug>` with a view link; replay it onto the current shared map. |
+| `sketch_promote {confirm?, token?, then?:'keep'\|'discard'}` | OUTWARD: put the active sketch on the live shared map (refused until its base is the current version: rebase first); shared_save's preview + token gate. |
 
 ## Mutating tools: common rules
 
@@ -165,7 +167,7 @@ details?}, consoleErrors?, notes?}`.
 | BAD_ARGS, BAD_FIELD, BAD_TYPE, BAD_REF, BAD_LAYER | invalid input |
 | NO_PATH | add route: no path (water end, different landmass, impassable) |
 | REFUSED | a guard said no (capital removal, path policy, editor open, token missing/used/mismatched, ...) |
-| MODE | local mode: no shared writes, or TUPAIA_LIVE_ORIGIN=none: no shared reads |
+| MODE | local mode: no shared or sketch writes, or TUPAIA_LIVE_ORIGIN=none: no shared reads |
 | STALE | the shared map moved on since the page map was loaded (or expectVersion/expectCurrent mismatch) |
 | LOCKED | someone else holds the shared map's edit lock |
 | LINEAGE | the page map is not derived from the shared map |
@@ -277,6 +279,42 @@ writes the shared map.
   ops are the applied ones. Returns `{applied, skipped, conflicts:[{seq, reason, op}], idMap}`.
 - eval code is replayed verbatim: ids inside the code are not rewritten.
 
+### Sketches on the Worker (network)
+
+A saved sketch is the Worker map `sketch-<slug>` (the page map as a .map blob) plus
+`/api/map/sketch-<slug>/ops` (ops.json: `{schema:1, slug, base, note, blobOnly,
+blobOnlyReasons, blockers, author:'tupaia-mcp', created, updated, summaryMarkdown, baseCounts,
+blob:{id, version, bytes, sha256}, viewUrl, ops}`). Sketch writes never touch `shared`: the
+client refuses any id not starting with `sketch-`, and they need a server spawned with
+`TUPAIA_MODE=live` (MODE otherwise). They never send X-Map-Overwrite.
+
+- `sketch {action:'save', confirm:true}`: PUT the page map to `sketch-<slug>` (X-Map-Version =
+  the sketch's own version; none on the first save, so an existing id answers CONFLICT), then
+  PUT ops.json. Refreshes a stale summary (text only). Returns `viewUrl` =
+  `<origin>/?maplink=<encodeURIComponent(origin + '/api/map/sketch-<slug>')>`, which opens the
+  sketch in the app (not the shared map). Without `confirm`: a preview of the two PUTs.
+  Refused while a stopped rebase holds the page, or for a test-hook (file-based) sketch.
+- `sketch {action:'list'}`: read-only (works in local mode with a live origin): GET /api/maps,
+  the `sketch-*` ids, each with its ops.json header (base, ops count, first 50 op summaries,
+  blobOnly, author, created/updated) and viewUrl.
+- `sketch {action:'open', slug}`: GET the blob and ops.json, load the blob into the page (an
+  undo entry), make it the active, recording sketch. Origin kind `sketch` (`sketchSlug`,
+  `sketchVersion`, `sharedVersion` = its base). A blob whose version or checksum differs from
+  the one its ops.json was saved with is blob-only. Refused while another sketch records.
+  Summaries of an opened sketch have no before shots (the Worker keeps no copy of its base).
+- `sketch {action:'rebase', onConflict?}` (no `onto`): GET the current shared map vM, load it
+  (one undo entry), replay the log onto it. On completion the base is vM, ops are the applied
+  ones and the page holds the result with origin shared vM; nothing is saved. Refused for a
+  blob-only sketch. On a stop, `snapshot undo n` returns to the sketch.
+- `sketch {action:'discard', slug, confirm:true}`: DELETE `sketch-<slug>` (blob, versions,
+  ops.json; cannot be undone). Without `confirm`: a preview with its version and author.
+- `sketch_promote {}`: REFUSED "rebase first" unless the active sketch's base version is the
+  shared map's current version. Otherwise it is `shared_save` with `expectVersion` = the base:
+  the preview `{sketch, wouldOverwrite, lineage, stale, buildCheck, sends, token}`; then
+  `sketch_promote {confirm:true, token, then?}`. LOCKED and BUILD refuse as in shared_save (no
+  force here). On success the origin is shared at the new version, the sketch is no longer
+  active, and `then:'discard'` DELETEs `sketch-<slug>` (`'keep'`, the default, leaves it).
+
 ## Recipes
 
 1. Rename many burgs from a name base.
@@ -311,3 +349,8 @@ writes the shared map.
     on their yes: `shared_save {confirm:true, token:'<token>'}` → report the new version and the
     backup path. On STALE/LOCKED: stop and ask; only on an explicit yes preview again with
     `force:true` and confirm with `force:true` + the new token, and say that you forced it.
+11. Propose a change as a sketch. `load_map {source:'shared'}` → `sketch {action:'start', slug:'harbour', note:'...'}`
+    → edits + screenshots → `sketch {action:'summary'}` → `sketch {action:'save', confirm:true}` → give the
+    human `viewUrl` and the markdown. On yes: `sketch {action:'rebase'}` → `sketch_promote {}` (tell them
+    the version it replaces) → `sketch_promote {confirm:true, token:'<token>', then:'discard'}` → report
+    the new version. On no: `sketch {action:'discard', slug:'harbour', confirm:true}`.

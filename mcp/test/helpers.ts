@@ -245,3 +245,57 @@ export async function rawStdoutCheck(
   if (buf.trim()) bad.push(`(unterminated) ${buf.slice(0, 200)}`);
   return { lines, bad, responses };
 }
+
+/**
+ * A test-owned headless page on `url` (a fake Worker serving dist), for checking what a human's
+ * browser does with a link: every non-loopback request is aborted, native dialogs are dismissed,
+ * and `__loads` counts completed map loads (the app's "map:loaded" event).
+ */
+export async function openViewer(url: string): Promise<{
+  page: import("playwright").Page;
+  close(): Promise<void>;
+}> {
+  if (FORBIDDEN_ORIGIN.test(url)) throw new Error(`refusing to open ${url}: tests never touch the live shared map`);
+  const { chromium } = await import("playwright");
+  const browser = await chromium.launch();
+  const context = await browser.newContext({ viewport: { width: 1280, height: 720 } });
+  await context.route(
+    u => (u.protocol === "http:" || u.protocol === "https:") && !["127.0.0.1", "localhost"].includes(u.hostname),
+    r => r.abort("blockedbyclient")
+  );
+  await context.addInitScript(() => {
+    const w = globalThis as unknown as { __loads: number; addEventListener: typeof addEventListener };
+    w.__loads = 0;
+    w.addEventListener("map:loaded", () => {
+      w.__loads++;
+    });
+  });
+  const page = await context.newPage();
+  page.on("dialog", d => void d.dismiss().catch(() => {}));
+  await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60_000 });
+  return { page, close: () => browser.close() };
+}
+
+/** Wait until the viewer page completed `n` map loads. */
+export async function viewerLoads(page: import("playwright").Page, n: number, timeoutMs = 90_000): Promise<void> {
+  await page.waitForFunction(k => (globalThis as unknown as { __loads: number }).__loads >= k, n, {
+    timeout: timeoutMs
+  });
+}
+
+/** The visible jQuery UI dialog in the viewer page: title, text and button labels (null when none). */
+export async function viewerDialog(
+  page: import("playwright").Page
+): Promise<{ title: string; text: string; buttons: string[] } | null> {
+  return page.evaluate(() => {
+    const all = Array.from(document.querySelectorAll(".ui-dialog")) as HTMLElement[];
+    const d = all.find(e => e.offsetParent !== null);
+    if (!d) return null;
+    const text = (sel: string) => (d.querySelector(sel) as HTMLElement | null)?.innerText ?? "";
+    return {
+      title: text(".ui-dialog-title"),
+      text: text(".ui-dialog-content"),
+      buttons: (Array.from(d.querySelectorAll(".ui-dialog-buttonset button")) as HTMLElement[]).map(b => b.innerText)
+    };
+  });
+}

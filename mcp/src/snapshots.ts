@@ -5,13 +5,17 @@
 // - the provenance of the map currently in the page.
 // Each snapshot/undo entry owns a digest baseline key in the page (for map_info diffs).
 
-export type ProvenanceKind = "boot" | "generated" | "file" | "shared" | "snapshot" | "unknown";
+export type ProvenanceKind = "boot" | "generated" | "file" | "shared" | "sketch" | "snapshot" | "unknown";
 
 export interface Provenance {
   kind: ProvenanceKind;
   seed?: string | null;
   path?: string;
+  /** shared: the version loaded. sketch: the shared version the sketch is based on. */
   sharedVersion?: number;
+  /** sketch: the sketch opened from the Worker (`sketch-<slug>`) and its blob version. */
+  sketchSlug?: string;
+  sketchVersion?: number;
   sharedUpdatedBy?: string | null;
   sharedUpdatedAt?: string | null;
   fetchedAt?: string;

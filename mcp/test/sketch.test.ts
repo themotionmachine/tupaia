@@ -1,11 +1,25 @@
-// Provisional sketches, local layer: the ops log, undo/redo inside a sketch, summary, and the
+// Provisional sketches. Local layer: the ops log, undo/redo inside a sketch, summary, and the
 // replay engine (sketch rebase {onto:{path}}, a test hook) against copies of
-// tests/fixtures/demo.map that "someone else" edited. No network: TUPAIA_LIVE_ORIGIN=none.
+// tests/fixtures/demo.map that "someone else" edited (no network: TUPAIA_LIVE_ORIGIN=none).
+// Network layer: save/list/open/rebase/discard and sketch_promote against the in-process fake
+// Worker (test/fake-worker.ts on 127.0.0.1, serving dist like the real Worker), and the view
+// link opened in a test-owned headless page. Never the live site.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { after, before, describe, test } from "node:test";
-import { alive, errorBody, type Harness, startServer } from "./helpers.ts";
+import { FakeWorker } from "./fake-worker.ts";
+import {
+  alive,
+  DEMO_MAP,
+  errorBody,
+  type Harness,
+  openViewer,
+  REPO_ROOT,
+  startServer,
+  viewerDialog,
+  viewerLoads
+} from "./helpers.ts";
 
 type Obj = Record<string, any>;
 
@@ -334,5 +348,267 @@ describe("tupaia-mcp sketch (local ops log and replay)", () => {
     assert.equal(err.code, "REFUSED");
     assert.match(err.message, /load_map \{source:'shared'\}/);
     assert.ok(fs.existsSync(path.join(out, "sketches", "t-sketch", "summary.md")));
+  });
+});
+
+const NET_PICK = `
+const C = pack.cells;
+const market = b => (pack.markets || []).some(m => m.centerBurgId === b.i);
+const bs = pack.burgs.filter(b => b && b.i && !b.removed && !b.capital && !market(b) && b.state > 0);
+const free = c => C.h[c] >= 20 && !C.burg[c];
+let D = null, newCell = null;
+for (const b of bs.slice(10)) {
+  const n = C.c[b.cell].find(c => free(c) && C.f[c] === C.f[b.cell] && C.c[c].every(k => !C.burg[k] || k === b.cell));
+  if (n !== undefined) { D = b; newCell = n; break; }
+}
+const A = bs.find(b => b.i !== D.i && b.state !== D.state);
+const U = bs.find(b => b.i !== D.i && b.i !== A.i && b.state !== A.state);
+const states = pack.states.filter(s => s.i && !s.removed);
+return {
+  A: { i: A.i, name: A.name }, U: { i: U.i, name: U.name }, D: { i: D.i },
+  S1: { i: states[0].i }, S2: { i: states[1].i },
+  newAt: { x: C.p[newCell][0], y: C.p[newCell][1] }
+};`;
+
+describe("tupaia-mcp sketch network actions (live mode, fake Worker)", () => {
+  let fake: FakeWorker;
+  let h: Harness;
+  let origin = "";
+  let pick: Obj;
+  let theirs: Buffer;
+  let viewUrl = "";
+  const writes = () => fake.writes().map(r => `${r.method} ${r.path}`);
+
+  before(async () => {
+    fake = new FakeWorker({ seedFile: DEMO_MAP, version: 6, assetsDir: path.join(REPO_ROOT, "dist") });
+    origin = await fake.start();
+    h = await startServer({
+      TUPAIA_MODE: "live",
+      TUPAIA_LIVE_ORIGIN: origin,
+      TUPAIA_BUILD_CACHE_MS: "0",
+      TUPAIA_UNDO_DEPTH: "30"
+    });
+    // a live server loads shared v6 on its first launch
+    pick = (await h.ok("eval", { code: NET_PICK, readOnly: true })).value as Obj;
+    // "someone else's" v7: a different but compatible map (their rename and recolour)
+    await h.ok("eval", {
+      args: pick,
+      code: `pack.burgs[args.U.i].name = "Otherton"; pack.states[args.S2.i].color = "#123456"; return 1;`
+    });
+    const saved = await h.ok("save_map", { path: "theirs-v7.map", overwrite: true });
+    theirs = fs.readFileSync(saved.path as string);
+  });
+
+  after(async () => {
+    if (h && alive(h.pid)) await h.close();
+    await fake?.stop();
+  });
+
+  test("save: preview writes nothing; confirm PUTs sketch-harbour and its ops.json; list shows the header", async () => {
+    await h.ok("load_map", { source: "shared" });
+    const st = await h.ok("sketch", { action: "start", slug: "harbour", note: "A new harbour town" });
+    assert.equal((st.base as Obj).version, 6);
+    await h.ok("edit", { type: "burg", ops: [{ ref: pick.A.i, set: { name: "Sketchford" } }] });
+    await h.ok("add", { type: "burg", items: [{ at: pick.newAt, name: "Newhaven" }] });
+    await h.ok("edit", { type: "state", ops: [{ ref: pick.S1.i, set: { color: "#aa2200" } }] });
+    fake.clearLog();
+    const p = await h.ok("sketch", { action: "save" });
+    assert.equal(p.preview, true);
+    assert.deepEqual(writes(), []);
+    const r = await h.ok("sketch", { action: "save", confirm: true });
+    assert.deepEqual(writes(), ["PUT /api/map/sketch-harbour", "PUT /api/map/sketch-harbour/ops"]);
+    const put = fake.writes()[0];
+    assert.equal(put.headers["x-map-version"], undefined, "first save: no version header");
+    assert.equal(put.headers["x-map-overwrite"], undefined);
+    viewUrl = r.viewUrl as string;
+    assert.equal(viewUrl, `${origin}/?maplink=${encodeURIComponent(`${origin}/api/map/sketch-harbour`)}`);
+    assert.equal((r.saved as Obj).version, 1);
+    const ops = JSON.parse(String(fake.maps.get("sketch-harbour")?.ops)) as Obj;
+    assert.equal(ops.schema, 1);
+    assert.equal(ops.slug, "harbour");
+    assert.equal(ops.author, "tupaia-mcp");
+    assert.equal(ops.blobOnly, false);
+    assert.equal(ops.base.version, 6);
+    assert.equal(ops.note, "A new harbour town");
+    assert.equal(ops.ops.length, 3);
+    assert.ok(ops.ops.every((o: Obj) => !("undoId" in o)));
+    assert.match(ops.summaryMarkdown, /Sketchford/);
+    for (const k of ["created", "updated", "blob"]) assert.ok(ops[k], k);
+    const status = await h.ok("sketch", { action: "status" });
+    assert.equal(status.dirty, false);
+    assert.equal(status.viewUrl, viewUrl);
+
+    const l = await h.ok("sketch", { action: "list" });
+    const items = l.sketches as Obj[];
+    assert.deepEqual(
+      items.map(i => i.id),
+      ["sketch-harbour"]
+    );
+    const hd = items[0].header as Obj;
+    assert.equal(hd.base.version, 6);
+    assert.equal(hd.ops, 3);
+    assert.equal(hd.author, "tupaia-mcp");
+    assert.equal(hd.blobOnly, false);
+    assert.match(hd.log[0], /Sketchford/);
+    assert.equal(items[0].viewUrl, viewUrl);
+  });
+
+  test("the view link opens the sketch (not the shared map) in a browser; Save to shared asks first", async () => {
+    fake.clearLog();
+    const v = await openViewer(viewUrl);
+    try {
+      await viewerLoads(v.page, 1);
+      const names = await v.page.evaluate(
+        a => [(globalThis as any).pack.burgs[a].name, (globalThis as any).pack.burgs.length],
+        pick.A.i as number
+      );
+      assert.equal(names[0], "Sketchford");
+      const api = fake.requests.filter(q => q.path.startsWith("/api/")).map(q => `${q.method} ${q.path}`);
+      assert.deepEqual(api, ["GET /api/map/sketch-harbour"], "the sketch was loaded, the shared map was not");
+      // the in-page Save -> shared map: the guard asks instead of sending anything
+      await v.page.evaluate(() => (globalThis as any).lazy.sharedMap().then((m: any) => m.saveSharedMap()));
+      await v.page.waitForSelector(".ui-dialog:visible");
+      const d = await viewerDialog(v.page);
+      assert.equal(d?.title, "Replace the shared map?");
+      assert.match(d?.text ?? "", /not loaded from the shared map/);
+      assert.deepEqual(d?.buttons, ["Replace v6", "Cancel"]);
+      await v.page.locator(".ui-dialog-buttonset button", { hasText: "Cancel" }).click();
+      await v.page.waitForTimeout(300);
+      assert.deepEqual(writes(), []);
+    } finally {
+      await v.close();
+    }
+  });
+
+  test("open in a fresh (local-mode) server restores the map and the ops; save and discard are refused there", async () => {
+    const h2 = await startServer({ TUPAIA_LIVE_ORIGIN: origin, TUPAIA_UNDO_DEPTH: "30" });
+    try {
+      const before = writes().length;
+      const l = await h2.ok("sketch", { action: "list" });
+      assert.equal((l.sketches as Obj[]).length, 1, "list works in local mode");
+      const o = await h2.ok("sketch", { action: "open", slug: "harbour" });
+      assert.equal(o.opened, true);
+      assert.equal(o.ops, 3);
+      assert.equal((o.base as Obj).version, 6);
+      assert.equal((o.origin as Obj).kind, "sketch");
+      assert.equal((o.origin as Obj).sketchSlug, "harbour");
+      assert.equal(o.dirty, false);
+      const ev = await h2.ok("eval", {
+        readOnly: true,
+        code: `[pack.burgs[${pick.A.i}].name, pack.burgs.filter(b => b && b.name === "Newhaven" && !b.removed).length, pack.states[${pick.S1.i}].color]`
+      });
+      assert.deepEqual(ev.value, ["Sketchford", 1, "#aa2200"]);
+      const st = await h2.ok("sketch", { action: "status", full: true });
+      assert.deepEqual(
+        (st.records as Obj[]).map(r => r.tool),
+        ["edit", "add", "edit"]
+      );
+      for (const [args, what] of [
+        [{ action: "save", confirm: true }, "save"],
+        [{ action: "discard", slug: "harbour", confirm: true }, "discard"]
+      ] as const) {
+        const r = await h2.call("sketch", args);
+        assert.equal(r.isError, true, what);
+        assert.equal(errorBody(r).error.code, "MODE", what);
+      }
+      const pr = await h2.call("sketch_promote", {});
+      assert.equal(errorBody(pr).error.code, "MODE");
+      assert.equal(writes().length, before, "the local server wrote nothing");
+    } finally {
+      await h2.close();
+    }
+  });
+
+  test("someone else saves v7: sketch_promote refuses with 'rebase first' and writes nothing", async () => {
+    assert.equal(fake.externalSave("alice@example.test", theirs), 7);
+    fake.clearLog();
+    const r = await h.call("sketch_promote", {});
+    assert.equal(r.isError, true);
+    const err = errorBody(r).error;
+    assert.equal(err.code, "REFUSED");
+    assert.match(err.message, /^rebase first/);
+    assert.match(err.message, /v6/);
+    assert.match(err.message, /v7/);
+    assert.deepEqual(writes(), []);
+  });
+
+  test("rebase onto the current shared map v7 applies cleanly and keeps their edits; nothing is saved", async () => {
+    fake.clearLog();
+    const r = await h.ok("sketch", { action: "rebase" }, 240_000);
+    assert.equal(r.completed, true, JSON.stringify(r.conflicts));
+    assert.deepEqual(r.applied, [1, 2, 3]);
+    assert.equal(((r.sketch as Obj).base as Obj).version, 7);
+    assert.equal((r.sketch as Obj).dirty, true);
+    assert.deepEqual(writes(), [], "rebase does not save");
+    const ev = await h.ok("eval", {
+      readOnly: true,
+      code: `[pack.burgs[${pick.A.i}].name, pack.burgs[${pick.U.i}].name, pack.states[${pick.S2.i}].color, pack.states[${pick.S1.i}].color]`
+    });
+    assert.deepEqual(ev.value, ["Sketchford", "Otherton", "#123456", "#aa2200"]);
+    const s = await h.ok("shared_status", {});
+    assert.equal((s.local as Obj).lineage, "shared");
+    assert.equal((s.local as Obj).stale, false);
+  });
+
+  test("sketch_promote: preview -> token -> confirm sends one PUT (X-Map-Version 7, no overwrite), then DELETE", async () => {
+    fake.clearLog();
+    // biome-ignore lint/suspicious/noThenProperty: sketch_promote's parameter is named 'then'
+    const thenDiscard = { then: "discard" };
+    const p = await h.ok("sketch_promote", thenDiscard);
+    assert.equal(p.preview, true);
+    assert.equal((p.wouldOverwrite as Obj).version, 7);
+    assert.equal((p.sketch as Obj).slug, "harbour");
+    assert.equal(typeof p.token, "string");
+    assert.match(String(p.next), /sketch_promote \{confirm:true, token:'[0-9a-f]+', then:'discard'\}/);
+    assert.deepEqual(writes(), []);
+    const r = await h.ok("sketch_promote", { confirm: true, token: p.token as string, ...thenDiscard });
+    assert.deepEqual(writes(), ["PUT /api/map/shared", "DELETE /api/map/sketch-harbour"]);
+    const put = fake.writes()[0];
+    assert.equal(put.headers["x-map-version"], "7");
+    assert.equal(put.headers["x-map-overwrite"], undefined);
+    assert.equal((r.saved as Obj).version, 8);
+    assert.equal((r.promoted as Obj).to, 8);
+    assert.equal((r.origin as Obj).kind, "shared");
+    assert.equal((r.origin as Obj).sharedVersion, 8);
+    assert.equal((r.discarded as Obj).deleted, true);
+    assert.equal(fake.maps.has("sketch-harbour"), false);
+    assert.equal(fake.row.version, 8);
+    const st = await h.ok("sketch", { action: "status" });
+    assert.equal(st.active, false);
+    // the token was used up
+    const again = await h.call("sketch_promote", { confirm: true, token: p.token as string });
+    assert.equal(again.isError, true);
+  });
+
+  test("a blob-only sketch refuses rebase but can still be saved, and discard deletes it", async () => {
+    await h.ok("load_map", { source: "shared" });
+    await h.ok("sketch", { action: "start", slug: "blobby" });
+    await h.ok("regenerate", { parts: ["zones"] }, 240_000);
+    const r = await h.call("sketch", { action: "rebase" });
+    assert.equal(errorBody(r).error.code, "REFUSED");
+    assert.match(errorBody(r).error.message, /blob-only/);
+    fake.clearLog();
+    const s = await h.ok("sketch", { action: "save", confirm: true });
+    assert.deepEqual(writes(), ["PUT /api/map/sketch-blobby", "PUT /api/map/sketch-blobby/ops"]);
+    assert.equal((s.sketch as Obj).blobOnly, true);
+    const ops = JSON.parse(String(fake.maps.get("sketch-blobby")?.ops)) as Obj;
+    assert.equal(ops.blobOnly, true);
+    assert.match(JSON.stringify(ops.blobOnlyReasons), /regenerate/);
+    const pv = await h.ok("sketch", { action: "discard", slug: "blobby" });
+    assert.equal(pv.preview, true);
+    assert.equal(fake.maps.has("sketch-blobby"), true);
+    const d = await h.ok("sketch", { action: "discard", slug: "blobby", confirm: true });
+    assert.equal((d.deleted as Obj).deleted, true);
+    assert.equal(fake.maps.has("sketch-blobby"), false);
+    const st = await h.ok("sketch", { action: "status" });
+    assert.equal(st.lastSaved, null);
+  });
+
+  test("never a DELETE of shared, never an overwrite header; outward requests are loopback only", async () => {
+    const all = fake.requests;
+    assert.ok(!all.some(q => q.method === "DELETE" && q.path === "/api/map/shared"));
+    for (const q of all) assert.equal(q.headers["x-map-overwrite"], undefined, `${q.method} ${q.path}`);
+    const s = await h.ok("session", { action: "status" });
+    for (const q of s.outwardRequests as Obj[]) assert.match(q.url, /^http:\/\/127\.0\.0\.1:\d+\//);
   });
 });

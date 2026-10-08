@@ -30,6 +30,20 @@ const mapUrl = (id: string, suffix = "") => `${apiBase()}/api/map/${encodeURICom
  *  after an explicit confirmation. */
 let loadedVersion: number | null = null;
 
+// tupaia-mcp: loadedVersion only holds while the page still has the map loaded from `shared`.
+// A shared load arms `pendingVersion`; the next completed load (load.ts fires "map:loaded") takes
+// it over and any other load clears it. "map:generated" (fired by every generate AND, before
+// "map:loaded", by every load) clears it too. So a map opened from a ?maplink sketch, a file or
+// a new map never saves over `shared` without a confirmation.
+let pendingVersion: number | null = null;
+window.addEventListener("map:loaded", () => {
+  loadedVersion = pendingVersion;
+  pendingVersion = null;
+});
+window.addEventListener("map:generated", () => {
+  loadedVersion = null;
+});
+
 interface MapMeta {
   id: string;
   name: string;
@@ -61,7 +75,7 @@ export async function loadSharedMap(): Promise<void> {
     const blob = await response.blob();
 
     uploadMap(blob, () => {
-      loadedVersion = Number.isFinite(version) ? version : null;
+      pendingVersion = Number.isFinite(version) ? version : null; // tupaia-mcp: set on map:loaded
     });
     tip(`Loaded shared map · v${version} · last saved by ${updatedBy} at ${when(updatedAt)}`, true, "success", 6000);
   } catch (error) {
@@ -84,7 +98,7 @@ export async function loadSharedMapOnBoot(): Promise<boolean> {
     const updatedAt = response.headers.get("X-Map-Updated-At") ?? "";
     const blob = await response.blob();
     uploadMap(blob, () => {
-      loadedVersion = Number.isFinite(version) ? version : null;
+      pendingVersion = Number.isFinite(version) ? version : null; // tupaia-mcp: set on map:loaded
     });
     tip(`Loaded shared map · v${version} · last saved by ${updatedBy} at ${when(updatedAt)}`, true, "success", 6000);
     return true;
@@ -96,11 +110,13 @@ export async function loadSharedMapOnBoot(): Promise<boolean> {
 
 /** Serialize the current map and save it to the shared cloud slot (FR-4).
  *  On a stale-write 409 the user must consciously choose overwrite or reload (FR-7). */
-export async function saveSharedMap(force = false): Promise<void> {
+export async function saveSharedMap(force = false, replaceVersion: number | null = null): Promise<void> {
   if (customization) {
     tip("Map cannot be saved in EDIT mode, please complete the edit and retry", false, "error");
     return;
   }
+  // tupaia-mcp: a map that did not come from `shared` asks before it replaces it
+  if (!force && loadedVersion === null && replaceVersion === null) return confirmReplaceShared();
 
   try {
     const mapData = prepareMapData();
@@ -109,7 +125,8 @@ export async function saveSharedMap(force = false): Promise<void> {
       "X-Map-Name": encodeURIComponent(getFileName())
     };
     if (force) headers["X-Map-Overwrite"] = "true";
-    if (loadedVersion !== null) headers["X-Map-Version"] = String(loadedVersion);
+    const version = loadedVersion ?? replaceVersion; // tupaia-mcp: the version the user agreed to replace
+    if (version !== null) headers["X-Map-Version"] = String(version);
 
     const response = await fetch(mapUrl(MAP_ID), { method: "PUT", headers, body: mapData });
 
@@ -127,6 +144,44 @@ export async function saveSharedMap(force = false): Promise<void> {
     ERROR && console.error(error);
     tip("Cannot save shared map. Check your connection and try again", true, "error", 4000);
   }
+}
+
+/** tupaia-mcp: the page map was not loaded from `shared` (a ?maplink sketch, a file, a new
+ *  map). Saving it replaces the shared map, so name the version it replaces and ask. The PUT
+ *  then carries that version, so a save by someone else in between still answers 409. */
+async function confirmReplaceShared(): Promise<void> {
+  let meta: MapMeta | null = null;
+  try {
+    const response = await fetch(mapUrl(MAP_ID, "/meta"), { method: "GET" });
+    if (response.status === 404) return saveSharedMap(false, 0); // no shared map yet: create it
+    if (!response.ok) throw new Error(`Server returned ${response.status}`);
+    meta = (await response.json()) as MapMeta;
+  } catch (error) {
+    ERROR && console.error(error);
+    tip("Cannot reach the shared map. Check your connection and try again", true, "error", 4000);
+    return;
+  }
+  const current = meta;
+  alertMessage.innerHTML = /* html */ `The map in this page was <b>not loaded from the shared map</b>
+    (it was opened from a link such as a sketch, loaded from a file, or generated here).<br /><br />
+    Saving it <b>replaces the shared map v${current.version}</b> (saved by <b>${current.updated_by}</b>,
+    ${when(current.updated_at)}) for everyone. Edits made there that this map does not have are lost
+    from the current version; v${current.version} stays recoverable from history.`;
+  $("#alert").dialog({
+    resizable: false,
+    title: "Replace the shared map?",
+    width: "32em",
+    buttons: {
+      [`Replace v${current.version}`]: function (this: HTMLElement) {
+        $(this).dialog("close");
+        saveSharedMap(false, current.version);
+      },
+      Cancel: function (this: HTMLElement) {
+        $(this).dialog("close");
+      }
+    },
+    position: { my: "center", at: "center", of: "svg" }
+  });
 }
 
 /** The lost-edits guard made visible (PRD §10): someone saved since we opened. */

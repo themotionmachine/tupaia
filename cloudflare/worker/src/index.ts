@@ -8,6 +8,7 @@
  * Storage (PRD §6):
  *   R2 `MAPS`:  maps/<id>.map            — current opaque .map blob
  *               maps/<id>/v<n>.map       — immutable snapshot of version n
+ *               maps/<id>/ops.json       — optional JSON sidecar (a sketch's ops log)
  *   D1 `DB`:    one `map` row per id     — name, version, updated_at, updated_by, soft lock
  *
  * The blob is opaque bytes — the Worker never parses or rewrites it (NFR-5).
@@ -39,6 +40,10 @@ interface MapRow {
 const KEEP_VERSIONS = 20;
 /** Reject empty or absurdly large bodies (NFR-5). Maps are ~4.3 MB; 64 MB is generous headroom. */
 const MAX_BLOB_BYTES = 64 * 1024 * 1024;
+/** The ops.json sidecar is small JSON (a sketch's operation log). */
+const MAX_OPS_BYTES = 2 * 1024 * 1024;
+/** The one map DELETE never touches. */
+const PROTECTED_ID = "shared";
 /** Advisory edit-lock TTL (FR-8). */
 const LOCK_TTL_MS = 15 * 60 * 1000;
 /** Slugs must be filesystem/key-safe. */
@@ -52,6 +57,7 @@ const json = (body: unknown, status = 200, headers: Record<string, string> = {})
 
 const currentKey = (id: string) => `maps/${id}.map`;
 const versionKey = (id: string, v: number) => `maps/${id}/v${v}.map`;
+const opsKey = (id: string) => `maps/${id}/ops.json`;
 
 /** Identity from Cloudflare Access; falls back when Access is not (yet) enforced. */
 const callerEmail = (req: Request) =>
@@ -252,6 +258,52 @@ async function releaseLock(env: Env, id: string): Promise<Response> {
   return json(metaPayload({ ...row, editing_by: null, lock_expires: null }));
 }
 
+/** GET /api/map/:id/ops — the map's ops.json sidecar (a sketch's operation log). */
+async function getOps(env: Env, id: string): Promise<Response> {
+  const row = await getRow(env, id);
+  if (!row) return json({ error: "not_found", id }, 404);
+  const obj = await env.MAPS.get(opsKey(id));
+  if (!obj) return json({ error: "not_found", id }, 404);
+  return new Response(obj.body, { headers: { "content-type": "application/json; charset=utf-8" } });
+}
+
+/** PUT /api/map/:id/ops — replace the ops.json sidecar. JSON object, ≤ 2 MB, no version guard;
+ *  the map itself must exist (PUT the blob first). */
+async function putOps(req: Request, env: Env, id: string): Promise<Response> {
+  const body = await req.arrayBuffer();
+  if (body.byteLength === 0) return json({ error: "empty_body" }, 400);
+  if (body.byteLength > MAX_OPS_BYTES) return json({ error: "too_large" }, 413);
+  const row = await getRow(env, id);
+  if (!row) return json({ error: "not_found", id }, 404);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(body));
+  } catch {
+    return json({ error: "bad_json" }, 400);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return json({ error: "bad_json" }, 400);
+  await env.MAPS.put(opsKey(id), body, { httpMetadata: { contentType: "application/json" } });
+  return json({ id, bytes: body.byteLength, updated_at: new Date().toISOString() });
+}
+
+/** DELETE /api/map/:id — remove a map: its blob, every version snapshot, ops.json and the D1
+ *  row. Never the shared map (403). */
+async function deleteMap(env: Env, id: string): Promise<Response> {
+  if (id === PROTECTED_ID) return json({ error: "forbidden", id }, 403);
+  const row = await getRow(env, id);
+  if (!row) return json({ error: "not_found", id }, 404);
+  const keys = [currentKey(id)];
+  let cursor: string | undefined;
+  do {
+    const listed = await env.MAPS.list({ prefix: `maps/${id}/`, cursor });
+    keys.push(...listed.objects.map((o) => o.key));
+    cursor = listed.truncated ? listed.cursor : undefined;
+  } while (cursor);
+  await env.MAPS.delete(keys);
+  await env.DB.prepare("DELETE FROM map WHERE id = ?").bind(id).run();
+  return json({ id, deleted: true, objects: keys.length });
+}
+
 // --- entry ----------------------------------------------------------------
 
 export default {
@@ -268,7 +320,7 @@ export default {
     try {
       if (pathname === "/api/maps" && method === "GET") return await listMaps(env);
 
-      const m = pathname.match(/^\/api\/map\/([^/]+)(\/(meta|versions|restore|claim|release))?$/);
+      const m = pathname.match(/^\/api\/map\/([^/]+)(\/(meta|versions|restore|claim|release|ops))?$/);
       if (m) {
         const id = decodeURIComponent(m[1]);
         if (!ID_RE.test(id)) return json({ error: "bad_id", id }, 400);
@@ -276,6 +328,9 @@ export default {
 
         if (!sub && method === "GET") return await loadMap(env, id);
         if (!sub && method === "PUT") return await saveMap(request, env, id);
+        if (!sub && method === "DELETE") return await deleteMap(env, id);
+        if (sub === "ops" && method === "GET") return await getOps(env, id);
+        if (sub === "ops" && method === "PUT") return await putOps(request, env, id);
         if (sub === "meta" && method === "GET") return await getMeta(env, id);
         if (sub === "versions" && method === "GET") return await listVersions(env, id);
         if (sub === "restore" && method === "POST") {

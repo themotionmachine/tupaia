@@ -5,8 +5,22 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { after, before, describe, test } from "node:test";
+import type { BrowserManager } from "../src/browser.ts";
+import type { Config } from "../src/config.ts";
+import { SharedApi } from "../src/shared-api.ts";
 import { FakeWorker } from "./fake-worker.ts";
-import { alive, DEMO_MAP, errorBody, type Harness, REPO_ROOT, safeEnv, startServer } from "./helpers.ts";
+import {
+  alive,
+  DEMO_MAP,
+  errorBody,
+  type Harness,
+  openViewer,
+  REPO_ROOT,
+  safeEnv,
+  startServer,
+  viewerDialog,
+  viewerLoads
+} from "./helpers.ts";
 
 const LOCAL_ENTRY = /src="\/(index-[^"]+\.js)"/.exec(
   fs.readFileSync(path.join(REPO_ROOT, "dist", "index.html"), "utf8")
@@ -378,5 +392,175 @@ describe("shared tools in live mode (fake Worker)", () => {
     assert.equal(errorBody(r).error.code, "MODE");
     const live = await h.call("session", { action: "set_mode", mode: "live" });
     assert.equal(live.isError, true);
+  });
+});
+
+describe("shared-api sketch writes (the client re-checks id and mode)", () => {
+  let fake: FakeWorker;
+  const mode = { mode: "live" as "live" | "local" };
+  let envMode: "live" | "local" = "live";
+  let api: SharedApi;
+  const logged: string[] = [];
+
+  before(async () => {
+    fake = new FakeWorker({ seedFile: DEMO_MAP, version: 2 });
+    const origin = await fake.start();
+    const config = {
+      get envMode() {
+        return envMode;
+      },
+      liveOrigin: origin,
+      buildCacheMs: 0
+    } as unknown as Config;
+    const browser = {
+      modeState: mode,
+      logOutward: (m: string, u: string, st: number | string) => logged.push(`${m} ${u} ${st}`)
+    } as unknown as BrowserManager;
+    api = new SharedApi(config, browser);
+  });
+
+  after(async () => {
+    await fake?.stop();
+  });
+
+  test("ids that do not start with sketch- are refused before any request; 'shared' above all", async () => {
+    const body = Buffer.from("x");
+    for (const id of ["shared", "Shared", "sketch-", "sketches", "notasketch", "sketch-../shared", "sketch-UP"]) {
+      await assert.rejects(
+        api.putSketchBlob({ mode: "live", id, body, version: null, name: null }),
+        /REFUSED|sketch-<slug>/
+      );
+      await assert.rejects(api.putSketchOps({ mode: "live", id, json: {} }), /sketch-<slug>/);
+      await assert.rejects(api.deleteSketch({ mode: "live", id }), /sketch-<slug>/);
+    }
+    assert.deepEqual(fake.requests, []);
+    assert.deepEqual(logged, []);
+  });
+
+  test("sketch writes need the spawn-time live mode, checked inside the client", async () => {
+    const args = { mode: "live" as const, id: "sketch-ok", body: Buffer.from("x"), version: null, name: null };
+    envMode = "local";
+    await assert.rejects(api.putSketchBlob(args), (e: Error & { code?: string }) => e.code === "MODE");
+    envMode = "live";
+    mode.mode = "local"; // dropped to local at run time
+    await assert.rejects(
+      api.deleteSketch({ mode: "live", id: "sketch-ok" }),
+      (e: Error & { code?: string }) => e.code === "MODE"
+    );
+    mode.mode = "live";
+    await assert.rejects(
+      api.putSketchOps({ mode: "local", id: "sketch-ok", json: {} }),
+      (e: Error & { code?: string }) => e.code === "MODE"
+    );
+    assert.equal(fake.requests.length, 0);
+    // and with everything in order the write goes through, logged in the outward log
+    const put = await api.putSketchBlob(args);
+    assert.equal(put.version, 1);
+    const del = await api.deleteSketch({ mode: "live", id: "sketch-ok" });
+    assert.equal(del.deleted, true);
+    assert.deepEqual(
+      fake.requests.map(r => `${r.method} ${r.path}`),
+      ["GET /api/map/shared/ops", "PUT /api/map/sketch-ok", "DELETE /api/map/sketch-ok"]
+    );
+    assert.equal(logged.length, 3);
+    assert.ok(!fake.requests.some(r => r.headers["x-map-overwrite"] !== undefined));
+  });
+
+  test("a Worker without the sketch routes (not deployed yet): the first sketch write is refused, nothing written", async () => {
+    const fresh = new SharedApi(
+      { envMode: "live", liveOrigin: fake.origin, buildCacheMs: 0 } as unknown as Config,
+      { modeState: { mode: "live" }, logOutward: () => {} } as unknown as BrowserManager
+    );
+    fake.sketchRoutes = false;
+    fake.clearLog();
+    try {
+      await assert.rejects(
+        fresh.putSketchBlob({ mode: "live", id: "sketch-new", body: Buffer.from("x"), version: null, name: null }),
+        (e: Error & { code?: string }) => e.code === "REFUSED" && /does not have the sketch routes/.test(e.message)
+      );
+      assert.deepEqual(fake.writes(), []);
+      assert.equal(fake.maps.has("sketch-new"), false);
+    } finally {
+      fake.sketchRoutes = true;
+    }
+  });
+
+  test("the fake Worker itself refuses DELETE shared with 403, like the real one", async () => {
+    const res = await fetch(`${fake.origin}/api/map/shared`, { method: "DELETE" });
+    assert.equal(res.status, 403);
+    assert.equal(fake.row.version, 2);
+  });
+});
+
+describe("app client guard: Save to shared map from a page that did not load shared", () => {
+  let fake: FakeWorker;
+  let origin = "";
+  const puts = () => fake.writes();
+  const save = (page: import("playwright").Page) =>
+    page.evaluate(() => (globalThis as any).lazy.sharedMap().then((m: any) => m.saveSharedMap()));
+
+  before(async () => {
+    fake = new FakeWorker({ seedFile: DEMO_MAP, version: 4, assetsDir: path.join(REPO_ROOT, "dist") });
+    origin = await fake.start();
+    const put = await fetch(`${origin}/api/map/sketch-x`, { method: "PUT", body: fs.readFileSync(DEMO_MAP) });
+    assert.equal(put.status, 200);
+    fake.clearLog();
+  });
+
+  after(async () => {
+    await fake?.stop();
+  });
+
+  test("after a ?maplink boot it asks; Replace sends one PUT with the version it named and no overwrite", async () => {
+    const v = await openViewer(`${origin}/?maplink=${encodeURIComponent(`${origin}/api/map/sketch-x`)}`);
+    try {
+      await viewerLoads(v.page, 1);
+      await save(v.page);
+      await v.page.waitForSelector(".ui-dialog:visible");
+      const d = await viewerDialog(v.page);
+      assert.equal(d?.title, "Replace the shared map?");
+      assert.match(d?.text ?? "", /replaces the shared map v4/);
+      assert.deepEqual(puts(), [], "nothing sent before the human confirms");
+      await v.page.locator(".ui-dialog-buttonset button", { hasText: "Replace v4" }).click();
+      for (let k = 0; k < 100 && !puts().length; k++) await new Promise(r => setTimeout(r, 100));
+      const ok = puts();
+      assert.equal(ok.length, 1);
+      assert.equal(ok[0].path, "/api/map/shared");
+      assert.equal(ok[0].headers["x-map-version"], "4");
+      assert.equal(ok[0].headers["x-map-overwrite"], undefined);
+      assert.equal(fake.row.version, 5);
+    } finally {
+      await v.close();
+    }
+  });
+
+  test("a normal boot (shared loaded) saves at once with its version; after loading another map it asks again", async () => {
+    fake.clearLog();
+    const v = await openViewer(`${origin}/`);
+    try {
+      await viewerLoads(v.page, 1);
+      const api = fake.requests.filter(q => q.path.startsWith("/api/")).map(q => `${q.method} ${q.path}`);
+      assert.deepEqual(api, ["GET /api/map/shared"]);
+      await save(v.page);
+      for (let k = 0; k < 100 && !puts().length; k++) await new Promise(r => setTimeout(r, 100));
+      assert.equal(puts().length, 1);
+      assert.equal(puts()[0].headers["x-map-version"], "5");
+      assert.equal(await viewerDialog(v.page), null, "no confirmation for the map that came from shared");
+      assert.equal(fake.row.version, 6);
+      // the same page then opens a sketch: loadedVersion no longer applies
+      await v.page.evaluate(
+        u => (globalThis as any).lazy.load().then((m: any) => m.loadMapFromURL(u)),
+        `${origin}/api/map/sketch-x`
+      );
+      await viewerLoads(v.page, 2);
+      await save(v.page);
+      await v.page.waitForSelector(".ui-dialog:visible");
+      assert.equal((await viewerDialog(v.page))?.title, "Replace the shared map?");
+      await v.page.locator(".ui-dialog-buttonset button", { hasText: "Cancel" }).click();
+      await new Promise(r => setTimeout(r, 300));
+      assert.equal(puts().length, 1, "Cancel sends nothing");
+    } finally {
+      await v.close();
+    }
   });
 });

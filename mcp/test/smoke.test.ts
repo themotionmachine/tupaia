@@ -40,7 +40,8 @@ const ALL_TOOLS = [
   "shared_status",
   "shared_save",
   "shared_restore",
-  "sketch"
+  "sketch",
+  "sketch_promote"
 ];
 
 describe("tupaia-mcp smoke (core layer)", () => {

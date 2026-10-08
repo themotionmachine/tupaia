@@ -8,12 +8,18 @@
 //   version, same body hash or target, same flags); it is valid for 10 minutes, once.
 // putMap sends X-Map-Version and never X-Map-Overwrite. Every request is logged through
 // BrowserManager.logOutward (method, url, status) into the session's outward request log.
+//
+// Sketch writes (putSketchBlob, putSketchOps, deleteSketch) never touch `shared`: they refuse
+// any id that does not start with `sketch-` and need the same spawn-time live mode, re-checked
+// here. They take no token (the shared map is not involved) and never send X-Map-Overwrite.
 import crypto from "node:crypto";
 import type { BrowserManager } from "./browser.ts";
 import type { Config, Mode } from "./config.ts";
 import { ToolError } from "./result.ts";
 
 export const MAP_ID = "shared";
+/** Ids sketch writes may touch: `sketch-<slug>`, slug as in the sketch tool. */
+export const SKETCH_ID_RE = /^sketch-[a-z0-9][a-z0-9-]{0,47}$/;
 export const TOKEN_TTL_MS = 10 * 60 * 1000;
 
 export interface SharedMapBlob {
@@ -90,6 +96,7 @@ export class SharedApi {
   readonly browser: BrowserManager;
   #tokens = new Map<string, TokenEntry>();
   #build: { at: number; value: LiveBuild } | null = null;
+  #sketchRoutes = false;
 
   constructor(config: Config, browser: BrowserManager) {
     this.config = config;
@@ -110,7 +117,7 @@ export class SharedApi {
   }
 
   async #request(
-    method: "GET" | "PUT" | "POST",
+    method: "GET" | "PUT" | "POST" | "DELETE",
     pathname: string,
     init: { headers?: Record<string, string>; body?: Buffer | string; timeoutMs?: number } = {}
   ): Promise<Response> {
@@ -145,9 +152,9 @@ export class SharedApi {
     }
   }
 
-  /** GET /api/map/shared/meta; null when the shared map does not exist yet. */
-  async meta(): Promise<SharedMeta | null> {
-    const res = await this.get(`/api/map/${MAP_ID}/meta`);
+  /** GET /api/map/<id>/meta (default shared); null when the map does not exist (404). */
+  async meta(id: string = MAP_ID): Promise<SharedMeta | null> {
+    const res = await this.get(`/api/map/${encodeURIComponent(id)}/meta`);
     if (res.status === 404) return null;
     if (!res.ok) throw new ToolError("NETWORK", `GET meta returned ${res.status}`);
     return this.#json<SharedMeta>(res, "meta");
@@ -160,10 +167,14 @@ export class SharedApi {
     return this.#json<SharedVersions>(res, "versions");
   }
 
-  async getMap(): Promise<SharedMapBlob> {
-    const res = await this.get(`/api/map/${MAP_ID}`, 60_000);
-    if (res.status === 404) throw new ToolError("NOT_FOUND", "the shared map does not exist yet (404)");
-    if (!res.ok) throw new ToolError("NETWORK", `GET /api/map/${MAP_ID} returned ${res.status}`);
+  async getMap(id: string = MAP_ID): Promise<SharedMapBlob> {
+    const res = await this.get(`/api/map/${encodeURIComponent(id)}`, 60_000);
+    if (res.status === 404)
+      throw new ToolError(
+        "NOT_FOUND",
+        id === MAP_ID ? "the shared map does not exist yet (404)" : `map '${id}' not found (404)`
+      );
+    if (!res.ok) throw new ToolError("NETWORK", `GET /api/map/${id} returned ${res.status}`);
     const bytes = Buffer.from(await res.arrayBuffer());
     const v = res.headers.get("x-map-version");
     return {
@@ -173,6 +184,21 @@ export class SharedApi {
       updatedAt: res.headers.get("x-map-updated-at"),
       url: res.url
     };
+  }
+
+  /** GET /api/maps: every map's metadata (the shared map and the sketches). */
+  async listMaps(): Promise<SharedMeta[]> {
+    const res = await this.get("/api/maps");
+    if (!res.ok) throw new ToolError("NETWORK", `GET /api/maps returned ${res.status}`);
+    return this.#json<SharedMeta[]>(res, "maps");
+  }
+
+  /** GET /api/map/:id/ops: a sketch's ops.json, or null when it has none (404). */
+  async getOps(id: string): Promise<Record<string, unknown> | null> {
+    const res = await this.get(`/api/map/${encodeURIComponent(id)}/ops`);
+    if (res.status === 404) return null;
+    if (!res.ok) throw new ToolError("NETWORK", `GET /api/map/${id}/ops returned ${res.status}`);
+    return this.#json<Record<string, unknown>>(res, "ops");
   }
 
   /** The deployed build: VERSION from /versioning.js and the entry chunk from /. Cached. */
@@ -284,6 +310,102 @@ export class SharedApi {
     if (!res.ok)
       throw new ToolError("NETWORK", `PUT returned ${res.status}: ${text.slice(0, 300)}`, { details: { body } });
     return body as { id: string; version: number; updated_at: string; updated_by: string };
+  }
+
+  // ------------------------------------------------------------------ sketch writes
+
+  #assertSketchId(id: string): void {
+    if (id === MAP_ID || !SKETCH_ID_RE.test(id))
+      throw new ToolError("REFUSED", `sketch writes only touch ids 'sketch-<slug>'; refused '${id}'`);
+  }
+
+  /**
+   * Does the Worker have the sketch routes (GET|PUT /api/map/:id/ops, DELETE /api/map/:id)? One
+   * read-only GET of /api/map/shared/ops: a Worker with them answers 200 or its own 404
+   * {error, id}; one without them answers the generic 404 {error:'not_found'} (no id). Only a
+   * positive answer is cached.
+   */
+  async sketchRoutesAvailable(): Promise<boolean> {
+    if (this.#sketchRoutes) return true;
+    const res = await this.get(`/api/map/${MAP_ID}/ops`);
+    const text = await res.text();
+    let ok = res.ok;
+    if (res.status === 404) {
+      try {
+        ok = typeof (JSON.parse(text) as { id?: unknown }).id === "string";
+      } catch {
+        ok = false;
+      }
+    }
+    this.#sketchRoutes = ok;
+    return ok;
+  }
+
+  async #answer(res: Response, what: string): Promise<Record<string, unknown>> {
+    const text = await res.text();
+    let body: unknown = text;
+    try {
+      body = JSON.parse(text);
+    } catch {}
+    if (res.status === 409)
+      throw new ToolError("CONFLICT", `${what}: the Worker answered 409: ${text.slice(0, 300)}`, {
+        details: { status: 409, body }
+      });
+    if (res.status === 404) throw new ToolError("NOT_FOUND", `${what}: 404 ${text.slice(0, 200)}`);
+    if (!res.ok)
+      throw new ToolError("NETWORK", `${what} returned ${res.status}: ${text.slice(0, 300)}`, { details: { body } });
+    return (body && typeof body === "object" ? body : { body }) as Record<string, unknown>;
+  }
+
+  /**
+   * PUT a sketch blob. `version` is the sketch's own current version (X-Map-Version), null on
+   * the first save; the Worker answers 409 (CONFLICT) when the id exists at another version.
+   */
+  async putSketchBlob(req: {
+    mode: Mode;
+    id: string;
+    body: Buffer;
+    version: number | null;
+    name: string | null;
+  }): Promise<{ id: string; version: number; updated_at: string; updated_by: string }> {
+    this.#assertSketchId(req.id);
+    this.#assertLive(req.mode);
+    if (!(await this.sketchRoutesAvailable()))
+      throw new ToolError(
+        "REFUSED",
+        `the Worker at ${this.origin()} does not have the sketch routes yet (GET|PUT /api/map/:id/ops, DELETE /api/map/:id), so a sketch could be written but not its ops log or deleted again; nothing was written. Deploying cloudflare/worker is Ryan's call.`
+      );
+    const headers: Record<string, string> = { "content-type": "text/plain; charset=utf-8" };
+    if (req.version !== null) headers["X-Map-Version"] = String(req.version);
+    if (req.name) headers["X-Map-Name"] = encodeURIComponent(req.name);
+    const res = await this.#request("PUT", `/api/map/${req.id}`, { headers, body: req.body, timeoutMs: 120_000 });
+    return (await this.#answer(res, `PUT /api/map/${req.id}`)) as {
+      id: string;
+      version: number;
+      updated_at: string;
+      updated_by: string;
+    };
+  }
+
+  /** PUT a sketch's ops.json (the Worker keeps no versions of it). */
+  async putSketchOps(req: { mode: Mode; id: string; json: unknown }): Promise<Record<string, unknown>> {
+    this.#assertSketchId(req.id);
+    this.#assertLive(req.mode);
+    const body = JSON.stringify(req.json);
+    const res = await this.#request("PUT", `/api/map/${req.id}/ops`, {
+      headers: { "content-type": "application/json; charset=utf-8" },
+      body,
+      timeoutMs: 60_000
+    });
+    return this.#answer(res, `PUT /api/map/${req.id}/ops`);
+  }
+
+  /** DELETE a sketch (blob, versions, ops.json, row). Never `shared`. */
+  async deleteSketch(req: { mode: Mode; id: string }): Promise<Record<string, unknown>> {
+    this.#assertSketchId(req.id);
+    this.#assertLive(req.mode);
+    const res = await this.#request("DELETE", `/api/map/${req.id}`, { timeoutMs: 60_000 });
+    return this.#answer(res, `DELETE /api/map/${req.id}`);
   }
 
   /** POST restore?v=N. The Worker has no version guard here; the token's liveVersion is the only one. */

@@ -1,12 +1,12 @@
 ---
 name: tupaia-dexterity
-description: Drive the Tupaia map app through the `tupaia` MCP server to generate, query, edit, style, screenshot, snapshot/undo and export maps, and (only when the human asks) save the live shared map. Use for any request to look at or change a Tupaia or FMG (Fantasy Map Generator) map.
+description: Drive the Tupaia map app through the `tupaia` MCP server to generate, query, edit, style, screenshot, snapshot/undo and export maps, propose shared-map changes as sketches, and (only when the human asks) save the live shared map. Use for any request to look at or change a Tupaia or FMG (Fantasy Map Generator) map.
 ---
 
 # Tupaia dexterity
 
 The `tupaia` MCP server runs the built Tupaia app (Ryan's fork of Azgaar's Fantasy Map
-Generator) in headless Chromium and exposes 20 tools. This skill is how to use them well.
+Generator) in headless Chromium and exposes 21 tools. This skill is how to use them well.
 For full signatures, field tables and error codes, read the resource
 `tupaia://docs/cheatsheet.md`. Read `tupaia://docs/runtime-api.md` before any `eval`.
 
@@ -104,8 +104,8 @@ Every mutating tool is undoable, including `eval` (unless `readOnly:true`), `dis
 
 ## 8. Outward writes: the live shared map
 
-The shared map at map.activationlayer.org is used by other people. `shared_save` and
-`shared_restore` are the only tools that change it.
+The shared map at map.activationlayer.org is used by other people. `shared_save`,
+`shared_restore` and `sketch_promote` (section 9) are the only tools that change it.
 
 - Use them ONLY when the human, in this conversation, explicitly asks for the live shared map
   to change. Never as a side effect, never to "back up" work, never because a task seems to
@@ -149,28 +149,58 @@ The shared map at map.activationlayer.org is used by other people. `shared_save`
 
 ## 9. Sketches: proposing a change
 
-When the human wants a change to the shared map that people can look at before it lands, make
-it a sketch instead of editing the live map. A sketch is "base version N of the shared map plus
-the ops that produced it"; it never writes the shared map.
+When Ryan (or anyone) wants a change to the shared map that people can look at before it lands,
+make it a sketch instead of editing the live map. A sketch is "base version N of the shared map
+plus the ops that produced it". It is stored on the Worker as its own map, `sketch-<slug>`, and
+has a link that opens it in the app. Accepting it replays the ops onto whatever the shared map
+is by then, so edits other people made in the meantime survive.
+
+The loop:
 
 1. `load_map {source:'shared'}` (a read-only GET). Make no edits yet.
 2. `sketch {action:'start', slug:'short-name', note:'what this proposes'}`. It is REFUSED if the
    page map did not come from the shared map or was already edited; do what the message says.
-3. Make the changes with the normal tools, screenshots as usual. Every mutating call is logged
-   with what it actually did (ids, literal generated names, literal cells), so it can be
-   replayed later onto a newer shared map and other people's edits survive.
-4. Prefer edit, add, paint_cells and display. `regenerate`, `generate_map`, `load_map` and
-   `snapshot restore` make the sketch blob-only (it can no longer be replayed); undo them if
-   that was not intended. eval is replayed verbatim and marked unsafe in the summary; avoid it.
-5. Undo works inside a sketch: `snapshot {action:'undo'}` takes the last op out of the log.
-6. `sketch {action:'summary'}`: markdown for the human (base version, one sentence per op,
-   counts vs base) and before/after screenshot paths. Show the human the markdown and the
-   framed before/after images.
-7. `sketch {action:'stop'}` when done; the page keeps the result.
+3. Make the changes with the normal tools, with screenshots as usual. Every mutating call is
+   logged with what it actually did (ids, literal generated names, literal cells). Prefer
+   edit, add, paint_cells and display. `regenerate`, `generate_map`, `load_map` and
+   `snapshot restore` make the sketch blob-only (it can be saved, viewed and promoted as is,
+   but not replayed onto a newer map); undo them if that was not intended. eval is replayed
+   verbatim and marked unsafe; avoid it. `snapshot {action:'undo'}` takes the last op out of
+   the log.
+4. `sketch {action:'summary'}`: markdown (base version, one sentence per op, counts vs base,
+   the view link) and before/after screenshots.
+5. `sketch {action:'save', confirm:true}` (needs the live-mode server). It writes only
+   `sketch-<slug>` and its ops.json, never the shared map, and returns `viewUrl`.
+6. Give Ryan the `viewUrl` and the summary markdown (and the framed before/after images). The
+   link opens the sketch in the app, not the shared map. Then stop and wait for his answer.
+7. When he says yes:
+   1. `sketch {action:'rebase'}`: replays the sketch onto the CURRENT shared map. If nobody
+      saved since the base, it is a clean replay onto the same version. Read `applied`,
+      `skipped` and `conflicts`.
+   2. `sketch_promote {}`: the preview (what it overwrites, lineage, build check) and a token.
+      Tell Ryan the version it replaces and anything unusual in the preview.
+   3. `sketch_promote {confirm:true, token:'<token>', then:'discard'}` (or `then:'keep'` if he
+      wants the sketch kept). It is shared_save underneath: one PUT with X-Map-Version.
+   4. Report the new shared version and the backup paths.
+8. When he says no: `sketch {action:'discard', slug, confirm:true}`.
 
-`sketch {action:'status'}` shows the base, the log, and why a sketch is blob-only. Replaying
-onto a newer map stops at conflicts (a target someone removed, a field both sides changed);
-report each conflict's `reason` to the human rather than working around it.
+Stop and ask Ryan, instead of working around it, when:
+
+- the rebase reports a conflict (a target someone removed, `both changed <field>`): name each
+  op and its `reason`; do not rerun with `onConflict:'skip'` unless he agrees to drop those ops;
+- the sketch is blob-only and the shared map moved since its base: it cannot be replayed, and
+  promoting it would need the shared map's newer edits thrown away (sketch_promote refuses);
+- sketch_promote refuses with LOCKED, BUILD or STALE, or the preview shows a version you did not
+  tell him about: preview again only after telling him;
+- `sketch save` answers CONFLICT: `sketch-<slug>` already exists at another version (someone
+  else's sketch or another session); open it or pick another slug, his call;
+- the status shows `diverged` (the page changed after the sketch stopped recording): the blob
+  then has changes the log does not.
+
+Other actions: `sketch {action:'list'}` (read-only; works in local mode) shows the saved sketches
+with their headers; `sketch {action:'open', slug}` loads one into the page as the active sketch
+(local mode can open and rebase, not save). `sketch {action:'status'}` shows the base, the log,
+`dirty` since the last save, `viewUrl`, and why a sketch is blob-only.
 
 ## 10. Failure handling
 

@@ -812,6 +812,7 @@ async function parseLoadedData(data: string[], mapVersion: string | null): Promi
     showStatistics();
     INFO && console.groupEnd();
     tip("Map is successfully loaded", true, "success", 7000);
+    window.dispatchEvent(new CustomEvent("map:loaded")); // tupaia-mcp: cloud-cloudflare.ts tracks what the page holds
   } catch (error) {
     ERROR && console.error(error);
     clearMainTip();

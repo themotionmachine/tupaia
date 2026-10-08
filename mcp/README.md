@@ -12,22 +12,22 @@ It is a separate Node package. Nothing here is imported by the app or shipped in
 
 - `node mcp/src/server.ts` (Node 24+ type stripping; not tsx). stdout carries only JSON-RPC;
   logs go to stderr.
-- Startup registers 20 tools and 3 resources and opens no browser and no network. The first
+- Startup registers 21 tools and 3 resources and opens no browser and no network. The first
   tool call starts a loopback static server over `<repo>/dist`, launches Chromium
   (Playwright 1.60.0) and opens one page at `/?local`.
 - `src/bridge.js` and `src/bridge-mutations.js` are injected as classic scripts and define
   `globalThis.__tupaia`; every tool goes through one `__tupaia.call(name, args)`.
 - A route firewall answers every page-originated non-GET `/api` request with 403 in all
   modes and aborts every non-loopback host (analytics are stubbed, fonts are allowed unless
-  `TUPAIA_OFFLINE=1`). So `eval` cannot write the live map; only `shared_save` and
-  `shared_restore` can, from Node (`src/shared-api.ts`).
+  `TUPAIA_OFFLINE=1`). So `eval` cannot write the live map; only `shared_save`,
+  `shared_restore` and `sketch_promote` can, from Node (`src/shared-api.ts`).
 - Snapshots, the undo/redo history and the map's provenance live in Node memory and survive
   browser relaunches. A mutating call that times out marks the page dirty; the next call
   relaunches and restores the newest snapshot.
 
 Tools: session, map_info, find, inspect, screenshot, display, edit, add, paint_cells,
 generate_map, regenerate, snapshot, eval, load_map, save_map, export, shared_status,
-shared_save, shared_restore, sketch. Resources: `tupaia://docs/cheatsheet.md` (every tool, refs,
+shared_save, shared_restore, sketch, sketch_promote. Resources: `tupaia://docs/cheatsheet.md` (every tool, refs,
 places, error codes, field tables, recipes), `tupaia://docs/runtime-api.md`,
 `tupaia://docs/data-model.md`. The operating skill for Claude is
 `.claude/skills/tupaia-dexterity/SKILL.md`.
@@ -83,7 +83,7 @@ Remove it again when the write is done.
 
 | variable | default | meaning |
 | --- | --- | --- |
-| `TUPAIA_MODE` | `local` | `live` enables shared_save/shared_restore. Only settable at spawn; `session {action:'set_mode', mode:'local'}` can drop live to local, never the reverse. |
+| `TUPAIA_MODE` | `local` | `live` enables shared_save/shared_restore/sketch_promote and sketch save/discard. Only settable at spawn; `session {action:'set_mode', mode:'local'}` can drop live to local, never the reverse. |
 | `TUPAIA_LIVE_ORIGIN` | `https://map.activationlayer.org` | Origin for shared reads (and writes in live mode). `none` disables shared reads too. |
 | `TUPAIA_OUT` | `<repo>/.tupaia-mcp-out` | Screenshots, saves, exports, shared-save backups (gitignored). |
 | `TUPAIA_DIST` | `<repo>/dist` | The built app. |
@@ -158,6 +158,45 @@ each op first (missing or removed targets, fields both sides changed). `summary`
 markdown and before/after screenshots under `TUPAIA_OUT/sketches/<slug>/`.
 `rebase {onto:{path}}` (replay onto a map file) is a test hook (`TUPAIA_TEST_HOOKS=1`).
 
+### Saving, viewing and promoting sketches
+
+A saved sketch is its own map on the Worker, `sketch-<slug>`: the page map as a blob (the
+Worker already accepts any id and keeps 20 versions of it) plus `ops.json` beside it
+(`GET|PUT /api/map/sketch-<slug>/ops`), holding `{schema:1, slug, base, note, blobOnly,
+blobOnlyReasons, blockers, author:'tupaia-mcp', created, updated, summaryMarkdown, baseCounts,
+blob:{id, version, bytes, sha256}, viewUrl, ops}`.
+
+- `sketch {action:'save', confirm:true}` PUTs the blob (X-Map-Version = the sketch's own
+  version, none on the first save) and then ops.json, and returns
+  `viewUrl = <origin>/?maplink=<encodeURIComponent(origin + '/api/map/sketch-<slug>')>`. The app
+  checks `?maplink` before its shared-map boot load, so the link opens the sketch, not the
+  shared map.
+- `list` (read-only, also in local mode) shows the `sketch-*` maps with their ops.json headers;
+  `open {slug}` loads one into the page as the active sketch (origin kind `sketch`).
+- `rebase` without `onto` replays the log onto the CURRENT shared map (a GET) and leaves the
+  result in the page with the shared origin at that version; it does not save.
+- `discard {slug, confirm:true}` DELETEs `sketch-<slug>` (blob, versions, ops.json).
+- `sketch_promote` refuses with "rebase first" until the active sketch's base version equals
+  the shared map's current version; then it runs `shared_save`'s own code path end to end
+  (preview, one-time token, confirm; lineage, lock, build, backups; one PUT with
+  X-Map-Version, never X-Map-Overwrite). `then:'discard'` deletes the sketch afterwards.
+
+Sketch writes (blob PUT, ops PUT, DELETE) are re-checked inside `src/shared-api.ts`: the id
+must match `sketch-<slug>` (so `shared` can never be deleted or overwritten through them) and
+the server must be in its spawn-time live mode. Every request goes into `session`'s
+`outwardRequests`. They take no token, because they never touch the shared map.
+
+The two Worker routes they use (`GET|PUT /api/map/:id/ops`, `DELETE /api/map/:id`) are in
+`cloudflare/worker/src/index.ts` but are NOT deployed until Ryan deploys them. Until then,
+against the live site: `save` probes for them first (one GET of `/api/map/shared/ops`; a Worker
+without them answers its generic 404) and refuses before writing anything; `list` shows the
+sketches without headers; `open` answers NOT_FOUND (no ops.json); `discard` gets a 404.
+
+The app guard: a page booted from a sketch link (or one that loaded a file or generated a map)
+used to send a versionless PUT on "Save to shared map", get a 409 and offer an Overwrite
+button that sent `X-Map-Overwrite: true`. `src/io/cloud-cloudflare.ts` now asks first ("Replace
+the shared map v<N>?") and saves with that version, so a concurrent save still answers 409.
+
 ## Test
 
 ```bash
@@ -175,12 +214,21 @@ npm test                # node --test "test/**/*.test.ts"
   a layer toggle), undo/redo inside it, the summary, and replays onto copies someone else
   edited: ids shift and their edits survive; a removed target and a both-changed field are
   conflicts (`stop` and `skip`); a regenerate makes it blob-only.
+- `test/sketch.test.ts` (network): in a live-mode server against the fake Worker: save →
+  list → the view link opened in a test-owned headless page loads the sketch (and its Save to
+  shared asks first) → open in a fresh local-mode server (save/discard/promote refused there)
+  → someone else saves v7 → sketch_promote refuses "rebase first" → rebase → promote preview,
+  token, confirm (one PUT with X-Map-Version 7, no overwrite) → `then:'discard'` DELETE; a
+  blob-only sketch refuses rebase but saves; never a DELETE of shared.
 - `test/ops.test.ts`: pure tests of the ops log, id rewriting and replay helpers.
 - `test/shared.test.ts`: the shared tools against `test/fake-worker.ts`, an in-process
   `node:http` fake of `cloudflare/worker/src/index.ts` on 127.0.0.1. It covers local-mode
   refusals and, in a live-mode server, preview, token, confirm (exactly one PUT with
   X-Map-Version and no overwrite header), token reuse, STALE, force, a 409, LOCKED, the
-  build block, LINEAGE and restore.
+  build block, LINEAGE and restore. Also: `SharedApi` refuses sketch writes to any id not
+  starting with `sketch-` and outside live mode before sending anything, and the app's client
+  guard (a ?maplink page asks before replacing shared, Replace sends the named version, a
+  normal boot saves at once).
 
 Tests never touch the live site: `test/helpers.ts` defaults `TUPAIA_LIVE_ORIGIN=none` and
 throws if any test points it at activationlayer.org. Never run the repo's Playwright e2e

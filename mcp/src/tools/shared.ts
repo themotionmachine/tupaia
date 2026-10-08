@@ -57,7 +57,7 @@ async function buildCheck(ctx: ToolContext): Promise<BuildCheck> {
   return { ...base, verdict: "ok", message: "local and deployed builds match" };
 }
 
-function requireLive(ctx: ToolContext): void {
+export function requireLive(ctx: ToolContext): void {
   if (ctx.config.envMode !== "live") {
     throw new ToolError(
       "MODE",
@@ -90,7 +90,9 @@ function metaView(m: SharedMeta) {
  */
 async function lineageOf(ctx: ToolContext) {
   const p = ctx.snapshots.provenance;
-  const claimsShared = p.kind === "shared" && typeof p.sharedVersion === "number";
+  // a sketch opened from the Worker is derived from the shared version it is based on
+  const claimsShared = (p.kind === "shared" || p.kind === "sketch") && typeof p.sharedVersion === "number";
+  const via = p.kind === "sketch" ? ` via sketch '${p.sketchSlug ?? "?"}' (its v${p.sketchVersion ?? "?"})` : "";
   const pageId = claimsShared ? await ctx.pageMapId() : null;
   const idMatches = pageId !== null && p.mapId !== undefined && p.mapId !== null && pageId === p.mapId;
   const related = claimsShared && idMatches;
@@ -99,10 +101,10 @@ async function lineageOf(ctx: ToolContext) {
   if (claimsShared && !related) {
     note =
       pageId === null
-        ? `NOT verifiably derived from the shared map: the origin says shared v${p.sharedVersion}, but the page's map id cannot be read (browser not running), so the map that will be in the page is unknown`
-        : `NOT verifiably derived from the shared map: the origin says shared v${p.sharedVersion}, but the page's map id ${pageId} differs from the one recorded then (${p.mapId ?? "none"}); something replaced the map since (eval, a failed generate_map, a relaunch)`;
+        ? `NOT verifiably derived from the shared map: the origin says shared v${p.sharedVersion}${via}, but the page's map id cannot be read (browser not running), so the map that will be in the page is unknown`
+        : `NOT verifiably derived from the shared map: the origin says shared v${p.sharedVersion}${via}, but the page's map id ${pageId} differs from the one recorded then (${p.mapId ?? "none"}); something replaced the map since (eval, a failed generate_map, a relaunch)`;
   } else if (related) {
-    note = `derived from the shared map v${p.sharedVersion}${p.restoredFrom ? ` (via ${p.restoredFrom})` : ""}, ${p.opsSince} op(s) since`;
+    note = `derived from the shared map v${p.sharedVersion}${via}${p.restoredFrom ? ` (via ${p.restoredFrom})` : ""}, ${p.opsSince} op(s) since`;
   } else if (p.kind === "generated") {
     note = `NOT derived from the shared map: generated here from seed ${p.seed ?? "?"}`;
   } else if (p.kind === "file") {
@@ -256,7 +258,8 @@ export function register(ctx: ToolContext): void {
   );
 }
 
-async function sharedSave(
+/** The shared_save gate end to end (preview -> token -> confirm); sketch_promote reuses it. */
+export async function sharedSave(
   ctx: ToolContext,
   scope: CallScope,
   args: {

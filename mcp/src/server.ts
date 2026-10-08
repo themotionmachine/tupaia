@@ -32,7 +32,7 @@ export const INSTRUCTIONS = `Tupaia MCP drives the Tupaia fantasy-map app (Azgaa
 - Screenshot after visual changes, not after pure reads (JPEG maxSide 1024 by default; the full PNG is saved to disk).
 - eval is the last resort: read tupaia://docs/runtime-api.md first, use bare globals (pack, notes, svg), pass redraw layers after mutating, readOnly:true for reads.
 - Results carry alerts (app dialogs, auto-dismissed), consoleErrors and notes: read them. After TIMEOUT or a relaunch note, call session and restore if needed.
-- To propose a shared-map change without writing it: load_map {source:'shared'} -> sketch {action:'start'} -> edits -> sketch {action:'summary'}.
+- To propose a shared-map change without writing it: load_map {source:'shared'} -> sketch start -> edits -> summary -> save (view link). Promote only on the human's yes: rebase, then sketch_promote.
 - Cheatsheet: tupaia://docs/cheatsheet.md. Data model: tupaia://docs/data-model.md.`;
 
 const config = loadConfig();

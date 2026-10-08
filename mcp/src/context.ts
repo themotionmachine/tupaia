@@ -343,7 +343,7 @@ export class ToolContext {
    */
   async verifyProvenance(): Promise<void> {
     const p = this.snapshots.provenance;
-    if (p.kind !== "shared") return;
+    if (p.kind !== "shared" && p.kind !== "sketch") return;
     const id = await this.pageMapId();
     if (id === null || p.mapId === undefined || p.mapId === null || id !== p.mapId)
       this.snapshots.setProvenance({ kind: "unknown", mapId: id, opsSince: p.opsSince });
@@ -386,7 +386,11 @@ export class ToolContext {
         const held = prov.mapId !== undefined && prov.mapId !== null && prov.mapId === idBefore;
         this.snapshots.provenance = held
           ? { ...prov, mapId: env.value?.mapId ?? null }
-          : { ...prov, kind: prov.kind === "shared" ? "unknown" : prov.kind, mapId: env.value?.mapId ?? null };
+          : {
+              ...prov,
+              kind: prov.kind === "shared" || prov.kind === "sketch" ? "unknown" : prov.kind,
+              mapId: env.value?.mapId ?? null
+            };
         return "Reloaded the map that was in the page before the restart (nothing lost).";
       }
     }
@@ -505,6 +509,8 @@ export class ToolContext {
       "mapId",
       "path",
       "sharedVersion",
+      "sketchSlug",
+      "sketchVersion",
       "sharedUpdatedBy",
       "sharedUpdatedAt",
       "fetchedAt",

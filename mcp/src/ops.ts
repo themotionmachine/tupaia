@@ -135,6 +135,8 @@ export interface Sketch {
   rev: number;
   /** Set by sketch summary; kept for save. */
   summaryMarkdown: string | null;
+  /** The rev summaryMarkdown was made at (save refreshes a stale one). */
+  summaryRev?: number;
   /** Builder-2 bookkeeping (save): the rev and blob version last saved. */
   saved: { rev: number; version: number | null; at: string } | null;
   lastRebase: Record<string, unknown> | null;

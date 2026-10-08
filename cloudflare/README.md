@@ -14,11 +14,39 @@ browser ─ https://map.activationlayer.org ─▶ fmg-map Worker
    ├─ GET  /api/map/:id/meta           "last saved by" + lock status
    ├─ GET  /api/map/:id/versions       retained snapshots (≤20)
    ├─ POST /api/map/:id/restore?v=n    roll back to a version
-   └─ POST /api/map/:id/{claim,release} soft advisory edit lock
+   ├─ POST /api/map/:id/{claim,release} soft advisory edit lock
+   ├─ GET  /api/map/:id/ops            a sketch's ops.json  (R2)          [not deployed yet]
+   ├─ PUT  /api/map/:id/ops            replace ops.json     (R2, ≤ 2 MB)  [not deployed yet]
+   └─ DELETE /api/map/:id              remove a map (403 for shared)     [not deployed yet]
 ```
 
-Storage: blobs in **R2** (`maps/<id>.map`, `maps/<id>/v<n>.map`); one metadata row
-per map in **D1**. The blob is opaque — the Worker never parses it.
+Storage: blobs in **R2** (`maps/<id>.map`, `maps/<id>/v<n>.map`, and for sketches
+`maps/<id>/ops.json`); one metadata row per map in **D1**. The blob is opaque — the Worker
+never parses it.
+
+### Sketch routes (added for the MCP server's sketches; NOT deployed)
+
+The MCP server (`mcp/`) stores a provisional sketch of the shared map as its own map id,
+`sketch-<slug>`, plus an operation log beside it. Two routes were added for that; **they are
+in `worker/src/index.ts` but are not deployed. Deploying them is Ryan's call** (`./cloudflare/deploy.sh`
+after review). The live site answers them with its generic 404 until then, and the MCP server
+refuses to save a sketch against such a Worker.
+
+- `GET /api/map/:id/ops`: the JSON at `maps/<id>/ops.json`. 404 `{error:'not_found', id}` when
+  the map or its ops.json does not exist.
+- `PUT /api/map/:id/ops`: replace it. The body must be a JSON object, at most 2 MB (413
+  `too_large`, 400 `bad_json`/`empty_body`); no version guard; the map must exist (404), so
+  PUT the blob first. Returns `{id, bytes, updated_at}`.
+- `DELETE /api/map/:id`: delete the current blob, every `maps/<id>/v<n>.map`, `ops.json` and
+  the D1 row; returns `{id, deleted:true, objects}`. `shared` is refused with 403
+  `{error:'forbidden'}`; an unknown id is 404.
+
+Nothing else changed: existing handlers are untouched, `snapshotAndPrune` and `listVersions`
+only look at `maps/<id>/v*`, so `ops.json` never counts as a version. Tested locally with
+`wrangler dev --local` against a scratch config and `--persist-to` a scratch directory (never
+`cloudflare/.wrangler`): PUT `sketch-x`, GET/PUT its ops (404 before, 200 after, 400 for non-JSON
+and arrays, 413 over 2 MB, 404 for a missing map), `GET /api/maps`, `DELETE sketch-x` (3 objects,
+then 404 for the blob and ops), `DELETE shared` → 403 with the shared map untouched.
 
 ## Layout
 
@@ -37,13 +65,19 @@ Client fork surface is just that one file, two buttons in `src/index.html`
 The MCP server lives in `mcp/` with its own `package.json` and `node_modules`; nothing
 in it is imported by the app or shipped in `dist/`. Its other repo-level files are
 `.mcp.json` (registers the local-mode `tupaia` server), `.claude/skills/tupaia-dexterity/`
-and `docs/architecture/runtime_api.md`. Inside the app it adds two small export hooks,
-each marked `// tupaia-mcp:`:
+and `docs/architecture/runtime_api.md`. Inside the app it adds two small export hooks and one
+client guard, each marked `// tupaia-mcp:`:
 `src/controllers/states-editor.ts` puts the module-private `adjustProvinces` and
 `stateRemove` on `window.__tupaiaInternals` when the states editor module loads, and
 `public/modules/ui/heightmap-editor.js` returns its rebuild closures (`restoreKeptData`,
 `restoreRiskedData`, `regenerateErasedData`) from `editHeightmap({tupaiaExport: true})`
-without opening the editor. Re-check both after an upstream rebase.
+without opening the editor. The guard: `src/io/load.ts` fires a `map:loaded` event after a
+successful load (one line), and `src/io/cloud-cloudflare.ts` uses it (with the existing
+`map:generated`) so `loadedVersion` only holds while the page still has the map it loaded from
+`shared`; when it does not (a `?maplink` sketch, a file, a new map), `saveSharedMap` shows
+"Replace the shared map v<N>?" and, on Replace, PUTs with `X-Map-Version: N` instead of the old
+versionless PUT whose 409 dialog offered an `X-Map-Overwrite` button. Re-check all three after
+an upstream rebase.
 
 ## Local smoke test (no Cloudflare account needed)
 
