@@ -31,11 +31,16 @@ const mapUrl = (id: string, suffix = "") => `${apiBase()}/api/map/${encodeURICom
 let loadedVersion: number | null = null;
 
 // tupaia-mcp: loadedVersion only holds while the page still has the map loaded from `shared`.
-// A shared load arms `pendingVersion`; the next completed load (load.ts fires "map:loaded") takes
-// it over and any other load clears it. "map:generated" (fired by every generate AND, before
-// "map:loaded", by every load) clears it too. So a map opened from a ?maplink sketch, a file or
-// a new map never saves over `shared` without a confirmation.
+// Every load starts with "map:loading" (load.ts, before the loader's callback), which disarms
+// `pendingVersion`; a shared load's callback then arms it, and the completed load ("map:loaded")
+// takes it over. So a shared load that never completes (invalid/newer file, cancelled, parse
+// error) cannot lend its version to the next load. "map:generated" (fired by every generate AND,
+// before "map:loaded", by every load) clears loadedVersion too. So a map opened from a ?maplink
+// sketch, a file or a new map never saves over `shared` without a confirmation.
 let pendingVersion: number | null = null;
+window.addEventListener("map:loading", () => {
+  pendingVersion = null;
+});
 window.addEventListener("map:loaded", () => {
   loadedVersion = pendingVersion;
   pendingVersion = null;

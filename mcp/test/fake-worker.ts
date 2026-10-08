@@ -1,8 +1,8 @@
 // In-process fake of the shared-map Worker (cloudflare/worker/src/index.ts) for tests.
 // Same routes and semantics, for any map id: GET /api/maps, meta, versions, GET/PUT map with the
 // X-Map-Version stale guard (409 {error:'conflict', version, updated_by, updated_at}), restore?v=N,
-// claim/release, GET/PUT /api/map/:id/ops (JSON, 2 MB, 404 when absent) and DELETE /api/map/:id
-// (403 for 'shared'; removes the blob, the versions, ops.json and the row). Also serves
+// claim/release, GET/PUT /api/map/:id/ops (JSON, 2 MB, 404 when absent; PUT for sketch-* only) and DELETE /api/map/:id
+// (403 for any id but sketch-*; removes the blob, the versions, ops.json and the row). Also serves
 // /versioning.js (configurable VERSION) and / (an index.html with an entry chunk) for the build
 // check, or, with `assetsDir`, the built app itself (like the real Worker's ASSETS binding), so a
 // browser can boot it same-origin. Records every request with its headers. Binds 127.0.0.1 only.
@@ -53,6 +53,8 @@ export interface FakeWorkerOptions {
 
 const KEEP_VERSIONS = 20;
 const MAX_OPS_BYTES = 2 * 1024 * 1024;
+/** Like the Worker: ops.json writes and DELETE are for `sketch-<slug>` ids only. */
+const isSketchId = (id: string) => id.startsWith("sketch-") && id.length > "sketch-".length;
 const ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/i;
 
 const TYPES: Record<string, string> = {
@@ -330,7 +332,7 @@ export class FakeWorker {
       });
     }
     if (!sub && method === "DELETE") {
-      if (id === "shared") return send(403, { error: "forbidden", id });
+      if (!isSketchId(id)) return send(403, { error: "forbidden", id });
       const objects = 1 + e.retained.size + (e.ops ? 1 : 0);
       this.maps.delete(id);
       return send(200, { id, deleted: true, objects });
@@ -347,6 +349,7 @@ export class FakeWorker {
       return send(200, e.ops.toString("utf8"), { "content-type": "application/json; charset=utf-8" });
     }
     if (sub === "ops" && method === "PUT") {
+      if (!isSketchId(id)) return send(403, { error: "forbidden", id });
       if (body.length === 0) return send(400, { error: "empty_body" });
       if (body.length > MAX_OPS_BYTES) return send(413, { error: "too_large" });
       let parsed: unknown;

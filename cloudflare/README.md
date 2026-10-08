@@ -16,8 +16,8 @@ browser ─ https://map.activationlayer.org ─▶ fmg-map Worker
    ├─ POST /api/map/:id/restore?v=n    roll back to a version
    ├─ POST /api/map/:id/{claim,release} soft advisory edit lock
    ├─ GET  /api/map/:id/ops            a sketch's ops.json  (R2)          [not deployed yet]
-   ├─ PUT  /api/map/:id/ops            replace ops.json     (R2, ≤ 2 MB)  [not deployed yet]
-   └─ DELETE /api/map/:id              remove a map (403 for shared)     [not deployed yet]
+   ├─ PUT  /api/map/:id/ops            replace ops.json (sketch-*, ≤ 2 MB) [not deployed yet]
+   └─ DELETE /api/map/:id              remove a sketch (403 otherwise)   [not deployed yet]
 ```
 
 Storage: blobs in **R2** (`maps/<id>.map`, `maps/<id>/v<n>.map`, and for sketches
@@ -34,19 +34,24 @@ refuses to save a sketch against such a Worker.
 
 - `GET /api/map/:id/ops`: the JSON at `maps/<id>/ops.json`. 404 `{error:'not_found', id}` when
   the map or its ops.json does not exist.
-- `PUT /api/map/:id/ops`: replace it. The body must be a JSON object, at most 2 MB (413
-  `too_large`, 400 `bad_json`/`empty_body`); no version guard; the map must exist (404), so
-  PUT the blob first. Returns `{id, bytes, updated_at}`.
+- `PUT /api/map/:id/ops`: replace it. Only for `sketch-<slug>` ids (403 `{error:'forbidden'}`
+  for `shared` and every other id, so this adds no write path to the shared map). The body must
+  be a JSON object, at most 2 MB (413 `too_large`, 400 `bad_json`/`empty_body`); no version
+  guard; the map must exist (404), so PUT the blob first. Returns `{id, bytes, updated_at}`.
 - `DELETE /api/map/:id`: delete the current blob, every `maps/<id>/v<n>.map`, `ops.json` and
-  the D1 row; returns `{id, deleted:true, objects}`. `shared` is refused with 403
-  `{error:'forbidden'}`; an unknown id is 404.
+  the D1 row (R2 deletes in batches of 1000 keys); returns `{id, deleted:true, objects}`. Only
+  for `sketch-<slug>` ids: `shared` and every other map are refused with 403
+  `{error:'forbidden'}` (a delete drops the version history a PUT keeps); an unknown sketch is
+  404.
 
 Nothing else changed: existing handlers are untouched, `snapshotAndPrune` and `listVersions`
 only look at `maps/<id>/v*`, so `ops.json` never counts as a version. Tested locally with
 `wrangler dev --local` against a scratch config and `--persist-to` a scratch directory (never
 `cloudflare/.wrangler`): PUT `sketch-x`, GET/PUT its ops (404 before, 200 after, 400 for non-JSON
 and arrays, 413 over 2 MB, 404 for a missing map), `GET /api/maps`, `DELETE sketch-x` (3 objects,
-then 404 for the blob and ops), `DELETE shared` → 403 with the shared map untouched.
+then 404 for the blob and ops), `DELETE shared` → 403 with the shared map untouched; and after
+the sketch-only restriction: `PUT shared/ops`, `PUT other/ops`, `PUT sketch-/ops`,
+`DELETE other` and `DELETE %73hared` → 403, `GET shared/ops` → 404.
 
 ## Layout
 
@@ -71,9 +76,10 @@ client guard, each marked `// tupaia-mcp:`:
 `stateRemove` on `window.__tupaiaInternals` when the states editor module loads, and
 `public/modules/ui/heightmap-editor.js` returns its rebuild closures (`restoreKeptData`,
 `restoreRiskedData`, `regenerateErasedData`) from `editHeightmap({tupaiaExport: true})`
-without opening the editor. The guard: `src/io/load.ts` fires a `map:loaded` event after a
-successful load (one line), and `src/io/cloud-cloudflare.ts` uses it (with the existing
-`map:generated`) so `loadedVersion` only holds while the page still has the map it loaded from
+without opening the editor. The guard: `src/io/load.ts` fires a `map:loading` event when a load
+starts (before the loader's callback) and a `map:loaded` event after a successful load (one line
+each), and `src/io/cloud-cloudflare.ts` uses them (with the existing `map:generated`) so a shared
+load that never completes cannot lend its version to the next load, and so `loadedVersion` only holds while the page still has the map it loaded from
 `shared`; when it does not (a `?maplink` sketch, a file, a new map), `saveSharedMap` shows
 "Replace the shared map v<N>?" and, on Replace, PUTs with `X-Map-Version: N` instead of the old
 versionless PUT whose 409 dialog offered an `X-Map-Overwrite` button. Re-check all three after

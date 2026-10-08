@@ -42,8 +42,11 @@ const KEEP_VERSIONS = 20;
 const MAX_BLOB_BYTES = 64 * 1024 * 1024;
 /** The ops.json sidecar is small JSON (a sketch's operation log). */
 const MAX_OPS_BYTES = 2 * 1024 * 1024;
-/** The one map DELETE never touches. */
-const PROTECTED_ID = "shared";
+/** ops.json writes and DELETE are for sketches only (`sketch-<slug>`); never `shared`. */
+const SKETCH_PREFIX = "sketch-";
+const isSketchId = (id: string) => id.startsWith(SKETCH_PREFIX) && id.length > SKETCH_PREFIX.length;
+/** R2 bulk delete takes at most 1000 keys per call. */
+const R2_DELETE_BATCH = 1000;
 /** Advisory edit-lock TTL (FR-8). */
 const LOCK_TTL_MS = 15 * 60 * 1000;
 /** Slugs must be filesystem/key-safe. */
@@ -267,9 +270,11 @@ async function getOps(env: Env, id: string): Promise<Response> {
   return new Response(obj.body, { headers: { "content-type": "application/json; charset=utf-8" } });
 }
 
-/** PUT /api/map/:id/ops — replace the ops.json sidecar. JSON object, ≤ 2 MB, no version guard;
- *  the map itself must exist (PUT the blob first). */
+/** PUT /api/map/:id/ops — replace the ops.json sidecar. Sketch ids only (403 otherwise, so no
+ *  new write path to `shared`). JSON object, ≤ 2 MB, no version guard; the map itself must exist
+ *  (PUT the blob first). */
 async function putOps(req: Request, env: Env, id: string): Promise<Response> {
+  if (!isSketchId(id)) return json({ error: "forbidden", id }, 403);
   const body = await req.arrayBuffer();
   if (body.byteLength === 0) return json({ error: "empty_body" }, 400);
   if (body.byteLength > MAX_OPS_BYTES) return json({ error: "too_large" }, 413);
@@ -286,10 +291,11 @@ async function putOps(req: Request, env: Env, id: string): Promise<Response> {
   return json({ id, bytes: body.byteLength, updated_at: new Date().toISOString() });
 }
 
-/** DELETE /api/map/:id — remove a map: its blob, every version snapshot, ops.json and the D1
- *  row. Never the shared map (403). */
+/** DELETE /api/map/:id — remove a sketch: its blob, every version snapshot, ops.json and the D1
+ *  row. Sketch ids only: `shared` and every other map are refused (403), since a delete drops
+ *  the version history a PUT keeps. */
 async function deleteMap(env: Env, id: string): Promise<Response> {
-  if (id === PROTECTED_ID) return json({ error: "forbidden", id }, 403);
+  if (!isSketchId(id)) return json({ error: "forbidden", id }, 403);
   const row = await getRow(env, id);
   if (!row) return json({ error: "not_found", id }, 404);
   const keys = [currentKey(id)];
@@ -299,7 +305,7 @@ async function deleteMap(env: Env, id: string): Promise<Response> {
     keys.push(...listed.objects.map((o) => o.key));
     cursor = listed.truncated ? listed.cursor : undefined;
   } while (cursor);
-  await env.MAPS.delete(keys);
+  for (let k = 0; k < keys.length; k += R2_DELETE_BATCH) await env.MAPS.delete(keys.slice(k, k + R2_DELETE_BATCH));
   await env.DB.prepare("DELETE FROM map WHERE id = ?").bind(id).run();
   return json({ id, deleted: true, objects: keys.length });
 }

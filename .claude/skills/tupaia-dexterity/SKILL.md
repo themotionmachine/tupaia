@@ -162,8 +162,9 @@ The loop:
    page map did not come from the shared map or was already edited; do what the message says.
 3. Make the changes with the normal tools, with screenshots as usual. Every mutating call is
    logged with what it actually did (ids, literal generated names, literal cells). Prefer
-   edit, add, paint_cells and display. `regenerate`, `generate_map`, `load_map` and
-   `snapshot restore` make the sketch blob-only (it can be saved, viewed and promoted as is,
+   edit, add, paint_cells and display. `regenerate`, `generate_map`, `load_map`,
+   `snapshot restore` and a height paint with `rebuild:'risk'` or `'erase'` make the sketch
+   blob-only (it can be saved, viewed and promoted as is,
    but not replayed onto a newer map); undo them if that was not intended. eval is replayed
    verbatim and marked unsafe; avoid it. `snapshot {action:'undo'}` takes the last op out of
    the log.
@@ -186,8 +187,13 @@ The loop:
 
 Stop and ask Ryan, instead of working around it, when:
 
-- the rebase reports a conflict (a target someone removed, `both changed <field>`): name each
-  op and its `reason`; do not rerun with `onConflict:'skip'` unless he agrees to drop those ops;
+- the rebase reports a conflict (a target someone removed, `both changed <field>`, an id that
+  now names another entity, a removal of something someone changed since, renumbered cells):
+  name each op and its `reason`; do not rerun with `onConflict:'skip'` unless he agrees to
+  drop those ops. While a stopped rebase holds the page, shared_save refuses too: undo it
+  (`snapshot {action:'undo', n}` as the rebase said) first;
+- `sketch save` refuses because ops.json would pass 2 MB: undo the largest ops (big paint
+  selections) or split the sketch, his call;
 - the sketch is blob-only and the shared map moved since its base: it cannot be replayed, and
   promoting it would need the shared map's newer edits thrown away (sketch_promote refuses);
 - sketch_promote refuses with LOCKED, BUILD or STALE, or the preview shows a version you did not

@@ -148,14 +148,19 @@ the shared map plus an ops log (`src/ops.ts`). `start` needs a page map loaded w
 `load_map {source:'shared'}` and unedited. While a sketch records, every mutating tool call
 appends `{seq, tool, args, resolved, summary, at, digestBefore, digestAfter}`; `resolved` comes
 from the bridge's own apply result (ids, literal generated names, literal cell lists, the
-created entities' ids, the layer on/off lists, verbatim eval code). regenerate, generate_map,
-load_map and snapshot restore are logged as non-replayable, which makes the sketch blob-only
-until they are undone; undo pops the op it undid and redo re-appends it.
+created entities' ids, the layer on/off lists, verbatim eval code, and for replay's checks the
+target's identity fields and the cell-graph fingerprint of a literal cell list). regenerate,
+generate_map, load_map, snapshot restore and a paint_cells height rebuild ('risk' or 'erase')
+are logged as non-replayable, which makes the sketch blob-only until they are undone; undo pops
+the op it undid and redo re-appends it.
 
 `src/replay.ts` replays a log onto whatever map is in the page through the same bridge
 functions, rewriting the ids of entities the sketch created through an id map and checking
-each op first (missing or removed targets, fields both sides changed). `summary` writes
-markdown and before/after screenshots under `TUPAIA_OUT/sketches/<slug>/`.
+each op first (missing or removed targets, fields both sides changed, a marker/route/zone id
+that now names another entity, a removal of an entity someone changed since, a literal cell
+list on a renumbered cell graph). Created ids are mapped positionally: an op only sees ids that
+earlier adds created. `summary` writes markdown and like-for-like before/after screenshots
+under `TUPAIA_OUT/sketches/<slug>/`.
 `rebase {onto:{path}}` (replay onto a map file) is a test hook (`TUPAIA_TEST_HOOKS=1`).
 
 ### Saving, viewing and promoting sketches
@@ -170,9 +175,11 @@ blob:{id, version, bytes, sha256}, viewUrl, ops}`.
   version, none on the first save) and then ops.json, and returns
   `viewUrl = <origin>/?maplink=<encodeURIComponent(origin + '/api/map/sketch-<slug>')>`. The app
   checks `?maplink` before its shared-map boot load, so the link opens the sketch, not the
-  shared map.
+  shared map. A log whose ops.json would exceed the Worker's 2 MB limit is refused before the
+  blob goes up.
 - `list` (read-only, also in local mode) shows the `sketch-*` maps with their ops.json headers;
-  `open {slug}` loads one into the page as the active sketch (origin kind `sketch`).
+  `open {slug}` loads one into the page as the active sketch (origin kind `sketch`). ops.json
+  is not trusted: replayability, the unsafe mark and summaries are recomputed from each record.
 - `rebase` without `onto` replays the log onto the CURRENT shared map (a GET) and leaves the
   result in the page with the shared origin at that version; it does not save.
 - `discard {slug, confirm:true}` DELETEs `sketch-<slug>` (blob, versions, ops.json).
@@ -180,13 +187,16 @@ blob:{id, version, bytes, sha256}, viewUrl, ops}`.
   the shared map's current version; then it runs `shared_save`'s own code path end to end
   (preview, one-time token, confirm; lineage, lock, build, backups; one PUT with
   X-Map-Version, never X-Map-Overwrite). `then:'discard'` deletes the sketch afterwards.
+- Plain `shared_save` refuses while a stopped rebase holds the page, and a confirmed
+  `shared_save` with an active sketch ends that sketch (its changes went live directly).
 
 Sketch writes (blob PUT, ops PUT, DELETE) are re-checked inside `src/shared-api.ts`: the id
 must match `sketch-<slug>` (so `shared` can never be deleted or overwritten through them) and
 the server must be in its spawn-time live mode. Every request goes into `session`'s
 `outwardRequests`. They take no token, because they never touch the shared map.
 
-The two Worker routes they use (`GET|PUT /api/map/:id/ops`, `DELETE /api/map/:id`) are in
+The two Worker routes they use (`GET|PUT /api/map/:id/ops`, `DELETE /api/map/:id`; the PUT
+and the DELETE only for `sketch-*` ids, 403 otherwise) are in
 `cloudflare/worker/src/index.ts` but are NOT deployed until Ryan deploys them. Until then,
 against the live site: `save` probes for them first (one GET of `/api/map/shared/ops`; a Worker
 without them answers its generic 404) and refuses before writing anything; `list` shows the

@@ -122,6 +122,7 @@ export function uploadMap(file: Blob, callback?: () => void): void {
 
   const fileReader = new FileReader();
   fileReader.onloadend = async fileLoadedEvent => {
+    window.dispatchEvent(new CustomEvent("map:loading")); // tupaia-mcp: cloud-cloudflare.ts drops a stale shared-load arm
     if (callback) callback();
     ensureEl("coas").innerHTML = ""; // remove auto-generated emblems
 

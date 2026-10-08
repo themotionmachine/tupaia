@@ -485,10 +485,18 @@ describe("shared-api sketch writes (the client re-checks id and mode)", () => {
     }
   });
 
-  test("the fake Worker itself refuses DELETE shared with 403, like the real one", async () => {
+  test("the fake Worker itself refuses DELETE and ops writes for anything but sketch-*, like the real one", async () => {
     const res = await fetch(`${fake.origin}/api/map/shared`, { method: "DELETE" });
     assert.equal(res.status, 403);
     assert.equal(fake.row.version, 2);
+    const ops = await fetch(`${fake.origin}/api/map/shared/ops`, { method: "PUT", body: "{}" });
+    assert.equal(ops.status, 403, "no write path to the shared map's prefix");
+    assert.equal(fake.maps.get("shared")?.ops ?? null, null);
+    const other = await fetch(`${fake.origin}/api/map/other`, { method: "PUT", body: fs.readFileSync(DEMO_MAP) });
+    assert.equal(other.status, 200);
+    assert.equal((await fetch(`${fake.origin}/api/map/other`, { method: "DELETE" })).status, 403);
+    assert.equal((await fetch(`${fake.origin}/api/map/other/ops`, { method: "PUT", body: "{}" })).status, 403);
+    assert.equal(fake.maps.has("other"), true);
   });
 });
 
@@ -530,6 +538,48 @@ describe("app client guard: Save to shared map from a page that did not load sha
       assert.equal(ok[0].headers["x-map-overwrite"], undefined);
       assert.equal(fake.row.version, 5);
     } finally {
+      await v.close();
+    }
+  });
+
+  test("a shared load that never completes does not lend its version to the next load", async () => {
+    const v = await openViewer(`${origin}/?maplink=${encodeURIComponent(`${origin}/api/map/sketch-x`)}`);
+    const shared = fake.maps.get("shared");
+    const good = shared?.current;
+    try {
+      await viewerLoads(v.page, 1);
+      // the shared blob is unloadable: the load is armed with its version but never completes
+      if (shared) shared.current = Buffer.from("not a map at all");
+      fake.clearLog();
+      await v.page.evaluate(() => (globalThis as any).lazy.sharedMap().then((m: any) => m.loadSharedMap()));
+      await v.page.waitForTimeout(1500);
+      if (shared && good) shared.current = good;
+      await v.page.evaluate(() => {
+        const $ = (globalThis as any).$;
+        $(".ui-dialog-content").each(function (this: unknown) {
+          try {
+            $(this).dialog("close");
+          } catch {}
+        });
+      });
+      assert.equal(await viewerDialog(v.page), null);
+      assert.deepEqual(
+        fake.requests.filter(q => q.path.startsWith("/api/")).map(q => `${q.method} ${q.path}`),
+        ["GET /api/map/shared"]
+      );
+      // the next load is the sketch, not the shared map
+      await v.page.evaluate(
+        u => (globalThis as any).lazy.load().then((m: any) => m.loadMapFromURL(u)),
+        `${origin}/api/map/sketch-x`
+      );
+      await viewerLoads(v.page, 2);
+      await save(v.page);
+      await v.page.waitForSelector(".ui-dialog:visible");
+      assert.equal((await viewerDialog(v.page))?.title, "Replace the shared map?");
+      assert.deepEqual(puts(), [], "nothing sent: the sketch did not inherit the shared version");
+      await v.page.locator(".ui-dialog-buttonset button", { hasText: "Cancel" }).click();
+    } finally {
+      if (shared && good) shared.current = good;
       await v.close();
     }
   });

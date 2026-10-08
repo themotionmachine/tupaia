@@ -771,6 +771,62 @@
     }
   };
 
+  // ---------------------------------------------------------------- identity (sketch replay)
+
+  const shortHash = v => {
+    const str = String(v ?? "");
+    let h = 0x811c9dc5;
+    for (let k = 0; k < str.length; k++) {
+      h ^= str.charCodeAt(k);
+      h = Math.imul(h, 0x01000193);
+    }
+    return `${str.length}:${(h >>> 0).toString(36)}`;
+  };
+
+  /** Route end cells (identity of a route). */
+  function routeEnds(r) {
+    const pts = Array.isArray(r.points) ? r.points : [];
+    if (pts.length) return [pts[0]?.[2] ?? null, pts[pts.length - 1]?.[2] ?? null];
+    const cells = Array.isArray(r.cells) ? r.cells : [];
+    return cells.length ? [cells[0], cells[cells.length - 1]] : [];
+  }
+
+  /**
+   * The identifying and main fields of an entity, recorded with each edit/remove op of a sketch.
+   * Replay compares them with the target as it is then: ids of markers, routes and zones are
+   * reused (max id + 1), and a removal must not drop someone else's later change. Plain values
+   * only (no refs to other entities, which the sketch could have created).
+   */
+  const IDENT = {
+    burg: b => ({
+      name: b.name ?? null,
+      cell: b.cell ?? null,
+      population: b.population ?? null,
+      type: b.type ?? null,
+      capital: !!b.capital,
+      port: !!b.port
+    }),
+    state: s => ({ name: s.name ?? null, fullName: s.fullName ?? null, form: s.form ?? null, color: s.color ?? null }),
+    province: p => ({ name: p.name ?? null, fullName: p.fullName ?? null, color: p.color ?? null }),
+    culture: x => ({ name: x.name ?? null, color: x.color ?? null }),
+    religion: x => ({ name: x.name ?? null, color: x.color ?? null }),
+    marker: m => ({ cell: m.cell ?? null, type: m.type ?? null, icon: m.icon ?? null }),
+    route: r => ({ group: r.group ?? null, name: r.name ?? null, ends: routeEnds(r) }),
+    zone: z => ({ name: z.name ?? null, type: z.type ?? null, cells: shortHash((z.cells || []).join(",")) }),
+    river: r => ({ name: r.name ?? null, source: r.source ?? null, mouth: r.mouth ?? null }),
+    note: n => ({ name: n.name ?? null, legend: shortHash(n.legend) })
+  };
+
+  function identOf(type, x) {
+    const f = IDENT[type];
+    if (!f || !x || typeof x !== "object") return null;
+    try {
+      return clone(f(x));
+    } catch {
+      return null;
+    }
+  }
+
   // ---------------------------------------------------------------- edit
 
   function prepareEditOp(type, op, index, c) {
@@ -782,7 +838,15 @@
       if (op.set && Object.keys(op.set).length) fail("BAD_ARGS", "an op either sets fields or removes, not both");
       if (NO_REMOVE[type]) fail("REFUSED", NO_REMOVE[type]);
       REMOVE[type].check?.(r.entity, c);
-      return { index, ref: op.ref, i: r.i, name: r.name, entity: r.entity, remove: true };
+      return {
+        index,
+        ref: op.ref,
+        i: r.i,
+        name: r.name,
+        entity: r.entity,
+        remove: true,
+        ident: identOf(type, r.entity)
+      };
     }
     if (!isObj(op.set) || !Object.keys(op.set).length) fail("BAD_ARGS", "op needs set:{...} or remove:true");
     const table = FIELDS[type];
@@ -792,11 +856,21 @@
       if (!f) fail("BAD_FIELD", `${type} has no editable field '${key}'`, { details: Object.keys(table) });
       fs.push({ key, f, v: f.check(op.set[key], r.entity, c, op.set) });
     }
-    return { index, ref: op.ref, i: r.i, name: r.name, entity: r.entity, set: op.set, fs };
+    return {
+      index,
+      ref: op.ref,
+      i: r.i,
+      name: r.name,
+      entity: r.entity,
+      set: op.set,
+      fs,
+      ident: identOf(type, r.entity)
+    };
   }
 
   function planRow(p) {
     const row = { index: p.index, i: p.i, name: p.name };
+    if (p.ident) row.ident = p.ident;
     if (p.remove) {
       row.remove = true;
       return row;
@@ -813,7 +887,13 @@
   function applyEditOp(type, p, c) {
     if (p.remove) {
       REMOVE[type].apply(p.entity, c);
-      return { index: p.index, i: p.i, name: p.name, removed: true, _r: { ref: p.i, name: p.name, remove: true } };
+      return {
+        index: p.index,
+        i: p.i,
+        name: p.name,
+        removed: true,
+        _r: { ref: p.i, name: p.name, remove: true, ident: p.ident ?? null }
+      };
     }
     const before = {};
     for (const { key, f } of p.fs) before[key] = clone(f.get(p.entity));
@@ -826,6 +906,7 @@
     for (const { key, f, v } of p.fs) lit[key] = literalValue(key, f, v, p.entity, p.set[key]);
     const r = { name: p.name, set: lit, before, after };
     if (type !== "map") r.ref = p.i;
+    if (p.ident) r.ident = p.ident;
     return { index: p.index, i: p.i, name, before, after, _r: r };
   }
 
@@ -1516,6 +1597,8 @@
     if (!h) fail("BAD_TYPE", `add does not handle '${type}'`, { details: Object.keys(ADD) });
     const items = Array.isArray(a.items) ? a.items : [];
     if (!items.length) fail("BAD_ARGS", "items must be a non-empty array");
+    // zone items keep literal cell lists: record the graph they refer to
+    const graph = type === "zone" && a.phase === "apply" ? (T.cellGraph?.() ?? null) : null;
     const out = await runBatch(
       a,
       items,
@@ -1539,6 +1622,7 @@
       items: out.done.map(d => d._r),
       created: out.done.map(d => d._created)
     };
+    if (graph) resolved.graph = graph;
     if (a.redraw !== undefined) resolved.redraw = a.redraw;
     return {
       created: out.done.map(({ _r, _created, ...row }) => row),
@@ -2114,6 +2198,8 @@
 
   FNS.paint = async a => {
     const P = preparePaint(a);
+    // the graph the literal cell list refers to (taken before a height rebuild renumbers it)
+    const graph = T.cellGraph?.() ?? null;
     if (a.phase !== "apply") {
       const c = batchContext(a);
       const out = await paintApply(P, false, c);
@@ -2129,6 +2215,7 @@
     if (P.zone) set.zone = { ref: P.zone.i, op: P.zone.op };
     if (P.height) set.height = clone(P.height);
     const resolved = { select: { cells: P.cells.slice() }, set };
+    if (graph) resolved.graph = graph;
     if (a.redraw !== undefined) resolved.redraw = a.redraw;
     return { cells: P.cells.length, set: out, resolved, ...rd, notes: [...c.notes] };
   };

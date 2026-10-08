@@ -269,9 +269,12 @@ export async function sharedSave(
     replaceWithUnrelated?: boolean;
     expectVersion?: number;
     skipBuildCheck?: boolean;
+    /** Internal (sketch_promote): the call publishes the active sketch itself. */
+    viaSketch?: boolean;
   }
 ): Promise<Record<string, unknown>> {
   requireLive(ctx);
+  const sk = ctx.sketches.current;
   const data = await scope.call<{ text: string; customization: number; fileName: string | null }>(
     "mapData",
     {},
@@ -320,6 +323,12 @@ export async function sharedSave(
       message: `${meta.editing_by} holds the edit lock until ${meta.lock_expires}; force:true overrides only if the human agrees`
     });
   }
+  if (sk?.suspended && !args.viaSketch) {
+    refusals.push({
+      code: "SKETCH",
+      message: `the page holds a stopped sketch rebase (a partial replay of sketch '${sk.slug}'), not a finished map: ${sk.suspended.reason}. Undo it (snapshot {action:'undo', n:${sk.suspended.entries.length}}) or finish the rebase (sketch {action:'rebase', onConflict:'skip'}) first.`
+    });
+  }
   if (build.verdict === "block") refusals.push({ code: "BUILD", message: build.message });
   if (build.verdict === "unknown" && !skipBuild) {
     refusals.push({
@@ -359,7 +368,11 @@ export async function sharedSave(
       headers: { "X-Map-Version": String(meta.version), "X-Map-Name": data.fileName },
       overwriteHeader: "never sent"
     },
-    overrides: overrides.length ? overrides : undefined
+    overrides: overrides.length ? overrides : undefined,
+    activeSketch:
+      sk && !args.viaSketch
+        ? `sketch '${sk.slug}' is active (base v${sk.base.version ?? "?"}, ${sk.ops.length} ops): shared_save publishes the page map, sketch changes included, and ends the sketch (its changes would otherwise be applied twice by a later rebase or promote). To publish a sketch, use sketch_promote.`
+        : undefined
   };
 
   if (!args.confirm) {
@@ -417,8 +430,17 @@ export async function sharedSave(
     sharedUpdatedAt: saved.updated_at,
     fetchedAt: new Date().toISOString()
   });
+  // a sketch whose changes went live this way is done: a later rebase or promote would apply
+  // its adds and paints a second time on top of themselves
+  let sketchEnded: string | undefined;
+  if (sk && !args.viaSketch && ctx.sketches.current === sk) {
+    ctx.sketches.current = null;
+    sketchEnded = `sketch '${sk.slug}' ended: its changes are on the shared map as v${saved.version} through shared_save${sk.saved ? "; its saved copy stays on the Worker (sketch {action:'discard'} removes it)" : ""}`;
+    scope.notes.push(sketchEnded);
+  }
   return {
     saved,
+    ...(sketchEnded ? { sketchEnded } : {}),
     overwrote: preview.wouldOverwrite,
     overrides: preview.overrides,
     backup: backups,

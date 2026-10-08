@@ -24,8 +24,33 @@ export const NOT_REPLAYABLE: Record<string, string> = {
   load_map: "load_map replaced the whole map",
   snapshot: "snapshot restore jumped to a stored map",
   shared_restore: "shared_restore reloaded the shared map",
-  screenshot: "screenshot keepLayers could not be recorded"
+  screenshot: "screenshot keepLayers could not be recorded",
+  "paint_cells:risk":
+    "paint_cells height rebuild:'risk' renumbers every cell and recomputes the coastline, lakes and rivers (erosion regenerates rivers at random, burgs that end in water are dropped), so it and later literal cell lists cannot be replayed",
+  "paint_cells:erase":
+    "paint_cells height rebuild:'erase' regenerates every state, burg, culture, religion and province at random"
 };
+
+/**
+ * Why an op with this tool and resolved form cannot be replayed, or null when it can. Used when
+ * recording, when opening a saved log, and again by replay.
+ */
+export function unreplayableReason(tool: string, resolved: Resolved | null): string | null {
+  if (!(REPLAYABLE_TOOLS as readonly string[]).includes(tool))
+    return NOT_REPLAYABLE[tool] ?? `${tool} is not replayable`;
+  if (tool === "paint_cells" && resolved) {
+    const h = (resolved as PaintResolved).set?.height as { rebuild?: unknown } | undefined;
+    if (h && typeof h === "object") {
+      const rebuild = h.rebuild ?? "keep";
+      if (rebuild !== "keep")
+        return (
+          NOT_REPLAYABLE[`paint_cells:${String(rebuild)}`] ??
+          `paint_cells height rebuild:'${String(rebuild)}' cannot be replayed`
+        );
+    }
+  }
+  return null;
+}
 
 export interface EditResolved {
   type: string;
@@ -36,6 +61,12 @@ export interface EditResolved {
     before?: Record<string, unknown>;
     after?: Record<string, unknown>;
     remove?: boolean;
+    /**
+     * The entity's identifying and main fields before the op (bridge identOf): replay checks
+     * that the target is still the same entity (marker, route and zone ids are reused) and,
+     * for a removal, that nobody changed it since.
+     */
+    ident?: Record<string, unknown> | null;
   }>;
   redraw?: unknown;
 }
@@ -50,12 +81,16 @@ export interface AddResolved {
   items: Array<Record<string, unknown>>;
   /** Per item: every entity the item created (the item's own type first). */
   created: CreatedRef[][];
+  /** zone adds: fingerprint of the cell graph the items' literal cell lists refer to. */
+  graph?: string;
   redraw?: unknown;
 }
 
 export interface PaintResolved {
   select: { cells: number[] };
   set: Record<string, unknown>;
+  /** Fingerprint of the cell graph `select.cells` refers to (bridge cellGraph). */
+  graph?: string;
   redraw?: unknown;
 }
 
@@ -335,6 +370,51 @@ export class SketchStore {
   }
 }
 
+// ---------------------------------------------------------------- saved logs
+
+const cap = (v: unknown, n: number): string | undefined =>
+  typeof v === "string" ? (v.length > n ? `${v.slice(0, n - 3)}...` : v) : undefined;
+
+/**
+ * A record read back from a saved ops.json (which any Worker caller can replace), rebuilt from
+ * what replay actually uses: the tool and the resolved form. replayable, unsafe and summary are
+ * recomputed, never taken from the file, so a stored record cannot hide eval code behind a
+ * harmless sentence or mark a non-replayable op replayable.
+ */
+export function sanitizeRecord(raw: unknown, k: number): OpRecord {
+  const o = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const tool = typeof o.tool === "string" ? o.tool : "unknown";
+  const seq = Number.isInteger(o.seq) && (o.seq as number) > 0 ? (o.seq as number) : k + 1;
+  const resolved = o.resolved && typeof o.resolved === "object" ? (o.resolved as Resolved) : null;
+  const noop = o.noop === true && resolved === null;
+  const why = unreplayableReason(tool, resolved);
+  const storedNot = o.replayable === false ? (cap(o.reason, 200) ?? "not replayable (as saved)") : null;
+  const reason = noop
+    ? undefined
+    : (why ?? (resolved === null ? (storedNot ?? `${tool} has no resolved form`) : storedNot) ?? undefined);
+  const replayable = noop || !reason;
+  let summary: string;
+  if (noop) summary = `${tool} changed nothing (no-op).`;
+  else {
+    summary = summarizeOp(tool, replayable ? resolved : null, null, o.args);
+    if (!replayable) summary = `${summary} (not replayable: ${reason})`;
+  }
+  return {
+    seq,
+    tool,
+    args: o.args ?? null,
+    resolved: replayable ? resolved : null,
+    summary,
+    at: cap(o.at, 40) ?? "",
+    digestBefore: cap(o.digestBefore, 64) ?? null,
+    digestAfter: cap(o.digestAfter, 64) ?? null,
+    replayable,
+    ...(reason ? { reason } : {}),
+    ...(tool === "eval" ? { unsafe: true } : {}),
+    ...(noop ? { noop: true } : {})
+  };
+}
+
 // ---------------------------------------------------------------- summaries (one sentence)
 
 const q = (v: unknown): string => {
@@ -436,13 +516,18 @@ export class Unmapped extends Error {
   }
 }
 
+/** The entities one op created (as "type:id"). */
+export function createdBy(o: OpRecord): string[] {
+  if (o.tool !== "add" || !o.resolved) return [];
+  const out: string[] = [];
+  for (const list of (o.resolved as AddResolved).created ?? []) for (const c of list) out.push(`${c.type}:${c.i}`);
+  return out;
+}
+
 /** Every entity created by the ops (as "type:id"). */
 export function createdSet(ops: readonly OpRecord[]): Set<string> {
   const s = new Set<string>();
-  for (const o of ops) {
-    if (o.tool !== "add" || !o.resolved) continue;
-    for (const list of (o.resolved as AddResolved).created ?? []) for (const c of list) s.add(`${c.type}:${c.i}`);
-  }
+  for (const o of ops) for (const k of createdBy(o)) s.add(k);
   return s;
 }
 

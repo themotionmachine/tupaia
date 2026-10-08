@@ -15,7 +15,7 @@
 import type { CallScope, ToolContext } from "./context.ts";
 import {
   type AddResolved,
-  createdSet,
+  createdBy,
   type DisplayResolved,
   type EditResolved,
   type EvalResolved,
@@ -28,7 +28,8 @@ import {
   rewriteResolved,
   summarizeOp,
   takeResolved,
-  Unmapped
+  Unmapped,
+  unreplayableReason
 } from "./ops.ts";
 import { TIMEOUTS } from "./schemas.ts";
 
@@ -117,6 +118,9 @@ const show = (v: unknown): string => {
   return s.length > 60 ? `${s.slice(0, 57)}...` : s;
 };
 
+const whoOf = (type: string, o: EditResolved["ops"][number]) =>
+  type === "map" ? "the map" : `${type} ${o.name ? `'${o.name}' ` : ""}(${o.ref})`;
+
 /**
  * Fields of an edit op that both the sketch (before != after) and someone else (base value !=
  * current value) changed, to different values. `plan` is the bridge's validate plan.
@@ -133,9 +137,54 @@ export function bothChanged(r: EditResolved, plan: Array<Record<string, unknown>
       const mine = o.after[key];
       const cur = now[key];
       if (same(base, mine) || same(cur, base) || same(cur, mine)) continue;
-      const who = r.type === "map" ? "the map" : `${r.type} ${o.name ? `'${o.name}' ` : ""}(${o.ref})`;
-      out.push(`both changed ${key} of ${who}: base ${show(base)}, now ${show(cur)}, sketch ${show(mine)}`);
+      out.push(
+        `both changed ${key} of ${whoOf(r.type, o)}: base ${show(base)}, now ${show(cur)}, sketch ${show(mine)}`
+      );
     }
+  });
+  return out;
+}
+
+/** Types whose ids the app reuses after a removal (max id + 1), so an id alone is not identity. */
+export const REUSED_ID_TYPES: Record<string, string[]> = {
+  marker: ["cell", "type"],
+  route: ["group", "ends"],
+  zone: ["type", "name"]
+};
+
+/**
+ * Identity checks of an edit op against the bridge's validate plan (`plan[k].ident` is the
+ * target as it is now; `o.ident` as it was when the sketch recorded the op):
+ * - a removal: any recorded field that differs now means someone changed the entity since,
+ *   and removing it would silently drop their change;
+ * - an edit of a type whose ids get reused: the identifying fields must match, else the id now
+ *   names another entity (or someone moved it); fields the op itself sets are left to
+ *   bothChanged.
+ * `isCreated(k)`: op k targets an entity the sketch created (mapped to its replay id), skip it.
+ */
+export function identityConflicts(
+  r: EditResolved,
+  plan: Array<Record<string, unknown>>,
+  isCreated: (k: number) => boolean = () => false
+): string[] {
+  const out: string[] = [];
+  r.ops.forEach((o, k) => {
+    if (!o.ident || isCreated(k)) return;
+    const row = plan.find(p => p.index === k) ?? plan[k];
+    const now = row?.ident as Record<string, unknown> | null | undefined;
+    if (!now || typeof now !== "object") return;
+    const keys = o.remove
+      ? Object.keys(o.ident)
+      : (REUSED_ID_TYPES[r.type] ?? []).filter(key => !(key in (o.set ?? {})));
+    const diff = keys.filter(key => key in now && !same(o.ident?.[key], now[key]));
+    if (!diff.length) return;
+    const fields = diff.map(key => `${key} ${show(o.ident?.[key])} -> ${show(now[key])}`).join(", ");
+    if (o.remove)
+      out.push(`removed by the sketch, but ${whoOf(r.type, o)} was changed since by someone else (${fields})`);
+    else
+      out.push(
+        `target ${whoOf(r.type, o)} is not the entity the sketch edited (${fields}): it was removed and its id reused, or someone changed it`
+      );
   });
   return out;
 }
@@ -158,7 +207,13 @@ export async function replayOps(
     undoEntries: [],
     notes: []
   };
-  const rw = new Rewriter(res.idMap, createdSet(ops));
+  // positional: an op sees as "created by the sketch" only ids that EARLIER add ops created, so
+  // a pre-existing id that a later add reuses (zones, markers, routes: max id + 1) still means
+  // the pre-existing entity for the ops before that add
+  const rw = new Rewriter(res.idMap, new Set());
+  let prev: OpRecord | null = null;
+  // fingerprint of the page's cell graph, read once (replayable ops never renumber cells)
+  let pageGraph: string | null | undefined;
   const conflict = (op: OpRecord, reason: string, hard = false): boolean => {
     res.conflicts.push({ seq: op.seq, reason, op });
     if (hard || onConflict === "stop") {
@@ -170,6 +225,8 @@ export async function replayOps(
   };
 
   for (const op of ops) {
+    if (prev) for (const k of createdBy(prev)) rw.created.add(k);
+    prev = op;
     if (op.noop) {
       res.noops.push(op.seq);
       continue;
@@ -178,10 +235,34 @@ export async function replayOps(
       if (conflict(op, `not replayable: ${op.reason ?? `${op.tool} has no resolved form`}`)) break;
       continue;
     }
+    const why = unreplayableReason(op.tool, op.resolved);
+    if (why) {
+      if (conflict(op, `not replayable: ${why}`)) break;
+      continue;
+    }
     const fn = BRIDGE_FN[op.tool];
     if (!fn) {
       if (conflict(op, `no replay for tool '${op.tool}'`)) break;
       continue;
+    }
+    // literal cell lists (paint_cells, zone add) only mean the same places on the same cell graph
+    const graph = (op.resolved as { graph?: unknown }).graph;
+    if (typeof graph === "string") {
+      if (pageGraph === undefined)
+        pageGraph = await scope
+          .call<{ graph: string }>("cellGraph", {}, { noAlerts: true })
+          .then(g => g.graph)
+          .catch(() => null);
+      if (pageGraph !== null && pageGraph !== graph) {
+        if (
+          conflict(
+            op,
+            "the map's cells were renumbered since the sketch recorded this op (a heightmap rebuild); its literal cell list no longer points at the same places"
+          )
+        )
+          break;
+        continue;
+      }
     }
     let r: Resolved;
     try {
@@ -207,9 +288,18 @@ export async function replayOps(
         continue;
       }
       if (op.tool === "edit") {
-        const both = bothChanged(r as EditResolved, (v.value?.plan as Array<Record<string, unknown>>) ?? []);
-        if (both.length) {
-          if (conflict(op, both.join("; "))) break;
+        const plan = (v.value?.plan as Array<Record<string, unknown>>) ?? [];
+        const orig = op.resolved as EditResolved;
+        const created = (k: number) => {
+          const ref = orig.ops[k]?.ref;
+          return ref !== undefined && rw.created.has(`${orig.type}:${ref}`);
+        };
+        const problems = [
+          ...identityConflicts(r as EditResolved, plan, created),
+          ...bothChanged(r as EditResolved, plan)
+        ];
+        if (problems.length) {
+          if (conflict(op, problems.join("; "))) break;
           continue;
         }
       }
@@ -253,7 +343,8 @@ export async function replayOps(
     res.records.push({
       ...op,
       resolved: applied,
-      summary: op.tool === "eval" ? op.summary : summarizeOp(op.tool, applied, out, op.args),
+      summary: summarizeOp(op.tool, applied, out, op.args),
+      ...(op.tool === "eval" ? { unsafe: true } : {}),
       at: new Date().toISOString(),
       digestBefore,
       digestAfter: await scope.digest(),

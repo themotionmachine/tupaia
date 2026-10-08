@@ -256,8 +256,9 @@ writes the shared map.
   digestAfter}`. `resolved` is what was applied: ids instead of names, literal generated names
   (a replay gives the SAME names), literal cell lists for paint selections, created ids for add,
   layer on/off lists for display, verbatim code for eval (flagged unsafe).
-- Not replayable: `regenerate`, `generate_map`, `load_map`, `snapshot restore`, a call that
-  failed part-way. They are logged and make the sketch blob-only (can be saved and viewed, not
+- Not replayable: `regenerate`, `generate_map`, `load_map`, `snapshot restore`, a
+  `paint_cells` height edit with `rebuild:'risk'` or `'erase'` (renumbers cells / regenerates
+  entities at random), a call that failed part-way. They are logged and make the sketch blob-only (can be saved and viewed, not
   rebased) until undone. Undo stepping back past the sketch's start is permanent blob-only.
 - `snapshot {action:'undo'}` takes the last op out of the log; `redo` puts it back. A call
   that failed without changing anything is logged as a no-op.
@@ -266,14 +267,19 @@ writes the shared map.
 - `sketch {action:'summary', shots?}`: markdown (base, one sentence per op, map counts vs base)
   plus four screenshots under `TUPAIA_OUT/sketches/<slug>/` (before/after, full map and framed
   on the most-changed entity, with that entity's layers on). It loads the base to shoot it and
-  loads the sketch back (no undo entry). `shots:false` skips them.
+  loads the sketch back (no undo entry); both pairs are taken the same way (the page's layer
+  set, a fitted view, burg icons and labels drawn), and the page's layers and view are put
+  back. `shots:false` skips them.
 - `sketch {action:'stop'}`: ends recording; the page keeps the changes. Later changes are not
   logged (status shows `diverged`).
 - `sketch {action:'rebase', onto:{path}, onConflict?}` (test hook, TUPAIA_TEST_HOOKS=1):
   replay the log onto another map. Per op: ids of entities the sketch created are rewritten
   through the id map, then validated: a missing or removed target, an occupied cell, a NO_PATH
-  route, or a field that both the sketch and someone else changed (`both changed <field>`) is
-  a conflict. `onConflict:'stop'` (default) stops there and leaves the page with the partial
+  route, a field that both the sketch and someone else changed (`both changed <field>`), a
+  marker/route/zone id that now names another entity (those ids are reused: `target ... is not
+  the entity the sketch edited`), a removal of an entity someone changed since (`removed by
+  the sketch, but ...`), or a literal cell list on a renumbered cell graph (`cells were
+  renumbered`) is a conflict. `onConflict:'stop'` (default) stops there and leaves the page with the partial
   replay (`snapshot undo n` returns to the sketch); `'skip'` drops the op and goes on. Each
   applied op pushes one undo entry. On completion the sketch's base is the new map and its
   ops are the applied ones. Returns `{applied, skipped, conflicts:[{seq, reason, op}], idMap}`.
@@ -293,7 +299,9 @@ client refuses any id not starting with `sketch-`, and they need a server spawne
   PUT ops.json. Refreshes a stale summary (text only). Returns `viewUrl` =
   `<origin>/?maplink=<encodeURIComponent(origin + '/api/map/sketch-<slug>')>`, which opens the
   sketch in the app (not the shared map). Without `confirm`: a preview of the two PUTs.
-  Refused while a stopped rebase holds the page, or for a test-hook (file-based) sketch.
+  Refused while a stopped rebase holds the page, or for a test-hook (file-based) sketch, or
+  (before anything is written) when ops.json would exceed the Worker's 2 MB limit (large
+  paint selections keep every cell id; eval keeps its args).
 - `sketch {action:'list'}`: read-only (works in local mode with a live origin): GET /api/maps,
   the `sketch-*` ids, each with its ops.json header (base, ops count, first 50 op summaries,
   blobOnly, author, created/updated) and viewUrl.
@@ -302,6 +310,8 @@ client refuses any id not starting with `sketch-`, and they need a server spawne
   `sketchVersion`, `sharedVersion` = its base). A blob whose version or checksum differs from
   the one its ops.json was saved with is blob-only. Refused while another sketch records.
   Summaries of an opened sketch have no before shots (the Worker keeps no copy of its base).
+  ops.json is not trusted: replayability, the unsafe mark and every summary are recomputed
+  from each record's tool and resolved form.
 - `sketch {action:'rebase', onConflict?}` (no `onto`): GET the current shared map vM, load it
   (one undo entry), replay the log onto it. On completion the base is vM, ops are the applied
   ones and the page holds the result with origin shared vM; nothing is saved. Refused for a
@@ -314,6 +324,10 @@ client refuses any id not starting with `sketch-`, and they need a server spawne
   `sketch_promote {confirm:true, token, then?}`. LOCKED and BUILD refuse as in shared_save (no
   force here). On success the origin is shared at the new version, the sketch is no longer
   active, and `then:'discard'` DELETEs `sketch-<slug>` (`'keep'`, the default, leaves it).
+- Plain `shared_save` with a sketch around: refused (SKETCH) while a stopped rebase holds the
+  page (a partial replay); with an active sketch the preview says so (`activeSketch`) and a
+  confirmed save ends the sketch (its changes are then live; a later rebase would apply them
+  twice). Use `sketch_promote` to publish a sketch.
 
 ## Recipes
 

@@ -173,6 +173,12 @@ describe("tupaia-mcp sketch (local ops log and replay)", () => {
     assert.match(log[1].summary, new RegExp(generatedName));
     assert.match(log[0].summary, /Sketchford/);
     assert.match(log[7].summary, /Painted \d+ selected cells/);
+    // the records carry what replay checks: the target's identity, the cell graph of a paint
+    const full = await h.ok("sketch", { action: "status", full: true });
+    const recs = full.records as Obj[];
+    assert.equal(recs[0].resolved.ops[0].ident.name, pick.A.name, "edit records the target's identity");
+    assert.equal(recs[0].resolved.ops[0].ident.cell, pick.A.cell);
+    assert.match(String(recs[7].resolved.graph), /^\d+:\w+$/, "a paint records the cell graph of its cell list");
   });
 
   test("5. undo inside a sketch removes the op from the log; redo restores it", async () => {
@@ -322,6 +328,31 @@ describe("tupaia-mcp sketch (local ops log and replay)", () => {
     assert.equal(st2.ops, recordedOps);
   });
 
+  test("a paint_cells height rebuild (risk) makes the sketch blob-only; undo clears it", async () => {
+    const r = await h.ok(
+      "paint_cells",
+      {
+        select: { circle: { at: pick.paintAt, radius: 20 }, where: { land: true } },
+        set: { height: { delta: 3, rebuild: "risk" } }
+      },
+      240_000
+    );
+    assert.ok(r.cells);
+    const st = await h.ok("sketch", { action: "status" });
+    assert.equal(st.blobOnly, true);
+    assert.match(JSON.stringify(st.blobOnlyReasons), /rebuild:'risk' renumbers every cell/);
+    const log = st.log as Obj[];
+    assert.equal(log[log.length - 1].tool, "paint_cells");
+    assert.equal(log[log.length - 1].replayable, false);
+    const reb = await h.call("sketch", { action: "rebase", onto: { path: files.ok } });
+    assert.equal(errorBody(reb).error.code, "REFUSED");
+    assert.match(errorBody(reb).error.message, /blob-only/);
+    await h.ok("snapshot", { action: "undo" }, 240_000);
+    const st2 = await h.ok("sketch", { action: "status" });
+    assert.equal(st2.blobOnly, false);
+    assert.equal(st2.ops, recordedOps);
+  });
+
   test("eval is logged as unsafe; a failed eval is a no-op; stop ends recording", async () => {
     await h.ok("eval", { code: `pack.burgs[${pick.C.i}].population = 7; return 1;` });
     const bad = await h.call("eval", { code: "throw new Error('nope')" });
@@ -348,6 +379,48 @@ describe("tupaia-mcp sketch (local ops log and replay)", () => {
     assert.equal(err.code, "REFUSED");
     assert.match(err.message, /load_map \{source:'shared'\}/);
     assert.ok(fs.existsSync(path.join(out, "sketches", "t-sketch", "summary.md")));
+  });
+
+  test("summary shots are like for like (same layers, labels and scale) and leave the page's layers and view alone", async () => {
+    await h.ok("load_map", { path: "tests/fixtures/demo.map" });
+    await h.ok("sketch", { action: "start", slug: "t-shots" });
+    await h.ok("edit", { type: "burg", ops: [{ ref: pick.D.i, set: { name: "Shotwick" } }] });
+    const state = "return { layers: __tupaia.fns.layersOn(), view: __tupaia.fns.getView() }";
+    const before = (await h.ok("eval", { readOnly: true, code: state })).value as Obj;
+    const s = await h.ok("sketch", { action: "summary" }, 240_000);
+    const after = (await h.ok("eval", { readOnly: true, code: state })).value as Obj;
+    assert.deepEqual(after.layers, before.layers, "summary leaves the layer set alone (a load turns 'trade' on)");
+    for (const k of ["x", "y", "scale"]) assert.equal(after.view[k], before.view[k], `view ${k}`);
+    const shots = s.shots as Record<string, string>;
+    for (const [a, b] of [
+      ["beforeFull", "afterFull"],
+      ["beforeFramed", "afterFramed"]
+    ]) {
+      assert.ok(shots[a] && shots[b], `${a} and ${b}`);
+      const d = await h.ok("eval", {
+        readOnly: true,
+        args: { a: fs.readFileSync(shots[a]).toString("base64"), b: fs.readFileSync(shots[b]).toString("base64") },
+        code: "return (await __tupaia.fns.diffImages({ a: args.a, b: args.b, format: 'jpeg', maxSide: 256 })).changedPct"
+      });
+      // one burg renamed: only its label differs (before the fix the base shots lacked every
+      // label and had another zoom's scale bar, about 2% of the pixels)
+      assert.ok((d.value as number) < 0.5, `${a} vs ${b}: ${d.value}% of the pixels differ`);
+    }
+  });
+
+  test("a removal of a burg someone else changed since is a conflict, not a silent drop of their change", async () => {
+    await h.ok("sketch", { action: "stop" }); // 't-shots'
+    await h.ok("load_map", { path: "tests/fixtures/demo.map" });
+    await h.ok("sketch", { action: "start", slug: "t-ident" });
+    await h.ok("edit", { type: "burg", ops: [{ ref: pick.A.i, remove: true }] });
+    const r = await h.ok("sketch", { action: "rebase", onto: { path: files.renamed } }, 240_000);
+    assert.equal(r.completed, false);
+    const c = (r.conflicts as Obj[])[0];
+    assert.equal(c.seq, 1);
+    assert.match(c.reason, /^removed by the sketch, but burg/);
+    assert.match(c.reason, /Elsewhere/);
+    const ev = await h.ok("eval", { readOnly: true, code: `pack.burgs[${pick.A.i}].removed ?? false` });
+    assert.equal(ev.value, false, "their burg is still there");
   });
 });
 
@@ -481,6 +554,12 @@ describe("tupaia-mcp sketch network actions (live mode, fake Worker)", () => {
   });
 
   test("open in a fresh (local-mode) server restores the map and the ops; save and discard are refused there", async () => {
+    // ops.json is replaceable by any Worker caller: a stored summary must not be trusted
+    const stored = fake.maps.get("sketch-harbour");
+    const json = JSON.parse(String(stored?.ops)) as Obj;
+    json.ops[0].summary = "Harmless spelling fix.";
+    json.ops[0].unsafe = false;
+    if (stored) stored.ops = Buffer.from(JSON.stringify(json));
     const h2 = await startServer({ TUPAIA_LIVE_ORIGIN: origin, TUPAIA_UNDO_DEPTH: "30" });
     try {
       const before = writes().length;
@@ -503,6 +582,9 @@ describe("tupaia-mcp sketch network actions (live mode, fake Worker)", () => {
         (st.records as Obj[]).map(r => r.tool),
         ["edit", "add", "edit"]
       );
+      const log = st.log as Obj[];
+      assert.doesNotMatch(log[0].summary, /Harmless/, "the summary is rebuilt from the record");
+      assert.match(log[0].summary, /Sketchford/);
       for (const [args, what] of [
         [{ action: "save", confirm: true }, "save"],
         [{ action: "discard", slug: "harbour", confirm: true }, "discard"]
@@ -602,6 +684,70 @@ describe("tupaia-mcp sketch network actions (live mode, fake Worker)", () => {
     assert.equal(fake.maps.has("sketch-blobby"), false);
     const st = await h.ok("sketch", { action: "status" });
     assert.equal(st.lastSaved, null);
+  });
+
+  test("shared_save refuses a stopped (partial) rebase, and ends a sketch whose changes it publishes", async () => {
+    await h.ok("sketch", { action: "stop" }); // 'blobby'
+    await h.ok("load_map", { source: "shared" });
+    const v = fake.row.version;
+    // "someone else" renames U on top of the current shared map
+    await h.ok("eval", { args: pick, code: `pack.burgs[args.U.i].name = "Theirname"; return 1;` });
+    const theirs2 = fs.readFileSync(
+      (await h.ok("save_map", { path: "theirs-next.map", overwrite: true })).path as string
+    );
+    await h.ok("load_map", { source: "shared" });
+    await h.ok("sketch", { action: "start", slug: "partial" });
+    await h.ok("edit", { type: "burg", ops: [{ ref: pick.U.i, set: { name: "Minename" } }] });
+    assert.equal(fake.externalSave("bob@example.test", theirs2), v + 1);
+    const r1 = await h.ok("sketch", { action: "rebase" }, 240_000);
+    assert.equal(r1.completed, false);
+    const n1 = (r1.sketch as Obj).suspendedUndoEntries as number;
+    // a second stopped rebase on top of the first: undo must pass through both
+    const r2 = await h.ok("sketch", { action: "rebase" }, 240_000);
+    assert.equal(r2.completed, false);
+    const n2 = (r2.sketch as Obj).suspendedUndoEntries as number;
+    assert.equal(n2, n1 + 1);
+    assert.match(String(r2.next), new RegExp(`n:${n2}\\}`));
+    fake.clearLog();
+    const p = await h.ok("shared_save", {});
+    assert.equal(p.token, null);
+    assert.match(String(p.refusalReason), /SKETCH: the page holds a stopped sketch rebase/);
+    const c = await h.call("shared_save", { confirm: true, token: "x" });
+    assert.equal(errorBody(c).error.code, "SKETCH");
+    assert.deepEqual(writes(), []);
+    await h.ok("snapshot", { action: "undo", n: n2 }, 240_000);
+    const st = await h.ok("sketch", { action: "status" });
+    assert.equal(st.suspended, undefined, "back to the sketch");
+    assert.equal(st.blobOnly, false, "undoing both stopped rebases is not 'past the start'");
+    const name = await h.ok("eval", { readOnly: true, code: `pack.burgs[${pick.U.i}].name` });
+    assert.equal(name.value, "Minename");
+    // skip the conflict: the (now empty) sketch sits on the current shared map
+    const r3 = await h.ok("sketch", { action: "rebase", onConflict: "skip" }, 240_000);
+    assert.equal(r3.completed, true);
+    const p2 = await h.ok("shared_save", {});
+    assert.match(String(p2.activeSketch), /sketch 'partial' is active/);
+    assert.equal(typeof p2.token, "string");
+    const saved = await h.ok("shared_save", { confirm: true, token: p2.token as string });
+    assert.equal((saved.saved as Obj).version, v + 2);
+    assert.match(String(saved.sketchEnded), /sketch 'partial' ended/);
+    assert.equal((await h.ok("sketch", { action: "status" })).active, false);
+    assert.deepEqual(writes(), ["PUT /api/map/shared"]);
+  });
+
+  test("a sketch whose ops.json would pass the Worker's 2 MB limit is refused before anything is written", async () => {
+    await h.ok("load_map", { source: "shared" });
+    await h.ok("sketch", { action: "start", slug: "huge" });
+    // an eval's args are kept twice (as given and in the resolved form): 2 x 1.1 MB
+    await h.ok("eval", { code: "return args.pad.length", args: { pad: "x".repeat(1_100_000) } });
+    fake.clearLog();
+    const r = await h.call("sketch", { action: "save", confirm: true });
+    const err = errorBody(r).error;
+    assert.equal(err.code, "REFUSED");
+    assert.match(err.message, /over the Worker's 2 MB limit; nothing was written/);
+    assert.match(err.message, /op 1 \(eval\)/);
+    assert.deepEqual(writes(), []);
+    assert.equal(fake.maps.has("sketch-huge"), false);
+    await h.ok("sketch", { action: "stop" });
   });
 
   test("never a DELETE of shared, never an overwrite header; outward requests are loopback only", async () => {

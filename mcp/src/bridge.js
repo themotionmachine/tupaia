@@ -1465,6 +1465,18 @@
     return { hash: hashStr(JSON.stringify([per, cellHash])), types: per, cells: cellHash };
   };
 
+  /**
+   * Fingerprint of the pack cell graph (cell count + pack->grid mapping). A heightmap rebuild
+   * (rebuild:'risk', or the app's heightmap editor) renumbers pack cells and changes it, so a
+   * literal list of pack cell ids recorded on one graph does not point at the same places on
+   * another.
+   */
+  function cellGraph() {
+    if (!pack?.cells?.g) return null;
+    return `${pack.cells.i.length}:${hashArray(Array.from(pack.cells.g))}`;
+  }
+  FNS.cellGraph = () => ({ graph: cellGraph() });
+
   // ---------------------------------------------------------------- view
 
   const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -1479,11 +1491,17 @@
     if (!(k > 0) || !Number.isFinite(Number(v.x)) || !Number.isFinite(Number(v.y)))
       fail("BAD_VIEW", "view needs x, y, scale");
     svg.interrupt();
+    // After a map load d3's zoom state is reset while the app's view globals (scale, viewX, viewY)
+    // keep their old values; zooming to a view equal to those globals is then a no-op in the
+    // app's zoom handler (zoomRaf), which leaves the viewbox transform, label visibility and the
+    // scale bar drawn for another zoom. Nudge the globals so zoomRaf runs its full redraw.
+    if (scale === k && viewX === Number(v.x) && viewY === Number(v.y)) {
+      scale = 0;
+      viewX = Number(v.x) + 1;
+    }
     svg.call(zoom.transform, d3.zoomIdentity.translate(Number(v.x), Number(v.y)).scale(k));
     await raf2();
-    // After a map load the viewbox carries the file's transform while the app's view globals keep
-    // the old values; zooming to that same view is then a no-op in the app's zoom handler and the
-    // page keeps showing the file's transform. Sync the DOM to the globals (as zoomRaf does).
+    // Fallback: if the handler still did not run, sync the DOM to the globals (as zoomRaf does).
     const want = `translate(${viewX} ${viewY}) scale(${scale})`;
     if (viewbox.attr("transform") !== want) {
       viewbox.attr("transform", want);
@@ -2086,6 +2104,7 @@
   T.resolve = resolve;
   T.place = place;
   T.entityBox = entityBox;
+  T.cellGraph = cellGraph;
   T.summary = summary;
   T.collectAlerts = collectAlerts;
   T.getView = getView;

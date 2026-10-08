@@ -3,7 +3,14 @@
 // coalesces the redraws. dryRun stops after validation and returns the plan.
 import { z } from "zod";
 import type { CallScope, ToolContext } from "../context.ts";
-import { type AddResolved, type EditResolved, type Resolved, takeResolved } from "../ops.ts";
+import {
+  type AddResolved,
+  type EditResolved,
+  type Resolved,
+  summarizeOp,
+  takeResolved,
+  unreplayableReason
+} from "../ops.ts";
 import { META_TEXT_HEAVY, ToolError } from "../result.ts";
 import { ENTITY_TYPES, EntityRef, EntityTarget, Place, RedrawLayer, TIMEOUTS, TimeoutMs } from "../schemas.ts";
 import { defineTools } from "./registry.ts";
@@ -98,7 +105,15 @@ export async function runPhased(
   // the sketch log gets the concrete form of what was applied (also for an aborted batch: the
   // ops before the failing one were applied)
   const resolved = takeResolved(out as Record<string, unknown>);
-  if (resolved && !isEmptyResolved(resolved))
+  const notReplayable = resolved ? unreplayableReason(scope.tool, resolved) : null;
+  if (resolved && notReplayable)
+    // e.g. a height rebuild: logged (it makes the sketch blob-only), but never replayed
+    await scope.record(scope.tool, toolArgs, null, {
+      replayable: false,
+      reason: notReplayable,
+      summary: summarizeOp(scope.tool, resolved, out as Record<string, unknown>, toolArgs)
+    });
+  else if (resolved && !isEmptyResolved(resolved))
     await scope.record(scope.tool, toolArgs, resolved, { out: out as Record<string, unknown> });
   else
     await scope.record(scope.tool, toolArgs, null, {

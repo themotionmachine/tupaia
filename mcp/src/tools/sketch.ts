@@ -14,10 +14,10 @@ import {
   type AddResolved,
   blobOnlyReasons,
   type EditResolved,
-  type OpRecord,
   type PaintResolved,
   type Sketch,
-  type SketchBase
+  type SketchBase,
+  sanitizeRecord
 } from "../ops.ts";
 import { resolveReadPath } from "../paths.ts";
 import { replayOps } from "../replay.ts";
@@ -218,44 +218,94 @@ async function shoot(
   }
 }
 
+/** Make the page show exactly `layers` (a load can switch layers on, e.g. 'trade'). */
+async function matchLayers(scope: CallScope, layers: readonly string[]): Promise<void> {
+  const now = await scope.call<string[]>("layersOn", {}, { noAlerts: true });
+  const want = new Set(layers);
+  const on = layers.filter(l => !now.includes(l));
+  const off = now.filter(l => !want.has(l));
+  if (on.length || off.length) await scope.call("setLayers", { on, off }, { noAlerts: true });
+}
+
+/**
+ * The summary's screenshots, like for like: the same layers and the same views for the base
+ * and the sketch, each pair taken right after the same steps (match layers -> fit view ->
+ * full shot -> framed shot). The page's layers and view are put back afterwards.
+ */
+async function summaryShots(
+  ctx: ToolContext,
+  scope: CallScope,
+  sk: Sketch,
+  target: Awaited<ReturnType<typeof framedTarget>>
+): Promise<Record<string, string | null>> {
+  const shots: Record<string, string | null> = {};
+  const dir = path.join("sketches", sk.slug);
+  const on = target ? (LAYERS_FOR[target.type] ?? []) : [];
+  const layers0 = await scope.call<string[]>("layersOn", {}, { noAlerts: true });
+  const view0 = await scope.call<{ x: number; y: number; scale: number }>("getView", {}, { noAlerts: true });
+  const pair = async (which: "before" | "after") => {
+    await matchLayers(scope, layers0).catch(e =>
+      scope.notes.push(`${which} shots: could not match the page's layers (${(e as Error).message})`)
+    );
+    await scope.call("resetView", {}, { noAlerts: true });
+    // a loaded map can lack burg icons and labels until something redraws them (the demo map
+    // does); draw them, at the same zoom, for both pairs so neither shows labels the other lacks
+    await scope
+      .call("redraw", { layers: ["burgIcons", "labels"] }, { noAlerts: true })
+      .catch(e => scope.notes.push(`${which} shots: redraw failed (${(e as Error).message})`));
+    shots[`${which}Full`] = await shoot(ctx, scope, path.join(dir, `${which}-full.png`), { full: true }, on);
+    if (target)
+      shots[`${which}Framed`] = await shoot(
+        ctx,
+        scope,
+        path.join(dir, `${which}-framed.png`),
+        { bbox: target.bbox },
+        on
+      );
+  };
+  if (!sk.baseText) {
+    scope.notes.push("no before shots: this sketch was opened from the Worker, which keeps no copy of its base");
+    try {
+      await pair("after");
+    } finally {
+      await matchLayers(scope, layers0).catch(() => {});
+      await scope.call("setView", { view: view0 }, { noAlerts: true }).catch(() => {});
+    }
+    return shots;
+  }
+  // the base: load it without an undo entry and shoot; then load the page map back and shoot
+  // it the same way, so both pairs come from a freshly loaded page
+  await ctx.verifyProvenance();
+  const prov = { ...ctx.snapshots.provenance };
+  const current = await scope.mapText();
+  try {
+    await scope.loadMap({ text: sk.baseText });
+    await pair("before");
+  } finally {
+    let back: Record<string, unknown>;
+    try {
+      back = await scope.loadMap({ text: current });
+    } catch {
+      back = await scope.loadMap({ text: current });
+    }
+    ctx.snapshots.provenance = { ...prov, mapId: typeof back.mapId === "number" ? back.mapId : null };
+  }
+  try {
+    await pair("after");
+  } finally {
+    await matchLayers(scope, layers0).catch(() => {});
+    await scope.call("setView", { view: view0 }, { noAlerts: true }).catch(() => {});
+  }
+  return shots;
+}
+
 async function summary(ctx: ToolContext, scope: CallScope, args: { shots?: boolean }) {
   const sk = needSketch(ctx);
   const now = await scope.call<{ counts: Record<string, number> }>("summary", {}, { noAlerts: true });
   const keys = [...new Set([...Object.keys(sk.baseCounts), ...Object.keys(now.counts)])];
   const counts = keys.map(k => ({ k, base: sk.baseCounts[k] ?? 0, now: now.counts[k] ?? 0 }));
   const target = await framedTarget(scope, sk);
-  const shots: Record<string, string | null> = {};
-  if (args.shots !== false) {
-    const dir = path.join("sketches", sk.slug);
-    const on = target ? (LAYERS_FOR[target.type] ?? []) : [];
-    shots.afterFull = await shoot(ctx, scope, path.join(dir, "after-full.png"), { full: true }, on);
-    if (target)
-      shots.afterFramed = await shoot(ctx, scope, path.join(dir, "after-framed.png"), { bbox: target.bbox }, on);
-    // the base: load it without an undo entry, shoot, and load the sketch back
-    if (!sk.baseText)
-      scope.notes.push("no before shots: this sketch was opened from the Worker, which keeps no copy of its base");
-  }
-  if (args.shots !== false && sk.baseText) {
-    const dir = path.join("sketches", sk.slug);
-    const on = target ? (LAYERS_FOR[target.type] ?? []) : [];
-    await ctx.verifyProvenance();
-    const prov = { ...ctx.snapshots.provenance };
-    const current = await scope.mapText();
-    try {
-      await scope.loadMap({ text: sk.baseText });
-      shots.beforeFull = await shoot(ctx, scope, path.join(dir, "before-full.png"), { full: true }, on);
-      if (target)
-        shots.beforeFramed = await shoot(ctx, scope, path.join(dir, "before-framed.png"), { bbox: target.bbox }, on);
-    } finally {
-      let back: Record<string, unknown>;
-      try {
-        back = await scope.loadMap({ text: current });
-      } catch {
-        back = await scope.loadMap({ text: current });
-      }
-      ctx.snapshots.provenance = { ...prov, mapId: typeof back.mapId === "number" ? back.mapId : null };
-    }
-  }
+  const shots: Record<string, string | null> = args.shots !== false ? await summaryShots(ctx, scope, sk, target) : {};
   const reasons = blobOnlyReasons(sk);
   const lines: string[] = [];
   lines.push(`# Sketch ${sk.slug}`, "");
@@ -332,7 +382,8 @@ export async function rebaseOnto(
   refuseBlobOnly(sk);
   if (sk.diverged)
     scope.notes.push(`the page had changes the log does not hold (${sk.diverged}); the rebase drops them`);
-  const entries: number[] = [];
+  // a rebase on top of a stopped one: undoing back to the sketch passes through both
+  const entries: number[] = [...(sk.suspended?.entries ?? [])];
   entries.push(await scope.pushUndo("sketch rebase", { onto: target.describe }));
   await target.load();
   const baseText = await scope.mapText();
@@ -475,6 +526,29 @@ function requireLiveSketch(ctx: ToolContext, action: string): void {
   }
 }
 
+/** The Worker's limit for ops.json (cloudflare/worker/src/index.ts MAX_OPS_BYTES). */
+export const MAX_OPS_BYTES = 2 * 1024 * 1024;
+
+/** REFUSED (before anything is written) when the ops.json for this header would exceed the limit. */
+export function refuseOversizeOps(header: Record<string, unknown>, sk: Sketch): void {
+  const bytes = Buffer.byteLength(JSON.stringify(header), "utf8");
+  if (bytes <= MAX_OPS_BYTES) return;
+  const biggest = sk.ops
+    .map(o => ({
+      seq: o.seq,
+      tool: o.tool,
+      bytes: Buffer.byteLength(JSON.stringify({ ...o, undoId: undefined }), "utf8")
+    }))
+    .sort((a, b) => b.bytes - a.bytes)
+    .slice(0, 5)
+    .map(o => `op ${o.seq} (${o.tool}) ${Math.round(o.bytes / 1024)} KB`);
+  throw new ToolError(
+    "REFUSED",
+    `the sketch's ops.json would be ${(bytes / 1024 / 1024).toFixed(2)} MB, over the Worker's 2 MB limit; nothing was written. Largest ops: ${biggest.join(", ")}. Undo the largest ops (large paint_cells selections keep every cell id; eval keeps its args) or split the sketch.`,
+    { details: { bytes, limit: MAX_OPS_BYTES } }
+  );
+}
+
 /** save: PUT the page map to sketch-<slug> and its ops.json. Never touches `shared`. */
 async function save(ctx: ToolContext, scope: CallScope, args: { confirm?: boolean }) {
   requireLiveSketch(ctx, "save");
@@ -523,6 +597,26 @@ async function save(ctx: ToolContext, scope: CallScope, args: { confirm?: boolea
     };
   }
   if (!sk.summaryMarkdown || sk.summaryRev !== sk.rev) await summary(ctx, scope, { shots: false });
+  const makeHeader = (blobVersion: number | null, updated: string) => ({
+    schema: OPS_SCHEMA,
+    slug: sk.slug,
+    base: sk.base,
+    note: sk.note,
+    blobOnly: reasons.length > 0,
+    blobOnlyReasons: reasons,
+    blockers,
+    author: "tupaia-mcp",
+    created: sk.created,
+    updated,
+    summaryMarkdown: sk.summaryMarkdown,
+    baseCounts: sk.baseCounts,
+    blob: { id, version: blobVersion, bytes: body.length, sha256: sha256(body) },
+    viewUrl: url,
+    ops: sk.ops.map(({ undoId: _undoId, ...o }) => o)
+  });
+  // the Worker takes at most 2 MB of ops.json; check before the blob goes up, so a too-large log
+  // never leaves a blob on the Worker without its log
+  refuseOversizeOps(makeHeader(Number.MAX_SAFE_INTEGER, new Date().toISOString()), sk);
   let put: Awaited<ReturnType<typeof ctx.shared.putSketchBlob>>;
   try {
     put = await ctx.shared.putSketchBlob({
@@ -538,23 +632,7 @@ async function save(ctx: ToolContext, scope: CallScope, args: { confirm?: boolea
     throw e;
   }
   const now = new Date().toISOString();
-  const header = {
-    schema: OPS_SCHEMA,
-    slug: sk.slug,
-    base: sk.base,
-    note: sk.note,
-    blobOnly: reasons.length > 0,
-    blobOnlyReasons: reasons,
-    blockers,
-    author: "tupaia-mcp",
-    created: sk.created,
-    updated: now,
-    summaryMarkdown: sk.summaryMarkdown,
-    baseCounts: sk.baseCounts,
-    blob: { id, version: put.version, bytes: body.length, sha256: sha256(body) },
-    viewUrl: url,
-    ops: sk.ops.map(({ undoId: _undoId, ...o }) => o)
-  };
+  const header = makeHeader(put.version, now);
   let opsSaved: Record<string, unknown>;
   try {
     opsSaved = await ctx.shared.putSketchOps({ mode: ctx.mode.mode, id, json: header });
@@ -574,13 +652,14 @@ async function save(ctx: ToolContext, scope: CallScope, args: { confirm?: boolea
 
 function headerOf(ops: Record<string, unknown> | null): Record<string, unknown> | null {
   if (!ops) return null;
-  const list = Array.isArray(ops.ops) ? (ops.ops as OpRecord[]) : [];
+  // summaries are rebuilt from the records (the file's own summary text is not trusted)
+  const list = Array.isArray(ops.ops) ? (ops.ops as unknown[]).map((o, k) => sanitizeRecord(o, k)) : [];
   return {
     schema: ops.schema,
     slug: ops.slug,
     base: ops.base,
     note: ops.note,
-    blobOnly: ops.blobOnly,
+    blobOnly: ops.blobOnly === true || list.some(o => !o.replayable),
     ...(Array.isArray(ops.blobOnlyReasons) && ops.blobOnlyReasons.length
       ? { blobOnlyReasons: ops.blobOnlyReasons }
       : {}),
@@ -589,7 +668,7 @@ function headerOf(ops: Record<string, unknown> | null): Record<string, unknown> 
     updated: ops.updated,
     blob: ops.blob,
     ops: list.length,
-    log: list.slice(0, 50).map(o => `${o.seq}. ${o.summary}`)
+    log: list.slice(0, 50).map(o => `${o.seq}. ${o.summary}${o.unsafe ? " [unsafe]" : ""}`)
   };
 }
 
@@ -646,7 +725,8 @@ async function open(ctx: ToolContext, scope: CallScope, args: { slug?: string })
   if (!base || base.kind !== "shared" || typeof base.version !== "number")
     throw new ToolError("REFUSED", `${id}: its ops.json has no shared base version`);
   if (!Array.isArray(header.ops)) throw new ToolError("REFUSED", `${id}: its ops.json has no ops list`);
-  const ops = header.ops as OpRecord[];
+  // ops.json is replaceable by any Worker caller: keep only what replay uses and recompute the rest
+  const ops = (header.ops as unknown[]).map((o, k) => sanitizeRecord(o, k));
   const blockers = Array.isArray(header.blockers) ? [...(header.blockers as string[])] : [];
   const meta = header.blob as { version?: number; sha256?: string } | undefined;
   if (meta?.version !== blob.version)
@@ -677,10 +757,10 @@ async function open(ctx: ToolContext, scope: CallScope, args: { slug?: string })
     baseCounts: (header.baseCounts as Record<string, number>) ?? {}
   });
   if (typeof header.created === "string") sk.created = header.created;
-  sk.ops = ops.map(o => ({ ...o }));
+  sk.ops = ops;
   sk.blockers = blockers;
-  sk.summaryMarkdown = typeof header.summaryMarkdown === "string" ? header.summaryMarkdown : null;
-  sk.summaryRev = sk.rev;
+  // the stored summary markdown is not trusted either: summary/save rebuild it from the records
+  sk.summaryMarkdown = null;
   sk.saved = { rev: sk.rev, version: blob.version, at: typeof header.updated === "string" ? header.updated : "" };
   if (old) scope.notes.push(`replaced the stopped sketch '${old.slug}' (${old.ops.length} ops)`);
   return {
@@ -749,7 +829,12 @@ async function promote(
   const notes: string[] = [];
   if (sk.diverged) notes.push(`the page has changes the sketch log does not (${sk.diverged}); they are promoted too`);
   if (blobOnlyReasons(sk).length) notes.push("blob-only sketch: the page map is promoted as is");
-  const res = await sharedSave(ctx, scope, { confirm: args.confirm, token: args.token, expectVersion: base });
+  const res = await sharedSave(ctx, scope, {
+    confirm: args.confirm,
+    token: args.token,
+    expectVersion: base,
+    viaSketch: true
+  });
   const sketchInfo = { slug: sk.slug, base, ops: sk.ops.length, then, ...(notes.length ? { notes } : {}) };
   if (!args.confirm) {
     if (typeof res.next === "string")
@@ -757,7 +842,7 @@ async function promote(
         /shared_save \{confirm:true, token:'([^']+)'([^}]*)\}/,
         `sketch_promote {confirm:true, token:'$1'${then === "discard" ? ", then:'discard'" : ""}}`
       );
-    return { sketch: sketchInfo, ...res };
+    return { ...res, sketch: sketchInfo };
   }
   const saved = res.saved as { version: number };
   const out: Record<string, unknown> = { promoted: { ...sketchInfo, to: saved.version }, ...res };
