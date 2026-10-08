@@ -39,7 +39,8 @@ const ALL_TOOLS = [
   "export",
   "shared_status",
   "shared_save",
-  "shared_restore"
+  "shared_restore",
+  "sketch"
 ];
 
 describe("tupaia-mcp smoke (core layer)", () => {
@@ -1000,7 +1001,7 @@ describe("tupaia-mcp smoke (mutations)", () => {
   });
 });
 
-// Persistence layer: save_map and export (plan items y, z) plus the final 19-tool surface.
+// Persistence layer: save_map and export (plan items y, z) plus the tool surface (20 with sketch).
 describe("tupaia-mcp smoke (persistence)", () => {
   let h: Harness;
   const outside: string[] = [];
@@ -1015,7 +1016,7 @@ describe("tupaia-mcp smoke (persistence)", () => {
     if (h && alive(h.pid)) await h.close();
   });
 
-  test("a. exactly the 19 tools; shared writes annotated destructive + open world", async () => {
+  test("a. exactly the 20 tools; shared writes annotated destructive + open world", async () => {
     const { tools } = await h.client.listTools();
     assert.deepEqual(tools.map(t => t.name).sort(), [...ALL_TOOLS].sort());
     for (const t of tools) assert.ok((t.description ?? "").length <= 2048, `${t.name} description too long`);

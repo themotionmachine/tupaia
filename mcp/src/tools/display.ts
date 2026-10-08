@@ -2,6 +2,7 @@
 // (screenshot {layers} changes layers for one shot only; display changes them for good.)
 import { z } from "zod";
 import type { ToolContext } from "../context.ts";
+import { takeResolved } from "../ops.ts";
 import { ToolError } from "../result.ts";
 import { LayerName, TIMEOUTS, TimeoutMs } from "../schemas.ts";
 import { defineTools } from "./registry.ts";
@@ -40,6 +41,8 @@ export function register(ctx: ToolContext): void {
       } finally {
         ctx.snapshots.noteMutation();
       }
+      const resolved = takeResolved(out);
+      await scope.record("display", args, resolved, { out });
       return { ...out, undo: "snapshot {action:'undo'} reverts this call" };
     }
   );

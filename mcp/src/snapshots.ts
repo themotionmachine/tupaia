@@ -255,10 +255,15 @@ export class SnapshotStore {
    * the call, i.e. the page state before the redo) and the keys to drop (replayed redo entries
    * and undo entries evicted by the depth limit).
    */
-  commitRedo(entries: HistoryEntry[], currentText: string): { added: string[]; dropped: string[] } {
+  commitRedo(
+    entries: HistoryEntry[],
+    currentText: string
+  ): { added: string[]; dropped: string[]; pairs: Array<{ from: number; to: number }> } {
     this.#redo.splice(this.#redo.length - entries.length, entries.length);
     const dropped = entries.map(e => e.baselineKey);
     const added: string[] = [];
+    // redo entry id (= the original undo entry's id) -> id of the undo entry that replaces it
+    const pairs: Array<{ from: number; to: number }> = [];
     let before = currentText;
     let beforeProv = cloneProv(this.provenance);
     for (const e of entries) {
@@ -275,6 +280,7 @@ export class SnapshotStore {
       };
       this.#undo.push(entry);
       added.push(entry.baselineKey);
+      pairs.push({ from: e.id, to: id });
       before = e.text;
       beforeProv = cloneProv(e.provenance);
     }
@@ -286,7 +292,7 @@ export class SnapshotStore {
       if (k >= 0) added.splice(k, 1);
     }
     this.provenance = cloneProv(entries[entries.length - 1].provenance);
-    return { added, dropped };
+    return { added, dropped, pairs };
   }
 
   /** Baseline key the next undo entry will get (redo sets it before loading). */

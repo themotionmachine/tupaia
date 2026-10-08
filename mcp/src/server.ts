@@ -21,6 +21,7 @@ import "./tools/edit.ts";
 import "./tools/generate.ts";
 import "./tools/display.ts";
 import "./tools/shared.ts";
+import "./tools/sketch.ts";
 
 export const INSTRUCTIONS = `Tupaia MCP drives the Tupaia fantasy-map app (Azgaar's FMG fork) in headless Chromium.
 - Mode is local unless the server was spawned with TUPAIA_MODE=live; nothing here writes the live shared map (map.activationlayer.org) except shared_save/shared_restore, and only when the human explicitly asks in this conversation: preview first, then confirm with the preview token.
@@ -31,6 +32,7 @@ export const INSTRUCTIONS = `Tupaia MCP drives the Tupaia fantasy-map app (Azgaa
 - Screenshot after visual changes, not after pure reads (JPEG maxSide 1024 by default; the full PNG is saved to disk).
 - eval is the last resort: read tupaia://docs/runtime-api.md first, use bare globals (pack, notes, svg), pass redraw layers after mutating, readOnly:true for reads.
 - Results carry alerts (app dialogs, auto-dismissed), consoleErrors and notes: read them. After TIMEOUT or a relaunch note, call session and restore if needed.
+- To propose a shared-map change without writing it: load_map {source:'shared'} -> sketch {action:'start'} -> edits -> sketch {action:'summary'}.
 - Cheatsheet: tupaia://docs/cheatsheet.md. Data model: tupaia://docs/data-model.md.`;
 
 const config = loadConfig();

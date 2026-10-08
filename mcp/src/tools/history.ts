@@ -103,6 +103,7 @@ export function register(ctx: ToolContext): void {
           const summary = await scope.loadMap({ text: plan.load.text }, true);
           const dropped = snaps.commitUndo(plan);
           snaps.provenance.mapId = mapIdOf(summary);
+          scope.notes.push(...ctx.sketches.onUndo(plan.undone));
           await scope.call("dropBaseline", { keys: dropped }, { noAlerts: true });
           return {
             undone: plan.undone.map(e => ({ op: e.op, args: e.argsSummary, at: e.at })),
@@ -128,8 +129,14 @@ export function register(ctx: ToolContext): void {
             await scope.call("dropBaseline", { key: preKey }, { noAlerts: true }).catch(() => {});
             throw e;
           }
-          const { dropped } = snaps.commitRedo(entries, current);
+          const { dropped, pairs } = snaps.commitRedo(entries, current);
           snaps.provenance.mapId = mapIdOf(summary);
+          scope.notes.push(
+            ...ctx.sketches.onRedo(
+              pairs,
+              entries.map(e => e.op)
+            )
+          );
           if (dropped.length) await scope.call("dropBaseline", { keys: dropped }, { noAlerts: true });
           return {
             redone: entries.map(e => ({ op: e.op, args: e.argsSummary })),

@@ -3,6 +3,7 @@
 // coalesces the redraws. dryRun stops after validation and returns the plan.
 import { z } from "zod";
 import type { CallScope, ToolContext } from "../context.ts";
+import { type AddResolved, type EditResolved, type Resolved, takeResolved } from "../ops.ts";
 import { META_TEXT_HEAVY, ToolError } from "../result.ts";
 import { ENTITY_TYPES, EntityRef, EntityTarget, Place, RedrawLayer, TIMEOUTS, TimeoutMs } from "../schemas.ts";
 import { defineTools } from "./registry.ts";
@@ -94,6 +95,17 @@ export async function runPhased(
     throw e;
   }
   ctx.snapshots.noteMutation();
+  // the sketch log gets the concrete form of what was applied (also for an aborted batch: the
+  // ops before the failing one were applied)
+  const resolved = takeResolved(out as Record<string, unknown>);
+  if (resolved && !isEmptyResolved(resolved))
+    await scope.record(scope.tool, toolArgs, resolved, { out: out as Record<string, unknown> });
+  else
+    await scope.record(scope.tool, toolArgs, null, {
+      replayable: true,
+      noop: true,
+      summary: `${scope.tool} applied nothing (no-op).`
+    });
   if (out.aborted) {
     const a = out.aborted;
     throw new ToolError(
@@ -110,6 +122,12 @@ export async function runPhased(
   if (changes !== undefined) result.changes = changes;
   result.undo = "snapshot {action:'undo'} reverts this whole call";
   return result;
+}
+
+function isEmptyResolved(r: Resolved): boolean {
+  if ("ops" in r) return !(r as EditResolved).ops.length;
+  if ("items" in r) return !(r as AddResolved).items.length;
+  return false;
 }
 
 const EDIT_TYPES = [...ENTITY_TYPES.filter(t => t !== "namesbase"), "map"] as const;

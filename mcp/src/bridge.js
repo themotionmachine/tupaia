@@ -1481,6 +1481,15 @@
     svg.interrupt();
     svg.call(zoom.transform, d3.zoomIdentity.translate(Number(v.x), Number(v.y)).scale(k));
     await raf2();
+    // After a map load the viewbox carries the file's transform while the app's view globals keep
+    // the old values; zooming to that same view is then a no-op in the app's zoom handler and the
+    // page keeps showing the file's transform. Sync the DOM to the globals (as zoomRaf does).
+    const want = `translate(${viewX} ${viewY}) scale(${scale})`;
+    if (viewbox.attr("transform") !== want) {
+      viewbox.attr("transform", want);
+      if (typeof invokeActiveZooming === "function") invokeActiveZooming();
+      await raf2();
+    }
     return getView();
   }
 

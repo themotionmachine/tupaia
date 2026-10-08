@@ -100,6 +100,9 @@ export async function takeScreenshot(
       if (args.keepLayers) await scope.pushUndo("screenshot keepLayers", { layers: args.layers });
       layerChange = await scope.call("setLayers", { on: args.layers.on ?? [], off: args.layers.off ?? [] });
       if (args.keepLayers && layerChange?.changed.length) ctx.snapshots.noteMutation();
+      // kept layers are a display change in a sketch's log
+      if (args.keepLayers)
+        await scope.record("display", args, { on: args.layers.on ?? [], off: args.layers.off ?? [] });
     }
     if (full) {
       const r = await scope.call<Encoded>("rasterize", { scale, format: "png" }, { noAlerts: true });

@@ -8,6 +8,7 @@ import type { CallToolResult, McpServer, ServerContext } from "@modelcontextprot
 import type { z } from "zod";
 import { BrowserManager, type CallOptions } from "./browser.ts";
 import { type Config, ModeState } from "./config.ts";
+import { NOT_REPLAYABLE, type OpRecord, type Resolved, SketchStore, summarizeOp } from "./ops.ts";
 import {
   type Alert,
   type Envelope,
@@ -100,13 +101,78 @@ export class CallScope {
   readonly alerts: Alert[] = [];
   readonly consoleSeq: number;
   readonly started = Date.now();
+  /** Name of the tool this call runs (sketch bookkeeping). */
+  readonly tool: string;
+  /** Ids of the auto-undo entries this call pushed. */
+  readonly undoPushed: number[] = [];
+  /** Page digest before the first undo push (only while a sketch records). */
+  digestBefore: string | null | undefined;
+  /** The call logged its own op (record()); the runner's fallback then stays out. */
+  opRecorded = false;
 
-  constructor(ctx: ToolContext, signal: AbortSignal | undefined, kind: ToolKind, timeoutMs?: number) {
+  constructor(ctx: ToolContext, signal: AbortSignal | undefined, kind: ToolKind, timeoutMs?: number, tool = "") {
     this.ctx = ctx;
     this.signal = signal;
     this.kind = kind;
     this.timeoutMs = timeoutMs ?? TIMEOUTS[kind];
     this.consoleSeq = ctx.browser.consoleSeq;
+    this.tool = tool;
+  }
+
+  /** The sketch tool manages the log itself; every other mutating call is logged while recording. */
+  get logsToSketch(): boolean {
+    return this.ctx.sketches.recording && this.tool !== "sketch";
+  }
+
+  /** Bridge digest hash of the page map, or null. */
+  async digest(): Promise<string | null> {
+    try {
+      const d = await this.call<{ hash: string }>("digest", {}, { noAlerts: true, timeoutMs: HOUSEKEEPING_MS });
+      return d.hash;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Log this call in the active sketch (no-op unless a sketch records). `out` is the bridge
+   * result the summary is built from.
+   */
+  async record(
+    tool: string,
+    args: unknown,
+    resolved: Resolved | null,
+    opts: {
+      out?: Record<string, unknown> | null;
+      replayable?: boolean;
+      reason?: string;
+      unsafe?: boolean;
+      noop?: boolean;
+      summary?: string;
+      skipDigest?: boolean;
+    } = {}
+  ): Promise<OpRecord | null> {
+    if (!this.logsToSketch) return null;
+    const replayable = opts.replayable ?? resolved !== null;
+    const digestAfter = opts.skipDigest ? null : await this.digest();
+    let summary = opts.summary ?? summarizeOp(tool, resolved, opts.out ?? null, args);
+    if (!replayable && opts.reason) summary = `${summary} (not replayable: ${opts.reason})`;
+    const rec = this.ctx.sketches.append({
+      tool,
+      args,
+      resolved,
+      summary,
+      at: new Date().toISOString(),
+      digestBefore: this.digestBefore ?? null,
+      digestAfter,
+      replayable,
+      ...(opts.reason && !replayable ? { reason: opts.reason } : {}),
+      ...(opts.unsafe ? { unsafe: true } : {}),
+      ...(opts.noop ? { noop: true } : {}),
+      undoId: this.undoPushed[this.undoPushed.length - 1]
+    });
+    this.opRecorded = true;
+    return rec;
   }
 
   /** Remaining budget for this call, at least 1 s. */
@@ -139,13 +205,17 @@ export class CallScope {
   }
 
   /** Take an auto-undo entry for a mutating op. Call before mutating the page. */
-  async pushUndo(op: string, args: unknown): Promise<void> {
+  async pushUndo(op: string, args: unknown): Promise<number> {
     await this.ctx.verifyProvenance();
+    if (this.logsToSketch && this.digestBefore === undefined) this.digestBefore = await this.digest();
     const text = await this.mapText();
     const { entry, evicted } = this.ctx.snapshots.pushUndo(op, summarizeArgs(args), text);
+    this.undoPushed.push(entry.id);
+    this.ctx.sketches.onUndoPushed();
     await this.call("setBaseline", { key: entry.baselineKey }, { noAlerts: true, timeoutMs: HOUSEKEEPING_MS });
     if (evicted.length)
       await this.call("dropBaseline", { keys: evicted }, { noAlerts: true, timeoutMs: HOUSEKEEPING_MS });
+    return entry.id;
   }
 
   /**
@@ -176,6 +246,8 @@ export class ToolContext {
   readonly snapshots: SnapshotStore;
   readonly shots = new ShotStore();
   readonly shared: SharedApi;
+  /** The provisional sketch (ops log) being recorded, if any. */
+  readonly sketches = new SketchStore();
   server!: McpServer;
   readonly toolNames: string[] = [];
 
@@ -240,7 +312,9 @@ export class ToolContext {
     if (!env.ok) return `Restoring ${src.label} failed: ${env.error?.message}`;
     // the app stamps a new map id on every load, so lineage is re-bound to the loaded map
     this.snapshots.provenance = { ...src.provenance, restoredFrom: src.label, mapId: env.value?.mapId ?? null };
+    const topUndo = this.snapshots.undoStack[this.snapshots.undoStack.length - 1]?.id;
     this.snapshots.afterRestore(src.kind);
+    this.sketches.onCrashRestore(src.kind, src.kind === "undo" ? topUndo : undefined, src.label);
     void reason;
     const lost = src.lostOps.length
       ? ` The map in the page before the relaunch could not be kept; the effects of these calls were LOST and need redoing: ${src.lostOps.join("; ")}.`
@@ -335,12 +409,12 @@ export class ToolContext {
         annotations: spec.annotations,
         _meta: spec._meta
       },
-      (async (args: any, sctx: ServerContext) => this.run(spec, sctx, args, impl)) as any
+      (async (args: any, sctx: ServerContext) => this.run({ ...spec, name }, sctx, args, impl)) as any
     );
   }
 
   async run<A>(
-    spec: { kind?: ToolKind; launch?: boolean },
+    spec: { kind?: ToolKind; launch?: boolean; name?: string },
     sctx: ServerContext | undefined,
     args: A,
     impl: (args: A, scope: CallScope) => Promise<WithImages | Record<string, unknown>>
@@ -352,20 +426,67 @@ export class ToolContext {
         this,
         sctx?.mcpReq?.signal,
         kind,
-        typeof rawTimeout === "number" ? rawTimeout : undefined
+        typeof rawTimeout === "number" ? rawTimeout : undefined,
+        spec.name ?? ""
       );
       try {
         if (spec.launch !== false) await this.browser.ensureHealthy(scope.notes);
         else if (this.browser.pendingNotes.length) scope.notes.push(...this.browser.pendingNotes.splice(0));
         const out = await impl(args, scope);
+        await this.#sketchFallback(scope, args, null);
         await new Promise(r => setImmediate(r)); // let late console events land
         const normalized: ToolOutput =
           out instanceof WithImages ? { value: out.value, images: out.images } : { value: out };
         return okResult(normalized, this.#extras(scope));
       } catch (e) {
+        await this.#sketchFallback(scope, args, e).catch(() => {});
         await new Promise(r => setImmediate(r));
         return errorResult(e, this.#extras(scope));
       }
+    });
+  }
+
+  /**
+   * A call that pushed an auto-undo entry but did not log itself (regenerate, generate_map,
+   * load_map, snapshot restore, or a call that failed after changing the map) is logged as a
+   * non-replayable op, so the sketch knows it and undo can take it out again. A failed call
+   * that left the page unchanged is logged as a no-op instead.
+   */
+  async #sketchFallback(scope: CallScope, args: unknown, error: unknown): Promise<void> {
+    if (scope.tool === "sketch" || !scope.undoPushed.length || scope.opRecorded) return;
+    if (!this.sketches.current) return;
+    if (!this.sketches.recording) {
+      this.sketches.noteUnlogged(scope.tool);
+      return;
+    }
+    if (this.browser.dirty) {
+      await scope.record(scope.tool, args, null, {
+        replayable: false,
+        reason: `${scope.tool} timed out or was aborted while changing the map`,
+        skipDigest: true
+      });
+      return;
+    }
+    if (error) {
+      const after = await scope.digest();
+      if (after !== null && after === scope.digestBefore) {
+        await scope.record(scope.tool, args, null, {
+          replayable: true,
+          noop: true,
+          summary: `${scope.tool} failed without changing the map (no-op).`
+        });
+        return;
+      }
+      const code = (error as { code?: string }).code ?? "error";
+      await scope.record(scope.tool, args, null, {
+        replayable: false,
+        reason: `${scope.tool} failed part-way (${code}) after changing the map; undo it`
+      });
+      return;
+    }
+    await scope.record(scope.tool, args, null, {
+      replayable: false,
+      reason: NOT_REPLAYABLE[scope.tool] ?? `${scope.tool} is not replayable`
     });
   }
 

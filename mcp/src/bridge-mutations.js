@@ -171,6 +171,7 @@
 
   function nameField(type, apply) {
     return {
+      isName: true,
       check: v => nameSpec(v),
       get: x => (x ? (x.name ?? null) : null),
       show: p => p.text ?? `(generated from ${p.gen.label})`,
@@ -180,6 +181,59 @@
 
   function placeCheck(v) {
     return T.place(v);
+  }
+
+  // ---------------------------------------------------------------- resolved (replayable) forms
+  // Every batch apply also returns `resolved`: the concrete form of what it applied, which the
+  // sketch ops log stores and replays. Refs are ids, generated names are literal strings, cell
+  // selections are literal cell lists, places are {x,y} or {entity:{type, ref:id}, at?} (an
+  // entity place keeps following the entity, so a replay can rewrite its id).
+
+  /** Replayable form of a place: entity places keep the (resolved) entity, others become x,y. */
+  function literalPlace(input, p) {
+    if (isObj(input) && isObj(input.entity)) {
+      const r = T.resolve(input.entity.type, input.entity.ref);
+      const out = { entity: { type: r.type, ref: r.i } };
+      if (input.at !== undefined && input.at !== null) out.at = input.at;
+      return out;
+    }
+    return { x: p.x, y: p.y };
+  }
+
+  /** Replayable value of one checked edit/add field after it was applied to x. */
+  function literalValue(key, f, v, x, input) {
+    if (f.isName) return clone(f.get(x));
+    if (key === "move") return literalPlace(input, v);
+    if (key === "port") return !!v.on;
+    return clone(v);
+  }
+
+  const TRACKED_TYPES = ["burg", "state", "province", "culture", "religion", "route", "marker", "zone", "label"];
+
+  /** Ids of every entity of the tracked types (to find what one add item created). */
+  function idSnapshot() {
+    T.resetMemo?.();
+    const s = {};
+    for (const t of TRACKED_TYPES) {
+      s[t] = new Set();
+      for (const x of I.rawList(t)) if (x && typeof x === "object") s[t].add(I.idOf(t, x));
+    }
+    return s;
+  }
+
+  /** [{type, i}] of entities that exist now but not in snapshot s; `first` type leads. */
+  function createdSince(s, first) {
+    T.resetMemo?.();
+    const out = [];
+    for (const t of TRACKED_TYPES) {
+      const ids = [];
+      for (const x of I.rawList(t))
+        if (x && typeof x === "object" && !x.removed && !s[t].has(I.idOf(t, x))) ids.push(I.idOf(t, x));
+      ids.sort((a, b) => (typeof a === "number" && typeof b === "number" ? a - b : String(a).localeCompare(String(b))));
+      for (const i of ids) out.push({ type: t, i });
+    }
+    out.sort((a, b) => (a.type === first ? 0 : 1) - (b.type === first ? 0 : 1));
+    return out;
   }
 
   // ---------------------------------------------------------------- port helper
@@ -588,6 +642,7 @@
 
     map: {
       name: {
+        isName: true,
         check: v => nameSpec(v),
         get: () => mapName.value,
         show: p => p.text ?? "(generated)",
@@ -758,7 +813,7 @@
   function applyEditOp(type, p, c) {
     if (p.remove) {
       REMOVE[type].apply(p.entity, c);
-      return { index: p.index, i: p.i, name: p.name, removed: true };
+      return { index: p.index, i: p.i, name: p.name, removed: true, _r: { ref: p.i, name: p.name, remove: true } };
     }
     const before = {};
     for (const { key, f } of p.fs) before[key] = clone(f.get(p.entity));
@@ -767,7 +822,11 @@
     const after = {};
     for (const { key, f } of p.fs) after[key] = clone(f.get(p.entity));
     const name = type === "map" ? mapName.value : I.nameOf(type, p.entity);
-    return { index: p.index, i: p.i, name, before, after };
+    const lit = {};
+    for (const { key, f, v } of p.fs) lit[key] = literalValue(key, f, v, p.entity, p.set[key]);
+    const r = { name: p.name, set: lit, before, after };
+    if (type !== "map") r.ref = p.i;
+    return { index: p.index, i: p.i, name, before, after, _r: r };
   }
 
   async function runBatch(a, items, prepare, plan, apply, setup) {
@@ -822,8 +881,11 @@
       }
     );
     if (out.phase) return out;
+    const resolved = { type, ops: out.done.map(d => d._r) };
+    if (a.redraw !== undefined) resolved.redraw = a.redraw;
     return {
-      applied: out.done,
+      applied: out.done.map(({ _r, ...row }) => row),
+      resolved,
       errors: out.errors,
       aborted: out.aborted,
       redrawn: out.redrawn,
@@ -921,7 +983,22 @@
         const id = Burgs.add([q.p.x, q.p.y]);
         const b = pack.burgs[id];
         applyFields(q.fs, b, c, item);
-        return { i: id, name: b.name, x: rn(b.x), y: rn(b.y), cell: b.cell, state: b.state, group: b.group };
+        // literal name, population and group: Burgs.add draws them at random
+        const lit = { at: literalPlace(item.at, q.p) };
+        for (const { key, f, v } of q.fs) lit[key] = literalValue(key, f, v, b, item[key]);
+        lit.name = b.name;
+        lit.population = I.people(b);
+        if (b.group) lit.group = b.group;
+        return {
+          i: id,
+          name: b.name,
+          x: rn(b.x),
+          y: rn(b.y),
+          cell: b.cell,
+          state: b.state,
+          group: b.group,
+          _r: lit
+        };
       }
     },
 
@@ -955,12 +1032,16 @@
         if (item.form !== undefined) q.form = str("form")(item.form);
         if (item.formName !== undefined) q.formName = str("formName")(item.formName);
         if (item.expand !== undefined) q.expand = bool("expand")(item.expand);
-        const extra = Object.keys(item).filter(
-          k => !["capital", "at", "name", "color", "culture", "form", "formName", "expand"].includes(k)
-        );
+        if (item.capitalName !== undefined) {
+          str("capitalName")(item.capitalName);
+          if (!item.capitalName.trim()) fail("BAD_ARGS", "capitalName cannot be empty");
+          q.capitalName = item.capitalName;
+        }
+        const STATE_KEYS = ["capital", "at", "name", "color", "culture", "form", "formName", "expand", "capitalName"];
+        const extra = Object.keys(item).filter(k => !STATE_KEYS.includes(k));
         if (extra.length)
           fail("BAD_FIELD", `state items take no field '${extra[0]}'`, {
-            details: ["capital", "name", "color", "culture", "form", "formName", "expand"]
+            details: STATE_KEYS.filter(k => k !== "at")
           });
         return q;
       },
@@ -970,13 +1051,19 @@
           capitalBurg: q.burgId || "(new burg)",
           name: q.name ? (q.name.text ?? `(generated from ${q.name.gen.label})`) : "(generated)"
         }),
-      apply(q, c) {
+      apply(q, c, item) {
         const C = pack.cells;
         const states = pack.states;
         const burgs = pack.burgs;
         const center = q.center;
         let bid = q.burgId;
-        if (!bid) bid = Burgs.add([q.p.x, q.p.y]);
+        if (!bid) {
+          bid = Burgs.add([q.p.x, q.p.y]);
+          if (q.capitalName) {
+            burgs[bid].name = q.capitalName;
+            drawBurgLabel(burgs[bid]);
+          }
+        }
         const oldState = C.state[center];
         const oldProvince = C.province[center];
         const newState = states.length;
@@ -1058,7 +1145,18 @@
         c.R.add("borders");
         c.R.add("provinces");
         c.R.add("stateLabels", [newState]);
+        const lit = {
+          capital: q.burgId ? { burg: q.burgId } : literalPlace(item.capital ?? item.at, q.p),
+          name: s.name,
+          color: s.color
+        };
+        if (!q.burgId) lit.capitalName = burgs[bid].name;
+        if (q.culture !== undefined) lit.culture = q.culture;
+        if (q.form !== undefined) lit.form = q.form;
+        if (q.formName !== undefined) lit.formName = q.formName;
+        if (q.expand) lit.expand = true;
         return {
+          _r: lit,
           i: newState,
           name: s.name,
           fullName: s.fullName,
@@ -1110,7 +1208,13 @@
         if (q.note) upsertNote(`marker${stored.i}`, q.note.name ?? item.type ?? "Marker", q.note.legend);
         c.R.add("markers");
         const n = notes.find(x => x.id === `marker${stored.i}`);
+        const lit = { at: literalPlace(item.at, q.p), icon: stored.icon };
+        if (item.type !== undefined) lit.type = item.type;
+        if (q.size !== undefined) lit.size = q.size;
+        if (q.pinned !== undefined) lit.pinned = q.pinned;
+        if (n) lit.note = { name: n.name, legend: n.legend ?? "" };
         return {
+          _r: lit,
           i: stored.i,
           name: n ? n.name : I.nameOf("marker", stored),
           type: stored.type ?? null,
@@ -1148,7 +1252,7 @@
           pathCells.push(...leg);
         }
         if (pathCells.length < 2) fail("BAD_ARGS", "all places fall into the same cell");
-        return { group, places, pathCells, name: item.name };
+        return { group, places, pathCells, name: item.name, through: item.through };
       },
       plan: (q, row) =>
         Object.assign(row, {
@@ -1182,7 +1286,10 @@
         const ends = [q.pathCells[0], q.pathCells[q.pathCells.length - 1]].map(cell =>
           C.burg[cell] ? { i: C.burg[cell], name: pack.burgs[C.burg[cell]].name } : null
         );
+        const lit = { through: q.through.map((v, k) => literalPlace(v, q.places[k])), group: q.group };
+        if (q.name) lit.name = q.name;
         return {
+          _r: lit,
           i: id,
           name: I.nameOf("route", route),
           group: q.group,
@@ -1227,7 +1334,12 @@
         };
         pack.zones.push(z);
         c.R.add("zones");
-        return { i: id, name: z.name, cells: z.cells.length };
+        return {
+          i: id,
+          name: z.name,
+          cells: z.cells.length,
+          _r: { name: z.name, type: z.type, color: z.color, cells: z.cells.slice() }
+        };
       }
     },
 
@@ -1239,7 +1351,7 @@
         const extra = Object.keys(item).filter(k => !["at", "text", "group"].includes(k));
         if (extra.length)
           fail("BAD_FIELD", `label items take no field '${extra[0]}'`, { details: ["at", "text", "group"] });
-        return { p, text: item.text, group: item.group ?? "addedLabels" };
+        return { p, text: item.text, group: item.group ?? "addedLabels", at: item.at };
       },
       plan: (q, row) => Object.assign(row, { name: q.text, x: q.p.x, y: q.p.y, group: q.group }),
       apply(q) {
@@ -1274,13 +1386,21 @@
           .append("path")
           .attr("id", `textPath_${id}`)
           .attr("d", `M${rn(q.p.x - width)},${rn(q.p.y)} h${rn(width * 2)}`);
-        return { i: id, name: q.text, x: q.p.x, y: q.p.y, group: q.group };
+        return {
+          i: id,
+          name: q.text,
+          x: q.p.x,
+          y: q.p.y,
+          group: q.group,
+          _r: { at: literalPlace(q.at, q.p), text: q.text, group: q.group }
+        };
       }
     },
 
     note: {
       check(item, c) {
         let id = item.id;
+        let owner = null;
         if (item.entity !== undefined) {
           if (id !== undefined) fail("BAD_ARGS", "pass id or entity, not both");
           const r = T.resolve(item.entity.type, item.entity.ref);
@@ -1294,6 +1414,7 @@
           }[r.type];
           if (!prefix) fail("BAD_ARGS", `notes attach to burg, marker, state, route, river or province, not ${r.type}`);
           id = `${prefix}${r.i}`;
+          owner = { type: r.type, ref: r.i };
         }
         if (typeof id !== "string" || !id)
           fail("BAD_ARGS", "a note needs id (element id such as burg12) or entity:{type,ref}");
@@ -1302,12 +1423,15 @@
         c.claimed.add(id);
         str("name")(item.name);
         if (item.legend !== undefined) str("legend")(item.legend);
-        return { id, name: item.name, legend: item.legend ?? "" };
+        return { id, name: item.name, legend: item.legend ?? "", owner };
       },
       plan: (q, row) => Object.assign(row, { i: q.id, name: q.name }),
       apply(q) {
         notes.push({ id: q.id, name: q.name, legend: q.legend });
-        return { i: q.id, name: q.name };
+        const lit = q.owner ? { entity: q.owner } : { id: q.id };
+        lit.name = q.name;
+        lit.legend = q.legend;
+        return { i: q.id, name: q.name, _r: lit };
       }
     },
 
@@ -1332,7 +1456,13 @@
           c.notes.add("expand:true re-expanded every unlocked culture and updated burg cultures");
         }
         c.R.add("cultures");
-        return { i: x.i, name: x.name, cell: q.p.cell, x: q.p.x, y: q.p.y, base: x.base };
+        const lit = { at: literalPlace(item.at, q.p), name: x.name, color: x.color };
+        if (typeof x.type === "string") lit.type = x.type;
+        if (Number.isInteger(x.base)) lit.base = x.base;
+        if (typeof x.expansionism === "number" && x.expansionism >= 0 && x.expansionism <= 10)
+          lit.expansionism = x.expansionism;
+        if (q.expand) lit.expand = true;
+        return { i: x.i, name: x.name, cell: q.p.cell, x: q.p.x, y: q.p.y, base: x.base, _r: lit };
       }
     },
 
@@ -1368,7 +1498,14 @@
           c.notes.add("expand:true recalculated every religion's territory");
         }
         c.R.add("religions");
-        return { i: x.i, name: x.name, type: x.type, cell: q.p.cell, x: q.p.x, y: q.p.y };
+        const lit = { at: literalPlace(item.at, q.p), name: x.name, color: x.color };
+        if (typeof x.type === "string") lit.type = x.type;
+        if (typeof x.form === "string") lit.form = x.form;
+        if (x.deity === null || typeof x.deity === "string") lit.deity = x.deity;
+        if (typeof x.expansionism === "number" && x.expansionism >= 0 && x.expansionism <= 10)
+          lit.expansionism = x.expansionism;
+        if (q.expand) lit.expand = true;
+        return { i: x.i, name: x.name, type: x.type, cell: q.p.cell, x: q.p.x, y: q.p.y, _r: lit };
       }
     }
   };
@@ -1387,14 +1524,25 @@
         return { index: k, item, q: h.check(item, c) };
       },
       p => h.plan(p.q, { index: p.index }),
-      async (p, c) => ({ index: p.index, ...(await h.apply(p.q, c, p.item)) }),
+      async (p, c) => {
+        const ids = idSnapshot();
+        const row = await h.apply(p.q, c, p.item);
+        return { index: p.index, ...row, _created: createdSince(ids, type) };
+      },
       async c => {
         if (type === "state") c.internals = await stateInternals();
       }
     );
     if (out.phase) return out;
+    const resolved = {
+      type,
+      items: out.done.map(d => d._r),
+      created: out.done.map(d => d._created)
+    };
+    if (a.redraw !== undefined) resolved.redraw = a.redraw;
     return {
-      created: out.done,
+      created: out.done.map(({ _r, _created, ...row }) => row),
+      resolved,
       errors: out.errors,
       aborted: out.aborted,
       redrawn: out.redrawn,
@@ -1976,7 +2124,13 @@
     const out = await paintApply(P, true, c);
     T.resetMemo?.();
     const rd = await finishRedraw(a, c.R);
-    return { cells: P.cells.length, set: out, ...rd, notes: [...c.notes] };
+    const set = {};
+    for (const k of ["state", "province", "culture", "religion", "biome"]) if (P[k] !== undefined) set[k] = P[k];
+    if (P.zone) set.zone = { ref: P.zone.i, op: P.zone.op };
+    if (P.height) set.height = clone(P.height);
+    const resolved = { select: { cells: P.cells.slice() }, set };
+    if (a.redraw !== undefined) resolved.redraw = a.redraw;
+    return { cells: P.cells.length, set: out, resolved, ...rd, notes: [...c.notes] };
   };
 
   // ---------------------------------------------------------------- generate
@@ -2311,7 +2465,15 @@
       if (typeof invokeActiveZooming === "function") invokeActiveZooming();
     }
     await T.settle();
+    const resolved = {
+      on: [...want].filter(([, v]) => v).map(([n]) => n),
+      off: [...want].filter(([, v]) => !v).map(([n]) => n)
+    };
+    if (a.layersPreset !== undefined) resolved.layersPreset = a.layersPreset;
+    if (stylePresetName) resolved.stylePreset = stylePresetName;
+    if (a.styleRules !== undefined) resolved.styleRules = clone(a.styleRules);
     return {
+      resolved,
       layersOn: FNS.layersOn(),
       changed,
       stylePreset: localStorage.getItem("presetStyle"),

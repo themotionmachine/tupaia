@@ -1,11 +1,11 @@
 # Tupaia MCP cheatsheet
 
 The `tupaia` MCP server drives the built Tupaia app (Azgaar's Fantasy Map Generator fork) in
-headless Chromium. 19 tools. Local mode by default: nothing writes the live shared map
+headless Chromium. 20 tools. Local mode by default: nothing writes the live shared map
 (map.activationlayer.org) except `shared_save`/`shared_restore`, and those only in a server a
 human spawned with `TUPAIA_MODE=live`, behind a preview and a one-time token.
 
-## The 19 tools
+## The 20 tools
 
 | tool | one line |
 | --- | --- |
@@ -28,6 +28,7 @@ human spawned with `TUPAIA_MODE=live`, behind a preview and a one-time token.
 | `shared_status {versions?, build?}` | live shared map metadata vs the page map: lineage, stale, build check (default only in live mode); `versions:true` lists retained versions. |
 | `shared_save {confirm?, token?, force?, replaceWithUnrelated?, expectVersion?, skipBuildCheck?}` | OUTWARD: overwrite the live shared map (preview, then confirm + token). |
 | `shared_restore {version, confirm?, token?, expectCurrent?, force?, reload?}` | OUTWARD: roll the live shared map back to a retained version. |
+| `sketch {action:'start'\|'status'\|'summary'\|'stop'\|'rebase', slug?, note?, onConflict?, shots?, full?}` | provisional sketch: log every mutating call against base version N of the shared map; summarise it for humans; replay it onto a newer map. |
 
 ## Mutating tools: common rules
 
@@ -241,6 +242,40 @@ heightmap, physical, poi, goods, trade, military, emblems, landmass.
   guard on restore. `reload` (default true) loads the result into the page.
 - Layer visibility and style are part of the saved map: a `display` change ships with the
   next shared_save.
+
+## Sketches (provisional changes)
+
+A sketch is base version N of the shared map plus the ops log that produced it. Nothing here
+writes the shared map.
+
+- `sketch {action:'start', slug?, note?}`: needs the page map loaded with
+  `load_map {source:'shared'}` and no edits since (else REFUSED with that fix). From then on
+  every mutating call is logged as `{seq, tool, args, resolved, summary, at, digestBefore,
+  digestAfter}`. `resolved` is what was applied: ids instead of names, literal generated names
+  (a replay gives the SAME names), literal cell lists for paint selections, created ids for add,
+  layer on/off lists for display, verbatim code for eval (flagged unsafe).
+- Not replayable: `regenerate`, `generate_map`, `load_map`, `snapshot restore`, a call that
+  failed part-way. They are logged and make the sketch blob-only (can be saved and viewed, not
+  rebased) until undone. Undo stepping back past the sketch's start is permanent blob-only.
+- `snapshot {action:'undo'}` takes the last op out of the log; `redo` puts it back. A call
+  that failed without changing anything is logged as a no-op.
+- `sketch {action:'status', full?}`: base, ops (`log`: seq, tool, summary), blobOnly and
+  `blobOnlyReasons`, `dirty`. `full:true` adds every record with its resolved form (large).
+- `sketch {action:'summary', shots?}`: markdown (base, one sentence per op, map counts vs base)
+  plus four screenshots under `TUPAIA_OUT/sketches/<slug>/` (before/after, full map and framed
+  on the most-changed entity, with that entity's layers on). It loads the base to shoot it and
+  loads the sketch back (no undo entry). `shots:false` skips them.
+- `sketch {action:'stop'}`: ends recording; the page keeps the changes. Later changes are not
+  logged (status shows `diverged`).
+- `sketch {action:'rebase', onto:{path}, onConflict?}` (test hook, TUPAIA_TEST_HOOKS=1):
+  replay the log onto another map. Per op: ids of entities the sketch created are rewritten
+  through the id map, then validated: a missing or removed target, an occupied cell, a NO_PATH
+  route, or a field that both the sketch and someone else changed (`both changed <field>`) is
+  a conflict. `onConflict:'stop'` (default) stops there and leaves the page with the partial
+  replay (`snapshot undo n` returns to the sketch); `'skip'` drops the op and goes on. Each
+  applied op pushes one undo entry. On completion the sketch's base is the new map and its
+  ops are the applied ones. Returns `{applied, skipped, conflicts:[{seq, reason, op}], idMap}`.
+- eval code is replayed verbatim: ids inside the code are not rewritten.
 
 ## Recipes
 

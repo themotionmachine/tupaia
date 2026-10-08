@@ -12,7 +12,7 @@ It is a separate Node package. Nothing here is imported by the app or shipped in
 
 - `node mcp/src/server.ts` (Node 24+ type stripping; not tsx). stdout carries only JSON-RPC;
   logs go to stderr.
-- Startup registers 19 tools and 3 resources and opens no browser and no network. The first
+- Startup registers 20 tools and 3 resources and opens no browser and no network. The first
   tool call starts a loopback static server over `<repo>/dist`, launches Chromium
   (Playwright 1.60.0) and opens one page at `/?local`.
 - `src/bridge.js` and `src/bridge-mutations.js` are injected as classic scripts and define
@@ -27,7 +27,7 @@ It is a separate Node package. Nothing here is imported by the app or shipped in
 
 Tools: session, map_info, find, inspect, screenshot, display, edit, add, paint_cells,
 generate_map, regenerate, snapshot, eval, load_map, save_map, export, shared_status,
-shared_save, shared_restore. Resources: `tupaia://docs/cheatsheet.md` (every tool, refs,
+shared_save, shared_restore, sketch. Resources: `tupaia://docs/cheatsheet.md` (every tool, refs,
 places, error codes, field tables, recipes), `tupaia://docs/runtime-api.md`,
 `tupaia://docs/data-model.md`. The operating skill for Claude is
 `.claude/skills/tupaia-dexterity/SKILL.md`.
@@ -141,6 +141,23 @@ needs `expectCurrent`, because the Worker has no version guard on restore. With
 Every request to the live origin (method, URL, status) is listed in `session` status under
 `outwardRequests`.
 
+## Sketches (provisional changes)
+
+`sketch` records a proposed change to the shared map without writing it: base version N of
+the shared map plus an ops log (`src/ops.ts`). `start` needs a page map loaded with
+`load_map {source:'shared'}` and unedited. While a sketch records, every mutating tool call
+appends `{seq, tool, args, resolved, summary, at, digestBefore, digestAfter}`; `resolved` comes
+from the bridge's own apply result (ids, literal generated names, literal cell lists, the
+created entities' ids, the layer on/off lists, verbatim eval code). regenerate, generate_map,
+load_map and snapshot restore are logged as non-replayable, which makes the sketch blob-only
+until they are undone; undo pops the op it undid and redo re-appends it.
+
+`src/replay.ts` replays a log onto whatever map is in the page through the same bridge
+functions, rewriting the ids of entities the sketch created through an id map and checking
+each op first (missing or removed targets, fields both sides changed). `summary` writes
+markdown and before/after screenshots under `TUPAIA_OUT/sketches/<slug>/`.
+`rebase {onto:{path}}` (replay onto a map file) is a test hook (`TUPAIA_TEST_HOOKS=1`).
+
 ## Test
 
 ```bash
@@ -153,6 +170,12 @@ npm test                # node --test "test/**/*.test.ts"
 - `test/bridge.test.ts`: pure unit tests of the bridge in `node:vm` (no browser).
 - `test/smoke.test.ts`: stdio end-to-end tests of every local tool against
   `tests/fixtures/demo.map` (core, mutations, persistence blocks).
+- `test/sketch.test.ts`: a sketch of 9 ops on demo.map (renames incl. a generated name, a
+  recolour, a new burg, a route to it by its sketch id, a marker with a note, a painted circle,
+  a layer toggle), undo/redo inside it, the summary, and replays onto copies someone else
+  edited: ids shift and their edits survive; a removed target and a both-changed field are
+  conflicts (`stop` and `skip`); a regenerate makes it blob-only.
+- `test/ops.test.ts`: pure tests of the ops log, id rewriting and replay helpers.
 - `test/shared.test.ts`: the shared tools against `test/fake-worker.ts`, an in-process
   `node:http` fake of `cloudflare/worker/src/index.ts` on 127.0.0.1. It covers local-mode
   refusals and, in a live-mode server, preview, token, confirm (exactly one PUT with

@@ -6,7 +6,7 @@ description: Drive the Tupaia map app through the `tupaia` MCP server to generat
 # Tupaia dexterity
 
 The `tupaia` MCP server runs the built Tupaia app (Ryan's fork of Azgaar's Fantasy Map
-Generator) in headless Chromium and exposes 19 tools. This skill is how to use them well.
+Generator) in headless Chromium and exposes 20 tools. This skill is how to use them well.
 For full signatures, field tables and error codes, read the resource
 `tupaia://docs/cheatsheet.md`. Read `tupaia://docs/runtime-api.md` before any `eval`.
 
@@ -147,7 +147,32 @@ The shared map at map.activationlayer.org is used by other people. `shared_save`
 - Layer visibility and style are saved with the map; a `display` change ships with the next
   shared_save. Mention it if you changed them.
 
-## 9. Failure handling
+## 9. Sketches: proposing a change
+
+When the human wants a change to the shared map that people can look at before it lands, make
+it a sketch instead of editing the live map. A sketch is "base version N of the shared map plus
+the ops that produced it"; it never writes the shared map.
+
+1. `load_map {source:'shared'}` (a read-only GET). Make no edits yet.
+2. `sketch {action:'start', slug:'short-name', note:'what this proposes'}`. It is REFUSED if the
+   page map did not come from the shared map or was already edited; do what the message says.
+3. Make the changes with the normal tools, screenshots as usual. Every mutating call is logged
+   with what it actually did (ids, literal generated names, literal cells), so it can be
+   replayed later onto a newer shared map and other people's edits survive.
+4. Prefer edit, add, paint_cells and display. `regenerate`, `generate_map`, `load_map` and
+   `snapshot restore` make the sketch blob-only (it can no longer be replayed); undo them if
+   that was not intended. eval is replayed verbatim and marked unsafe in the summary; avoid it.
+5. Undo works inside a sketch: `snapshot {action:'undo'}` takes the last op out of the log.
+6. `sketch {action:'summary'}`: markdown for the human (base version, one sentence per op,
+   counts vs base) and before/after screenshot paths. Show the human the markdown and the
+   framed before/after images.
+7. `sketch {action:'stop'}` when done; the page keeps the result.
+
+`sketch {action:'status'}` shows the base, the log, and why a sketch is blob-only. Replaying
+onto a newer map stops at conflicts (a target someone removed, a field both sides changed);
+report each conflict's `reason` to the human rather than working around it.
+
+## 10. Failure handling
 
 - Results list `alerts` (app dialogs, auto-dismissed), `consoleErrors` and `notes`. Read them.
 - TIMEOUT on a mutating call, or a note that the browser relaunched: call `session`, check
@@ -157,7 +182,7 @@ The shared map at map.activationlayer.org is used by other people. `shared_save`
   (`eval {code:"closeDialogs(); customization = 0"}`).
 - A batch error names the item index (`details.errors`); fix that item and resend the batch.
 
-## 10. Pitfalls
+## 11. Pitfalls
 
 - Layer toggles flip state; `display` and `screenshot {layers}` handle that for you.
 - Locked states' labels, marker removal (icon and note) and state removal are handled for

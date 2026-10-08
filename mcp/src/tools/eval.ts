@@ -1,6 +1,7 @@
 // eval: the escape hatch. Runs JS in the page against the app's runtime globals.
 import { z } from "zod";
 import type { ToolContext } from "../context.ts";
+import type { EvalResolved } from "../ops.ts";
 import { META_TEXT_HEAVY, unwrap } from "../result.ts";
 import { RedrawLayer, TIMEOUTS, TimeoutMs } from "../schemas.ts";
 import { defineTools } from "./registry.ts";
@@ -27,6 +28,8 @@ export function register(ctx: ToolContext): void {
       const readOnly = !!args.readOnly;
       if (!readOnly) await scope.pushUndo("eval", { code: args.code });
       const idBefore = await ctx.pageMapId();
+      let replaced = false;
+      let result: Record<string, unknown>;
       try {
         const env = await scope.envelope<Record<string, unknown>>(
           "evalUser",
@@ -34,19 +37,31 @@ export function register(ctx: ToolContext): void {
           { timeoutMs: args.timeoutMs ?? TIMEOUTS.edit, mutating: !readOnly }
         );
         const v = unwrap(env);
-        return { ...v, ms: env.ms, ...(readOnly ? {} : { undo: "available (snapshot {action:'undo'})" }) };
+        result = { ...v, ms: env.ms, ...(readOnly ? {} : { undo: "available (snapshot {action:'undo'})" }) };
       } finally {
         // eval can replace the whole map (generate(), uploadMap(), ...). Lineage to the shared
         // map must not survive that: a new window.mapId drops provenance to 'unknown'.
         // (a dirty page is relaunched and the newest snapshot restored, with its provenance, next)
         const idAfter = ctx.browser.dirty ? idBefore : await ctx.pageMapId();
         if (idBefore !== idAfter) {
+          replaced = true;
           ctx.snapshots.setProvenance({ kind: "unknown", mapId: idAfter });
           scope.notes.push(
             "eval replaced the map in the page (its map id changed); the origin is now 'unknown', so shared_save treats it as unrelated to the shared map"
           );
         } else if (!readOnly) ctx.snapshots.noteMutation();
       }
+      if (!readOnly) {
+        const resolved: EvalResolved = { code: args.code };
+        if (args.args !== undefined) resolved.args = args.args;
+        if (args.redraw !== undefined) resolved.redraw = args.redraw;
+        await scope.record("eval", args, resolved, {
+          unsafe: true,
+          replayable: !replaced,
+          reason: replaced ? "eval replaced the whole map" : undefined
+        });
+      }
+      return result;
     }
   );
 }
