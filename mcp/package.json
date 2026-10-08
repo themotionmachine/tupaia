@@ -1,0 +1,26 @@
+{
+  "name": "tupaia-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MCP server that drives the built Tupaia app in headless Chromium.",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node src/server.ts",
+    "typecheck": "tsc -p .",
+    "test": "node --test \"test/**/*.test.ts\"",
+    "lint": "../node_modules/.bin/biome check --write --config-path=biome.lint.jsonc src test"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.3.1",
+    "playwright": "1.60.0",
+    "zod": "^4.2.0"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "^2.3.1",
+    "@types/node": "^25.0.10",
+    "typescript": "^5.9.3"
+  }
+}

@@ -15,3 +15,5 @@
 /memory
 .github/agents/bmad-*
 .github/prompts/bmad-*
+# tupaia MCP server output (screenshots, exports)
+.tupaia-mcp-out/

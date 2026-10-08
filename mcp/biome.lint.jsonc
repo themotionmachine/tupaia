@@ -1,0 +1,6 @@
+{
+  "root": true,
+  "extends": ["../biome.json"],
+  "vcs": { "enabled": false },
+  "files": { "includes": ["src/**/*.ts", "src/**/*.js", "test/**/*.ts"] }
+}
