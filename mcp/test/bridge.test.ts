@@ -194,6 +194,17 @@ describe("place", () => {
     assert.equal(mid.x, 400);
     assert.equal(mid.y, 150);
   });
+  test("a burg entity resolves to its recorded cell, not the cell nearest its x,y", () => {
+    // x 401 is nearer cell 24's centre (450) than cell 23's (350)
+    world.pack.burgs.push({ i: 6, name: "Edgeby", x: 401, y: 250, cell: 23, state: 1, culture: 1, population: 1 });
+    try {
+      assert.equal(T.place({ x: 401, y: 250 }).cell, 24);
+      assert.equal(T.place({ entity: { type: "burg", ref: "Edgeby" } }).cell, 23);
+      assert.equal(T.place({ entity: { type: "burg", ref: 6 } }).x, 401);
+    } finally {
+      world.pack.burgs.pop();
+    }
+  });
   test("OUT_OF_BOUNDS", () => {
     expectError(() => T.place({ x: -5, y: 10 }), "OUT_OF_BOUNDS");
     expectError(() => T.place({ lat: 80, lon: 0 }), "OUT_OF_BOUNDS");

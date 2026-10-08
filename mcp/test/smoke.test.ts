@@ -195,6 +195,9 @@ describe("tupaia-mcp smoke (core layer)", () => {
     assert.ok((feat.total as number) > 0);
     const f0 = (feat.rows as Array<{ i: number; x: number }>)[0];
     assert.equal(typeof f0.x, "number", "features have a centroid");
+    const fi = await h.ok("inspect", { entity: { type: "feature", ref: f0.i } });
+    const bb = fi.bbox as number[];
+    assert.ok(Array.isArray(bb) && bb.length === 4 && bb[0] <= bb[2] && bb[1] <= bb[3], "inspect feature has a bbox");
     const nb = await h.ok("find", { type: "namesbase", name: "Hawaiian" });
     assert.equal(nb.total, 1);
   });
@@ -779,6 +782,35 @@ describe("tupaia-mcp smoke (mutations)", () => {
     assert.deepEqual(hidden.skippedHidden, ["routes"]);
     await h.ok("snapshot", { action: "undo" });
     await h.ok("display", { on: ["routes"] });
+  });
+
+  test("a route from a burg whose x,y sits nearer a neighbour cell starts at the burg's own cell", async () => {
+    // demo.map has burgs (e.g. Krar) whose x,y is nearer a neighbouring cell's centre than their own
+    const pair = await evalRO(`
+      const B = pack.burgs.filter(b => b && b.i && !b.removed && pack.cells.h[b.cell] >= 20);
+      for (const a of B) {
+        if (findCell(a.x, a.y) === a.cell) continue;
+        for (const b of B) {
+          if (b.i === a.i || b.feature !== a.feature) continue;
+          const d = Math.hypot(a.x - b.x, a.y - b.y);
+          if (d > 40 && d < 150) return [a.i, b.i, a.cell];
+        }
+      }
+      return null;`);
+    assert.ok(pair, "need a burg whose nearest cell is not its own");
+    const [a, b, aCell] = pair as [number, number, number];
+    const at = await h.ok("inspect", { at: { entity: { type: "burg", ref: a } } });
+    assert.equal(at.cell, aCell);
+    const r = await h.ok("add", {
+      type: "route",
+      items: [{ through: [{ entity: { type: "burg", ref: a } }, { entity: { type: "burg", ref: b } }], group: "roads" }]
+    });
+    const route = (r.created as Array<{ i: number; endBurgs: Array<{ i: number } | null> }>)[0];
+    assert.equal(route.endBurgs[0]?.i, a);
+    assert.equal(route.endBurgs[1]?.i, b);
+    const first = await evalRO(`pack.routes.find(x => x.i === ${route.i}).points[0][2]`);
+    assert.equal(first, aCell);
+    await h.ok("snapshot", { action: "undo" });
   });
 
   test("n. add a burg at lat/lon, then remove it", async () => {

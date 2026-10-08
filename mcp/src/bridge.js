@@ -795,7 +795,14 @@
         if (r.type === "route") pt = polylineAt(routePoints(r.entity), f);
         else if (r.type === "river") pt = polylineAt(riverPoints(r.entity), f);
         else fail("BAD_PLACE", "at (fraction along) works only for routes and rivers");
-      } else pt = anchor(r.type, r.entity);
+      } else {
+        pt = anchor(r.type, r.entity);
+        // A burg or marker belongs to its recorded cell; its x,y can sit nearer a neighbour's
+        // centre (39 of 753 burgs in demo.map), so the nearest cell would be the wrong one.
+        const ec = r.entity.cell;
+        if ((r.type === "burg" || r.type === "marker") && Number.isInteger(ec) && ec >= 0 && ec < pack.cells.p.length)
+          cell = ec;
+      }
       if (!pt) fail("NO_POSITION", `${r.type} ${r.i} has no position`);
       x = pt.x;
       y = pt.y;
@@ -1216,6 +1223,7 @@
     if (r.type === "label") ent = { id: x.id, text: x.name, group: x.group };
     out.entity = safeJson(ent, { maxItems: 300, maxDepth: 6 });
     out.relations = relationsOf(r.type, x);
+    if (r.type === "feature" && out.relations.bbox) out.bbox = out.relations.bbox;
     return out;
   };
 
