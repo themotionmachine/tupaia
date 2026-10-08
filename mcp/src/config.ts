@@ -23,6 +23,8 @@ export interface Config {
   headed: boolean;
   offline: boolean;
   testHooks: boolean;
+  /** How long the live build check (versioning.js VERSION, index entry) is cached (ms). */
+  buildCacheMs: number;
   warnings: string[];
 }
 
@@ -114,6 +116,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     headed: flag(env.TUPAIA_HEADED),
     offline: flag(env.TUPAIA_OFFLINE),
     testHooks: flag(env.TUPAIA_TEST_HOOKS),
+    buildCacheMs: int(env.TUPAIA_BUILD_CACHE_MS, 300_000, 0, 3_600_000),
     warnings
   };
 }

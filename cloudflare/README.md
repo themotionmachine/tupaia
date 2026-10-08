@@ -34,7 +34,11 @@ Client fork surface is just that one file, two buttons in `src/index.html`
 (Save/Load menus), one `lazy-loaders.ts` entry, and the `base` flag in
 `vite.config.ts` — keeps upstream rebases cheap (NFR-3).
 
-The MCP server (`mcp/`) adds two small export hooks, each marked `// tupaia-mcp:`:
+The MCP server lives in `mcp/` with its own `package.json` and `node_modules`; nothing
+in it is imported by the app or shipped in `dist/`. Its other repo-level files are
+`.mcp.json` (registers the local-mode `tupaia` server), `.claude/skills/tupaia-dexterity/`
+and `docs/architecture/runtime_api.md`. Inside the app it adds two small export hooks,
+each marked `// tupaia-mcp:`:
 `src/controllers/states-editor.ts` puts the module-private `adjustProvinces` and
 `stateRemove` on `window.__tupaiaInternals` when the states editor module loads, and
 `public/modules/ui/heightmap-editor.js` returns its rebuild closures (`restoreKeptData`,

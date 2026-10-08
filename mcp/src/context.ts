@@ -188,10 +188,38 @@ export class ToolContext {
     this.browser.onLaunch(() => this.#afterLaunch());
   }
 
+  #sharedBootDone = false;
+
   async #afterLaunch(): Promise<void> {
     // A fresh page holds a random boot map until something is restored or loaded.
     const env = await this.browser.callBridge<{ seed?: string }>("summary", {}, { timeoutMs: 15_000, noAlerts: true });
     this.snapshots.setProvenance({ kind: "boot", seed: env.ok ? (env.value?.seed ?? null) : null });
+    // Live mode: the first launch loads the shared map, so its version is known before any write.
+    if (this.mode.mode === "live" && !this.#sharedBootDone) {
+      this.#sharedBootDone = true;
+      try {
+        const blob = await this.shared.getMap();
+        const r = await this.browser.callBridge<{ seed?: string }>(
+          "loadMap",
+          { b64: blob.bytes.toString("base64"), keepView: false, timeoutMs: 110_000 },
+          { timeoutMs: 120_000, mutating: true }
+        );
+        if (!r.ok) throw new Error(r.error?.message ?? "load failed");
+        this.snapshots.setProvenance({
+          kind: "shared",
+          seed: r.value?.seed ?? null,
+          sharedVersion: blob.version ?? undefined,
+          sharedUpdatedBy: blob.updatedBy,
+          sharedUpdatedAt: blob.updatedAt,
+          fetchedAt: new Date().toISOString()
+        });
+        this.browser.pendingNotes.push(`live mode: loaded the shared map v${blob.version ?? "?"} into the page`);
+      } catch (e) {
+        this.browser.pendingNotes.push(
+          `live mode: loading the shared map on launch failed (${(e as Error).message}); the page holds a random map`
+        );
+      }
+    }
   }
 
   async #restoreNewest(reason: string): Promise<string> {

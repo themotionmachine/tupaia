@@ -1740,7 +1740,16 @@
   FNS.mapData = async () => {
     const { prepareMapData } = await lazy.save();
     const text = prepareMapData();
-    return { text, bytes: text.length, customization: typeof customization !== "undefined" ? customization : 0 };
+    let fileName = null;
+    try {
+      fileName = typeof getFileName === "function" ? getFileName() : null;
+    } catch {}
+    return {
+      text,
+      bytes: text.length,
+      customization: typeof customization !== "undefined" ? customization : 0,
+      fileName
+    };
   };
 
   FNS.loadMap = async (a, meta) => {
@@ -1856,8 +1865,89 @@
     const k = a.scale || 1;
     const c = canvasOf(Math.round(graphWidth * k), Math.round(graphHeight * k));
     const ctx = c.getContext("2d");
+    if (a.format === "jpeg") {
+      ctx.fillStyle = "#ffffff"; // JPEG has no alpha: paint transparent areas white, not black
+      ctx.fillRect(0, 0, c.width, c.height);
+    }
     ctx.drawImage(img, 0, 0, c.width, c.height);
     return encodeCanvas(c, a.format || "png", a.quality);
+  };
+
+  // ---------------------------------------------------------------- export (save_map/export tools)
+
+  function exportOptions(o) {
+    const out = { fullMap: o?.fullMap !== false };
+    for (const k of ["noLabels", "noWater", "noScaleBar", "noIce", "noVignette"]) if (o?.[k]) out[k] = true;
+    return out;
+  }
+  T.exportOptions = exportOptions;
+
+  function refuseWhileEditing() {
+    if (typeof customization !== "undefined" && customization) {
+      fail(
+        "REFUSED",
+        `an editor is active (customization=${customization}); close it first (eval: closeDialogs(); customization = 0)`
+      );
+    }
+  }
+
+  FNS.mapFileName = () => {
+    let fileName = null;
+    try {
+      fileName = typeof getFileName === "function" ? getFileName() : null;
+    } catch {}
+    return { fileName, customization: typeof customization !== "undefined" ? customization : 0 };
+  };
+
+  /** SVG text of the map (getMapURL fetched inside this call: the blob URL dies after 5 s). */
+  FNS.exportSvg = async a => {
+    refuseWhileEditing();
+    const { getMapURL } = await lazy.exportMap();
+    const url = await getMapURL("svg", exportOptions(a.options));
+    const text = await (await fetch(url)).text();
+    return { text, bytes: text.length, graphWidth, graphHeight };
+  };
+
+  /** PNG/JPEG of the whole map: the same rasteriser as screenshot {full:true}. */
+  FNS.exportRaster = async a => {
+    refuseWhileEditing();
+    return FNS.rasterize({
+      scale: a.scale || 1,
+      format: a.format,
+      quality: a.quality,
+      options: exportOptions(a.options)
+    });
+  };
+
+  const JSON_KINDS = {
+    "json-full": "Full",
+    "json-minimal": "Minimal",
+    "json-packcells": "PackCells",
+    "json-gridcells": "GridCells"
+  };
+  const GEOJSON_FNS = {
+    "geojson-cells": "saveGeoJsonCells",
+    "geojson-routes": "saveGeoJsonRoutes",
+    "geojson-rivers": "saveGeoJsonRivers",
+    "geojson-markers": "saveGeoJsonMarkers",
+    "geojson-zones": "saveGeoJsonZones"
+  };
+
+  /** Start one of the app's download-only exports; Node captures the download event. */
+  FNS.triggerDownload = async a => {
+    refuseWhileEditing();
+    const kind = String(a.format || "");
+    if (JSON_KINDS[kind]) {
+      const { exportToJson } = await lazy.exportJson();
+      exportToJson(JSON_KINDS[kind]);
+      return { started: kind };
+    }
+    if (GEOJSON_FNS[kind]) {
+      const mod = await lazy.exportMap();
+      mod[GEOJSON_FNS[kind]]();
+      return { started: kind };
+    }
+    fail("BAD_ARGS", `unknown download format '${kind}'`);
   };
 
   // ---------------------------------------------------------------- eval
@@ -1900,7 +1990,7 @@
   };
 
   // Functions whose results are large strings (map text, base64 images) skip safeJson caps.
-  for (const k of ["mapData", "encodeImage", "diffImages", "rasterize"]) FNS[k].raw = true;
+  for (const k of ["mapData", "encodeImage", "diffImages", "rasterize", "exportSvg", "exportRaster"]) FNS[k].raw = true;
 
   // ---------------------------------------------------------------- envelope
 

@@ -292,6 +292,19 @@ As classic code migrates out of `public/`, it lands in the matching `src/` folde
 - A pure, reusable helper with no domain knowledge → `utils/`
 - A shared type / interface → `types/`
 
+## Outside the app: the MCP server (`mcp/`)
+
+`mcp/` holds a Model Context Protocol server that lets a Claude session drive the built app
+(`dist/`) in headless Chromium: query, edit, paint, generate, screenshot, snapshot/undo,
+save and export maps, and (only in a server a human started with `TUPAIA_MODE=live`, behind a
+preview-and-token gate) write the shared map. It is a separate Node package with its own
+`package.json`, run with `node mcp/src/server.ts` and registered in `.mcp.json`; the app never
+imports it and it adds nothing to the bundle. It reaches the app only through its runtime
+globals (an injected `mcp/src/bridge.js`, documented in `docs/architecture/runtime_api.md`)
+plus two small export hooks marked `// tupaia-mcp:` (listed in `cloudflare/README.md`). An
+app change that renames a global, a lazy module export or one of those hooks can break it:
+run `npm test` in `mcp/` after such changes. See `mcp/README.md`.
+
 ---
 
 # Module Design

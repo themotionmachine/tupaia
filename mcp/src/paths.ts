@@ -38,6 +38,9 @@ export interface WriteOptions {
 
 export function resolveWritePath(cfg: Config, p: string, opts: WriteOptions = {}): string {
   const exts = opts.exts ?? WRITE_EXTS;
+  if (!path.isAbsolute(p) && /^(\.\/)?tests[\\/]fixtures([\\/]|$)/.test(p)) {
+    throw new ToolError("REFUSED", `refusing to write under tests/fixtures (${p})`);
+  }
   const abs = real(path.isAbsolute(p) ? path.resolve(p) : path.resolve(cfg.outDir, p));
   const fixtures = real(path.join(cfg.repoRoot, "tests", "fixtures"));
   if (inside(abs, fixtures)) throw new ToolError("REFUSED", `refusing to write under tests/fixtures (${abs})`);

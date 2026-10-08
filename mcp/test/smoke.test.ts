@@ -1,7 +1,10 @@
 // End-to-end smoke test over stdio against tests/fixtures/demo.map (core-layer tools).
 // Letters refer to the verification plan in the design (stage1 VERIFY section).
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { after, before, describe, test } from "node:test";
 import {
   alive,
@@ -9,6 +12,7 @@ import {
   errorBody,
   type Harness,
   imageSize,
+  REPO_ROOT,
   rawStdoutCheck,
   startServer,
   textOf,
@@ -16,6 +20,27 @@ import {
 } from "./helpers.ts";
 
 const CORE_TOOLS = ["session", "map_info", "find", "inspect", "screenshot", "snapshot", "eval", "load_map"];
+const ALL_TOOLS = [
+  "session",
+  "map_info",
+  "find",
+  "inspect",
+  "screenshot",
+  "display",
+  "edit",
+  "add",
+  "paint_cells",
+  "generate_map",
+  "regenerate",
+  "snapshot",
+  "eval",
+  "load_map",
+  "save_map",
+  "export",
+  "shared_status",
+  "shared_save",
+  "shared_restore"
+];
 
 describe("tupaia-mcp smoke (core layer)", () => {
   let h: Harness;
@@ -837,5 +862,123 @@ describe("tupaia-mcp smoke (mutations)", () => {
   test("no outward requests from the mutation tools", async () => {
     const status = await h.ok("session", {});
     assert.deepEqual(status.outwardRequests, []);
+  });
+});
+
+// Persistence layer: save_map and export (plan items y, z) plus the final 19-tool surface.
+describe("tupaia-mcp smoke (persistence)", () => {
+  let h: Harness;
+  const outside: string[] = [];
+
+  before(async () => {
+    h = await startServer();
+    await h.ok("load_map", { path: "tests/fixtures/demo.map" });
+  });
+
+  after(async () => {
+    for (const f of outside) fs.rmSync(f, { force: true });
+    if (h && alive(h.pid)) await h.close();
+  });
+
+  test("a. exactly the 19 tools; shared writes annotated destructive + open world", async () => {
+    const { tools } = await h.client.listTools();
+    assert.deepEqual(tools.map(t => t.name).sort(), [...ALL_TOOLS].sort());
+    for (const t of tools) assert.ok((t.description ?? "").length <= 2048, `${t.name} description too long`);
+    for (const n of ["shared_save", "shared_restore"]) {
+      const t = tools.find(x => x.name === n);
+      assert.equal(t?.annotations?.destructiveHint, true, `${n} destructive`);
+      assert.equal(t?.annotations?.openWorldHint, true, `${n} openWorld`);
+    }
+    assert.equal(tools.find(x => x.name === "shared_status")?.annotations?.readOnlyHint, true);
+  });
+
+  test("y. save_map writes a .map that loads back; overwrite and path policy", async () => {
+    const r = await h.ok("save_map", { path: "saved/demo-copy.map" });
+    const file = r.path as string;
+    assert.ok(file.startsWith(fs.realpathSync(h.env.TUPAIA_OUT)), `${file} under TUPAIA_OUT`);
+    const text = fs.readFileSync(file, "utf8");
+    assert.match(text, /^1\.130\.1\|/);
+    assert.equal(r.bytes, Buffer.byteLength(text));
+    assert.equal(r.sha256, crypto.createHash("sha256").update(text).digest("hex"));
+
+    const before = await h.ok("map_info", { since: "none" });
+    const loaded = await h.ok("load_map", { path: file });
+    assert.equal(loaded.name, "Chanland");
+    assert.deepEqual(loaded.counts, before.counts);
+
+    const again = await h.call("save_map", { path: "saved/demo-copy.map" });
+    assert.equal(errorBody(again).error.code, "REFUSED");
+    assert.match(errorBody(again).error.message, /overwrite:true/);
+    const over = await h.ok("save_map", { path: "saved/demo-copy.map", overwrite: true });
+    assert.equal(over.path, file);
+
+    for (const p of ["tests/fixtures/x.map", path.join(REPO_ROOT, "tests", "fixtures", "demo.map")]) {
+      const f = await h.call("save_map", { path: p, overwrite: true, allowOutside: true });
+      assert.equal(errorBody(f).error.code, "REFUSED", p);
+      assert.match(errorBody(f).error.message, /tests\/fixtures/);
+    }
+    const ext = await h.call("save_map", { path: "saved/demo.txt" });
+    assert.equal(errorBody(ext).error.code, "REFUSED");
+    const out = path.join(os.tmpdir(), `tupaia-outside-${process.pid}.map`);
+    outside.push(out);
+    const o1 = await h.call("save_map", { path: out });
+    assert.equal(errorBody(o1).error.code, "REFUSED");
+    assert.match(errorBody(o1).error.message, /allowOutside/);
+    assert.equal(fs.existsSync(out), false);
+    await h.ok("save_map", { path: out, allowOutside: true });
+    assert.ok(fs.statSync(out).size > 1_000_000);
+    const src = await h.call("save_map", { path: path.join(REPO_ROOT, "src", "x.map") });
+    assert.equal(errorBody(src).error.code, "REFUSED");
+  });
+
+  test("save_map is refused while an app editor is active", async () => {
+    await h.ok("eval", { code: "customization = 1", readOnly: true });
+    const r = await h.call("save_map", { path: "saved/editing.map" });
+    assert.equal(errorBody(r).error.code, "REFUSED");
+    assert.match(errorBody(r).error.message, /customization/);
+    const e = await h.call("export", { format: "svg", path: "exports/editing.svg" });
+    assert.equal(errorBody(e).error.code, "REFUSED");
+    await h.ok("eval", { code: "customization = 0", readOnly: true });
+  });
+
+  test("z. export svg, png, jpeg, json-full, geojson-cells, geojson-routes", async () => {
+    const svg = await h.ok("export", { format: "svg", path: "exports/map.svg" });
+    const svgText = fs.readFileSync(svg.path as string, "utf8");
+    assert.match(svgText.slice(0, 200), /^<\?xml/);
+    assert.match(svgText, /<svg[\s>]/);
+    assert.match(svgText.trimEnd(), /<\/svg>$/);
+    assert.equal(svg.width, 1680);
+
+    const png = await h.ok("export", { format: "png", path: "exports/map.png" });
+    const pngBuf = fs.readFileSync(png.path as string);
+    const ps = imageSize(pngBuf);
+    assert.equal(ps.type, "png");
+    assert.deepEqual([ps.width, ps.height], [1680, 849]);
+
+    const jpg = await h.ok("export", { format: "jpeg", path: "exports/map.jpg", scale: 0.5 });
+    const js = imageSize(fs.readFileSync(jpg.path as string));
+    assert.equal(js.type, "jpeg");
+    assert.deepEqual([js.width, js.height], [840, 425]);
+
+    const wrongExt = await h.call("export", { format: "png", path: "exports/map.jpg" });
+    assert.equal(errorBody(wrongExt).error.code, "REFUSED");
+
+    const full = await h.ok("export", { format: "json-full", path: "exports/full.json" });
+    const fullJson = JSON.parse(fs.readFileSync(full.path as string, "utf8"));
+    assert.ok(fullJson && typeof fullJson === "object" && (full.bytes as number) > 1000);
+
+    for (const f of ["geojson-cells", "geojson-routes"]) {
+      const g = await h.ok("export", { format: f, path: `exports/${f}.geojson` });
+      const gj = JSON.parse(fs.readFileSync(g.path as string, "utf8"));
+      assert.equal(gj.type, "FeatureCollection", f);
+      assert.ok(Array.isArray(gj.features) && gj.features.length > 0, `${f} has features`);
+    }
+    const def = await h.ok("export", { format: "svg" });
+    assert.match(def.path as string, /exports\/.+\.svg$/);
+  });
+
+  test("no outward requests from persistence tools", async () => {
+    const s = await h.ok("session", { action: "status" });
+    assert.deepEqual(s.outwardRequests, []);
   });
 });
