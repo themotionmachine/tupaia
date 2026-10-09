@@ -22,7 +22,10 @@
 //   burg's state or culture; a live culture's origins; a live religion's culture or origins; a
 //   market centre; a deal party; any cell. App code dereferences those ids and reads fields
 //   (regenerateEmblems reads the province burg's name, markets read the centre's cell, the
-//   religions CSV export reads origin names, ...).
+//   religions CSV export reads origin names, ...). keptBy counts them per kind and keptWhy names
+//   what releases each kind. repointProvinces:true releases removed burgs that are only held as a
+//   live province's capital: the province's capital becomes its first live burg (or 0), which is
+//   what the app's provinces editor does whenever it opens.
 // Rivers, routes, markers, zones, labels and regiments are deleted outright by the app, so they
 // have no records to stub; compact only drops their leftover notes and SVG.
 //
@@ -79,56 +82,125 @@
     return s;
   }
 
+  // Fields app code writes onto every record, stubs included, without making it bigger in any way
+  // that matters: the cultures and religions editors' statistics (0 for a stub, whose id no cell
+  // carries) and the cultures editor's `burg.culture = cells.culture[burg.cell]` (undefined for a
+  // stub, which JSON drops). A stub carrying only these is still a stub: compact would otherwise
+  // find "work" (an undo entry and a sketch op) after every editor visit.
+  const STAT_KEYS = ["cells", "area", "rural", "urban", "burgs"];
   function isStub(type, x) {
-    return Object.keys(x).every(k => k === "i" || k === "removed" || KEEP[type].includes(k));
+    return Object.keys(x).every(
+      k =>
+        k === "i" ||
+        k === "removed" ||
+        KEEP[type].includes(k) ||
+        x[k] === undefined ||
+        (STAT_KEYS.includes(k) && x[k] === 0)
+    );
   }
 
-  /** Removed records that live data points at: {type: Map(id -> first referrer)}. */
-  function references() {
+  // What holds a removed record, by kind, with the remedy keptWhy gives for it.
+  const REMEDY = {
+    deal: "regenerate {parts:['production']} rebuilds trade deals without removed burgs (it also re-rolls production, products and treasury of every live burg)",
+    provinceBurg:
+      "compact {repointProvinces:true} makes the first live burg in each such province its capital (or none), as the app's provinces editor does when it opens",
+    market: "regenerate {parts:['markets','production']} picks new market centres",
+    cells: "cells still carry the id (paint_cells reassigns them)"
+  };
+  const OTHER_REMEDY = "a live record still names it: change that record, or leave it (a kept record is safe)";
+
+  /**
+   * Removed records that live data points at: {type: Map(id -> {by: first referrer, kinds:
+   * Map(kind -> first referrer of that kind)})}. skipProvinceBurg: provinces whose burg compact
+   * is about to repoint (their old burg is no longer held by them).
+   */
+  function references(skipProvinceBurg) {
     const ref = {};
     for (const t of INDEXED) ref[t] = new Map();
-    const add = (t, id, by) => {
-      if (posId(id) && !ref[t].has(id)) ref[t].set(id, by);
+    const add = (t, id, kind, by) => {
+      if (!posId(id)) return;
+      if (!ref[t].has(id)) ref[t].set(id, { by, kinds: new Map() });
+      const r = ref[t].get(id);
+      if (!r.kinds.has(kind)) r.kinds.set(kind, by);
     };
     for (const s of pack.states || []) {
       if (!live(s)) continue;
-      add("burg", s.capital, `state ${s.i} capital`);
-      add("culture", s.culture, `state ${s.i} culture`);
-      for (const p of s.provinces || []) add("province", p, `state ${s.i} provinces`);
-      for (const n of s.neighbors || []) add("state", n, `state ${s.i} neighbors`);
+      const who = s.i ? `state ${s.i}` : "Neutrals (state 0)";
+      add("burg", s.capital, "capital", `${who} capital`);
+      add("culture", s.culture, "stateCulture", `${who} culture`);
+      for (const p of s.provinces || []) add("province", p, "stateProvinces", `${who} provinces list`);
+      for (const n of s.neighbors || []) add("state", n, "neighbors", `${who} neighbors list`);
       for (const c of s.campaigns || []) {
-        add("state", c?.attacker, `state ${s.i} campaigns`);
-        add("state", c?.defender, `state ${s.i} campaigns`);
+        add("state", c?.attacker, "campaigns", `${who} campaigns`);
+        add("state", c?.defender, "campaigns", `${who} campaigns`);
       }
     }
     for (const p of pack.provinces || []) {
       if (!live(p)) continue;
-      add("burg", p.burg, `province ${p.i} burg`);
-      add("state", p.state, `province ${p.i} state`);
+      if (!skipProvinceBurg?.has(p.i)) add("burg", p.burg, "provinceBurg", `province ${p.i} burg`);
+      add("state", p.state, "provinceState", `province ${p.i} state`);
     }
     for (const b of pack.burgs || []) {
       if (!live(b) || !b.i) continue;
-      add("state", b.state, `burg ${b.i} state`);
-      add("culture", b.culture, `burg ${b.i} culture`);
+      add("state", b.state, "burgState", `burg ${b.i} state`);
+      add("culture", b.culture, "burgCulture", `burg ${b.i} culture`);
     }
     for (const c of pack.cultures || [])
-      if (live(c)) for (const o of c.origins || []) add("culture", o, `culture ${c.i} origins`);
+      if (live(c)) for (const o of c.origins || []) add("culture", o, "origins", `culture ${c.i} origins`);
     for (const r of pack.religions || []) {
       if (!live(r)) continue;
-      add("culture", r.culture, `religion ${r.i} culture`);
-      for (const o of r.origins || []) add("religion", o, `religion ${r.i} origins`);
+      add("culture", r.culture, "religionCulture", `religion ${r.i} culture`);
+      for (const o of r.origins || []) add("religion", o, "origins", `religion ${r.i} origins`);
     }
-    for (const m of pack.markets || []) if (isObj(m)) add("burg", m.centerBurgId, `market ${m.i} centre`);
+    for (const m of pack.markets || []) if (isObj(m)) add("burg", m.centerBurgId, "market", `market ${m.i} centre`);
     for (const d of pack.deals || []) {
       if (!isObj(d)) continue;
-      if (d.sellerType === "burg") add("burg", d.seller, `deal ${d.i} seller`);
-      if (d.buyerType === "burg") add("burg", d.buyer, `deal ${d.i} buyer`);
+      if (d.sellerType === "burg") add("burg", d.seller, "deal", `deal ${d.i} seller`);
+      if (d.buyerType === "burg") add("burg", d.buyer, "deal", `deal ${d.i} buyer`);
     }
     for (const t of INDEXED) {
       const arr = pack.cells?.[t];
-      if (arr) for (const v of new Set(arr)) add(t, v, `cells (${t})`);
+      if (arr) for (const v of new Set(arr)) add(t, v, "cells", `cells (${t})`);
     }
     return ref;
+  }
+
+  /**
+   * Live provinces whose capital (province.burg) is a removed burg: [{i, from, to}], `to` being
+   * the first live burg in the province in cell order, or 0. This is what the app's provinces
+   * editor does each time it opens (collectStatistics in provinces-editor.js).
+   */
+  function provinceRepoints() {
+    const C = pack.cells;
+    const need = new Set();
+    for (const p of pack.provinces || []) {
+      if (!live(p) || !p.i || !posId(p.burg)) continue;
+      const b = pack.burgs?.[p.burg];
+      if (isObj(b) && b.removed) need.add(p.i);
+    }
+    if (!need.size || !C?.province || !C?.burg) return [];
+    const first = new Map();
+    for (let c = 0; c < C.province.length; c++) {
+      const pr = C.province[c];
+      if (!need.has(pr) || first.has(pr)) continue;
+      const b = C.burg[c];
+      if (b && live(pack.burgs[b])) first.set(pr, b);
+    }
+    return [...need].map(i => ({ i, from: pack.provinces[i].burg, to: first.get(i) ?? 0 }));
+  }
+
+  /** Replay: the logged repoints that still hold on this base (same old capital, still removed). */
+  function replayRepoints(list) {
+    const out = [];
+    for (const row of list) {
+      if (!Array.isArray(row)) continue;
+      const [i, from, to] = row.map(Number);
+      const p = pack.provinces?.[i];
+      if (!live(p) || p.burg !== from || !pack.burgs?.[from]?.removed) continue;
+      if (to !== 0 && !live(pack.burgs?.[to])) continue;
+      out.push({ i, from, to });
+    }
+    return out;
   }
 
   /** The entity a note belongs to by its id, or null. */
@@ -248,10 +320,18 @@
     const types = Array.isArray(a.types) && a.types.length ? a.types : TYPES;
     for (const t of types)
       if (!TYPES.includes(t)) fail("BAD_ARGS", `compact does not handle '${t}'`, { details: TYPES });
-    const replay = isObj(a.ids) || Array.isArray(a.noteIds) || isObj(a.svgIds);
+    const replay = isObj(a.ids) || Array.isArray(a.noteIds) || isObj(a.svgIds) || Array.isArray(a.repoint);
     const want = (obj, t) => (replay ? new Set((isObj(obj) && Array.isArray(obj[t]) ? obj[t] : []).map(Number)) : null);
-    const ref = references();
-    const p = { stubs: [], kept: [], notes: [], svg: [] };
+    // repoint province capitals only when burgs are compacted
+    const repoint = !types.includes("burg")
+      ? []
+      : replay
+        ? replayRepoints(Array.isArray(a.repoint) ? a.repoint : [])
+        : a.repointProvinces
+          ? provinceRepoints()
+          : [];
+    const ref = references(new Set(repoint.map(r => r.i)));
+    const p = { stubs: [], kept: [], notes: [], svg: [], repoint };
     const emblems = {};
 
     for (const t of INDEXED) {
@@ -262,8 +342,9 @@
       for (const x of list) {
         if (!isObj(x) || !x.removed || !posId(x.i) || list[x.i] !== x) continue;
         if (!replay || onlyIds.has(x.i)) {
-          if (ref[t].has(x.i)) {
-            if (!isStub(t, x)) p.kept.push({ type: t, i: x.i, by: ref[t].get(x.i) });
+          const held = ref[t].get(x.i);
+          if (held) {
+            if (!isStub(t, x)) p.kept.push({ type: t, i: x.i, by: held.by, kinds: held.kinds });
           } else if (!isStub(t, x)) {
             const stub = stubOf(t, x);
             p.stubs.push({ type: t, i: x.i, x, stub, bytes: u8(JSON.stringify(x)) - u8(JSON.stringify(stub)) });
@@ -291,12 +372,19 @@
     return p;
   }
 
-  /** Approximate .map bytes the plan saves. */
+  /**
+   * .map bytes the plan saves: exact for records and notes (their JSON), close for SVG (its
+   * markup; the save serializes a clone of the map SVG). A repointed province capital changes the
+   * digits of one number.
+   */
   function planBytes(p) {
     let n = 0;
     for (const s of p.stubs) n += s.bytes;
     for (const x of p.notes) n += u8(JSON.stringify(x)) + 1;
+    // [a,b] -> [] loses one comma fewer than it has elements
+    if (p.notes.length && typeof notes !== "undefined" && p.notes.length === notes.length) n -= 1;
     for (const o of p.svg) n += u8(o.el.outerHTML || "");
+    for (const r of p.repoint) n += String(r.from).length - String(r.to).length;
     return n;
   }
 
@@ -315,44 +403,78 @@
     return out;
   }
 
-  /** Compact result for Node (counts first, details opt-in). */
-  function view(p, details) {
-    const out = { compacted: countBy(p.stubs) };
-    if (p.kept.length) out.kept = countBy(p.kept);
-    Object.assign(out, {
-      notesDropped: p.notes.length,
-      svgDropped: p.svg.length,
-      bytesSaved: planBytes(p),
-      empty: !p.stubs.length && !p.notes.length && !p.svg.length
-    });
-    if (details) {
-      out.details = {
-        ids: Object.fromEntries(Object.entries(idsBy(p.stubs)).map(([t, ids]) => [t, ranges(ids)])),
-        kept: p.kept.slice(0, 50).map(k => ({ type: k.type, i: k.i, by: k.by })),
-        notes: p.notes.slice(0, 100).map(n => n.id),
-        svg: Object.fromEntries(Object.entries(idsBy(p.svg)).map(([t, ids]) => [t, ranges(ids)]))
-      };
-      if (p.kept.length > 50) out.details.keptTruncated = p.kept.length;
-      if (p.notes.length > 100) out.details.notesTruncated = p.notes.length;
-    }
-    if (p.kept.length) {
-      const list = details ? "" : " (details:true lists them)";
-      const deals = p.kept.some(k => /^deal /.test(k.by))
-        ? "; trade deals hold removed burgs until regenerate {parts:['production']} rebuilds them"
-        : "";
-      out.keptWhy = `${p.kept.length} removed record(s) are still referenced by live data and stay whole${list}${deals}`;
+  /** {type: {kind: n}} over kept records (a record held in several ways counts under each). */
+  function keptByKind(kept) {
+    const out = {};
+    for (const k of kept) {
+      if (!out[k.type]) out[k.type] = {};
+      const t = out[k.type];
+      for (const kind of k.kinds.keys()) t[kind] = (t[kind] || 0) + 1;
     }
     return out;
   }
 
-  /** Literal form for the sketch log: per-type ids compacted, note ids dropped, SVG owners. */
+  /** One line per kind: how many records it holds and what releases them. */
+  function keptWhy(kept, details) {
+    const kinds = new Map();
+    for (const k of kept) for (const kind of k.kinds.keys()) kinds.set(kind, (kinds.get(kind) || 0) + 1);
+    const lines = [...kinds]
+      .sort((x, y) => y[1] - x[1])
+      .map(([kind, n]) => `${kind} (${n}): ${REMEDY[kind] || OTHER_REMEDY}`);
+    const list = details ? "" : " details:true lists them.";
+    return `${kept.length} removed record(s) stay whole because live data still points at them (by kind; a record can be held in several ways).${list} ${lines.join(" | ")}`;
+  }
+
+  /** Compact result for Node (counts first, details opt-in). */
+  function view(p, details, limit) {
+    const out = { compacted: countBy(p.stubs) };
+    if (p.kept.length) {
+      out.kept = countBy(p.kept);
+      out.keptBy = keptByKind(p.kept);
+    }
+    if (p.repoint.length) out.repointed = p.repoint.length;
+    Object.assign(out, {
+      notesDropped: p.notes.length,
+      svgDropped: p.svg.length,
+      bytesSaved: planBytes(p),
+      empty: !p.stubs.length && !p.notes.length && !p.svg.length && !p.repoint.length
+    });
+    if (details) {
+      const n = Number.isInteger(limit) && limit > 0 ? Math.min(limit, 5000) : 50;
+      out.details = {
+        ids: Object.fromEntries(Object.entries(idsBy(p.stubs)).map(([t, ids]) => [t, ranges(ids)])),
+        kept: p.kept.slice(0, n).map(k => {
+          const also = [...k.kinds.values()].filter(by => by !== k.by);
+          return { type: k.type, i: k.i, by: k.by, ...(also.length ? { also } : {}) };
+        }),
+        notes: p.notes.slice(0, n).map(x => x.id),
+        svg: Object.fromEntries(Object.entries(idsBy(p.svg)).map(([t, ids]) => [t, ranges(ids)]))
+      };
+      if (p.repoint.length)
+        out.details.repointed = p.repoint.slice(0, n).map(r => ({ province: r.i, from: r.from, to: r.to }));
+      if (p.kept.length > n) out.details.keptTruncated = p.kept.length;
+      if (p.notes.length > n) out.details.notesTruncated = p.notes.length;
+      if (p.repoint.length > n) out.details.repointedTruncated = p.repoint.length;
+    }
+    if (p.kept.length) out.keptWhy = keptWhy(p.kept, details);
+    return out;
+  }
+
+  /**
+   * Literal form for the sketch log: per-type ids compacted, note ids dropped, SVG owners,
+   * province capitals repointed [[province, from, to]]. bytes and kept are for the log summary.
+   */
   function resolvedOf(p) {
     const svg = {};
     for (const o of p.svg) {
       if (!svg[o.type]) svg[o.type] = [];
       if (!svg[o.type].includes(o.i)) svg[o.type].push(o.i);
     }
-    return { ids: idsBy(p.stubs), notes: p.notes.map(n => n.id), svg };
+    const r = { ids: idsBy(p.stubs), notes: p.notes.map(n => n.id), svg };
+    if (p.repoint.length) r.repoint = p.repoint.map(x => [x.i, x.from, x.to]);
+    r.bytes = planBytes(p);
+    if (p.kept.length) r.kept = p.kept.length;
+    return r;
   }
 
   /**
@@ -370,6 +492,13 @@
       T.resetMemo?.();
     };
     try {
+      for (const r of p.repoint) {
+        const prov = pack.provinces[r.i];
+        prov.burg = r.to;
+        undo.push(() => {
+          prov.burg = r.from;
+        });
+      }
       for (const s of p.stubs) {
         const arr = pack[LIST[s.type]];
         arr[s.i] = s.stub;
@@ -406,8 +535,9 @@
   /** compact: phase 'validate' plans; phase 'apply' re-plans and applies (Node took the undo entry). */
   FNS.compact = async a => {
     const p = plan(a);
-    const out = view(p, !!a.details);
-    if (a.phase !== "apply") return { phase: "validate", ...out };
+    const out = view(p, !!a.details, a.limit);
+    if (a.phase !== "apply")
+      return { phase: "validate", ...out, customization: typeof customization !== "undefined" ? customization : 0 };
     applyPlan(p);
     return { ...out, resolved: resolvedOf(p) };
   };
@@ -418,7 +548,7 @@
    */
   FNS.compactMapData = async a => {
     const { prepareMapData } = await lazy.save();
-    const p = plan({ types: a.types });
+    const p = plan({ types: a.types }); // never repoints: a compacted save changes no live record
     const full = prepareMapData();
     const restore = applyPlan(p);
     let text;
@@ -431,9 +561,13 @@
     try {
       fileName = typeof getFileName === "function" ? getFileName() : null;
     } catch {}
-    // flat: {burg: n, ..., kept?: {type: n}, notesDropped, svgDropped, bytesSaved (exact)}
+    // flat: {burg: n, ..., kept?: {type: n}, keptBy?: {type: {kind: n}}, notesDropped, svgDropped,
+    // bytesSaved (exact)}
     const compacted = { ...countBy(p.stubs) };
-    if (p.kept.length) compacted.kept = countBy(p.kept);
+    if (p.kept.length) {
+      compacted.kept = countBy(p.kept);
+      compacted.keptBy = keptByKind(p.kept);
+    }
     Object.assign(compacted, {
       notesDropped: p.notes.length,
       svgDropped: p.svg.length,
@@ -449,5 +583,5 @@
   };
   FNS.compactMapData.raw = true;
 
-  T.compact = { plan, references, noteOwner, stubOf, isStub, ranges, u8, KEEP, TYPES };
+  T.compact = { plan, references, provinceRepoints, noteOwner, stubOf, isStub, ranges, u8, KEEP, TYPES };
 })(globalThis);

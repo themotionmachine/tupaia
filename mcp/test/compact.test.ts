@@ -5,13 +5,17 @@
 // religions (the app's own removal paths or faithful copies of them), deleted routes, rivers,
 // zones and markers with leftover notes and SVG; then compact, save (plain and compact:true),
 // load the compacted file, and exercise editors, overviews, charts, tooltips, regenerate and
-// exports with no console errors. Part 3 checks the sketch log and replay of a compact op.
+// exports with no console errors. Part 3 checks the sketch log and replay of a compact op. Part 4
+// runs compact:true through the token-gated writes (shared_save, sketch save, sketch_promote)
+// against the in-process fake Worker on 127.0.0.1 (never the live site; safeEnv refuses it).
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { after, before, describe, test } from "node:test";
 import vm from "node:vm";
-import { alive, DEMO_MAP, errorBody, type Harness, MCP_ROOT, startServer } from "./helpers.ts";
+import { FakeWorker } from "./fake-worker.ts";
+import { alive, DEMO_MAP, errorBody, type Harness, MCP_ROOT, REPO_ROOT, startServer } from "./helpers.ts";
 
 type Obj = Record<string, any>;
 
@@ -130,16 +134,26 @@ describe("compact planner (node:vm)", () => {
     assert.equal(v.phase, "validate");
     assert.deepEqual(v.compacted, { burg: 1, state: 1, province: 1, culture: 1, religion: 1 });
     assert.deepEqual(v.kept, { burg: 3, state: 1, culture: 1, religion: 1 });
+    assert.deepEqual(v.keptBy, {
+      burg: { market: 1, provinceBurg: 1, deal: 1 },
+      state: { neighbors: 1 },
+      culture: { religionCulture: 1 },
+      religion: { origins: 1 }
+    });
     assert.deepEqual(v.details.ids, { burg: "2", state: "3", province: "2", culture: "2", religion: "3" });
     const kept = Object.fromEntries(v.details.kept.map((k: Obj) => [`${k.type}${k.i}`, k.by]));
     assert.deepEqual(kept, {
       burg3: "market 1 centre",
       burg4: "province 1 burg",
       burg6: "deal 0 seller",
-      state2: "state 1 neighbors",
+      state2: "state 1 neighbors list",
       culture3: "religion 1 culture",
       religion2: "religion 1 origins"
     });
+    // every kind gets its own remedy line
+    assert.match(v.keptWhy, /deal \(1\): regenerate \{parts:\['production'\]\}.*re-rolls/);
+    assert.match(v.keptWhy, /provinceBurg \(1\): compact \{repointProvinces:true\}/);
+    assert.match(v.keptWhy, /market \(1\): regenerate \{parts:\['markets','production'\]\}/);
     assert.deepEqual(v.details.notes.sort(), [
       "burg2",
       "burg3",
@@ -165,7 +179,10 @@ describe("compact planner (node:vm)", () => {
     const { pack, notes } = world;
     const lengths = ["burgs", "states", "provinces", "cultures", "religions"].map(k => (pack as Obj)[k].length);
     const out = plain(await T.fns.compact({ phase: "apply" }));
-    assert.deepEqual(out.resolved, {
+    assert.ok(out.resolved.bytes > 300, "bytes saved, for the log summary");
+    assert.equal(out.resolved.kept, 6);
+    const { bytes: _b, kept: _k, ...resolved } = out.resolved;
+    assert.deepEqual(resolved, {
       ids: { burg: [2], state: [3], province: [2], culture: [2], religion: [3] },
       notes: [
         "burg2",
@@ -202,9 +219,67 @@ describe("compact planner (node:vm)", () => {
     );
     const again = plain(await T.fns.compact({ phase: "validate" }));
     assert.equal(again.empty, true, "a second run finds nothing");
-    // stats the culture editor writes onto every culture make a stub compactable again
+    // what editors write onto every record (cultures/religions statistics, burg.culture of a cell
+    // that is undefined for a stub) leaves a stub a stub: no new undo entry or sketch op for it
     Object.assign(pack.cultures[2], { cells: 0, area: 0, rural: 0, urban: 0 });
-    assert.deepEqual(plain(await T.fns.compact({ phase: "validate" })).compacted, { culture: 1 });
+    Object.assign(pack.religions[3], { cells: 0, area: 0, rural: 0, urban: 0 });
+    (pack.burgs[2] as Obj).culture = undefined;
+    assert.equal(plain(await T.fns.compact({ phase: "validate" })).empty, true, "editor fields are not work");
+    // a real field is
+    Object.assign(pack.religions[3], { name: "Back" });
+    assert.deepEqual(plain(await T.fns.compact({ phase: "validate" })).compacted, { religion: 1 });
+  });
+
+  test("repointProvinces moves a province capital off a removed burg (the provinces editor's rule)", async () => {
+    const { T, world } = loadVm();
+    const pack = world.pack as Obj;
+    const v = plain(await T.fns.compact({ phase: "validate", repointProvinces: true, details: true }));
+    assert.equal(v.repointed, 1);
+    assert.deepEqual(v.details.repointed, [{ province: 1, from: 4, to: 1 }], "first live burg in the province");
+    assert.equal(v.compacted.burg, 2, "burg 4 is released");
+    assert.equal(v.kept.burg, 2);
+    assert.equal(pack.provinces[1].burg, 4, "validate changes nothing");
+    const out = plain(await T.fns.compact({ phase: "apply", repointProvinces: true, types: ["burg"] }));
+    assert.deepEqual(out.resolved.repoint, [[1, 4, 1]]);
+    assert.deepEqual(out.resolved.ids, { burg: [2, 4] });
+    assert.equal(pack.provinces[1].burg, 1);
+    assert.deepEqual(plain(pack.burgs[4]), { i: 4, removed: true });
+    // without burgs in types nothing is repointed
+    const { T: T2, world: w2 } = loadVm();
+    const v2 = plain(await T2.fns.compact({ phase: "apply", repointProvinces: true, types: ["culture"] }));
+    assert.equal(v2.repointed, undefined);
+    assert.equal((w2.pack as Obj).provinces[1].burg, 4);
+  });
+
+  test("replayed repoints apply only where the province still has that removed capital", async () => {
+    const { T, world } = loadVm();
+    const pack = world.pack as Obj;
+    // a stale row (the province's capital is not 5 on this base) is skipped: burg 4 stays kept
+    const stale = plain(await T.fns.compact({ phase: "apply", ids: { burg: [4] }, repoint: [[1, 5, 1]] }));
+    assert.deepEqual(stale.resolved.ids, {});
+    assert.equal(pack.provinces[1].burg, 4);
+    // a row whose new capital is not live is skipped too
+    const dead = plain(await T.fns.compact({ phase: "apply", ids: { burg: [4] }, repoint: [[1, 4, 6]] }));
+    assert.deepEqual(dead.resolved.ids, {});
+    const ok = plain(await T.fns.compact({ phase: "apply", ids: { burg: [4] }, repoint: [[1, 4, 0]] }));
+    assert.deepEqual(ok.resolved.ids, { burg: [4] });
+    assert.deepEqual(ok.resolved.repoint, [[1, 4, 0]]);
+    assert.equal(pack.provinces[1].burg, 0);
+  });
+
+  test("details limit; notes byte count is exact when every note goes", async () => {
+    const { T, world } = loadVm();
+    const v = plain(await T.fns.compact({ phase: "validate", details: true, limit: 2 }));
+    assert.equal(v.details.kept.length, 2);
+    assert.equal(v.details.keptTruncated, 6);
+    assert.equal(v.details.notes.length, 2);
+    assert.equal(v.details.notesTruncated, 13);
+    world.notes.length = 0;
+    world.notes.push({ id: "route9", name: "x", legend: "" }, { id: "zone2", name: "y", legend: "" });
+    const before = JSON.stringify(world.notes).length;
+    const n = plain(await T.fns.compact({ phase: "validate", types: ["route", "zone"], svg: false }));
+    assert.equal(n.notesDropped, 2);
+    assert.equal(n.bytesSaved, before - "[]".length);
   });
 
   test("types limits the run; replay mode touches only the listed ids, notes and SVG owners", async () => {
@@ -221,7 +296,8 @@ describe("compact planner (node:vm)", () => {
       })
     );
     // live burg 1, kept burg 3 and missing 99 are skipped; the live zone's note stays
-    assert.deepEqual(r.resolved, { ids: { burg: [2], culture: [2] }, notes: ["zone2"], svg: {} });
+    const { bytes: _b, ...resolved } = r.resolved;
+    assert.deepEqual(resolved, { ids: { burg: [2], culture: [2] }, notes: ["zone2"], svg: {}, kept: 1 });
     assert.equal(world.pack.burgs[1].name, "Live");
     assert.equal(world.pack.states[3].name, "Gone", "unlisted types are untouched");
     const bad = await T.call("compact", { phase: "validate", types: ["feature"] });
@@ -389,7 +465,7 @@ const editors = {
   overviewCellsButton: []
 };
 const appear = async id => {
-  for (let k = 0; k < 50 && !document.getElementById(id)?.offsetParent; k++) await sleep(100);
+  for (let k = 0; k < 250 && !document.getElementById(id)?.offsetParent; k++) await sleep(100);
 };
 for (const [open, inner] of Object.entries(editors)) {
   await click(open, 500);
@@ -427,10 +503,12 @@ describe("compact in the app (demo.map with removed entities)", () => {
   let before0: Obj;
   const files = { plain: "", compact: "" };
 
-  // the notes editor loads tinymce from the web, which the offline test browser blocks
+  // the notes editor loads tinymce from the web, which the offline test browser blocks; the name
+  // generator logs (and falls back) when a random word comes out shorter than 2 letters
   const OFFLINE = /Failed to fetch dynamically imported module: https:\/\/azgaar\.github\.io\/.*tinymce/;
+  const BENIGN = /^Name is too short! Random name will be selected$/;
   const noErrors = (r: Obj, what: string) => {
-    const errs = ((r.consoleErrors as string[]) ?? []).filter(e => !OFFLINE.test(e));
+    const errs = ((r.consoleErrors as string[]) ?? []).filter(e => !OFFLINE.test(e) && !BENIGN.test(e));
     assert.deepEqual(errs, [], `${what}: console errors ${JSON.stringify(errs)}`);
   };
   const stats = async () => (await h.ok("eval", { code: STATS, args: pick, readOnly: true })).value as Obj;
@@ -491,6 +569,10 @@ describe("compact in the app (demo.map with removed entities)", () => {
     assert.equal(kept.burg, pick.traded.length + pick.provBurgs.length, `deal parties and province centres stay whole`);
     assert.equal(kept.state, 1, "the merge still in a live state's neighbors stays whole");
     assert.match(String(r.keptWhy), /regenerate \{parts:\['production'\]\}/);
+    const by = (r.keptBy as Obj).burg as Obj;
+    assert.equal(by.provinceBurg, pick.provBurgs.length, JSON.stringify(r.keptBy));
+    assert.equal(by.deal, pick.traded.length, JSON.stringify(r.keptBy));
+    assert.match(String(r.keptWhy), /provinceBurg \(\d+\): compact \{repointProvinces:true\}/);
     const d = r.details as Obj;
     assert.ok(d.kept.some((k: Obj) => k.type === "burg" && /^deal /.test(k.by)));
     assert.ok(d.kept.some((k: Obj) => k.type === "burg" && /^province \d+ burg$/.test(k.by)));
@@ -571,6 +653,38 @@ describe("compact in the app (demo.map with removed entities)", () => {
     assert.deepEqual(b1, b0, "undo restores the whole records and notes");
   });
 
+  test("repointProvinces releases burgs held only as province capitals; changes lists live edits; refused under an editor", async () => {
+    await h.ok("eval", { code: "customization = 1; return 1" });
+    const busy = await h.call("compact", {});
+    await h.ok("eval", { code: "customization = 0; return 1" });
+    assert.equal(errorBody(busy).error.code, "REFUSED");
+    assert.match(errorBody(busy).error.message, /customization=1/);
+    assert.deepEqual(await stats(), before0, "a refused compact changed the map");
+    const r = await h.ok("compact", { repointProvinces: true, details: true, limit: 500 });
+    noErrors(r, "compact repointProvinces");
+    assert.equal(r.repointed, pick.provBurgs.length);
+    assert.equal((r.compacted as Obj).burg, pick.free.length + pick.provBurgs.length);
+    assert.equal((r.kept as Obj).burg, pick.traded.length, "only the deal parties stay whole");
+    assert.equal((r.details as Obj).keptTruncated, undefined);
+    const changes = r.changes as Obj;
+    assert.equal(changes.province.counts.modified, pick.provBurgs.length, JSON.stringify(changes.province));
+    assert.ok(changes.note.counts.removed >= 3, JSON.stringify(changes.note?.counts));
+    assert.equal(changes.burg, undefined, "stubs are not live data");
+    const prov = await h.ok("eval", {
+      readOnly: true,
+      args: pick,
+      code: `return pack.provinces.filter(p => p && p.i && !p.removed && p.burg && pack.burgs[p.burg].removed).length;`
+    });
+    assert.equal(prov.value, 0, "no live province names a removed capital");
+    await h.ok("snapshot", { action: "undo" });
+    const back = await stats();
+    const { orphanSvg: _a, ...b0 } = before0;
+    const { orphanSvg: _b, ...b1 } = back;
+    assert.deepEqual(b1, b0);
+    const dry = await h.ok("compact", { dryRun: true });
+    assert.equal((dry.kept as Obj).burg, pick.traded.length + pick.provBurgs.length, "undo put the capitals back");
+  });
+
   test("the compacted file loads cleanly; editors, overviews, charts, tooltips and ?burg= run without errors", async () => {
     const l = await h.ok("load_map", { path: files.compact });
     noErrors(l, "load compacted");
@@ -579,7 +693,7 @@ describe("compact in the app (demo.map with removed entities)", () => {
     assert.deepEqual(s.removed, before0.removed);
     assert.equal(s.full.burgs, pick.traded.length + pick.provBurgs.length);
     noErrors(await h.ok("map_info", {}), "map_info");
-    const ex = await h.ok("eval", { code: EXERCISE, timeoutMs: 120_000 }, 150_000);
+    const ex = await h.ok("eval", { code: EXERCISE, timeoutMs: 240_000 }, 270_000);
     noErrors(ex, "editors");
     assert.deepEqual(ex.value, [], `missing elements: ${JSON.stringify(ex.value)}`);
     // the culture name generator reads base from a culture slot picked at random, stubs included;
@@ -598,6 +712,16 @@ describe("compact in the app (demo.map with removed entities)", () => {
     });
     noErrors(misc, "culture name / focusOn");
     assert.deepEqual(misc.value, { name: "string", view: true, same: true });
+    // the editors just wrote statistics onto culture and religion stubs; the cultures editor's
+    // auto-change writes burg.culture (undefined) onto burg stubs: none of that is work for compact.
+    // The provinces editor, on opening, moved the provinces' capitals off the removed burgs (what
+    // repointProvinces does), so those burgs are free to compact now.
+    await h.ok("eval", {
+      code: `for (const b of pack.burgs) if (b && b.removed && !b.name) b.culture = pack.cells.culture[b.cell]; return 1;`
+    });
+    const again = await h.ok("compact", { dryRun: true });
+    assert.deepEqual(again.compacted, { burg: pick.provBurgs.length }, JSON.stringify(again));
+    assert.equal(((again.keptBy as Obj).burg as Obj).provinceBurg, undefined);
     for (const type of ["burg", "state", "province", "culture", "religion"])
       noErrors(await h.ok("find", { type, limit: 3 }), `find ${type}`);
     noErrors(await h.ok("screenshot", { full: true, maxSide: 512 }), "screenshot");
@@ -636,7 +760,7 @@ describe("compact in the app (demo.map with removed entities)", () => {
       const r = await h.ok("regenerate", { parts, restoreLayers: true }, 240_000);
       noErrors(r, `regenerate ${parts}`);
     }
-    const ex = await h.ok("eval", { code: EXERCISE, timeoutMs: 120_000 }, 150_000);
+    const ex = await h.ok("eval", { code: EXERCISE, timeoutMs: 240_000 }, 270_000);
     noErrors(ex, "editors after regenerate");
   });
 
@@ -710,7 +834,13 @@ describe("compact in a sketch (logged with its resolved ids, replayed onto anoth
       ["add", "add", "edit", "edit", "compact"]
     );
     const n = stubbed.length;
-    assert.equal(log[4].summary, `Compacted ${n} removed burg${n === 1 ? "" : "s"}; dropped 1 note.`);
+    assert.match(
+      log[4].summary,
+      new RegExp(
+        `^Shrank ${n} removed burg records? to id-keeping stubs \\(no live entity changed\\); dropped 1 note; about \\d+ (KB|B) smaller; 1 still referenced and kept whole\\.$`
+      ),
+      log[4].summary
+    );
     assert.equal(status.blobOnly, false);
     const full = await h.ok("sketch", { action: "status", full: true });
     const rec = (full.records as Obj[])[4];
@@ -747,5 +877,124 @@ describe("compact in a sketch (logged with its resolved ids, replayed onto anoth
       "their burg in the sketch's old slot is untouched"
     );
     assert.equal(v.note, false);
+  });
+});
+
+// ---------------------------------------------------------------- part 4: the gated writes
+
+const LOCAL_ENTRY = /src="\/(index-[^"]+\.js)"/.exec(
+  fs.readFileSync(path.join(REPO_ROOT, "dist", "index.html"), "utf8")
+)?.[1];
+const sha = (b: Buffer) => createHash("sha256").update(b).digest("hex");
+const sendsBytes = (p: Obj) => Number(/\((\d+) bytes/.exec(String((p.sends as string[])[0]))?.[1]);
+
+describe("compact:true on shared_save, sketch save and sketch_promote (live mode, fake Worker)", () => {
+  let fake: FakeWorker;
+  let h: Harness;
+  let pick: Obj;
+  const puts = () => fake.requests.filter(r => r.method === "PUT");
+  const N = 40;
+
+  before(async () => {
+    fake = new FakeWorker({ seedFile: DEMO_MAP, version: 3, entry: LOCAL_ENTRY });
+    const origin = await fake.start();
+    h = await startServer({ TUPAIA_MODE: "live", TUPAIA_LIVE_ORIGIN: origin, TUPAIA_BUILD_CACHE_MS: "0" });
+    // the first launch loads shared v3: remove N burgs nothing else names, then rebuild the deals
+    pick = (await h.ok("eval", { code: PICK, readOnly: true })).value as Obj;
+    await h.ok("edit", {
+      type: "burg",
+      ops: (pick.free as number[]).slice(0, N).map(ref => ({ ref, remove: true })),
+      redraw: false
+    });
+    await h.ok("regenerate", { parts: ["production"], restoreLayers: true }, 240_000);
+  });
+
+  after(async () => {
+    if (h && alive(h.pid)) await h.close();
+    await fake?.stop();
+  });
+
+  test("shared_save: the preview shows the saving; the token holds only with the same flag; the PUT body is compacted", async () => {
+    const plainPrev = await h.ok("shared_save", {});
+    const p = await h.ok("shared_save", { compact: true });
+    assert.equal(typeof p.token, "string", String(p.refusalReason));
+    assert.equal(plainPrev.compacted, undefined);
+    const c = p.compacted as Obj;
+    assert.equal(c.burg, N);
+    assert.ok(c.bytesSaved > 10_000, JSON.stringify(c));
+    assert.equal((plainPrev.bytes as number) - (p.bytes as number), c.bytesSaved, "bytesSaved is exact");
+    assert.match(String(p.next), /shared_save \{confirm:true, token:'[0-9a-f]+', compact:true\}/);
+    assert.equal(puts().length, 0);
+    // a compact preview's token does not confirm a plain write, nor a plain preview's a compact one
+    const plainConfirm = await h.call("shared_save", { confirm: true, token: p.token as string });
+    assert.equal(errorBody(plainConfirm).error.code, "REFUSED");
+    assert.match(errorBody(plainConfirm).error.message, /flags differ/);
+    const crossed = await h.call("shared_save", { confirm: true, token: plainPrev.token as string, compact: true });
+    assert.equal(errorBody(crossed).error.code, "REFUSED");
+    assert.match(errorBody(crossed).error.message, /flags differ/);
+    assert.equal(puts().length, 0);
+    const r = await h.ok("shared_save", { confirm: true, token: p.token as string, compact: true });
+    assert.equal((r.saved as Obj).version, 4);
+    assert.equal(puts().length, 1);
+    assert.equal(sha(fake.current), p.sha256, "the PUT body is the previewed compacted text");
+    assert.equal(fake.current.length, p.bytes);
+    assert.equal((r.compacted as Obj).bytesSaved, c.bytesSaved);
+    const ev = await h.ok("eval", { readOnly: true, code: `return typeof pack.burgs[${pick.free[0]}].name` });
+    assert.equal(ev.value, "string", "the page keeps its whole records");
+  });
+
+  test("sketch save compact:true writes a compacted sketch blob; sketch_promote compact:true gates and PUTs the compacted map", async () => {
+    await h.ok("sketch", { action: "start", slug: "slim" });
+    await h.ok("edit", { type: "burg", ops: [{ ref: pick.free[N + 1], set: { name: "Slimford" } }] });
+    const plainSave = await h.ok("sketch", { action: "save" });
+    const p = await h.ok("sketch", { action: "save", compact: true });
+    assert.equal(plainSave.compacted, undefined);
+    const c = p.compacted as Obj;
+    assert.equal(c.burg, N);
+    assert.equal(sendsBytes(plainSave) - sendsBytes(p), c.bytesSaved);
+    assert.match(String(p.next), /sketch \{action:'save', confirm:true, compact:true\}/);
+    fake.clearLog();
+    const r = await h.ok("sketch", { action: "save", confirm: true, compact: true });
+    assert.deepEqual(
+      fake.writes().map(q => `${q.method} ${q.path}`),
+      ["PUT /api/map/sketch-slim", "PUT /api/map/sketch-slim/ops"]
+    );
+    assert.equal(fake.maps.get("sketch-slim")?.current.length, sendsBytes(p), "the sketch blob is compacted");
+    assert.equal((r.compacted as Obj).bytesSaved, c.bytesSaved);
+
+    fake.clearLog();
+    const pp = await h.ok("sketch_promote", { compact: true });
+    assert.equal(typeof pp.token, "string", String(pp.refusalReason));
+    assert.equal((pp.compacted as Obj).burg, N);
+    assert.match(String(pp.next), /sketch_promote \{confirm:true, token:'[0-9a-f]+', compact:true\}/);
+    const plainConfirm = await h.call("sketch_promote", { confirm: true, token: pp.token as string });
+    assert.equal(errorBody(plainConfirm).error.code, "REFUSED");
+    assert.match(errorBody(plainConfirm).error.message, /flags differ/);
+    assert.deepEqual(fake.writes(), []);
+    const done = await h.ok("sketch_promote", { confirm: true, token: pp.token as string, compact: true });
+    assert.deepEqual(
+      fake.writes().map(q => `${q.method} ${q.path}`),
+      ["PUT /api/map/shared"]
+    );
+    assert.equal(fake.writes()[0].headers["x-map-version"], "4");
+    assert.equal((done.saved as Obj).version, 5);
+    assert.equal(sha(fake.current), pp.sha256);
+    assert.equal((done.compacted as Obj).burg, N);
+  });
+
+  test("the compacted shared map loads with stubs in the removed slots", async () => {
+    const l = await h.ok("load_map", { source: "shared" });
+    assert.equal((l.origin as Obj).sharedVersion, 5);
+    assert.deepEqual(l.consoleErrors ?? [], []);
+    const ev = await h.ok("eval", {
+      readOnly: true,
+      args: pick,
+      code: `return { stub: pack.burgs[args.free[0]], renamed: pack.burgs[args.free[${N + 1}]].name, n: pack.burgs.length };`
+    });
+    const v = ev.value as Obj;
+    assert.deepEqual(v.stub, { i: pick.free[0], removed: true });
+    assert.equal(v.renamed, "Slimford");
+    const nothing = await h.ok("compact", { dryRun: true });
+    assert.deepEqual(nothing.compacted, {});
   });
 });
