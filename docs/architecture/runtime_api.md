@@ -407,10 +407,15 @@ no tool covers the change.
   - `data-regenerate`: `prepareMapData` (`src/io/save.ts:100`) empties `#terrain` in the saved
     copy, so every save drops the icons, and `restoreReliefOnLoad()` (called from
     `src/io/load.ts:779`) draws them again after a load. Manual relief-editor edits are lost on
-    such a map (the editor warns).
-  - `window.ReliefSettings` = `{attrs, gridKey, packCellKey, encodeRanges, parseExclusion, clear}`;
-    `generate()` (`public/main.js:692`) calls `ReliefSettings.clear()`, so a new map starts as
-    upstream. MCP: `regenerate {parts:['relief'], relief:{...}}`, `edit map {set:{reliefOnLoad}}`.
+    such a map (the editor warns). In the app it is the Style > Relief checkbox "Redraw relief
+    icons on load (smaller file)" (`#styleReliefOnLoad`, `public/modules/ui/style.js`).
+  - `window.ReliefSettings` = `{attrs, gridKey, packCellKey, encodeRanges, parseExclusion, clear,
+    sync, setOnLoad}`; `generate()` (`public/main.js:692`) calls `ReliefSettings.clear()`, so a new
+    map starts as upstream. `setOnLoad(on, mapSeed)` is the checkbox: on sets `data-regenerate`
+    (and `data-seed` when unset) and redraws. `sync()` makes a `data-regenerate` map show what its
+    next load draws (redraw when the Relief layer is on, else drop the icons; null and no change on
+    other maps); the biomes editor (Apply, Restore defaults) and the heightmap editor's finalize
+    call it. MCP: `regenerate {parts:['relief'], relief:{...}}`, `edit map {set:{reliefOnLoad}}`.
 - **Biome extras** (`src/io/biome-extras.ts`). The `.map` biome line (line 3) gets a 4th `|` field,
   JSON `{iconsDensity:[], icons:[[]], cost:[]}`, written by `save.ts` and applied by `load.ts:342`
   when present. Upstream keeps only `color|habitability|name`, so custom biomes lost their icon

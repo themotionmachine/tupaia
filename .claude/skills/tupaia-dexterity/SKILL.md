@@ -270,7 +270,8 @@ marker-near-burg) run only when named.
 4. Relief icons: `edit map {set:{reliefOnLoad:true}}` makes saves drop the icons and loads redraw
    them (seeded); `regenerate {parts:['relief'], relief:{matchIcons:<old count>}}` keeps the
    count if the switch changed it (it changed 30667 -> 41798 on v7). Hand edits in the relief
-   editor are lost. The shared map then needs a deployed app with the hook (shared_save refuses
+   editor are lost. Humans have the same switch in the app (Style > Relief, "Redraw relief icons
+   on load"), and the app's biomes and heightmap editors redraw such a map's icons themselves. The shared map then needs a deployed app with the hook (shared_save refuses
    with BUILD until then; `shared_status {build:true}` checks the deploy). A relief dryRun shows
    settings, not icon counts.
 5. Typical savings on the ~6.7 MB shared map: compact about 0.7 MB, relief density 0.5 with

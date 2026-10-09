@@ -217,7 +217,10 @@ seeded icons with settings stored on the map (map_info `relief`). The count goes
 (0.7 = about half). `matchIcons:<n>` picks the density that draws about n (`true` = the current
 count; the relief layer must be on). `edit map {set:{reliefOnLoad:true}}`: saves drop the icons
 and loads redraw them (about 80 B per icon: terraform-v3.map 4.75 -> 2.33 MB); shared_save and
-sketch_promote refuse it (BUILD) until the deployed app has the hook.
+sketch_promote refuse it (BUILD) until the deployed app has the hook. The app's own switch is the
+Style > Relief checkbox `#styleReliefOnLoad` (map_info `relief.onLoad` shows either); on such a
+map the app's biomes editor (Apply, Restore defaults), heightmap editor finalize and Tools >
+Regenerate > Relief redraw the icons as a load would.
 
 **Labels**: the app hides a label group while its on-screen size is under 6 px or over 60 px
 (emblems 25/300); whether that hides burg labels at full-map zoom depends on the map's font sizes

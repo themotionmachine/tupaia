@@ -1172,6 +1172,15 @@
                   <slider-input id="styleReliefDensity" min=".3" max=".8" step=".01"></slider-input>
                 </td>
               </tr>
+              <!-- tupaia-mcp: the relief-on-load switch (#terrain[data-regenerate], src/renderers/relief-settings.ts) -->
+              <tr
+                data-tip="Saves leave the relief icons out and every load draws them again from a fixed seed, so the file is smaller and the icons look the same after each load. Hand edits to single icons (relief editor) are not kept. Unchecked: icons are saved as drawn"
+              >
+                <td colspan="2">
+                  <input id="styleReliefOnLoad" class="checkbox" type="checkbox" />
+                  <label for="styleReliefOnLoad" class="checkbox-label">Redraw relief icons on load (smaller file)</label>
+                </td>
+              </tr>
             </tbody>
             <tbody id="styleFill">
               <tr data-tip="Set fill color">

@@ -225,6 +225,7 @@ function selectStyleElement() {
     styleReliefSize.value = terrain.attr("size") || 1;
     styleReliefDensity.value = terrain.attr("density") || 0.4;
     styleReliefSet.value = terrain.attr("set");
+    styleReliefOnLoad.checked = terrain.attr("data-regenerate") !== null; // tupaia-mcp: relief-settings.ts
   }
 
   if (styleElement === "population") {
@@ -779,6 +780,15 @@ styleReliefDensity.on("change", e => {
   terrain.attr("density", e.target.value);
   drawReliefIcons();
   if (!layerIsOn("toggleRelief")) toggleRelief();
+});
+
+// tupaia-mcp: relief on load, the same switch as MCP edit map {set:{reliefOnLoad}} (relief-settings.ts)
+styleReliefOnLoad.addEventListener("change", e => {
+  const on = e.target.checked;
+  const out = ReliefSettings.setOnLoad(on, String(seed));
+  if (!on) return tip("Relief icons are saved with the map again", false, "info", 4000);
+  const drawn = out?.action === "drawn" ? `. Icons redrawn as a load draws them: ${out.icons} (was ${out.before})` : "";
+  tip(`Saves now leave the relief icons out and loads draw them again${drawn}`, false, "success", 6000);
 });
 
 styleTemperatureFillOpacityInput.on("input", e => {

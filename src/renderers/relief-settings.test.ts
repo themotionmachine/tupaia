@@ -10,7 +10,9 @@ import {
   parseExclusion,
   parseRanges,
   RELIEF_ATTRS,
-  readReliefSettings
+  readReliefSettings,
+  setReliefOnLoad,
+  syncReliefOnLoad
 } from "./relief-settings";
 
 const attrs = (values: Record<string, string>) => ({ getAttribute: (name: string) => values[name] ?? null });
@@ -125,5 +127,75 @@ describe("relief settings", () => {
     clearReliefSettings({ removeAttribute: (name: string) => removed.push(name) } as unknown as Element);
     expect(removed).toEqual([...RELIEF_ATTRS]);
     expect(globalThis.ReliefSettings.attrs).toBe(RELIEF_ATTRS);
+  });
+
+  describe("relief on load (in-app switch and sync)", () => {
+    /** A fake #terrain with attributes and a child count, and a page whose draw adds `perDraw` icons. */
+    const page = (attrs: Record<string, string> = {}, shown = true, icons = 5, perDraw = 7) => {
+      const a = new Map(Object.entries(attrs));
+      let count = icons;
+      let draws = 0;
+      const el = {
+        hasAttribute: (n: string) => a.has(n),
+        getAttribute: (n: string) => a.get(n) ?? null,
+        setAttribute: (n: string, v: string) => void a.set(n, v),
+        removeAttribute: (n: string) => void a.delete(n),
+        replaceChildren: () => {
+          count = 0;
+        },
+        get childElementCount() {
+          return count;
+        }
+      } as unknown as Element;
+      return {
+        attrs: a,
+        draws: () => draws,
+        p: {
+          el,
+          shown: () => shown,
+          draw: () => {
+            draws++;
+            count = perDraw;
+          }
+        }
+      };
+    };
+
+    it("sync changes nothing on a map that stores its icons (upstream behaviour)", () => {
+      const t = page({ "data-seed": "1" });
+      expect(syncReliefOnLoad(t.p)).toBeNull();
+      expect(t.draws()).toBe(0);
+      expect(t.p.el.childElementCount).toBe(5);
+      expect(syncReliefOnLoad({ ...t.p, el: null })).toBeNull();
+    });
+
+    it("sync redraws a relief-on-load map, or drops its icons when the layer is off", () => {
+      const on = page({ "data-regenerate": "1" });
+      expect(syncReliefOnLoad(on.p)).toEqual({ action: "drawn", icons: 7 });
+      expect(on.draws()).toBe(1);
+      const off = page({ "data-regenerate": "1" }, false);
+      expect(syncReliefOnLoad(off.p)).toEqual({ action: "cleared", icons: 0 });
+      expect(off.draws()).toBe(0);
+      expect(off.p.el.childElementCount).toBe(0);
+    });
+
+    it("switching on seeds the draw with the map seed (unless seeded) and redraws; off keeps the icons", () => {
+      const t = page();
+      expect(setReliefOnLoad(true, "4242", t.p)).toEqual({ action: "drawn", icons: 7, before: 5 });
+      expect(t.attrs.get("data-regenerate")).toBe("1");
+      expect(t.attrs.get("data-seed")).toBe("4242");
+      expect(setReliefOnLoad(true, "999", t.p)).toBeNull(); // already on: no redraw
+      expect(t.draws()).toBe(1);
+      expect(setReliefOnLoad(false, "999", t.p)).toBeNull();
+      expect(t.attrs.has("data-regenerate")).toBe(false);
+      expect(t.attrs.get("data-seed")).toBe("4242");
+      expect(t.p.el.childElementCount).toBe(7);
+
+      const seeded = page({ "data-seed": "abc" }, false);
+      expect(setReliefOnLoad(true, "4242", seeded.p)).toEqual({ action: "cleared", icons: 0, before: 5 });
+      expect(seeded.attrs.get("data-seed")).toBe("abc");
+      expect(typeof globalThis.ReliefSettings.setOnLoad).toBe("function");
+      expect(typeof globalThis.ReliefSettings.sync).toBe("function");
+    });
   });
 });

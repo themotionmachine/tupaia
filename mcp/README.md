@@ -100,7 +100,9 @@ What the newer tools and fields replaced (all one undo entry each, all dryRun-ab
   for named states only (hand-made states too).
 - `regenerate {parts:['relief'], relief:{density|matchIcons, perBiome, exclude, nearBurgs,
   seed}}` and `edit map {set:{reliefOnLoad:true}}` (saves drop the icons, loads redraw them;
-  terraform-v3.map 4.75 -> 2.33 MB). App hooks: `src/renderers/relief-settings.ts` and friends.
+  terraform-v3.map 4.75 -> 2.33 MB). App hooks: `src/renderers/relief-settings.ts` and friends;
+  the app has the same switch (Style > Relief, "Redraw relief icons on load") and its biomes and
+  heightmap editors redraw such a map's icons.
 - `display {labels:{<group>:{minSize, maxSize, alwaysShow}}}` and `screenshot {labels:'all'}`.
   App hook: `invokeActiveZooming` in `public/main.js` reads `data-min-size`, `data-max-size`,
   `data-always-show`.

@@ -446,6 +446,7 @@ function editBiomes() {
     if (changed.size()) {
       drawBiomes();
       refreshBiomesEditor();
+      window.ReliefSettings?.sync(); // tupaia-mcp: a relief-on-load map shows what its next load draws
     }
     exitBiomesCustomizationMode();
   }
@@ -475,6 +476,7 @@ function editBiomes() {
     drawBiomes();
     recalculatePopulation();
     refreshBiomesEditor();
+    window.ReliefSettings?.sync(); // tupaia-mcp: icon densities and biomes changed (relief-settings.ts)
   }
 
   function closeBiomesEditor() {

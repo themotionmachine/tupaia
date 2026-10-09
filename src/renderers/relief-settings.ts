@@ -11,7 +11,9 @@
 //                    the neighbour e whose midpoint it is. Ignored on another grid (the key is gridKey:
 //                    cell count and a hash of the grid points)
 //   data-near-burgs  no icons within this many px of a burg
-//   data-regenerate  saves drop the icons (save.ts) and a load draws them again (load.ts)
+//   data-regenerate  saves drop the icons (save.ts) and a load draws them again (load.ts); in the app
+//                    it is the Style > Relief checkbox (style.js, setReliefOnLoad), and the biomes and
+//                    heightmap editors redraw such a map's icons (syncReliefOnLoad)
 // A new map (generate) clears them all (main.js).
 
 /** Every #terrain attribute this file defines. */
@@ -220,7 +222,70 @@ export function restoreReliefOnLoad(): void {
   }
 }
 
-// tupaia-mcp: the MCP bridge (mcp/src/bridge-ext/relief.js) and main.js use these through a global
+/** What the page holds after syncReliefOnLoad / setReliefOnLoad. */
+export interface ReliefSync {
+  /** "drawn": icons drawn from the stored settings; "cleared": layer off, icons dropped (the toggle draws them). */
+  action: "drawn" | "cleared";
+  icons: number;
+}
+
+interface ReliefPage {
+  el: Element | null;
+  /** Is the Relief layer shown? */
+  shown: () => boolean;
+  draw: () => void;
+}
+
+const reliefPage = (): ReliefPage => ({
+  el: typeof document === "undefined" ? null : document.getElementById("terrain"),
+  shown: () => typeof layerIsOn !== "function" || layerIsOn("toggleRelief"),
+  draw: () => drawReliefIcons()
+});
+
+/**
+ * tupaia-mcp: after an in-app action that changed what relief is drawn from (biomes editor, heightmap
+ * editor), make a #terrain[data-regenerate] map show what its next load draws: redraw the icons from
+ * the stored settings when the layer is shown, else drop them (the Relief toggle draws them when it
+ * finds none). Returns null, changing nothing, on any other map (upstream behaviour).
+ */
+export function syncReliefOnLoad(page: ReliefPage = reliefPage()): ReliefSync | null {
+  const { el } = page;
+  if (!el?.hasAttribute("data-regenerate")) return null;
+  if (!page.shown()) {
+    el.replaceChildren();
+    return { action: "cleared", icons: 0 };
+  }
+  page.draw();
+  return { action: "drawn", icons: el.childElementCount };
+}
+
+/**
+ * tupaia-mcp: the in-app switch (Style > Relief "Redraw relief icons on load"), the same setting as
+ * MCP edit map {set:{reliefOnLoad}}. On: saves drop the icons and loads draw them again; the draw is
+ * seeded (data-seed, the map seed unless one is stored) and the page is redrawn to show what a load
+ * will draw. Off: saves store the icons again; the page keeps them.
+ */
+export function setReliefOnLoad(
+  on: boolean,
+  mapSeed: string,
+  page: ReliefPage = reliefPage()
+): (ReliefSync & { before: number }) | null {
+  const { el } = page;
+  if (!el) return null;
+  const before = el.childElementCount;
+  if (!on) {
+    el.removeAttribute("data-regenerate");
+    return null;
+  }
+  if (el.hasAttribute("data-regenerate")) return null;
+  el.setAttribute("data-regenerate", "1");
+  if (!el.hasAttribute("data-seed")) el.setAttribute("data-seed", mapSeed);
+  const out = syncReliefOnLoad(page);
+  return out && { ...out, before };
+}
+
+// tupaia-mcp: the MCP bridge (mcp/src/bridge-ext/relief.js), main.js and the app's UI scripts
+// (style.js, biomes-editor.js, heightmap-editor.js) use these through a global
 declare global {
   var ReliefSettings: {
     attrs: typeof RELIEF_ATTRS;
@@ -229,6 +294,10 @@ declare global {
     encodeRanges: typeof encodeRanges;
     parseExclusion: typeof parseExclusion;
     clear: () => void;
+    /** syncReliefOnLoad on the page. */
+    sync: () => ReliefSync | null;
+    /** setReliefOnLoad on the page. */
+    setOnLoad: (on: boolean, mapSeed: string) => (ReliefSync & { before: number }) | null;
   };
 }
 globalThis.ReliefSettings = {
@@ -237,5 +306,7 @@ globalThis.ReliefSettings = {
   packCellKey,
   encodeRanges,
   parseExclusion,
-  clear: () => clearReliefSettings(typeof document === "undefined" ? null : document.getElementById("terrain"))
+  clear: () => clearReliefSettings(typeof document === "undefined" ? null : document.getElementById("terrain")),
+  sync: () => syncReliefOnLoad(),
+  setOnLoad: (on, mapSeed) => setReliefOnLoad(on, mapSeed)
 };
