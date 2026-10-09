@@ -376,6 +376,19 @@ describe("regenerate provinces and emblems (page)", () => {
     const orphan = await h.call("regenerate", { parts: ["zones"], provinces: { count: 2 } });
     assert.equal(orphan.isError, true);
     assert.match(errorBody(orphan).error.message, /'provinces' in parts/);
+    // ratio 0 (no growth) would make every free cell a one-cell province
+    assert.equal((await h.call("regenerate", { parts: ["provinces"], provinces: { ratio: 0 } })).isError, true);
+    const was = await evalRO(
+      `const el = document.getElementById("provincesRatio"); const v = el.value; el.value = 0; return v`
+    );
+    try {
+      const zero = await h.call("regenerate", { parts: ["provinces"], provinces: { states: [pick.S1.i] } });
+      assert.equal(zero.isError, true);
+      assert.match(errorBody(zero).error.message, /provinces ratio is 0/);
+      await h.ok("regenerate", { parts: ["provinces"], provinces: { states: [pick.S1.i], count: 2 }, dryRun: true });
+    } finally {
+      await evalRO(`document.getElementById("provincesRatio").value = ${JSON.stringify(was)}; return 1`);
+    }
     assert.equal(await undoDepth(), depth);
   });
 

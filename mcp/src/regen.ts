@@ -48,10 +48,12 @@ export const RegenProvinces = z
       ),
     ratio: z
       .number()
-      .min(0)
+      .min(1)
       .max(100)
       .optional()
-      .describe("Auto mode (no centres/count): the generator's provinces ratio (default: the options panel's)"),
+      .describe(
+        "Auto mode (no centres/count): the generator's provinces ratio 1-100, higher = more and bigger burg provinces (default: the options panel's)"
+      ),
     keepLocked: z
       .boolean()
       .optional()

@@ -107,8 +107,8 @@
     const keepLocked = opt.keepLocked !== false;
     if (opt.count !== undefined && (!Number.isInteger(opt.count) || opt.count < 1 || opt.count > 100))
       fail("BAD_ARGS", "count must be an integer 1..100");
-    if (opt.ratio !== undefined && (typeof opt.ratio !== "number" || !(opt.ratio >= 0 && opt.ratio <= 100)))
-      fail("BAD_ARGS", "ratio must be a number 0..100");
+    if (opt.ratio !== undefined && (typeof opt.ratio !== "number" || !(opt.ratio >= 1 && opt.ratio <= 100)))
+      fail("BAD_ARGS", "ratio must be a number 1..100");
     const C = pack.cells;
 
     const centres = [];
@@ -198,6 +198,12 @@
         );
       }
     const ratio = opt.ratio ?? provincesRatioInput();
+    // ratio 0 means no growth: the generator would make every free cell a one-cell province
+    if (ratio < 1 && !opt.count && targets.some(i => !centres.some(c => c.state === i)))
+      fail(
+        "BAD_ARGS",
+        `the options panel's provinces ratio is ${ratio}, which makes one-cell provinces; pass provinces.ratio 1..100 or count`
+      );
     return { keepLocked, ratio, count: opt.count, centres, targets, kept, replaced };
   }
 
