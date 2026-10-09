@@ -98,6 +98,39 @@ export const META_TEXT_HEAVY = { "anthropic/maxResultSizeChars": 200000 } as con
 
 export const MAX_TEXT_CHARS = 480_000;
 
+/** consoleErrors in a result: at most this many distinct messages... */
+export const CONSOLE_MAX_UNIQUE = 8;
+/** ...each cut to this many characters. */
+export const CONSOLE_MAX_CHARS = 300;
+
+/**
+ * The page console errors of one call, as a result carries them: identical messages folded into
+ * one with a count ("msg (x12)"), at most CONSOLE_MAX_UNIQUE of them (most repeated first), each cut
+ * to CONSOLE_MAX_CHARS, then one line saying how many more there were. session status lists them.
+ */
+export function summarizeConsole(list: readonly string[]): string[] {
+  if (!list.length) return [];
+  const counts = new Map<string, number>();
+  for (const m of list) counts.set(m, (counts.get(m) ?? 0) + 1);
+  const out: string[] = [];
+  let shown = 0;
+  // the most repeated first (a flood of one error is the story), then first seen
+  const ranked = [...counts].sort((a, b) => b[1] - a[1]);
+  for (const [m, n] of ranked) {
+    if (out.length >= CONSOLE_MAX_UNIQUE) break;
+    const text =
+      m.length > CONSOLE_MAX_CHARS ? `${m.slice(0, CONSOLE_MAX_CHARS - 1)}…(+${m.length - CONSOLE_MAX_CHARS + 1})` : m;
+    out.push(n > 1 ? `${text} (x${n})` : text);
+    shown += n;
+  }
+  const restUnique = counts.size - out.length;
+  if (restUnique > 0)
+    out.push(
+      `+${restUnique} more distinct message(s) (${list.length - shown} of ${list.length} errors not shown); session {action:'status'} lists the recent ones`
+    );
+  return out;
+}
+
 function withExtras(value: Record<string, unknown>, extras: Extras): Record<string, unknown> {
   const out: Record<string, unknown> = { ...value };
   if (extras.alerts?.length) out.alerts = [...((out.alerts as Alert[] | undefined) ?? []), ...extras.alerts];

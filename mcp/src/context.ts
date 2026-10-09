@@ -8,7 +8,7 @@
 // callTool() runs one by name without MCP (the --http JSON API). Both go through the same runner.
 import type { CallToolResult, McpServer, ServerContext } from "@modelcontextprotocol/server";
 import type { z } from "zod";
-import { BrowserManager, type CallOptions } from "./browser.ts";
+import { BrowserManager, type CallOptions, READ_STALL_PROBE_MS } from "./browser.ts";
 import { type Config, ModeState } from "./config.ts";
 import { NOT_REPLAYABLE, type OpRecord, type Resolved, SketchStore, summarizeOp } from "./ops.ts";
 import {
@@ -16,6 +16,7 @@ import {
   type Envelope,
   errorResult,
   okResult,
+  summarizeConsole,
   ToolError,
   type ToolOutput,
   unwrap,
@@ -109,7 +110,12 @@ export class CallScope {
   readonly notes: string[] = [];
   readonly alerts: Alert[] = [];
   readonly consoleSeq: number;
-  readonly started = Date.now();
+  /** When the call's budget started (reset after the launch/relaunch step, which has its own). */
+  started = Date.now();
+  /** ToolContext.callSeq of this call, and of the newest earlier call not annotated read-only. */
+  seq = 0;
+  prevMutableSeq = 0;
+  #cleanupDepth = 0;
   /** Name of the tool this call runs (sketch bookkeeping). */
   readonly tool: string;
   /** Ids of the auto-undo entries this call pushed. */
@@ -189,11 +195,44 @@ export class CallScope {
     return Math.max(1000, this.timeoutMs - (Date.now() - this.started));
   }
 
+  /** Inside cleanup(): restores and undo-of-setup steps. */
+  get inCleanup(): boolean {
+    return this.#cleanupDepth > 0;
+  }
+
+  /** Default budget of a bridge call: the remaining budget, or at least HOUSEKEEPING_MS in cleanup(). */
+  get budgetMs(): number {
+    return this.inCleanup ? Math.max(this.remainingMs, HOUSEKEEPING_MS) : this.remainingMs;
+  }
+
+  /**
+   * Run restores and other put-it-back steps (a finally block): bridge calls inside never carry
+   * the caller's cancellation signal and get at least HOUSEKEEPING_MS, so a cancelled or
+   * out-of-budget call still leaves the page as it found it.
+   */
+  async cleanup<T>(fn: () => Promise<T>): Promise<T> {
+    this.#cleanupDepth++;
+    try {
+      return await fn();
+    } finally {
+      this.#cleanupDepth--;
+    }
+  }
+
   /** Raw envelope call (no throw on !ok). */
   async envelope<T>(name: string, args: unknown, opts: Partial<CallOptions> = {}): Promise<Envelope<T>> {
-    const env = await this.ctx.browser.callBridge<T>(name, args, {
-      timeoutMs: opts.timeoutMs ?? this.remainingMs,
-      signal: this.signal,
+    const b = this.ctx.browser;
+    if (this.inCleanup && b.dirty) {
+      // a put-it-back step on a page a stall marked: skip it at once unless the page answers
+      // again (a hung page would hold every cleanup call for its whole budget)
+      if (!b.dirtyReadOnly || !(await b.probe(2000)))
+        throw new ToolError("BROWSER", `${name} skipped: the page is marked for a relaunch (${b.dirty})`);
+      b.dirty = null;
+      b.dirtyReadOnly = false;
+    }
+    const env = await b.callBridge<T>(name, args, {
+      timeoutMs: opts.timeoutMs ?? this.budgetMs,
+      signal: this.inCleanup ? undefined : this.signal,
       mutating: opts.mutating,
       json: opts.json,
       noAlerts: opts.noAlerts
@@ -217,7 +256,7 @@ export class CallScope {
   async pushUndo(op: string, args: unknown): Promise<number> {
     await this.ctx.verifyProvenance();
     if (this.logsToSketch && this.digestBefore === undefined) this.digestBefore = await this.digest();
-    const text = await this.mapText();
+    const text = this.#reusablePoint() ?? (await this.mapText());
     const { entry, evicted } = this.ctx.snapshots.pushUndo(op, summarizeArgs(args), text);
     this.undoPushed.push(entry.id);
     this.ctx.sketches.onUndoPushed();
@@ -225,6 +264,21 @@ export class CallScope {
     if (evicted.length)
       await this.call("dropBaseline", { keys: evicted }, { noAlerts: true, timeoutMs: HOUSEKEEPING_MS });
     return entry.id;
+  }
+
+  /**
+   * The restore point's text when it still is the page map: captured at the end of an earlier
+   * call, with only read-only tools since, no mutating bridge call or relaunch, and nothing newer
+   * in the history. Saves the second map serialisation of back-to-back mutating calls.
+   */
+  #reusablePoint(): string | null {
+    const snaps = this.ctx.snapshots;
+    const rp = snaps.restorePoint;
+    const b = this.ctx.browser;
+    if (!rp || this.undoPushed.length || !snaps.restorePointIsNewest) return null;
+    if (rp.callSeq < this.prevMutableSeq || rp.writes !== b.writes || rp.launches !== b.launches) return null;
+    if (rp.provenance.epoch !== snaps.provenance.epoch) return null;
+    return rp.text;
   }
 
   /**
@@ -240,11 +294,52 @@ export class CallScope {
 
   /** Load .map text (or base64 bytes) into the page; returns the bridge summary. */
   async loadMap(src: { text?: string; b64?: string }, keepView = false): Promise<Record<string, unknown>> {
+    const budget = Math.max(this.inCleanup ? 110_000 : 6000, this.budgetMs);
     return this.call<Record<string, unknown>>(
       "loadMap",
-      { ...src, keepView, timeoutMs: Math.max(5000, this.remainingMs - 1000) },
-      { mutating: true }
+      { ...src, keepView, timeoutMs: budget - 1000 },
+      { mutating: true, timeoutMs: budget }
     );
+  }
+
+  /**
+   * Put `text` (with `prov`) back into the page after a step that replaced the map failed or was
+   * cancelled. Runs in cleanup() (no cancellation, its own budget). When the page cannot be
+   * trusted (a stalled call marked it) or the load fails twice, the text becomes the restore
+   * point and the page is marked for a relaunch, which loads it before the next call.
+   */
+  async putBack(
+    text: string,
+    prov: Provenance,
+    label: string
+  ): Promise<{ reloaded: boolean; note: string; summary?: Record<string, unknown> }> {
+    return this.cleanup(async () => {
+      const b = this.ctx.browser;
+      if (b.dirty && b.dirtyReadOnly && (await b.probe(READ_STALL_PROBE_MS))) {
+        b.dirty = null;
+        b.dirtyReadOnly = false;
+      }
+      let why = b.dirty ?? "";
+      for (let attempt = 0; attempt < 2 && !b.dirty; attempt++) {
+        try {
+          const summary = await this.loadMap({ text });
+          this.ctx.snapshots.provenance = {
+            ...prov,
+            mapId: typeof summary.mapId === "number" ? summary.mapId : null
+          };
+          return { reloaded: true, note: `${label} was loaded back into the page`, summary };
+        } catch (e) {
+          why = (e as Error).message;
+        }
+      }
+      // the next call relaunches the page and loads the text back
+      this.ctx.snapshots.setRestorePoint(text, label, this.ctx.restoreMarks(this), prov);
+      b.markDirty(`putting ${label} back failed: ${why}`);
+      return {
+        reloaded: false,
+        note: `${label} could not be loaded back now (${why}); the page is relaunched before the next call and ${label} restored then`
+      };
+    });
   }
 }
 
@@ -332,6 +427,9 @@ export class ToolContext {
   /** Tool definitions in registration order (ctx.tool()). */
   readonly toolDefs = new Map<string, ToolDef>();
   readonly callPolicy: CallPolicy = { finishStartedCalls: false, closing: null };
+  /** Tool calls started so far, and the newest one not annotated read-only (restore point reuse). */
+  callSeq = 0;
+  #lastMutableSeq = 0;
   /** How this process is served (session status reports it). */
   serving: { transport: "stdio" } | { transport: "http"; url: string; pid: number } = { transport: "stdio" };
 
@@ -395,11 +493,17 @@ export class ToolContext {
     );
     if (!env.ok) return `Restoring ${src.label} failed: ${env.error?.message}`;
     // the app stamps a new map id on every load, so lineage is re-bound to the loaded map
-    this.snapshots.provenance = { ...src.provenance, restoredFrom: src.label, mapId: env.value?.mapId ?? null };
+    this.snapshots.provenance = {
+      ...src.provenance,
+      ...(src.kind === "point" ? {} : { restoredFrom: src.label }),
+      mapId: env.value?.mapId ?? null
+    };
     const topUndo = this.snapshots.undoStack[this.snapshots.undoStack.length - 1]?.id;
     this.snapshots.afterRestore(src.kind);
-    this.sketches.onCrashRestore(src.kind, src.kind === "undo" ? topUndo : undefined, src.label);
     void reason;
+    // the restore point is the page as the newest finished call left it: the sketch log still holds
+    if (src.kind === "point") return `Restored ${src.label} (nothing lost).`;
+    this.sketches.onCrashRestore(src.kind, src.kind === "undo" ? topUndo : undefined, src.label);
     const lost = src.lostOps.length
       ? ` The map in the page before the relaunch could not be kept; the effects of these calls were LOST and need redoing: ${src.lostOps.join("; ")}.`
       : "";
@@ -430,7 +534,7 @@ export class ToolContext {
     if (p.kind !== "shared" && p.kind !== "sketch") return;
     const id = await this.pageMapId();
     if (id === null || p.mapId === undefined || p.mapId === null || id !== p.mapId)
-      this.snapshots.setProvenance({ kind: "unknown", mapId: id, opsSince: p.opsSince });
+      this.snapshots.setProvenance({ kind: "unknown", mapId: id, opsSince: p.opsSince }, { sameMap: true });
   }
 
   /**
@@ -557,7 +661,7 @@ export class ToolContext {
   }
 
   async #runSignal<A>(
-    spec: { kind?: ToolKind; launch?: boolean; name?: string },
+    spec: { kind?: ToolKind; launch?: boolean; name?: string; annotations?: { readOnlyHint?: boolean } },
     signal: AbortSignal | undefined,
     args: A,
     impl: (args: A, scope: CallScope) => Promise<WithImages | WithText | Record<string, unknown>>,
@@ -589,11 +693,19 @@ export class ToolContext {
         typeof rawTimeout === "number" ? rawTimeout : timeoutMs,
         spec.name ?? ""
       );
+      scope.seq = ++this.callSeq;
+      scope.prevMutableSeq = this.#lastMutableSeq;
+      if (spec.annotations?.readOnlyHint !== true) this.#lastMutableSeq = scope.seq;
+      const writes0 = this.browser.writes;
       try {
-        if (spec.launch !== false) await this.browser.ensureHealthy(scope.notes);
-        else if (this.browser.pendingNotes.length) scope.notes.push(...this.browser.pendingNotes.splice(0));
+        if (spec.launch !== false) {
+          await this.browser.ensureHealthy(scope.notes);
+          // a launch or relaunch (and its restore) has its own budget: the call's starts now
+          scope.started = Date.now();
+        } else if (this.browser.pendingNotes.length) scope.notes.push(...this.browser.pendingNotes.splice(0));
         const out = await impl(args, scope);
         await this.#sketchFallback(scope, args, null);
+        await this.#capturePoint(scope, writes0);
         await new Promise(r => setImmediate(r)); // let late console events land
         const normalized: ToolOutput =
           out instanceof WithImages
@@ -604,6 +716,7 @@ export class ToolContext {
         return okResult(normalized, this.#extras(scope));
       } catch (e) {
         await this.#sketchFallback(scope, args, e).catch(() => {});
+        await this.#capturePoint(scope, writes0);
         await new Promise(r => setImmediate(r));
         return errorResult(e, this.#extras(scope));
       }
@@ -654,10 +767,32 @@ export class ToolContext {
     });
   }
 
+  /** Marks a restore point records (see SnapshotStore.setRestorePoint). */
+  restoreMarks(scope: CallScope): { writes: number; launches: number; callSeq: number } {
+    return { writes: this.browser.writes, launches: this.browser.launches, callSeq: scope.seq };
+  }
+
+  /**
+   * After a call that changed the page (a mutating bridge call, an undo entry, a relaunch), keep
+   * the page map as the restore point, so a later relaunch restores the state the finished call
+   * left instead of an older undo point. Skipped when the page cannot be trusted.
+   */
+  async #capturePoint(scope: CallScope, writes0: number): Promise<void> {
+    if (this.browser.writes === writes0 && !scope.undoPushed.length) return;
+    if (!this.browser.healthy) return;
+    try {
+      const text = await scope.cleanup(() => scope.mapText());
+      const label = `the map as '${scope.tool || "a call"}' left it (${new Date().toISOString()})`;
+      this.snapshots.setRestorePoint(text, label, this.restoreMarks(scope));
+    } catch {
+      // keep the older point; a relaunch then restores the newest snapshot or undo point
+    }
+  }
+
   #extras(scope: CallScope) {
     return {
       alerts: scope.alerts,
-      consoleErrors: this.browser.consoleSince(scope.consoleSeq),
+      consoleErrors: summarizeConsole(this.browser.consoleSince(scope.consoleSeq)),
       notes: scope.notes
     };
   }

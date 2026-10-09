@@ -9,6 +9,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { z } from "zod";
+import { compactSketchStatus } from "../compact.ts";
 import type { CallScope, ToolContext } from "../context.ts";
 import {
   type AddResolved,
@@ -23,7 +24,7 @@ import {
 } from "../ops.ts";
 import { resolveReadPath } from "../paths.ts";
 import { replayOps } from "../replay.ts";
-import { META_TEXT_HEAVY, ToolError } from "../result.ts";
+import { META_TEXT_HEAVY, ToolError, WithText } from "../result.ts";
 import { type LAYER_NAMES, TimeoutMs } from "../schemas.ts";
 import { sha256 } from "../shared-api.ts";
 import { CompactFlag, readMapData } from "./compact.ts";
@@ -261,6 +262,18 @@ async function shoot(
   }
 }
 
+/** Put the page's layers and view back after the summary shots (cleanup: never cancelled). */
+async function restoreLayersView(
+  scope: CallScope,
+  layers0: readonly string[],
+  view0: { x: number; y: number; scale: number }
+): Promise<void> {
+  await scope.cleanup(async () => {
+    await matchLayers(scope, layers0).catch(() => {});
+    await scope.call("setView", { view: view0 }, { noAlerts: true }).catch(() => {});
+  });
+}
+
 /** Make the page show exactly `layers` (a load can switch layers on, e.g. 'trade'). */
 async function matchLayers(scope: CallScope, layers: readonly string[]): Promise<void> {
   const now = await scope.call<string[]>("layersOn", {}, { noAlerts: true });
@@ -311,8 +324,7 @@ async function summaryShots(
     try {
       await pair("after");
     } finally {
-      await matchLayers(scope, layers0).catch(() => {});
-      await scope.call("setView", { view: view0 }, { noAlerts: true }).catch(() => {});
+      await restoreLayersView(scope, layers0, view0);
     }
     return shots;
   }
@@ -321,23 +333,23 @@ async function summaryShots(
   await ctx.verifyProvenance();
   const prov = { ...ctx.snapshots.provenance };
   const current = await scope.mapText();
+  let back: Awaited<ReturnType<CallScope["putBack"]>> | null = null;
   try {
     await scope.loadMap({ text: sk.baseText });
     await pair("before");
   } finally {
-    let back: Record<string, unknown>;
-    try {
-      back = await scope.loadMap({ text: current });
-    } catch {
-      back = await scope.loadMap({ text: current });
-    }
-    ctx.snapshots.provenance = { ...prov, mapId: typeof back.mapId === "number" ? back.mapId : null };
+    // never under the caller's cancellation: a cancelled summary must not leave the base map in
+    // the page (putBack falls back to a relaunch that restores the sketch map)
+    back = await scope.putBack(current, prov, `the sketch map '${sk.slug}'`);
+  }
+  if (!back.reloaded) {
+    scope.notes.push(back.note);
+    throw new ToolError("BROWSER", `sketch summary stopped after the base shots: ${back.note}`);
   }
   try {
     await pair("after");
   } finally {
-    await matchLayers(scope, layers0).catch(() => {});
-    await scope.call("setView", { view: view0 }, { noAlerts: true }).catch(() => {});
+    await restoreLayersView(scope, layers0, view0);
   }
   return shots;
 }
@@ -845,8 +857,33 @@ async function open(ctx: ToolContext, scope: CallScope, args: { slug?: string })
   };
 }
 
-/** discard: DELETE sketch-<slug> on the Worker (blob, versions, ops.json). Never `shared`. */
+/**
+ * discard of the active sketch when it was never saved: nothing exists on the Worker, so this is
+ * local (any mode): the sketch and its log end, the page keeps its map. Preview without confirm.
+ */
+function discardLocal(ctx: ToolContext, sk: Sketch, confirm: boolean | undefined) {
+  if (!confirm)
+    return {
+      preview: true,
+      local: true,
+      wouldDiscard: { slug: sk.slug, ops: sk.ops.length, recording: sk.recording, saved: false },
+      next: `Nothing was discarded. sketch {action:'discard', confirm:true} ends the sketch '${sk.slug}' and drops its log of ${sk.ops.length} op(s) (it was never saved, so nothing is deleted on the Worker); the page keeps its map and changes (snapshot undo still works).`
+    };
+  ctx.sketches.current = null;
+  return {
+    discarded: { slug: sk.slug, ops: sk.ops.length, local: true },
+    note: "the sketch was never saved: its log is dropped and no sketch is active; the page keeps its map (snapshot undo still works)"
+  };
+}
+
+/**
+ * discard: DELETE sketch-<slug> on the Worker (blob, versions, ops.json). Never `shared`. The
+ * active sketch, when it was never saved, is discarded locally instead (any mode).
+ */
 async function discard(ctx: ToolContext, args: { slug?: string; confirm?: boolean }) {
+  const active = ctx.sketches.current;
+  if (active && !active.saved && (args.slug === undefined || args.slug === active.slug))
+    return discardLocal(ctx, active, args.confirm);
   requireLiveSketch(ctx, "discard");
   const slug = args.slug ?? ctx.sketches.current?.slug;
   if (!slug) throw new ToolError("BAD_ARGS", "discard needs slug");
@@ -959,6 +996,12 @@ export const SketchInput = z.object({
     .optional()
     .describe("save/discard: true performs the write (live mode only); absent returns a preview"),
   full: z.boolean().optional().describe("status: include every op record with its resolved form (large)"),
+  format: z
+    .enum(["json", "compact"])
+    .optional()
+    .describe(
+      "status: compact = one key=value line (slug, recording, base, ops, dirty, saved, blobOnly, view, last op); with full:true one line per op follows (default json)"
+    ),
   compact: CompactFlag.describe("save: write a compacted copy of the page map (see compact); the page is not changed"),
   timeoutMs: TimeoutMs
 });
@@ -969,7 +1012,7 @@ export function register(ctx: ToolContext): void {
     {
       title: "Provisional sketches",
       description:
-        "Propose a change to the shared map without changing it: a sketch is base version N of the shared map plus the ops log that produced it. start {slug?, note?}: needs a page map from load_map {source:'shared'} with no edits; then every mutating call is logged in its resolved form (ids, literal names and cells). regenerate (unless its parts are only replayable ones: provinces/emblems, biomes, relief), generate_map, load_map and snapshot restore make it blob-only (not replayable) until undone; snapshot undo takes the last op out of the log. status: base, ops, blobOnly, lastSaved, dirty, viewUrl. summary {shots?}: markdown for humans with before/after screenshots under TUPAIA_OUT/sketches/<slug>/ (the screenshots reload the base map and can take a minute on a busy machine; shots:false skips them). stop: end recording. rebase {onConflict?}: replay the log onto the CURRENT shared map (a GET), keeping other people's edits; a removed target or a field both sides changed is a conflict ('stop' default, or 'skip'); does not save. Network (Worker id sketch-<slug>, never the shared map): save {confirm:true} PUTs the page map and ops.json and returns viewUrl (opens the sketch in the app); list (read-only) shows saved sketches with their headers; open {slug} loads one into the page as the active sketch; discard {slug, confirm:true} deletes it. save and discard need a server spawned with TUPAIA_MODE=live; without confirm they preview. To put a sketch on the shared map use sketch_promote.",
+        "Propose a change to the shared map without changing it: a sketch is base version N of the shared map plus the ops log that produced it. start {slug?, note?}: needs a page map from load_map {source:'shared'} with no edits; then every mutating call is logged in its resolved form (ids, literal names and cells). regenerate (unless its parts are only replayable ones: provinces/emblems, biomes, relief), generate_map, load_map and snapshot restore make it blob-only (not replayable) until undone; snapshot undo takes the last op out of the log. status: base, ops, blobOnly, lastSaved, dirty, viewUrl. summary {shots?}: markdown for humans with before/after screenshots under TUPAIA_OUT/sketches/<slug>/ (the screenshots reload the base map and can take a minute on a busy machine; shots:false skips them). stop: end recording. rebase {onConflict?}: replay the log onto the CURRENT shared map (a GET), keeping other people's edits; a removed target or a field both sides changed is a conflict ('stop' default, or 'skip'); does not save. Network (Worker id sketch-<slug>, never the shared map): save {confirm:true} PUTs the page map and ops.json and returns viewUrl (opens the sketch in the app); list (read-only) shows saved sketches with their headers; open {slug} loads one into the page as the active sketch; discard {slug, confirm:true} deletes it. save and discard need a server spawned with TUPAIA_MODE=live; without confirm they preview. A sketch that was never saved is discarded locally in any mode (discard {confirm:true} ends it and drops its log; the page keeps its map). To put a sketch on the shared map use sketch_promote.",
       inputSchema: SketchInput,
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
       _meta: META_TEXT_HEAVY,
@@ -983,6 +1026,7 @@ export function register(ctx: ToolContext): void {
           const v = ctx.sketches.view();
           const sk = ctx.sketches.current;
           if (sk && ctx.config.liveOrigin) v.viewUrl = sk.saved ? viewUrl(ctx.config.liveOrigin, sk.slug) : null;
+          if (args.format === "compact") return new WithText(compactSketchStatus(v, !!args.full));
           // full: every record with its resolved form (big: paint records hold their cell lists)
           if (args.full && sk) v.records = sk.ops;
           return v;

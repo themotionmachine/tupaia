@@ -277,25 +277,28 @@ export async function takeScreenshot(
       png = await ctx.browser.screenshotMap({ hideUi, scale, timeoutMs: scope.remainingMs });
     }
   } finally {
-    // undone in the reverse order of setup: thaw (set last), then the labels:'all' style, then layers
-    if (frozen) await scope.call("thaw", {}, { noAlerts: true, timeoutMs: STEP_MS }).catch(() => {});
-    if (labelsShot) {
-      // a <style> tag and (maybe) the labels layer: removed/restored here, never in the map or the undo stack
-      const r = await scope
-        .call<{ revealed: number }>("labelsShot", { on: false, restoreLayer: labelsShot.layerTurnedOn })
-        .catch(() => null);
-      labelsRevealed = r?.revealed;
-      if (r) labelsShotDirty.delete(ctx);
-      else
-        scope.notes.push(
-          "labels:'all' could not be undone in the page (its temporary style may remain); the next screenshot retries, or reload the page"
-        );
-    }
-    if (layerChange && !args.keepLayers) {
-      const prev = layerChange.previous;
-      if (prev.on.length || prev.off.length)
-        await scope.call("setLayers", { on: prev.on, off: prev.off }).catch(() => {});
-    }
+    // undone in the reverse order of setup: thaw (set last), then the labels:'all' style, then
+    // layers; in cleanup(), so a cancelled or out-of-budget shot still puts the page back
+    await scope.cleanup(async () => {
+      if (frozen) await scope.call("thaw", {}, { noAlerts: true, timeoutMs: STEP_MS }).catch(() => {});
+      if (labelsShot) {
+        // a <style> tag and (maybe) the labels layer: removed/restored here, never in the map or the undo stack
+        const r = await scope
+          .call<{ revealed: number }>("labelsShot", { on: false, restoreLayer: labelsShot.layerTurnedOn })
+          .catch(() => null);
+        labelsRevealed = r?.revealed;
+        if (r) labelsShotDirty.delete(ctx);
+        else
+          scope.notes.push(
+            "labels:'all' could not be undone in the page (its temporary style may remain); the next screenshot retries, or reload the page"
+          );
+      }
+      if (layerChange && !args.keepLayers) {
+        const prev = layerChange.previous;
+        if (prev.on.length || prev.off.length)
+          await scope.call("setLayers", { on: prev.on, off: prev.off }).catch(() => {});
+      }
+    });
   }
 
   const size = pngSize(png);

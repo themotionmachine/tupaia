@@ -1885,7 +1885,20 @@
     };
   };
 
+  /**
+   * Test faults (mcp tests set them through eval): T.testFaults.loadMap = n makes the next n
+   * loads fail part-way, after changing the page map, like an upload the app gives up on half
+   * way; T.testFaults.stall = {fn, ms} holds the next call of bridge function fn for ms (it
+   * logs 'tupaia-test: stalling <fn>' as a console error first). Nothing sets them outside the tests.
+   */
+  T.testFaults = {};
+
   FNS.loadMap = async (a, meta) => {
+    if (T.testFaults.loadMap > 0) {
+      T.testFaults.loadMap--;
+      if (typeof pack !== "undefined" && pack.burgs?.[1]) pack.burgs[1].name = "Half-loaded";
+      fail("PAGE_ERROR", "test fault: the load failed part-way");
+    }
     const blob = a.b64 ? new Blob([b64ToBytes(a.b64)]) : new Blob([String(a.text || "")]);
     const prevView = a.keepView ? getView() : null;
     const { uploadMap } = await lazy.load();
@@ -2153,6 +2166,13 @@
     try {
       const fn = FNS[name];
       if (!fn) fail("UNKNOWN_FUNCTION", `bridge has no function '${name}'`);
+      // test fault (see T.testFaults): hold the next call of one function, announced on the console
+      const stall = T.testFaults.stall;
+      if (stall && stall.fn === name) {
+        T.testFaults.stall = null;
+        console.error(`tupaia-test: stalling ${name}`);
+        await new Promise(r => setTimeout(r, stall.ms || 5000));
+      }
       const v = await fn(args || {}, m);
       env.value = fn.raw ? v : safeJson(v, m.json);
     } catch (e) {

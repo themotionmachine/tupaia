@@ -29,6 +29,31 @@ export interface Provenance {
   restoredFrom?: string;
   /** Mutating operations applied since the map was generated/loaded. */
   opsSince: number;
+  /**
+   * Which map this is: a new number whenever a different map replaces the page's (load,
+   * generate, shared restore, sketch open, a new boot page), kept by edits, undo/redo (an entry
+   * carries the number of the state it holds) and restores. Diffs between states with different
+   * numbers compare unrelated maps (query.ts, edit.ts).
+   */
+  epoch?: number;
+}
+
+/**
+ * The page map right after the newest call that changed it (context.ts captures it): a relaunch
+ * restores it in preference to an older snapshot or undo point, so finished calls are not lost.
+ */
+export interface RestorePoint {
+  text: string;
+  at: string;
+  provenance: Provenance;
+  label: string;
+  /** Store tick at capture: newer than every entry when it is the newest state. */
+  tick: number;
+  /** Browser mutating-call count and launch count at capture (pushUndo reuses the text while they hold). */
+  writes: number;
+  launches: number;
+  /** The tool call (ToolContext.callSeq) that captured it. */
+  callSeq: number;
 }
 
 export interface Snapshot {
@@ -40,6 +65,8 @@ export interface Snapshot {
   provenance: Provenance;
   baselineKey: string;
   savedTo?: string;
+  /** Store tick when it was taken (orders snapshots, undo entries and the restore point). */
+  tick?: number;
 }
 
 export interface HistoryEntry {
@@ -51,6 +78,7 @@ export interface HistoryEntry {
   text: string;
   provenance: Provenance;
   baselineKey: string;
+  tick?: number;
 }
 
 export interface UndoPlan {
@@ -86,7 +114,13 @@ export class SnapshotStore {
   #redo: HistoryEntry[] = [];
   #nextId = 1;
   #nextHist = 1;
-  provenance: Provenance = { kind: "boot", opsSince: 0 };
+  #tick = 0;
+  #epochSeq = 0;
+  provenance: Provenance = { kind: "boot", opsSince: 0, epoch: 0 };
+  /** The newest post-call state (see RestorePoint); null until a call changes the map. */
+  restorePoint: RestorePoint | null = null;
+  /** Epoch of the map the page's 'checkpoint' baseline was set on (map_info sets both). */
+  checkpointEpoch: number | undefined;
 
   constructor(max: number, undoDepth: number) {
     this.max = max;
@@ -113,7 +147,8 @@ export class SnapshotStore {
       bytes: Buffer.byteLength(text),
       text,
       provenance: cloneProv(this.provenance),
-      baselineKey: `snap:${id}`
+      baselineKey: `snap:${id}`,
+      tick: ++this.#tick
     };
     this.#ring.push(snap);
     const evicted: string[] = [];
@@ -145,23 +180,28 @@ export class SnapshotStore {
   }
 
   /**
-   * Newest state we can restore after a crash or hang: the newest of ring and undo entries by
-   * time. An undo entry holds the state from BEFORE its op, so restoring one loses that op; a
-   * snapshot loses every op recorded after it. lostOps names them (oldest first).
+   * Newest state we can restore after a crash or hang: the newest of the restore point (the page
+   * right after the newest call that changed it), ring and undo entries. An undo entry holds the
+   * state from BEFORE its op, so restoring one loses that op; a snapshot loses every op recorded
+   * after it; the restore point loses nothing. lostOps names what is lost (oldest first).
    */
   newestRestorable():
-    | { kind: "snapshot" | "undo"; text: string; label: string; provenance: Provenance; lostOps: string[] }
+    | { kind: "snapshot" | "undo" | "point"; text: string; label: string; provenance: Provenance; lostOps: string[] }
     | undefined {
     const s = this.latestSnapshot();
     const u = this.#undo[this.#undo.length - 1];
+    const p = this.restorePoint;
+    const tick = (x: { tick?: number } | undefined) => x?.tick ?? -1;
+    if (p && p.tick > tick(s) && p.tick > tick(u))
+      return { kind: "point", text: p.text, label: p.label, provenance: p.provenance, lostOps: [] };
     if (!s && !u) return undefined;
-    if (s && (!u || s.at >= u.at)) {
+    if (s && (!u || tick(s) >= tick(u))) {
       return {
         kind: "snapshot",
         text: s.text,
         label: `snapshot ${s.id}${s.label ? ` '${s.label}'` : ""}`,
         provenance: s.provenance,
-        lostOps: this.#undo.filter(e => e.at > s.at).map(e => `${e.op} ${e.argsSummary}`)
+        lostOps: this.#undo.filter(e => tick(e) > tick(s)).map(e => `${e.op} ${e.argsSummary}`)
       };
     }
     if (!u) return undefined;
@@ -174,13 +214,57 @@ export class SnapshotStore {
     };
   }
 
+  /** Record the page map after a call that changed it (or a state a cleanup could not put back). */
+  setRestorePoint(
+    text: string,
+    label: string,
+    marks: { writes: number; launches: number; callSeq: number },
+    provenance: Provenance = this.provenance
+  ): RestorePoint {
+    this.restorePoint = {
+      text,
+      at: new Date().toISOString(),
+      provenance: cloneProv(provenance),
+      label,
+      tick: ++this.#tick,
+      ...marks
+    };
+    return this.restorePoint;
+  }
+
+  /** True when the restore point is newer than every snapshot and undo entry. */
+  get restorePointIsNewest(): boolean {
+    const p = this.restorePoint;
+    if (!p) return false;
+    const s = this.latestSnapshot();
+    const u = this.#undo[this.#undo.length - 1];
+    return p.tick > (s?.tick ?? -1) && p.tick > (u?.tick ?? -1);
+  }
+
+  /** Drop the newest undo entry when it is `id` (a call that pushed it put the page back); returns its baseline key. */
+  popUndo(id: number): string | null {
+    const top = this.#undo[this.#undo.length - 1];
+    if (!top || top.id !== id) return null;
+    this.#undo.pop();
+    return top.baselineKey;
+  }
+
+  /** Epoch of the state a baseline key holds (undefined when unknown). */
+  epochOf(key: string): number | undefined {
+    if (key === "checkpoint") return this.checkpointEpoch;
+    const e = [...this.#ring, ...this.#undo, ...this.#redo].find(x => x.baselineKey === key);
+    return e?.provenance.epoch;
+  }
+
   /**
    * After newestRestorable() was loaded into a fresh page: an undo point that is now the current
    * state is popped (undoing to it again would do nothing), and redo entries are dropped (they
    * were relative to a page state that no longer exists). Returns the baseline keys dropped.
    */
-  afterRestore(kind: "snapshot" | "undo"): string[] {
+  afterRestore(kind: "snapshot" | "undo" | "point"): string[] {
     const dropped: string[] = [];
+    // the restore point is the state the redo entries were taken against: they stay valid
+    if (kind === "point") return dropped;
     if (kind === "undo") {
       const top = this.#undo.pop();
       if (top) dropped.push(top.baselineKey);
@@ -201,7 +285,8 @@ export class SnapshotStore {
       bytes: Buffer.byteLength(text),
       text,
       provenance: cloneProv(this.provenance),
-      baselineKey: `undo:${id}`
+      baselineKey: `undo:${id}`,
+      tick: ++this.#tick
     };
     this.#undo.push(entry);
     const evicted: string[] = [];
@@ -244,6 +329,8 @@ export class SnapshotStore {
     // push newest op first so redo pops the oldest undone op first
     for (const r of plan.redo) this.#redo.push(r);
     this.provenance = cloneProv(plan.load.provenance);
+    // the page holds another state now; the end of the call records a new point
+    this.restorePoint = null;
     return plan.undone.map(e => e.baselineKey);
   }
 
@@ -280,7 +367,8 @@ export class SnapshotStore {
         bytes: Buffer.byteLength(before),
         text: before,
         provenance: beforeProv,
-        baselineKey: `undo:${id}`
+        baselineKey: `undo:${id}`,
+        tick: ++this.#tick
       };
       this.#undo.push(entry);
       added.push(entry.baselineKey);
@@ -296,6 +384,7 @@ export class SnapshotStore {
       if (k >= 0) added.splice(k, 1);
     }
     this.provenance = cloneProv(entries[entries.length - 1].provenance);
+    this.restorePoint = null;
     return { added, dropped, pairs };
   }
 
@@ -308,8 +397,22 @@ export class SnapshotStore {
     this.provenance.opsSince++;
   }
 
-  setProvenance(p: Omit<Provenance, "opsSince"> & { opsSince?: number }): void {
-    this.provenance = { ...p, opsSince: p.opsSince ?? 0 };
+  /**
+   * Set the provenance of the page map. A different map came in (the default) gets a new epoch;
+   * `sameMap` keeps the current one (a relabelled origin of the same map: verifyProvenance, a save).
+   */
+  setProvenance(
+    p: Omit<Provenance, "opsSince" | "epoch"> & { opsSince?: number },
+    opts: { sameMap?: boolean } = {}
+  ): void {
+    const epoch = opts.sameMap ? this.provenance.epoch : ++this.#epochSeq;
+    this.provenance = { ...p, opsSince: p.opsSince ?? 0, epoch };
+  }
+
+  /** A new epoch for the page map (something replaced it without a provenance of its own). */
+  newEpoch(): number {
+    this.provenance.epoch = ++this.#epochSeq;
+    return this.provenance.epoch;
   }
 
   /** Newest baseline key for map_info's default 'since': latest snapshot or undo point. */
@@ -317,7 +420,7 @@ export class SnapshotStore {
     const s = this.latestSnapshot();
     const u = this.#undo[this.#undo.length - 1];
     if (!s && !u) return undefined;
-    if (s && (!u || s.at >= u.at))
+    if (s && (!u || (s.tick ?? -1) >= (u.tick ?? -1)))
       return { key: s.baselineKey, describe: `snapshot ${s.id}${s.label ? ` '${s.label}'` : ""}` };
     if (!u) return undefined;
     return { key: u.baselineKey, describe: `before '${u.op}' at ${u.at}` };

@@ -380,7 +380,10 @@ describe("tupaia-mcp smoke (core layer)", () => {
     const ms = Date.now() - t0;
     assert.equal(r.isError, true);
     assert.equal(errorBody(r).error.code, "TIMEOUT");
-    assert.ok(ms < 3000, `timeout took ${ms} ms`);
+    // the call's own 2 s bound applied (not eval's 30 s default): the message names it, and the
+    // wall clock stays far below the default even on a loaded machine (slack for IPC and the probe)
+    assert.match(errorBody(r).error.message, /timed out after 2000 ms/);
+    assert.ok(ms < 2000 + 12_000, `timeout took ${ms} ms`);
     const info = await h.ok("map_info", { since: "none" });
     assert.ok(
       (info.notes as string[]).some(n => /relaunched/.test(n) && /Restored/.test(n)),
@@ -433,12 +436,13 @@ describe("tupaia-mcp smoke (core layer)", () => {
   test("cc. shutdown on stdin close leaves no chrome behind", async () => {
     const pids = chromeDescendants(h.pid);
     assert.ok(pids.length > 0);
-    const t0 = Date.now();
-    await h.close(); // ends stdin; the client only signals after 2 s, so a fast close proves EOF shutdown
-    const ms = Date.now() - t0;
-    assert.ok(ms < 2000, `server took ${ms} ms to exit after stdin EOF`);
-    assert.ok(await waitFor(() => !alive(h.pid), 5000), "server exits within 5 s");
-    assert.ok(await waitFor(() => pids.every(p => !alive(p)), 5000), "chrome processes gone");
+    await h.close(); // ends stdin (the client signals only if the server is still there after 2 s)
+    assert.ok(await waitFor(() => !alive(h.pid), 15_000), "server exits");
+    assert.ok(await waitFor(() => pids.every(p => !alive(p)), 15_000), "chrome processes gone");
+    // the server shut itself down on stdin EOF ('transport closed'), not on the client's signal
+    const log = h.stderr.join("");
+    assert.match(log, /shutdown: transport closed/);
+    assert.doesNotMatch(log, /shutdown: SIG/);
   });
 });
 
