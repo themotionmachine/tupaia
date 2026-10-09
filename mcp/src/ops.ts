@@ -104,8 +104,12 @@ export interface EditResolved {
      * for a removal, that nobody changed it since.
      */
     ident?: Record<string, unknown> | null;
+    /** Entities the op created (edit river {split}), for the replay id map. */
+    created?: CreatedRef[];
   }>;
   redraw?: unknown;
+  /** Structural river edits: fingerprint of the cell graph their literal cell lists refer to. */
+  graph?: string;
 }
 
 export interface CreatedRef {
@@ -490,6 +494,17 @@ const setText = (v: unknown): string => {
   return p ? `${p.n} places` : q(v);
 };
 
+/**
+ * Per entity type and edit field: a phrase for the sketch log built from the resolved op (its
+ * literal set value, before/after and created), for fields whose before/after values are opaque
+ * (edit river {mainStem, split, merge, reroute}). Return null to fall back to "field a -> b".
+ * Built from the resolved data only, so a stored record cannot inject free text.
+ */
+export const EDIT_FIELD_SUMMARIES: Record<
+  string,
+  Record<string, (o: EditResolved["ops"][number]) => string | null>
+> = {};
+
 /** One sentence for a recorded call, from the resolved form and the bridge's result rows. */
 export function summarizeOp(tool: string, resolved: Resolved | null, out: Row | null, args?: unknown): string {
   try {
@@ -505,12 +520,21 @@ export function summarizeOp(tool: string, resolved: Resolved | null, out: Row | 
               ? `removed ${who} (${held ? `${held} route${held === 1 ? "" : "s"} ` : ""}moved to ${o.moveTo})`
               : `removed ${who}`;
           }
-          const fields = Object.keys(o.set ?? {}).map(k =>
-            o.before && o.after && k in o.before
+          const fields = Object.keys(o.set ?? {}).map(k => {
+            const say = EDIT_FIELD_SUMMARIES[r.type]?.[k];
+            let said: string | null = null;
+            try {
+              said = say ? say(o) : null;
+            } catch {
+              said = null;
+            }
+            if (said) return said;
+            return o.before && o.after && k in o.before
               ? `${k} ${changeText(o.before[k], o.after[k])}`
-              : `${k} ${setText(o.set?.[k])}`
-          );
-          return `${who}: ${fields.join(", ")}`;
+              : `${k} ${setText(o.set?.[k])}`;
+          });
+          const made = (o.created ?? []).map(c => `${c.type} ${c.i}`);
+          return `${who}: ${fields.join(", ")}${made.length ? ` (created ${made.join(", ")})` : ""}`;
         });
         return `Edited ${listOut(parts)}.`;
       }
@@ -585,14 +609,19 @@ export class Unmapped extends Error {
   }
 }
 
+/** Per item (add) or op (edit), the entities a resolved form says it created. */
+export function createdLists(tool: string, resolved: Resolved): CreatedRef[][] {
+  if (tool === "add") return (resolved as AddResolved).created ?? [];
+  if (tool === "edit") return ((resolved as EditResolved).ops ?? []).map(o => o.created ?? []);
+  const ext = REPLAY_EXT[tool];
+  return ext?.created ? ext.created(resolved) : [];
+}
+
 /** The entities one op created (as "type:id"). */
 export function createdBy(o: OpRecord): string[] {
   if (!o.resolved) return [];
-  const ext = REPLAY_EXT[o.tool];
-  const lists =
-    o.tool === "add" ? ((o.resolved as AddResolved).created ?? []) : ext?.created ? ext.created(o.resolved) : [];
   const out: string[] = [];
-  for (const list of lists) for (const c of list) out.push(`${c.type}:${c.i}`);
+  for (const list of createdLists(o.tool, o.resolved)) for (const c of list) out.push(`${c.type}:${c.i}`);
   return out;
 }
 
@@ -688,6 +717,9 @@ export function rewriteField(rw: Rewriter, kind: string, v: unknown): unknown {
     case "@noteId":
       return typeof v === "string" ? rw.noteId(v) : v;
     default:
+      // a ref field's literal may carry the ref with a precondition: {ref, ...} (river mainStem)
+      if (v && typeof v === "object" && !Array.isArray(v) && "ref" in v)
+        return { ...(v as Record<string, unknown>), ref: rw.id(kind, (v as { ref: unknown }).ref) };
       return rw.id(kind, v);
   }
 }
