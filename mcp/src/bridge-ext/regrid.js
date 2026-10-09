@@ -79,17 +79,25 @@
     return { spacing, cellsX, cellsY, points: cellsX * cellsY };
   }
 
-  // .map lines (save.ts prepareMapData) by how they grow with the cell count
-  // how each .map line grows with the cell count (save.ts prepareMapData order): grid arrays with
-  // the grid points, pack arrays with the pack cells, the rest by an exponent of the pack ratio
-  // measured on demo.map at 10K -> 50K (the svg 0.75, pack features 0.6, rivers 0.5)
+  // How each .map line grows with the cell count (save.ts prepareMapData order): grid arrays
+  // with the grid points, pack arrays with the pack cells, pack features and rivers by a power of
+  // the pack ratio. The svg (line 5) by drawn layer: the redraw makes area outlines grow about
+  // with ratio^0.6, heightmap contours ^0.73, relief icons ^0.37, rivers ^0.4; labels, markers,
+  // routes, burg icons and defs stay (measured on demo.map and terraform-v3.map, 10K -> 50K).
   const GRID_LINES = [6, 7, 8, 9, 10, 11];
   const PACK_LINES = [16, 17, 18, 19, 20, 21, 22, 24, 25, 26, 27, 38, 40, 44];
-  const PACK_EXPONENT = { 5: 0.75, 12: 0.6, 32: 0.5 };
+  const PACK_EXPONENT = { 12: 0.6, 32: 0.5 };
+  const SVG_LINE = 5;
+  const SVG_EXPONENT = { terrs: 0.73, terrain: 0.37, rivers: 0.4, cells: 1 };
+  for (const id of ["biomes", "regions", "provs", "cults", "relig", "borders", "ocean", "coastline", "lakes", "zones", "ice", "landmass", "temperature", "prec", "population"])
+    SVG_EXPONENT[id] = 0.6;
 
   async function bytesEstimate(gridRatio, packRatio) {
     const { prepareMapData } = await lazy.save();
     const lines = prepareMapData().split("\r\n");
+    let svgGrowth = 0;
+    for (const g of document.getElementById("viewbox")?.children || [])
+      if (SVG_EXPONENT[g.id]) svgGrowth += g.outerHTML.length * (packRatio ** SVG_EXPONENT[g.id] - 1);
     let now = 0;
     let est = 0;
     lines.forEach((l, k) => {
@@ -98,6 +106,7 @@
       if (GRID_LINES.includes(k)) est += n * gridRatio;
       else if (PACK_LINES.includes(k)) est += n * packRatio;
       else if (PACK_EXPONENT[k]) est += n * packRatio ** PACK_EXPONENT[k];
+      else if (k === SVG_LINE) est += Math.max(n / 4, n + svgGrowth);
       else est += n;
     });
     return { now, est: Math.round(est) };
@@ -285,7 +294,8 @@
 
   function capture() {
     const labelNodes = [];
-    for (const t of document.querySelectorAll('#labels text[id^="label"]')) {
+    // custom labels, and state labels (drawStateLabels skips locked states, so theirs would go)
+    for (const t of document.querySelectorAll('#labels text[id^="label"], #labels text[id^="stateLabel"]')) {
       const tp = t.querySelector("textPath");
       const href = tp ? tp.getAttribute("href") || tp.getAttribute("xlink:href") : null;
       const path = href?.startsWith("#") ? document.getElementById(href.slice(1)) : null;
@@ -326,7 +336,7 @@
   function restoreLabels(saved) {
     const host = document.querySelector("#textPaths");
     const labelRoot = document.getElementById("labels");
-    let restored = 0;
+    const restored = { labels: 0, stateLabels: 0 };
     for (const s of saved) {
       if (s.path && host && !document.getElementById(s.path.id)) host.appendChild(s.path);
       if (document.getElementById(s.node.id)) continue;
@@ -338,7 +348,8 @@
       }
       if (!g) continue;
       g.appendChild(s.node);
-      restored++;
+      if (s.node.id.startsWith("stateLabel")) restored.stateLabels++;
+      else restored.labels++;
     }
     return restored;
   }
@@ -1245,7 +1256,8 @@
     const orphaned = orphanedNotes(cmp.lostAll);
     cmp.entities.note.orphaned = orphaned.length;
     if (orphaned.length) cmp.entities.note.orphanedIds = orphaned.slice(0, 50);
-    cmp.entities.label.restored = labelsRestored;
+    cmp.entities.label.restored = labelsRestored.labels;
+    if (labelsRestored.stateLabels) cmp.entities.label.stateLabelsKept = labelsRestored.stateLabels;
     cmp.entities.ice = { before: before.ice, after: after.ice, mode: P.iceMode };
     if (report.burgsRehoused?.length)
       warnings.push(
