@@ -525,7 +525,14 @@ describe("tupaia CLI daemon lifecycle", () => {
     fs.writeFileSync(statePath(env.TUPAIA_OUT), JSON.stringify(fake), { mode: 0o600 });
     const r = await cli(["status"], env);
     assert.equal(r.code, 1);
-    assert.match(r.stderr, /removed a stale state file/);
+    assert.match(r.stderr, /removed a stale state file \(daemon pid \d+ is gone\)/);
+    assert.equal(fs.existsSync(statePath(env.TUPAIA_OUT)), false);
+    // a live pid that is not a daemon on the recorded port (pid reuse) is stale too
+    const reused = { ...fake, pid: process.pid, port: await freePort() };
+    fs.writeFileSync(statePath(env.TUPAIA_OUT), JSON.stringify(reused), { mode: 0o600 });
+    const r2 = await cli(["status"], env);
+    assert.equal(r2.code, 1);
+    assert.match(r2.stderr, /removed a stale state file \(pid \d+ is alive but is not a daemon/);
     assert.equal(fs.existsSync(statePath(env.TUPAIA_OUT)), false);
   });
 

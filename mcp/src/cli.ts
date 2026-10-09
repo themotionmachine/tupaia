@@ -93,13 +93,13 @@ const out = (s: string) => process.stdout.write(s.endsWith("\n") ? s : `${s}\n`)
 const note = (s: string) => process.stderr.write(`tupaia: ${s}\n`);
 
 type Health = Record<string, unknown> & { mode?: string; repoRoot?: string; pid?: number };
-type Probe = { health: Health } | { err: "refused" | "timeout" | "other"; detail: string };
+type Probe = { health: Health } | { err: "refused" | "unauthorized" | "timeout" | "other"; detail: string };
 
 async function probe(st: DaemonState, timeoutMs = 3000): Promise<Probe> {
   try {
     const r = await daemonRequest(st.port, st.token, "GET", "/health", undefined, timeoutMs);
     if (r.status === 200) return { health: JSON.parse(r.body) as Health };
-    return { err: "other", detail: `HTTP ${r.status} ${r.body.slice(0, 200)}` };
+    return { err: r.status === 401 ? "unauthorized" : "other", detail: `HTTP ${r.status} ${r.body.slice(0, 200)}` };
   } catch (e) {
     const code = (e as NodeJS.ErrnoException).code;
     if (code === "ECONNREFUSED") return { err: "refused", detail: "nothing listens on its port" };
@@ -124,14 +124,13 @@ async function findDaemon(cfg: Config, quiet = false): Promise<Found | null> {
   }
   const p = await probe(st);
   if ("health" in p && p.health.pid === st.pid) return { st, health: p.health };
-  if ("err" in p && p.err === "refused") {
+  if ("health" in p || p.err === "refused" || p.err === "unauthorized") {
+    // nothing listens there, or another daemon (with another token) took the port over
     removeStateIfOwned(cfg.outDir, st.pid);
     if (!quiet) note(`removed a stale state file (pid ${st.pid} is alive but is not a daemon on port ${st.port})`);
     return null;
   }
-  throw new CliError(
-    `daemon pid ${st.pid} (${st.url}) does not answer: ${"err" in p ? p.detail : "pid mismatch"}. Try 'tupaia stop'.`
-  );
+  throw new CliError(`daemon pid ${st.pid} (${st.url}) does not answer: ${p.detail}. Try 'tupaia stop'.`);
 }
 
 function rotateLog(file: string): void {
