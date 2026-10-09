@@ -17,6 +17,8 @@ const MAX_STR = 80;
 const MAX_ARRAY_CHARS = 240;
 /** inspect: arrays longer than this are shown as `[N items]` (the JSON format has them whole). */
 const MAX_INLINE_ITEMS = 12;
+/** inspect: a flat object with more keys than this is shown as its key list, not as dotted lines. */
+const MAX_FLAT_KEYS = 8;
 
 const KEY_ALIAS: Record<string, string> = { population: "pop" };
 const aliasKey = (k: string): string => KEY_ALIAS[k] ?? k;
@@ -193,7 +195,12 @@ function kvLines(o: Obj, skip: Set<string>, only: Set<string> | null, prefix = "
     if (skip.has(k) || (only && !only.has(k)) || !present(v)) continue;
     const key = `${prefix}${k}`;
     if (isRefLike(v)) out.push(`${key}=${refText(v)}`);
-    else if (isObj(v) && depth === 0 && Object.values(v).every(x => x === null || typeof x !== "object")) {
+    else if (
+      isObj(v) &&
+      depth === 0 &&
+      Object.keys(v).length <= MAX_FLAT_KEYS &&
+      Object.values(v).every(x => x === null || typeof x !== "object")
+    ) {
       // one level of flat object: dotted keys (population.rural=..)
       out.push(...kvLines(v, new Set(), null, `${key}.`, 1));
     } else if (v === true) out.push(key);
@@ -233,7 +240,10 @@ export function compactInspect(r: InspectResult, only?: string[]): string {
     return [head.join(" "), ...kvLines(r, skip, want)].join("\n");
   }
   const head = [String(r.type ?? "entity"), String(r.i)];
-  if (typeof r.name === "string" && r.name) head.push(/[="]/.test(r.name) ? JSON.stringify(r.name) : r.name);
+  if (typeof r.name === "string" && r.name) {
+    const nm = r.name.replace(/\s+/g, " ");
+    head.push(/[="]/.test(nm) ? JSON.stringify(nm) : nm);
+  }
   if (typeof r.x === "number" && typeof r.y === "number") head.push(`at=(${r.x},${r.y})`);
   if (typeof r.lat === "number") head.push(`lat=${r.lat}`, `lon=${r.lon}`);
   if (r.cell !== undefined) head.push(`cell=${r.cell}`);

@@ -100,7 +100,7 @@ export const ScreenshotInput = z.object({
     .max(5000)
     .optional()
     .describe(
-      "crop:'changed': context around the changed region in map px (default 10% of the region, at least 12 screenshot px)"
+      "crop:'changed': context around the changed region in map px (default 10% of the region; a crop is never under 128 px)"
     ),
   sideBySide: z
     .boolean()
@@ -128,6 +128,7 @@ export async function takeScreenshot(
   const maxSide = args.maxSide ?? 1024;
   const hideUi = args.hideUi ?? true;
 
+  let exactView = false;
   let layerChange: { changed: unknown[]; previous: { on: string[]; off: string[] } } | null = null;
   let png: Buffer;
   let view: ViewInfo;
@@ -159,6 +160,7 @@ export async function takeScreenshot(
           );
         }
         view = await scope.call<ViewInfo>("setView", { view: viewRec.view });
+        exactView = true;
       } else if (args.zoom) {
         const cur = await scope.call<ViewInfo>("getView");
         const [x0, y0, x1, y1] = cur.mapBboxShown;
@@ -169,6 +171,10 @@ export async function takeScreenshot(
       } else {
         view = await scope.call<ViewInfo>("getView");
       }
+      // getView rounds x, y and scale, and a later view:/compare: re-applies those rounded values,
+      // which shifts the drawing by a fraction of a pixel and speckles thin strokes in the diff.
+      // Capture at the rounded view too, so a shot and its replay are pixel-identical.
+      if (!exactView) view = await scope.call<ViewInfo>("setView", { view });
       await scope.call("settle", {}, { noAlerts: true });
       png = await ctx.browser.screenshotMap({ hideUi, scale, timeoutMs: scope.remainingMs });
     }
@@ -334,7 +340,7 @@ export function register(ctx: ToolContext): void {
     {
       title: "Screenshot the map",
       description:
-        "See the map. Frames target {entity:{type,ref}} | {bbox:[x0,y0,x1,y1]} | {at:Place} at an optional zoom (1-20; default fits the target, 8 for a point), or reuses an earlier shot's exact view (view:'last'|shotId), or keeps the current view. full:true rasterises the whole map instead. layers:{on,off} apply only for this shot (keepLayers:true keeps them). Returns a JPEG (maxSide 1024 by default) plus {shotId, file (full-resolution PNG), view, mapBboxShown}. compare:shotId diffs against that shot at the same view and returns the diff image (red = changed) with changedPct. Add crop:'changed' to get only the changed region of the new shot instead (pad in map px; sideBySide = before | after in one image) with compare.bbox (changed box) and compare.shown (the cropped box, which the image maps onto) in map px; nothing changed returns no image and a one-line note. Take one after any visual change, framed on what changed; skip it after pure reads.",
+        "See the map. Frames target {entity:{type,ref}} | {bbox:[x0,y0,x1,y1]} | {at:Place} at an optional zoom (1-20; default fits the target, 8 for a point), or reuses an earlier shot's exact view (view:'last'|shotId), or keeps the current view. full:true rasterises the whole map instead. layers:{on,off} apply only for this shot (keepLayers:true keeps them). Returns a JPEG (maxSide 1024 by default) plus {shotId, file (full-resolution PNG), view, mapBboxShown}. compare:shotId diffs against that shot at the same view and returns the diff image (red = changed) with changedPct. crop:'changed' (with compare) returns only the changed region of the new shot instead (pad in map px; sideBySide = before | after), with compare.bbox and compare.shown (the box the image maps onto) in map px; nothing changed = no image, a one-line note. Take one after any visual change, framed on what changed; skip it after pure reads.",
       inputSchema: ScreenshotInput,
       annotations: { readOnlyHint: true, openWorldHint: false },
       kind: "view"

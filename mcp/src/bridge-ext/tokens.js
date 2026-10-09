@@ -41,20 +41,19 @@
   }
 
   // Changed pixels are counted per TILE x TILE block, and blocks within GAP blocks of each other
-  // form one cluster. A cluster is part of the change when it holds at least MIN_CLUSTER_PX
-  // pixels and at least SIG_SHARE of all changed pixels; the rest is speckle (anti-aliasing
-  // flicker, a river stroke that drew a pixel differently) and must not stretch the box over
-  // the whole frame. Fewer than NOISE_MIN_PX significant pixels, or fewer than NOISE_PX spread
-  // over more than SPREAD_MAX of the frame, is noise altogether (no box).
+  // form one cluster. A change needs at least one solid cluster (NOISE_MIN_PX pixels): what is
+  // left are lone pixels and small speckle (anti-aliasing flicker, a river stroke that drew a
+  // pixel differently), which is noise. The box then spans the clusters that are not tiny next
+  // to the largest one (at least MIN_CLUSTER_PX pixels and REL_FLOOR of the largest), so
+  // speckle around a real change cannot stretch it over the whole frame. Everything left out
+  // is reported as `speckle`.
   const TILE_SHIFT = 2;
   const TILE = 1 << TILE_SHIFT;
   const GAP = 3;
   const MIN_CLUSTER_PX = 6;
-  const SIG_SHARE = 0.005;
-  const NOISE_MIN_PX = 24;
-  const NOISE_PX = 200;
-  const SPREAD_MAX = 0.25;
-  const MIN_CROP = 64;
+  const NOISE_MIN_PX = 48;
+  const REL_FLOOR = 0.15;
+  const MIN_CROP = 128;
 
   /**
    * Bounding box of the changed pixels of two RGBA buffers.
@@ -125,7 +124,10 @@
       }
       clusters.push({ px, x0, y0, x1: x1 + 1, y1: y1 + 1 });
     }
-    const floor = Math.max(MIN_CLUSTER_PX, changed * SIG_SHARE);
+    let largest = 0;
+    for (const c of clusters) if (c.px > largest) largest = c.px;
+    if (largest < NOISE_MIN_PX) return { changed, significant: 0, speckle: changed, box: null };
+    const floor = Math.max(MIN_CLUSTER_PX, largest * REL_FLOOR);
     let significant = 0;
     let x0 = Infinity;
     let y0 = Infinity;
@@ -139,9 +141,6 @@
       if (c.x1 > x1) x1 = c.x1;
       if (c.y1 > y1) y1 = c.y1;
     }
-    if (significant < NOISE_MIN_PX) return { changed, significant: 0, speckle: changed, box: null };
-    const spread = ((x1 - x0) * (y1 - y0)) / (w * h);
-    if (significant < NOISE_PX && spread > SPREAD_MAX) return { changed, significant: 0, speckle: changed, box: null };
     return { changed, significant, speckle: changed - significant, box: [x0, y0, x1, y1] };
   }
 

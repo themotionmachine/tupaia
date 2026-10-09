@@ -418,16 +418,25 @@ describe("changedBox / padBox (pure, in node:vm)", () => {
     assert.deepEqual(box(frame(), b).box, [20, 20, 340, 280]);
   });
 
+  test("a dense label-sized change wins over speckle: the box is the blob, not the frame", () => {
+    const b = frame();
+    paint(b, 120, 150, 130, 160); // 10x10 = 100 px, the real change
+    for (let k = 0; k < 24; k++) paint(b, 12 + k * 15, 8 + ((k * 41) % 280), 12 + k * 15 + 4, 10 + ((k * 41) % 280)); // 24 clusters of 8 px
+    const r = box(frame(), b);
+    assert.deepEqual(r.box, [120, 150, 130, 160]);
+    assert.ok(r.speckle >= 24 * 8 - 40, `speckle ${r.speckle}`);
+  });
+
   test("padBox: default pad, minimum size, clamped to the frame", () => {
-    assert.deepEqual(plain(tk.padBox([100, 100, 200, 160], W, H)), [88, 88, 212, 172]); // pad = max(12, 10% of 100)
-    assert.deepEqual(plain(tk.padBox([100, 100, 200, 170], W, H, 0)), [100, 100, 200, 170]);
-    assert.deepEqual(plain(tk.padBox([100, 100, 200, 160], W, H, 0)), [100, 98, 200, 162], "grown to 64 px high");
+    assert.deepEqual(plain(tk.padBox([100, 100, 300, 260], W, H)), [80, 80, 320, 280]); // pad = max(12, 10% of 200)
+    assert.deepEqual(plain(tk.padBox([100, 100, 300, 260], W, H, 0)), [100, 100, 300, 260]);
+    assert.deepEqual(plain(tk.padBox([100, 100, 200, 160], W, H, 0)), [86, 66, 214, 194], "grown to 128 px each way");
     const tiny = plain(tk.padBox([200, 150, 203, 152], W, H, 0)) as number[];
-    assert.ok(tiny[2] - tiny[0] >= 64 && tiny[3] - tiny[1] >= 64, `${tiny}`);
+    assert.ok(tiny[2] - tiny[0] >= 128 && tiny[3] - tiny[1] >= 128, `${tiny}`);
     const edge = plain(tk.padBox([0, 0, 10, 10], W, H, 20)) as number[];
-    assert.ok(edge[0] === 0 && edge[1] === 0 && edge[2] >= 30);
+    assert.ok(edge[0] === 0 && edge[1] === 0 && edge[2] >= 128 && edge[3] >= 128);
     const corner = plain(tk.padBox([395, 295, 400, 300], W, H, 0)) as number[];
-    assert.ok(corner[2] === W && corner[3] === H && corner[2] - corner[0] >= 64);
+    assert.ok(corner[2] === W && corner[3] === H && corner[2] - corner[0] >= 128 && corner[3] - corner[1] >= 128);
   });
 });
 
@@ -611,6 +620,8 @@ describe("token savers over the server (demo.map)", () => {
       // demo.map draws no burg labels until something redraws them: do that first so the
       // baseline shot already has them
       await h.ok("edit", { type: "burg", ops: [{ ref: 1, set: { name: "Longong" } }] });
+      // let the redrawn labels and icons finish any transition before the baseline shot
+      await h.ok("eval", { code: "await new Promise(r => setTimeout(r, 1200)); return 1", readOnly: true });
       base = (await h.ok("screenshot", { target: { bbox: frame } })).shotId as string;
     });
 
@@ -632,7 +643,9 @@ describe("token savers over the server (demo.map)", () => {
       assert.match(body.note, /^nothing changed vs s\d+: /);
       assert.ok(!body.note.includes("\n"));
       assert.equal(body.compare.with, base);
-      assert.ok(body.compare.changedPixels < 1000, `${body.compare.changedPixels}`);
+      // (a shot is captured at the rounded view that view:/compare: replay, so the replay is exact; a
+      // few pixels can still move while the page animates, which the noise floor ignores)
+      assert.match(body.note, new RegExp(`^nothing changed vs ${base}: `));
       assert.ok(textOf(r).length < 300, `${textOf(r).length} chars`);
       // the shot was stored: it works as a baseline
       const again = await call("screenshot", { compare: body.shotId, crop: "changed" });
@@ -657,7 +670,9 @@ describe("token savers over the server (demo.map)", () => {
       // the box holds the renamed burg and sits inside the framed view
       const [bx0, by0, bx1, by1] = c.bbox;
       const [sx0, sy0, sx1, sy1] = c.shown;
-      assert.ok(bx0 <= 207 && 207 <= bx1 && by0 <= 576 && 576 <= by1, `bbox ${c.bbox}`);
+      // (the label sits just above the burg at about (207, 576); nothing else changed)
+      assert.ok(Math.abs((bx0 + bx1) / 2 - 207) < 20 && Math.abs((by0 + by1) / 2 - 576) < 15, `bbox ${c.bbox}`);
+      assert.ok(bx1 - bx0 < 60 && by1 - by0 < 20, `bbox ${c.bbox} is the label, not the frame`);
       assert.ok(sx0 <= bx0 && sy0 <= by0 && sx1 >= bx1 && sy1 >= by1, "shown contains bbox");
       assert.ok(bx1 - bx0 > 5 && by1 - by0 > 2);
       // the returned image is the crop: same aspect as `shown`, not the whole frame
@@ -696,6 +711,39 @@ describe("token savers over the server (demo.map)", () => {
       assert.deepEqual(tight.bbox, wide.bbox);
       const grow = wide.shown[2] - wide.shown[0] - (tight.shown[2] - tight.shown[0]);
       assert.ok(grow > 10, `grew by ${grow}`);
+    });
+
+    test("full-map shots: the box comes back in graph (map) px", async () => {
+      // remove river 4 (Nelbaz, a long one) and compare two whole-map shots
+      const f1 = (await h.ok("screenshot", { full: true })).shotId as string;
+      const ext = (
+        await h.ok("eval", {
+          code: "const r = pack.rivers.find(x => x.i === 4); const pts = r.cells.map(c => pack.cells.p[c]).filter(Boolean); return {x0: Math.min(...pts.map(p => p[0])), y0: Math.min(...pts.map(p => p[1])), x1: Math.max(...pts.map(p => p[0])), y1: Math.max(...pts.map(p => p[1]))}",
+          readOnly: true
+        })
+      ).value as { x0: number; y0: number; x1: number; y1: number };
+      const e = await h.ok("edit", { type: "river", ops: [{ ref: 4, remove: true }] });
+      // a large diff: the mutating tool's changes are counts plus the first few
+      const rc = (
+        e.changes as { river: { counts: { removed: number }; removed: unknown[]; more?: { removed: number } } }
+      ).river;
+      assert.ok(rc.counts.removed > CHANGES_FULL_MAX, "the river and its tributaries");
+      assert.equal(rc.removed.length, CHANGES_SAMPLE);
+      assert.equal(rc.more?.removed, rc.counts.removed - CHANGES_SAMPLE);
+      const r = await call("screenshot", { compare: f1, crop: "changed", pad: 10 });
+      assert.equal(images(r).length, 1, textOf(r).slice(0, 300));
+      const c = JSON.parse(textOf(r)).compare as { bbox: number[]; shown: number[] };
+      const [x0, y0, x1, y1] = c.bbox;
+      // the changed region is the river's own extent (rivers drawn on the whole-map raster), in graph px
+      assert.ok(
+        Math.abs(x0 - ext.x0) < 12 && Math.abs(y0 - ext.y0) < 12 && Math.abs(y1 - ext.y1) < 12,
+        `bbox ${c.bbox} vs river ${JSON.stringify(ext)}`
+      );
+      assert.ok(x1 > ext.x1 - 12 && x1 < ext.x1 + 60, `bbox ${c.bbox} right edge vs ${ext.x1}`);
+      const [sx0, sy0, sx1, sy1] = c.shown;
+      assert.ok(sx0 <= x0 && sy0 <= y0 && sx1 >= x1 && sy1 >= y1);
+      assert.ok(Math.abs(x0 - sx0 - 10) < 2, `pad 10 map px on the left: ${c.shown} vs ${c.bbox}`);
+      await h.ok("snapshot", { action: "undo" });
     });
 
     test("plain compare is unchanged (diff image, diffFile, pixelHint)", async () => {

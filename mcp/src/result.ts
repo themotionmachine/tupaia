@@ -5,6 +5,8 @@
 //   is the same object. Per-call extras are merged into that object: `alerts` (app dialogs
 //   seen and dismissed), `consoleErrors` (page errors that arrived during this call) and
 //   `notes` (server notices such as "browser relaunched").
+// - Compact text (WithText, format:'compact'): content = [one plain-text block], no
+//   structuredContent; extras follow as a trailing JSON line.
 // - Failure: isError:true, text "CODE: message" then a JSON line {error:{code,message,
 //   candidates?,details?}, consoleErrors?, notes?}. Codes: NOT_FOUND, AMBIGUOUS, REMOVED,
 //   OUT_OF_BOUNDS, BAD_ARGS, BAD_PLACE, BAD_REF, BAD_TYPE, BAD_LAYER, REFUSED, MODE, TIMEOUT,
