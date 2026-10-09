@@ -842,8 +842,14 @@
       if (op.set && Object.keys(op.set).length) fail("BAD_ARGS", "an op either sets fields or removes, not both");
       if (NO_REMOVE[type]) fail("REFUSED", NO_REMOVE[type]);
       if ((op.force !== undefined || op.moveTo !== undefined) && !REMOVE[type].takesForce)
-        fail("BAD_ARGS", `force and moveTo apply only to removing a routeGroup, not a ${type}`);
-      // check(entity, batch, op) may return plan info (shown by dryRun); op carries force/moveTo
+        fail(
+          "BAD_ARGS",
+          op.moveTo !== undefined
+            ? `moveTo applies only to removing a routeGroup, not a ${type}`
+            : `force applies only to removing a burg or a routeGroup, not a ${type}`
+        );
+      // check(entity, batch, op) may return plan info (shown by dryRun, e.g. a forced removal's
+      // cascade preview); op carries force/moveTo/newCapital/orphanRoutes
       const info = REMOVE[type].check?.(r.entity, c, op);
       return {
         index,
@@ -853,7 +859,7 @@
         entity: r.entity,
         remove: true,
         op,
-        info,
+        info: isObj(info) ? info : null,
         ident: identOf(type, r.entity)
       };
     }
@@ -883,7 +889,7 @@
     if (p.ident) row.ident = p.ident;
     if (p.remove) {
       row.remove = true;
-      if (isObj(p.info)) Object.assign(row, p.info);
+      if (p.info) Object.assign(row, p.info);
       return row;
     }
     row.before = {};
@@ -897,9 +903,9 @@
 
   function applyEditOp(type, p, c) {
     if (p.remove) {
-      // apply(entity, batch, op) may return {row, resolved}: extra result fields and the extra
-      // fields of the replayable form (e.g. a route group's force/moveTo)
-      const extra = REMOVE[type].apply(p.entity, c, p.op) || {};
+      // apply(entity, batch, op, info) may return {row, resolved}: extra result fields and the
+      // extra fields of the replayable form (a route group's force/moveTo, a burg's newCapital)
+      const extra = REMOVE[type].apply(p.entity, c, p.op, p.info) || {};
       return {
         index: p.index,
         i: p.i,
@@ -2599,4 +2605,6 @@
   };
 
   T.mutations = { FIELDS, ADD, REMOVE, IDENT, TRACKED_TYPES, selectCells, nameSpec, literalPlace };
+  // removal hooks for bridge-ext/clear.js (province/culture/religion removal, forced burg removal)
+  Object.assign(T.mutations, { NO_REMOVE, identOf, batchContext, finishRedraw, stateInternals, errRow });
 })(globalThis);

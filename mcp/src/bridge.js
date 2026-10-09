@@ -2165,7 +2165,9 @@
     fieldValue,
     people,
     layerId,
-    LAYERS
+    LAYERS,
+    matchWhere,
+    REF_FIELDS
   };
   T.pure = {
     fold,

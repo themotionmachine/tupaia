@@ -207,24 +207,39 @@ export function register(ctx: ToolContext): void {
     {
       title: "Edit or remove entities",
       description:
-        "Batch-edit entities of ONE type: ops [{ref, set:{field: value}} | {ref, remove:true}]. All ops are validated first; if any is invalid nothing changes (unless continueOnError). One auto-undo entry covers the call; redraws are coalesced. dryRun:true returns before/after per op. Fields per type are in tupaia://docs/cheatsheet.md, e.g. burg {name, population (people), group, type, culture, port, lock, move:Place}; state {name, fullName, form, formName, color, capital:burgRef, culture, lock}; marker {type, icon, size, pinned, note:{name, legend}, move}; label {text, move}; route {group (any #routes group), name, lock, points:[Place...] (replaces the path, links rebuilt)}; routeGroup {id (rename; its routes follow), name, stroke, width, dash, linecap, opacity, after|before (draw order)}; river {name, type; one structural change per op: mainStem:<tributary> (its upper course becomes this river's), split:{at, name?, type?} (the upper part becomes a new river, in created), merge:true (inverse of split), reroute:{cells:[...]} | {from, to:Place|'edge', through?, snap?, edge?} (a stretch, a new mouth/confluence/edge, or a new source; no crossings, climbs warned); ops apply in order}; map (no ref) {name, populationRate, urbanization, year, era}. name can be {generate:{base:<namesbase>}} | {generate:{culture:<ref>}} | {generate:{}} (own culture). A state's capital changes only through edit state {capital}. remove works for burg (not capitals or market centres), state, marker, route, river, zone, note, label, routeGroup (only when empty; force:true moves its routes to moveTo, default 'roads'; roads/trails/searoutes stay); provinces, cultures and religions are REFUSED (repaint their cells with paint_cells instead).",
+        "Batch-edit entities of ONE type: ops [{ref, set:{field: value}} | {ref, remove:true}]. All ops are validated first; if any is invalid nothing changes (unless continueOnError). One auto-undo entry covers the call; redraws are coalesced. dryRun:true returns before/after per op. Fields per type are in tupaia://docs/cheatsheet.md, e.g. burg {name, population (people), group, type, culture, port, lock, move:Place}; state {name, fullName, form, formName, color, capital:burgRef, culture, lock}; marker {type, icon, size, pinned, note:{name, legend}, move}; label {text, move}; route {group, name, lock, points}; routeGroup {id (rename), name, stroke, width, dash, linecap, opacity, after|before}; river {name, type, mainStem, split, merge, reroute} (structural river ops and route points: see ops.set); map (no ref) {name, populationRate, urbanization, year, era}. name can be {generate:{base:<namesbase>}} | {generate:{culture:<ref>}} | {generate:{}} (own culture). A state's capital changes only through edit state {capital}. remove works for burg, state, province, culture, religion, marker, route, river, zone, note, label, routeGroup (as in the editors it ignores lock; bulk with locks honoured: the clear tool). A capital or a market centre is refused unless force:true (per op, or edit {force:true} for all ops; see ops.force); a routeGroup only when empty, or with force:true (its routes move to moveTo, default 'roads'; roads/trails/searoutes stay). orphanRoutes:true also removes routes that served only removed burgs. A province's cells become province-less; a culture's cells, burgs, states and religions fall back to culture 0 (Wildlands); a religion's cells to No religion; a state's provinces go with it. Removing burgs or routes repairs the route links once per call (routeLinksFixed).",
       inputSchema: z.object({
         type: z.enum(EDIT_TYPES),
         ops: z
           .array(
             z.object({
               ref: EntityRef.optional().describe("Entity ref (omit for type 'map')"),
-              set: z.record(z.string(), z.unknown()).optional(),
+              set: z
+                .record(z.string(), z.unknown())
+                .optional()
+                .describe(
+                  "Fields to set. route points:[Place | [x,y,cell]...] replaces the path (links rebuilt; add lock:true to keep an edited generated route on regenerate); route group: a group id or name. routeGroup id renames the group (its routes follow). river: one structural change per op: mainStem:<tributary> (its upper course becomes this river's), split:{at, name?, type?} (the upper part becomes a new river, in created), merge:true (inverse of split), reroute:{cells:[...]} | {from, to:Place|'edge', through?, snap?, edge?} (a stretch, a new mouth/confluence/edge, or a new source; no crossings, climbs warned); ops apply in order"
+                ),
               remove: z.boolean().optional(),
               force: z
                 .boolean()
                 .optional()
-                .describe("routeGroup remove: also move its routes to moveTo (default 'roads') instead of refusing"),
-              moveTo: EntityRef.optional().describe("routeGroup remove with force: the group the routes move to")
+                .describe(
+                  "burg remove: also remove a state capital or a market centre (dependants are reassigned), and locked orphan routes; routeGroup remove: move its routes to moveTo (default 'roads') instead of refusing"
+                ),
+              moveTo: EntityRef.optional().describe("routeGroup remove with force: the group the routes move to"),
+              newCapital: EntityRef.optional().describe("burg remove with force: the burg that becomes the capital"),
+              orphanRoutes: z
+                .boolean()
+                .optional()
+                .describe(
+                  "burg remove: also remove routes that served only removed burgs (locked ones only with force)"
+                )
             })
           )
           .min(1)
           .max(500),
+        force: z.boolean().optional().describe("type burg: force:true for every remove op"),
         ...Common
       }),
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
