@@ -17,7 +17,8 @@ import {
   ToolError,
   type ToolOutput,
   unwrap,
-  WithImages
+  WithImages,
+  WithText
 } from "./result.ts";
 import { TIMEOUTS } from "./schemas.ts";
 import { SharedApi } from "./shared-api.ts";
@@ -65,6 +66,12 @@ export interface ShotRecord {
   imgW: number;
   imgH: number;
   layersOn: string[];
+  /**
+   * Set when the returned image is the changed-region crop of the PNG (screenshot crop:'changed'):
+   * the crop's box in PNG px, and for sideBySide the width of one half and where the right
+   * ("after") half starts, both in returned-image px. imgW/imgH are then the crop image's size.
+   */
+  crop?: { box: [number, number, number, number]; half?: { width: number; right: number } };
 }
 
 export class ShotStore {
@@ -248,6 +255,19 @@ export class ToolContext {
   readonly shared: SharedApi;
   /** The provisional sketch (ops log) being recorded, if any. */
   readonly sketches = new SketchStore();
+  /**
+   * What the newest edit/add/paint_cells call redrew (screenshot compares use it to explain a
+   * 'no change' result). `suppressed`: the caller passed redraw:false or []. `ops`: the
+   * provenance op count right after it, so a later mutation, undo or load makes it stale.
+   */
+  lastRedraw: {
+    tool: string;
+    at: number;
+    ops: number;
+    redrawn: string[];
+    skippedHidden: string[];
+    suppressed: boolean;
+  } | null = null;
   server!: McpServer;
   readonly toolNames: string[] = [];
 
@@ -401,7 +421,7 @@ export class ToolContext {
   tool<S extends z.ZodType>(
     name: string,
     spec: ToolSpec<S>,
-    impl: (args: z.infer<S>, scope: CallScope) => Promise<WithImages | Record<string, unknown>>
+    impl: (args: z.infer<S>, scope: CallScope) => Promise<WithImages | WithText | Record<string, unknown>>
   ): void {
     this.toolNames.push(name);
     this.server.registerTool(
@@ -421,7 +441,7 @@ export class ToolContext {
     spec: { kind?: ToolKind; launch?: boolean; name?: string },
     sctx: ServerContext | undefined,
     args: A,
-    impl: (args: A, scope: CallScope) => Promise<WithImages | Record<string, unknown>>
+    impl: (args: A, scope: CallScope) => Promise<WithImages | WithText | Record<string, unknown>>
   ): Promise<CallToolResult> {
     return this.browser.exclusive(async () => {
       const kind = spec.kind ?? "read";
@@ -440,7 +460,11 @@ export class ToolContext {
         await this.#sketchFallback(scope, args, null);
         await new Promise(r => setImmediate(r)); // let late console events land
         const normalized: ToolOutput =
-          out instanceof WithImages ? { value: out.value, images: out.images } : { value: out };
+          out instanceof WithImages
+            ? { value: out.value, images: out.images }
+            : out instanceof WithText
+              ? { value: {}, text: out.text }
+              : { value: out };
         return okResult(normalized, this.#extras(scope));
       } catch (e) {
         await this.#sketchFallback(scope, args, e).catch(() => {});

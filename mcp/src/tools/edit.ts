@@ -2,6 +2,7 @@
 // (nothing changes when validation fails), then takes one auto-undo entry, applies the ops and
 // coalesces the redraws. dryRun stops after validation and returns the plan.
 import { z } from "zod";
+import { CHANGES_FULL_MAX, compactChanges } from "../compact.ts";
 import type { CallScope, ToolContext } from "../context.ts";
 import {
   type AddResolved,
@@ -41,8 +42,13 @@ export const Redraw = z
   .optional()
   .describe("Override the computed redraw: false = redraw nothing, or the exact layers to redraw");
 
-/** Diff of the page against the undo point this call just pushed. */
-export async function changesSinceUndo(ctx: ToolContext, scope: CallScope, limit = 20): Promise<unknown> {
+/**
+ * Diff of the page against the undo point this call just pushed. Small diffs are listed in full;
+ * a large one (more than CHANGES_FULL_MAX changed entities) comes back as exact per-type counts
+ * plus the first few entries (compactChanges), so a 200-burg batch does not echo 200 changes.
+ * map_info lists the rest (same baseline).
+ */
+export async function changesSinceUndo(ctx: ToolContext, scope: CallScope, limit = CHANGES_FULL_MAX): Promise<unknown> {
   const entry = ctx.snapshots.undoStack[ctx.snapshots.undoStack.length - 1];
   if (!entry) return undefined;
   try {
@@ -52,7 +58,7 @@ export async function changesSinceUndo(ctx: ToolContext, scope: CallScope, limit
       { noAlerts: true }
     );
     if (!d.available) return undefined;
-    return d.empty ? {} : d.changes;
+    return d.empty ? {} : compactChanges(d.changes as Record<string, unknown> | undefined);
   } catch {
     return undefined;
   }
@@ -73,7 +79,7 @@ export async function runPhased(
   toolArgs: Record<string, unknown>,
   fn: string,
   bridgeArgs: Record<string, unknown>,
-  opts: { dryRun?: boolean; continueOnError?: boolean; timeoutMs?: number }
+  opts: { dryRun?: boolean; continueOnError?: boolean; timeoutMs?: number; rows?: "full" | "ids" }
 ): Promise<Record<string, unknown>> {
   const timeoutMs = opts.timeoutMs ?? TIMEOUTS.edit;
   const plan = await scope.call<ValidateResult>(fn, { ...bridgeArgs, phase: "validate" }, { timeoutMs });
@@ -102,6 +108,15 @@ export async function runPhased(
     throw e;
   }
   ctx.snapshots.noteMutation();
+  const rd = bridgeArgs.redraw;
+  ctx.lastRedraw = {
+    tool: op,
+    at: Date.now(),
+    ops: ctx.snapshots.provenance.opsSince,
+    redrawn: Array.isArray(out.redrawn) ? (out.redrawn as string[]) : [],
+    skippedHidden: Array.isArray(out.skippedHidden) ? (out.skippedHidden as string[]) : [],
+    suppressed: rd === false || (Array.isArray(rd) && rd.length === 0)
+  };
   // the sketch log gets the concrete form of what was applied (also for an aborted batch: the
   // ops before the failing one were applied)
   const resolved = takeResolved(out as Record<string, unknown>);
@@ -133,10 +148,28 @@ export async function runPhased(
   const result: Record<string, unknown> = { ...rest };
   // the apply phase re-validates, so out.errors already holds the skipped invalid ops
   if (!out.errors?.length) delete result.errors;
+  if (opts.rows === "ids") idsOnly(result);
   const changes = await changesSinceUndo(ctx, scope);
   if (changes !== undefined) result.changes = changes;
   result.undo = "snapshot {action:'undo'} reverts this whole call";
   return result;
+}
+
+/** rows:'ids': the per-op `applied` rows and the `created` rows become lists of ids. */
+function idsOnly(result: Record<string, unknown>): void {
+  const ids = (rows: unknown[]) =>
+    rows.map(r => {
+      const row = r as { i?: unknown; index?: unknown };
+      return row.i ?? row.index ?? null;
+    });
+  if (Array.isArray(result.applied)) {
+    result.appliedIds = ids(result.applied);
+    delete result.applied;
+  }
+  if (Array.isArray(result.created)) {
+    result.createdIds = ids(result.created);
+    delete result.created;
+  }
 }
 
 function isEmptyResolved(r: Resolved): boolean {
@@ -155,7 +188,13 @@ const Common = {
     .optional()
     .describe("Apply the valid ops and report the invalid ones instead of refusing the whole call"),
   redraw: Redraw,
-  timeoutMs: TimeoutMs
+  timeoutMs: TimeoutMs,
+  rows: z
+    .enum(["full", "ids"])
+    .optional()
+    .describe(
+      "ids: answer with the ids only (appliedIds / createdIds) instead of one row per op (applied / created with before/after); far smaller for big batches"
+    )
 };
 
 const SelectSchema = z
@@ -216,9 +255,14 @@ export function register(ctx: ToolContext): void {
       kind: "edit"
     },
     async (args, scope) => {
-      const { dryRun, timeoutMs, ...rest } = args;
+      const { dryRun, timeoutMs, rows, ...rest } = args;
       const continueOnError = args.continueOnError;
-      return runPhased(ctx, scope, `edit ${args.type}`, args, "edit", rest, { dryRun, continueOnError, timeoutMs });
+      return runPhased(ctx, scope, `edit ${args.type}`, args, "edit", rest, {
+        dryRun,
+        continueOnError,
+        timeoutMs,
+        rows
+      });
     }
   );
 
@@ -238,9 +282,14 @@ export function register(ctx: ToolContext): void {
       kind: "edit"
     },
     async (args, scope) => {
-      const { dryRun, timeoutMs, ...rest } = args;
+      const { dryRun, timeoutMs, rows, ...rest } = args;
       const continueOnError = args.continueOnError;
-      return runPhased(ctx, scope, `add ${args.type}`, args, "add", rest, { dryRun, continueOnError, timeoutMs });
+      return runPhased(ctx, scope, `add ${args.type}`, args, "add", rest, {
+        dryRun,
+        continueOnError,
+        timeoutMs,
+        rows
+      });
     }
   );
 
