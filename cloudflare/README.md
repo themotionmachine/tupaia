@@ -115,6 +115,15 @@ map to `shared` by hand. In-app edits that change what relief is drawn from (the
 heightmap tools) do not redraw the icons on a `data-regenerate` map until its next load; MCP
 calls do. Re-check after an upstream rebase (upstream has a `relief-webgl-renderer` branch).
 
+Resampling (for the MCP `regrid` tool and the app's Transform tool): `src/generators/resample.ts`
+`process()` takes a `keepId` option; with it (scale 1) it keeps the map id and fires `map:resampled` instead of
+`showStatistics()` (a new id and `map:generated`), so a density-only change of the shared map
+still saves with its loaded version. Only the MCP `regrid` and a Transform with no shift,
+rotation, zoom, mirror or canvas change pass it; any other Transform and every Submap stay a new
+map ("Replace the shared map?"). `public/modules/ui/transform-tool.js` computes that and keeps
+`notes` across its `undraw()` so Resample carries them over (it dropped them). Re-check all of these
+after an upstream rebase.
+
 ## Local smoke test (no Cloudflare account needed)
 
 `wrangler dev --local` runs the Worker against an in-memory R2 + D1 (miniflare):

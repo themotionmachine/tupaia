@@ -109,9 +109,19 @@ async function start(ctx: ToolContext, scope: CallScope, args: { slug?: string; 
   const base = baseFromProvenance(ctx, notes);
   const slug = args.slug ?? defaultSlug();
   const baseText = await scope.mapText();
-  const summary = await scope.call<{ counts: Record<string, number> }>("summary", {}, { noAlerts: true });
+  const summary = await scope.call<{ counts: Record<string, number>; cells?: number }>(
+    "summary",
+    {},
+    { noAlerts: true }
+  );
   if (old) notes.push(`replaced the stopped sketch '${old.slug}' (${old.ops.length} ops)`);
-  const sk = ctx.sketches.begin({ slug, note: args.note ?? null, base, baseText, baseCounts: summary.counts });
+  const sk = ctx.sketches.begin({
+    slug,
+    note: args.note ?? null,
+    base,
+    baseText,
+    baseCounts: withCells(summary)
+  });
   scope.notes.push(...notes);
   return {
     started: true,
@@ -332,12 +342,13 @@ async function summaryShots(
 
 async function summary(ctx: ToolContext, scope: CallScope, args: { shots?: boolean }) {
   const sk = needSketch(ctx);
-  const now = await scope.call<{ counts: Record<string, number> }>("summary", {}, { noAlerts: true });
-  // a count the base never recorded (a sketch started before it was counted) is left out
-  const keys = [...new Set([...Object.keys(sk.baseCounts), ...Object.keys(now.counts)])].filter(
+  const now = await scope.call<{ counts: Record<string, number>; cells?: number }>("summary", {}, { noAlerts: true });
+  const nowCounts = withCells(now);
+  // a count the base never recorded (a sketch started before it was counted: biomes, cells) is left out
+  const keys = [...new Set([...Object.keys(sk.baseCounts), ...Object.keys(nowCounts)])].filter(
     k => sk.baseCounts[k] !== undefined
   );
-  const counts = keys.map(k => ({ k, base: sk.baseCounts[k] ?? 0, now: now.counts[k] ?? 0 }));
+  const counts = keys.map(k => ({ k, base: sk.baseCounts[k] ?? 0, now: nowCounts[k] ?? 0 }));
   const target = await framedTarget(scope, sk);
   const shots: Record<string, string | null> = args.shots !== false ? await summaryShots(ctx, scope, sk, target) : {};
   const reasons = blobOnlyReasons(sk);
@@ -386,14 +397,27 @@ async function summary(ctx: ToolContext, scope: CallScope, args: { shots?: boole
   };
 }
 
+/** Summary counts plus the cell count (a regrid changes only that). */
+function withCells(s: { counts: Record<string, number>; cells?: number }): Record<string, number> {
+  return typeof s.cells === "number" ? { ...s.counts, cells: s.cells } : { ...s.counts };
+}
+
 /** REFUSED with the reasons when the sketch cannot be replayed. */
 export function refuseBlobOnly(sk: Sketch): void {
   const reasons = blobOnlyReasons(sk);
   if (reasons.length)
     throw new ToolError(
       "REFUSED",
-      `sketch '${sk.slug}' is blob-only, so it cannot be replayed: ${reasons.join("; ")}. It can still be saved and viewed as a blob.`
+      `sketch '${sk.slug}' is blob-only, so it cannot be replayed: ${reasons.join("; ")}. ${blobOnlyNext(sk)}`
     );
+}
+
+/** What to do with a blob-only sketch instead of a rebase. */
+function blobOnlyNext(sk: Sketch): string {
+  const v = sk.base.kind === "shared" && typeof sk.base.version === "number" ? `v${sk.base.version}` : null;
+  return v
+    ? `No rebase is needed while the shared map is still at ${v} (shared_status): sketch_promote it directly. If the shared map moved, a blob-only sketch cannot be carried over: start a new sketch from the current shared map and redo the non-replayable steps (a regrid is one call). It can still be saved and viewed as a blob.`
+    : "It can still be saved and viewed as a blob.";
 }
 
 /**
@@ -422,7 +446,11 @@ export async function rebaseOnto(
   entries.push(await scope.pushUndo("sketch rebase", { onto: target.describe }));
   await target.load();
   const baseText = await scope.mapText();
-  const baseSummary = await scope.call<{ counts: Record<string, number> }>("summary", {}, { noAlerts: true });
+  const baseSummary = await scope.call<{ counts: Record<string, number>; cells?: number }>(
+    "summary",
+    {},
+    { noAlerts: true }
+  );
   const res = await replayOps(ctx, scope, sk.ops, { onConflict, label: "sketch replay" });
   entries.push(...res.undoEntries);
   scope.notes.push(...res.notes);
@@ -445,7 +473,7 @@ export async function rebaseOnto(
   if (completed) {
     sk.base = target.base;
     sk.baseText = baseText;
-    sk.baseCounts = baseSummary.counts;
+    sk.baseCounts = withCells(baseSummary);
     sk.ops = res.records;
     sk.redo = [];
     sk.blockers = [];
@@ -854,9 +882,13 @@ async function promote(
   if (!meta) throw new ToolError("NOT_FOUND", "the shared map does not exist yet");
   const base = sk.base.version;
   if (meta.version !== base) {
+    const moved = `sketch '${sk.slug}' is based on shared v${base}, but the shared map is now v${meta.version} (saved by ${meta.updated_by} at ${meta.updated_at}).`;
+    const reasons = blobOnlyReasons(sk);
     throw new ToolError(
       "REFUSED",
-      `rebase first: sketch '${sk.slug}' is based on shared v${base}, but the shared map is now v${meta.version} (saved by ${meta.updated_by} at ${meta.updated_at}). sketch {action:'rebase'} replays the sketch onto v${meta.version} keeping their edits; check the result, then sketch_promote again.`,
+      reasons.length
+        ? `${moved} It is blob-only (${reasons.join("; ")}), so rebase cannot replay it: start a new sketch from v${meta.version} (load_map {source:'shared'}) and redo its steps there (a regrid is one call), then promote that one.`
+        : `rebase first: ${moved} sketch {action:'rebase'} replays the sketch onto v${meta.version} keeping their edits; check the result, then sketch_promote again.`,
       { details: { sketchBase: base, live: meta.version } }
     );
   }
