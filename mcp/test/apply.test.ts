@@ -96,12 +96,12 @@ describe("apply: spec normalization (no browser)", () => {
     );
     assert.deepEqual(
       s.lists.map(l => `${l.key}:${l.type}:${l.entries.length}`),
-      ["burgs:burg:1", "states:state:1", "provinces:province:1", "rivers:river:1", "labels:label:1"],
+      ["burgs:burg:1", "states:state:1", "rivers:river:1", "labels:label:1", "provinces:province:1"],
       "lists come in stage order"
     );
     assert.deepEqual(s.lists[0].entries[0], { name: "B", group: "village", at: { x: 5, y: 6 } });
     assert.deepEqual(s.lists[1].entries[0], { name: "S", capital: "B" });
-    assert.deepEqual(s.lists[4].entries[0], { text: "L", group: "lbl_peaks", at: { x: 1, y: 2 } });
+    assert.deepEqual(s.lists[3].entries[0], { text: "L", group: "lbl_peaks", at: { x: 1, y: 2 } });
     assert.deepEqual(s.skipped.sort(), ["pipeline", "seed"]);
     const only = normalizeSpec(null, { burgs: [{ name: "B" }], labels: [{ text: "L" }] }, {}, ["labels"]);
     assert.deepEqual(
@@ -618,7 +618,7 @@ describe("tupaia-mcp apply", () => {
     });
     const grouped = (k.rows as Obj[]).find(r => r.count === 3) as Obj;
     assert.deepEqual(grouped.keys, ["Pa", "Pb", "Pc"], JSON.stringify(k.rows));
-    assert.match(grouped.error.message, /^missing; apply cannot create provinces/);
+    assert.match(grouped.error.message, /^missing; a new province needs a centre: capital:<burg>/);
     // with dx/routes merged the freehand route is an ordinary create: missing, and no error
     const freeWay = rowAt(k, "routes[0]");
     assert.equal(freeWay?.status, "missing", JSON.stringify(k.rows));

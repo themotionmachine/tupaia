@@ -1742,4 +1742,355 @@
       out.relations.tributaries = ks.slice(0, 25).map(k => ({ i: k.i, name: k.name ?? null, joinsAt: joinsAt(k) }));
       return out;
     });
+
+  // ---------------------------------------------------------------- add river
+
+  // add {type:'river'}: a new river along a neighbour-contiguous course, from its source down to
+  // its end cell, as Rivers.generate records rivers (the end is the water cell it flows into,
+  // the cell of the river it joins, or -1 off the map edge after a border cell).
+  //   cells:[...]      literal: exactly that course, which must already end in water, on another
+  //                    river's course (a confluence; on `parent`'s when given) or at -1
+  //   points:[Place...] the places joined into a course by the cheapest land path (uphill steps
+  //                    cost more) that avoids other rivers; the last place may be off the map or
+  //                    'edge' (the river runs off the nearest edge); a last place on land that is
+  //                    neither water nor a river is extended the same way to the nearest water or
+  //                    river (to `parent`'s course when given), with a note
+  // The source's and course's flux, the confluence and everything downstream of it (cells.fl,
+  // cells.conf), cells.r, lake inlets, and source, mouth, discharge, length and width come out as
+  // the structural edits above compute them; name defaults to Rivers.getName(mouth), type to
+  // Rivers.getType. Resolved: {cells (literal), name, type, parent?}.
+  const { ADD, TRACKED_TYPES } = T.mutations;
+  if (TRACKED_TYPES && !TRACKED_TYPES.includes("river")) TRACKED_TYPES.push("river");
+  const RIVER_ADD_KEYS = ["cells", "points", "name", "type", "parent"];
+
+  const offMap = v =>
+    isObj(v) &&
+    typeof v.x === "number" &&
+    typeof v.y === "number" &&
+    (v.x < 0 || v.y < 0 || v.x > graphWidth || v.y > graphHeight);
+  const clampXY = v => ({ x: Math.min(Math.max(v.x, 0), graphWidth), y: Math.min(Math.max(v.y, 0), graphHeight) });
+
+  /** Course cells of every river (non-terminal): Map cell -> [river]. */
+  const allCourses = () => courseIndex(null);
+
+  /** Where a new course ending at `e` ends: {kind:'water'|'river'|'edge', feature?, host?}, or null. */
+  function newEnd(e, parent, courses) {
+    if (e === -1) return { kind: "edge" };
+    if (isWaterCell(e)) {
+      const f = pack.features[pack.cells.f[e]];
+      return { kind: "water", feature: f };
+    }
+    const hosts = (courses.get(e) || []).slice().sort((a, b) => a.i - b.i);
+    if (parent) return hosts.includes(parent) ? { kind: "river", host: parent } : null;
+    return hosts.length ? { kind: "river", host: hosts[0] } : null;
+  }
+
+  /** Check a new river's course (nothing is mutated): {path, end, parentId?, climbs}. */
+  function planNewRiver(path, parent) {
+    const C = pack.cells;
+    const total = C.i.length;
+    if (!Array.isArray(path) || path.length < 3)
+      fail(
+        "BAD_ARGS",
+        "a river needs at least 3 cells: its source, its course and the cell it ends in (water, a river, or -1 off the map edge)"
+      );
+    path.forEach((c, k) => {
+      if (c === -1 && k === path.length - 1) return;
+      if (!Number.isInteger(c) || c < 0 || c >= total)
+        fail(
+          "BAD_ARGS",
+          `river cell ${JSON.stringify(c)} is not a cell id 0..${total - 1}${k === path.length - 1 ? " (or -1: off the map edge)" : ""}`
+        );
+    });
+    if (new Set(path).size !== path.length) fail("BAD_ARGS", "a cell appears twice in the course; a river cannot loop");
+    for (let k = 1; k < path.length; k++) {
+      const a = path[k - 1];
+      const b = path[k];
+      if (b === -1) {
+        if (!C.b[a]) fail("BAD_ARGS", `-1 (off the map edge) must follow a border cell; cell ${a} is not one`);
+      } else if (!C.c[a].includes(b))
+        fail(
+          "BAD_ARGS",
+          `cells ${a} and ${b} are not neighbours; a river's cells must be contiguous (cell ${a}'s neighbours: ${Array.from(C.c[a]).join(", ")}); points:[...] joins places into a course`
+        );
+    }
+    const courses = allCourses();
+    const last = lastOf(path);
+    path.forEach((c, k) => {
+      if (k === path.length - 1) return;
+      if (!isLandCell(c))
+        refuse(
+          `cell ${c} is water; a river ${k === 0 ? "rises on land" : "can end in water (a mouth) but not cross it"}`
+        );
+      const on = courses.get(c);
+      if (on)
+        refuse(
+          `cell ${c} is on ${tag(on[0])}; a new river cannot ${k === 0 ? "rise on" : "cross"} another river (it may end on one, as a confluence)`,
+          on.map(r => r.i)
+        );
+    });
+    const end = newEnd(last, parent, courses);
+    if (!end) {
+      if (parent)
+        refuse(
+          `the course ends at cell ${last}, which is not on ${tag(parent)}'s course; with parent the river ends on that river (points:[...] extends to it)`,
+          [parent.i]
+        );
+      refuse(
+        `the course ends at cell ${last}, which is not water, another river's course or -1 (off the map edge after a border cell); a river ends in one of those (points:[...] extends to the nearest)`
+      );
+    }
+    if (parent && end.kind !== "river")
+      refuse(
+        `with parent the river ends on ${tag(parent)}'s course; it ends in ${end.kind === "edge" ? "the map edge" : "water"}`,
+        [parent.i]
+      );
+    const climbs = [];
+    for (let k = 1; k < path.length; k++) {
+      const a = path[k - 1];
+      const b = path[k];
+      if (isLandCell(a) && isLandCell(b) && C.h[b] > C.h[a]) climbs.push(`${a} (h${C.h[a]}) -> ${b} (h${C.h[b]})`);
+    }
+    return { path, end, climbs };
+  }
+
+  /** points -> a course: {path, notes}. Joins places by the cheapest land path; extends the end. */
+  function pointsPath(points, parent) {
+    const C = pack.cells;
+    if (!Array.isArray(points) || points.length < 1) fail("BAD_ARGS", "points is a non-empty list of places");
+    const notes = [];
+    const courses = allCourses();
+    const n = points.length;
+    let edge = false;
+    const cellsAt = points.map((v, k) => {
+      if (k === n - 1 && k > 0 && (v === "edge" || v === -1 || offMap(v))) {
+        edge = true;
+        return v === "edge" || v === -1 ? null : placeOf(clampXY(v)).cell;
+      }
+      return placeOf(v).cell;
+    });
+    const used = new Set();
+    const ok = c => isLandCell(c) && !used.has(c) && !courses.has(c);
+    const src = cellsAt[0];
+    if (!isLandCell(src)) fail("BAD_ARGS", `the first place (cell ${src}) is water; a river rises on land`);
+    if (courses.has(src)) {
+      const r = courses.get(src)[0];
+      refuse(
+        `the first place (cell ${src}) is on ${tag(r)}; a new river rises off other rivers (if that river is the one meant, name it: edit river {ref:${r.i}, set:{name}}, or give the entry ref ${r.i})`,
+        [r.i]
+      );
+    }
+    const path = [src];
+    used.add(src);
+    const step = (goal, what) => {
+      const from = lastOf(path);
+      if (typeof goal !== "function" && goal === from) return;
+      const seg = shortestPath(from, goal, ok);
+      if (!seg) fail("NO_PATH", `no land path from cell ${from} to ${what} that avoids water and other rivers`);
+      for (const c of seg.slice(1)) {
+        path.push(c);
+        used.add(c);
+      }
+    };
+    for (let k = 1; k < n; k++) {
+      const c = cellsAt[k];
+      if (c === null) continue;
+      const lastPoint = k === n - 1;
+      if (!lastPoint) {
+        if (!isLandCell(c))
+          fail("BAD_ARGS", `points[${k}] (cell ${c}) is water; only the last place may be (the mouth)`);
+        if (courses.has(c))
+          refuse(
+            `points[${k}] (cell ${c}) is on ${tag(courses.get(c)[0])}; a river cannot cross another (only the last place may be on one: a confluence)`,
+            courses.get(c).map(r => r.i)
+          );
+      }
+      if (used.has(c) && c !== lastOf(path))
+        fail("BAD_ARGS", `points[${k}] (cell ${c}) is already on the course; a river cannot loop`);
+      const hosts = lastPoint ? courses.get(c) : null;
+      if (!hosts) step(c, `points[${k}] (cell ${c})`);
+      else
+        try {
+          step(c, `points[${k}] (cell ${c})`);
+        } catch (e) {
+          // the last place is on a river that cannot be reached right there (other rivers in
+          // the way): join that river wherever it is nearest
+          if (e?.code !== "NO_PATH") throw e;
+          step(x => isLandCell(x) && (courses.get(x) || []).some(r => hosts.includes(r)), tag(hosts[0]));
+          notes.push(
+            `the last place (cell ${c}, on ${tag(hosts[0])}) cannot be reached without crossing another river; the course joins ${tag(hosts[0])} at cell ${lastOf(path)} instead`
+          );
+        }
+    }
+    const last = lastOf(path);
+    if (edge) {
+      if (isWaterCell(last)) notes.push(`the last place falls in water at cell ${last}: the river ends there`);
+      else {
+        if (!C.b[last]) step(c => !!C.b[c] && ok(c), "the map edge");
+        path.push(-1);
+      }
+      return { path, notes };
+    }
+    // where a river can end: the parent's course, else water or another river
+    const done = parent
+      ? c => isLandCell(c) && (courses.get(c) || []).includes(parent)
+      : c => isWaterCell(c) || courses.has(c);
+    if (path.length < 2 || !done(last)) {
+      const seg = shortestPath(last, done, ok);
+      if (!seg)
+        fail(
+          "NO_PATH",
+          `the last place (cell ${last}) reaches no ${parent ? `cell of ${tag(parent)}'s course` : "water or river"} by a land path that avoids other rivers`
+        );
+      for (const c of seg.slice(1)) path.push(c);
+      const end = lastOf(path);
+      const host = parent ?? (courses.get(end) || []).slice().sort((a, b) => a.i - b.i)[0];
+      notes.push(
+        `the course was extended ${seg.length - 1} cell(s) from the last place (cell ${last}) to ${isWaterCell(end) ? `${pack.features[C.f[end]]?.type === "lake" ? "a lake" : "the sea"} at cell ${end}` : `${tag(host)} at cell ${end}`}`
+      );
+    }
+    return { path, notes };
+  }
+
+  /** Flux along a new course, the confluence and downstream; returns the river. */
+  function makeRiver(plan, q, c) {
+    const C = pack.cells;
+    const path = plan.path;
+    const sigs = signatures();
+    const discharges = new Map(pack.rivers.map(r => [r, r.discharge]));
+    const id = Rivers.getNextId(pack.rivers);
+    const prec = x => grid.cells.prec?.[C.g[x]] ?? 0;
+    const accounted = new Set(path);
+    const lowest = u => C.c[u].reduce((m, w) => (C.h[w] < C.h[m] ? w : m), C.c[u][0]);
+    // a course cell's own water: its rain plus the off-river cells that drain into it, at most its stored flux
+    const own = x => {
+      let s = prec(x);
+      for (const u of C.c[x])
+        if (isLandCell(u) && !accounted.has(u) && !C.r[u] && C.h[u] > C.h[x] && lowest(u) === x) s += C.fl[u];
+      return Math.min(C.fl[x], s);
+    };
+    let flowing = C.fl[path[0]];
+    for (let k = 1; k < path.length - 1; k++) {
+      flowing = Math.min(65535, own(path[k]) + flowing);
+      C.fl[path[k]] = flowing;
+    }
+    const end = plan.end;
+    let parentId = id;
+    let basin = id;
+    if (end.kind === "river") {
+      parentId = end.host.i;
+      basin = end.host.basin ?? Rivers.getBasin(end.host.i);
+    } else if (end.kind === "water" && end.feature?.type === "lake" && end.feature.outlet) {
+      const o = riverOf(end.feature.outlet);
+      if (o) {
+        parentId = o.i;
+        basin = o.basin ?? Rivers.getBasin(o.i);
+      }
+    }
+    const base = baseWidthFactor(null);
+    const r = {
+      i: id,
+      source: path[0],
+      mouth: mouthOf(path),
+      discharge: 0,
+      length: 0,
+      width: 0,
+      widthFactor: parentId === id ? rn2(base * 1.2) : base,
+      sourceWidth: Rivers.getSourceWidth(C.fl[path[0]]),
+      parent: parentId,
+      cells: path.slice(),
+      basin,
+      name: "",
+      type: ""
+    };
+    pack.rivers.push(r);
+    const touched = new Set([r]);
+    const mouthCell = mouthOf(path);
+    const delivered = isLandCell(mouthCell) ? C.fl[mouthCell] : 0;
+    deliverAt(lastOf(path), end.kind === "river" ? end.host : null, delivered, touched, r);
+    if (end.kind === "river") markConf(lastOf(path), delivered);
+    refreshLakes([r], [], c.notes);
+    reown(path);
+    for (const x of touched) restat(x, x === r ? null : sigs);
+    if (q.name?.text) FIELDS.river.name.set(r, q.name, c);
+    else if (q.name?.gen) FIELDS.river.name.set(r, q.name, c);
+    else r.name = Rivers.getName(r.mouth);
+    r.type = q.type ?? Rivers.getType(r);
+    c.R.add("rivers");
+    const down = [...touched].filter(x => x !== r && discharges.get(x) !== x.discharge);
+    if (down.length)
+      c.notes.add(
+        `discharge changed downstream: ${down
+          .slice(0, 4)
+          .map(x => `${tag(x)} ${discharges.get(x)} -> ${x.discharge}`)
+          .join(", ")}${down.length > 4 ? `, and ${down.length - 4} more` : ""}`
+      );
+    if (plan.climbs.length)
+      c.notes.add(
+        `warning: the course of ${tag(r)} climbs at ${plan.climbs.length} step(s): ${plan.climbs.slice(0, 3).join(", ")}${plan.climbs.length > 3 ? ", ..." : ""}`
+      );
+    if (pack.rivers.some(x => x !== r && fold(x.name || "") === fold(r.name || "")))
+      c.notes.add(`warning: another river is also named '${r.name}'; refs by that name are now AMBIGUOUS`);
+    return r;
+  }
+
+  const newEndText = (end, path) =>
+    end.kind === "edge"
+      ? "the map edge"
+      : end.kind === "river"
+        ? `${tag(end.host)} at cell ${lastOf(path)}`
+        : `${end.feature?.type === "lake" ? "lake" : "the sea"} at cell ${lastOf(path)}`;
+
+  function riverItemPlan(item, q) {
+    const out = q.cells ? { path: q.cells, notes: [] } : pointsPath(item.points, q.parent);
+    return { ...planNewRiver(out.path, q.parent), notes: out.notes };
+  }
+
+  ADD.river = {
+    literalCells: true,
+    check(item) {
+      for (const k of Object.keys(item))
+        if (!RIVER_ADD_KEYS.includes(k))
+          fail("BAD_FIELD", `river items take no field '${k}'`, { details: RIVER_ADD_KEYS });
+      if ((item.cells === undefined) === (item.points === undefined))
+        fail("BAD_ARGS", "a river needs cells:[...] (a contiguous course) or points:[Place...] (exactly one)");
+      if (item.cells !== undefined && !Array.isArray(item.cells)) fail("BAD_ARGS", "cells is a list of cell ids");
+      const q = {};
+      if (item.parent !== undefined && item.parent !== null) q.parent = T.resolve("river", item.parent).entity;
+      if (item.name !== undefined) q.name = nameSpec(item.name);
+      if (item.type !== undefined) q.type = FIELDS.river.type.check(item.type);
+      if (item.cells !== undefined) q.cells = item.cells.slice();
+      // checked against the map as it is; applied against the map after the call's earlier items
+      q.plan = riverItemPlan(item, q);
+      return q;
+    },
+    plan: (q, row) =>
+      Object.assign(row, {
+        cells: q.plan.path.length,
+        source: q.plan.path[0],
+        ends: newEndText(q.plan.end, q.plan.path),
+        ...(q.plan.climbs.length ? { climbs: q.plan.climbs.length } : {}),
+        ...(q.plan.notes.length ? { notes: q.plan.notes } : {})
+      }),
+    apply(q, c, item) {
+      if (q.parent && !pack.rivers.includes(q.parent)) refuse(`${tag(q.parent)} no longer exists`);
+      const plan = riverItemPlan(item, q);
+      for (const n of plan.notes) c.notes.add(n);
+      const r = makeRiver(plan, q, c);
+      const lit = { cells: r.cells.slice(), name: r.name, type: r.type };
+      if (q.parent) lit.parent = q.parent.i;
+      return {
+        i: r.i,
+        name: r.name,
+        type: r.type,
+        cells: r.cells.length,
+        source: r.source,
+        mouth: r.mouth,
+        ends: newEndText(plan.end, r.cells),
+        ...(isRootRiver(r) ? {} : { parent: r.parent }),
+        discharge: r.discharge,
+        _r: lit
+      };
+    }
+  };
 })(globalThis);

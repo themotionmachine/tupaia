@@ -189,17 +189,19 @@ Token economy (results are counts first; ask for detail only when needed):
    dryRun.
 2. `apply {specPath:'/abs/design/build-spec.json', <mapping and paint below>, mode:'check'}`:
    what upsert would do (paint rows count each entry's differing cells).
-3. The same without `mode`: creates, edits and paints; one undo entry.
-4. `regenerate {parts:['provinces'], provinces:{states:[...], centres:[{state, burg, name}]}}`
-   with one centre per `states[].provinces` entry (apply cannot create provinces).
-5. `apply {..., mode:'check'}` again: every row `unchanged` except what the spec cannot express,
-   each an error row saying why: rivers the spec names that the map lacks (UNSUPPORTED: name the
-   map's rivers with `edit river`), notes the spec gives twice (CONFLICT), a curved-path label.
-   A second upsert changes nothing.
+3. The same without `mode`: creates, edits and paints; one undo entry. Provinces
+   (`states[].provinces`, each around its `capital` burg) are made after the paint, in their
+   states' painted territory; rivers (`rivers_intended` from/via/to) run along the land and are
+   extended downhill to the sea or the river they join.
+4. `apply {..., mode:'check'}` again: every row `unchanged` except what the spec cannot express,
+   each an error row saying why: a river whose course the map already holds under another name
+   (the row names it: rename it with `edit river {ref, set:{name}}`), notes the spec gives twice
+   (CONFLICT), a curved-path label. A second upsert changes nothing.
 
-The builder's spec needs this mapping and paint list (verified on a wiped copy of shared v7:
-check, upsert, regenerate provinces, check gives 346 unchanged and 14 error rows: 12 rivers,
-2 duplicate notes; a second upsert changes nothing):
+The builder's spec needs this mapping and paint list (verified on a wiped copy of the builder's
+terraform-v3.map: check, upsert, check gives 348 unchanged and 13 error rows: 11 rivers already
+on the map under other names, 2 duplicate notes; all 12 provinces made and unchanged; a second
+upsert changes nothing):
 
 ```
 mapping: {lists:{frame:'map', rivers_intended:'rivers'},
@@ -253,7 +255,9 @@ paint:[
   (joined into the legend as the builder wrote them) need nothing. Two duplicates stay CONFLICT
   rows: Wainfolk (cultures[3].note and notes[10]) and Kaisma's road (routes[13].note and
   notes[7]); the builder joined each pair into one legend.
-- apply matches rivers by name but never creates them; use `edit river` for structure.
+- apply matches rivers by name and creates a missing one along its from/via/to (`add river`);
+  a river whose first place is already on a river is an error row naming that river. Use
+  `edit river` for structure.
 - `specPath`: absolute (a relative one: your cwd via the CLI, else the server's cwd, the out dir,
   the repo root; the result's `specPath` names the file read).
 
@@ -288,11 +292,15 @@ the sketch rebasable.
 **Hand-made state with provinces and arms.** `add {type:'state', items:[{capital:{burg:'X'},
 name:'S'}]}` -> `paint_cells {select, set:{state:'S'}}` (and `{culture}`) ->
 `regenerate {parts:['provinces','emblems'], provinces:{states:['S'], count:3}, emblems:{states:
-['S']}, dryRun:true}` (sizes) -> without dryRun. Locked states need `lockedStates:true`. A
+['S']}, dryRun:true}` (sizes) -> without dryRun. One province at a time: `add {type:'province',
+items:[{centre:{burg:'Y'}, name:'March'}]}` (state from the centre; it grows over the state's
+nearer cells, or takes `cells`/`select`; shield, label and borders drawn). Locked states need `lockedStates:true`. A
 Place capital makes a new burg; with `culture` it takes that culture. Every new burg also gets a
 route to its nearest neighbour, as in the app (its row lists `routes`).
 
-**Rivers.** `inspect {at:{cell}}` lists a cell's `neighbours` (reroute `{cells}` must be
+**Rivers.** A new river: `add {type:'river', items:[{points:[{x,y}, ...], name, parent?}]}`
+(joined along land, extended downhill to the sea or `parent`; flux, width and the discharge
+downstream follow), or literal `cells`. `inspect {at:{cell}}` lists a cell's `neighbours` (reroute `{cells}` must be
 neighbours, in order). To move a confluence or end a river earlier: one edit call, three ops
 in order: detour river A off the cells, reroute B through the freed cell, reroute A to its new
 end. A climb is warned; lint river-uphill only flags rises of `riverTol` (12). For the

@@ -236,6 +236,7 @@ const LAYERS_FOR: Record<string, LayerNameT[]> = {
   route: ["routes"],
   marker: ["markers"],
   zone: ["zones"],
+  river: ["rivers"],
   label: ["labels"],
   biome: ["biomes"]
 };

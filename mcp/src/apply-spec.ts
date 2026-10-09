@@ -45,9 +45,10 @@ export const LIST_TYPES: Record<string, string> = {
 
 /**
  * Order the page works through, so references resolve: definitions (biomes, route groups),
- * peoples, burgs, states (capitals are burgs), provinces, rivers and features, routes (through
- * burgs), markers/zones/labels, any other runtime type, the paint list (its targets exist by
- * then), notes last (they attach to anything).
+ * peoples, burgs, states (capitals are burgs), rivers and features, routes (through burgs),
+ * markers/zones/labels, any other runtime type, the paint list (its targets exist by then),
+ * provinces (made in their states' painted territory; the page runs the paint entries that set
+ * only a province after them), notes last (they attach to anything).
  */
 export const STAGES: string[][] = [
   ["map"],
@@ -55,12 +56,12 @@ export const STAGES: string[][] = [
   ["culture", "religion"],
   ["burg"],
   ["state"],
-  ["province"],
   ["river", "feature"],
   ["route"],
   ["marker", "zone", "label"],
   ["*"],
   ["paint"],
+  ["province"],
   ["note"]
 ];
 
@@ -199,6 +200,19 @@ export function normalizeEntry(type: string, raw: Entry): Entry {
     }
     if (e.select !== undefined) e.select = toSelect(e.select);
   }
+  // the builder's rivers_intended {from, via, to}: the places add river joins into its course
+  if (
+    type === "river" &&
+    e.points === undefined &&
+    e.cells === undefined &&
+    (e.from !== undefined || e.to !== undefined)
+  ) {
+    const via = Array.isArray(e.via) ? (e.via as unknown[]) : [];
+    e.points = [e.from, ...via, e.to].filter(p => p !== undefined).map(p => toPlace(p));
+    delete e.from;
+    delete e.via;
+    delete e.to;
+  } else if (type === "river" && Array.isArray(e.points)) e.points = (e.points as unknown[]).map(p => toPlace(p));
   if (type === "culture" && e.base === undefined && e.namesbase !== undefined) {
     e.base = e.namesbase;
     delete e.namesbase;
@@ -539,7 +553,11 @@ export function normalizeSpec(
     merged.states = states.map(s => {
       if (!isObj(s) || !Array.isArray(s.provinces) || !s.provinces.every(isObj)) return s;
       const { provinces, ...rest } = s;
-      for (const p of provinces as Entry[]) flat.push(p);
+      // each takes its state (as the states list names it after mapping), so apply can create it there
+      const st = mapEntry(rest, mapping.keys?.states, mapping.values?.states);
+      const sref = st.ref ?? st.name;
+      for (const p of provinces as Entry[])
+        flat.push(p.state === undefined && sref !== undefined ? { ...p, state: sref } : p);
       return rest;
     });
     if (flat.length) {

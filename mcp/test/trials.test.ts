@@ -411,20 +411,22 @@ describe("trial fixes (browser)", () => {
     await h.ok("snapshot", { action: "undo" });
   });
 
-  test("apply: zone notes, UNSUPPORTED province rows with a how, identical differs grouped, created complete", async () => {
+  test("apply: zone notes, UNSUPPORTED feature rows with a how, a province without a centre, identical differs grouped, created complete", async () => {
     const zone = (await evalv(`pack.zones.find(z => z && !z.hidden && z.name)?.name ?? null`)) as string | null;
     const spec: Obj = {
       burgs: [
         { name: "Applyton", at: pick.at1, note: "Founded by the spec" },
         { name: "Applyville", at: pick.at2 }
       ],
-      provinces: [{ name: "Nowhere Province", state: pick.S1.name }]
+      provinces: [{ name: "Nowhere Province", state: pick.S1.name }],
+      features: [{ name: "Nowhere Isle" }]
     };
     if (zone) spec.zones = [{ name: zone, note: { name: "Zone note", legend: "from the spec" } }];
     const r = await h.ok("apply", spec);
     const s = JSON.stringify(r);
     assert.match(s, /UNSUPPORTED/);
-    assert.match(s, /regenerate/, "the row says how to make a province");
+    assert.match(s, /features come from the heights/, "the row says how to make a feature");
+    assert.match(s, /a new province needs a centre/, "a province entry without a centre says what it needs");
     const created = r.created as Obj;
     assert.ok(created.burgs && Object.keys(created.burgs).length === 2, s.slice(0, 600));
     if (zone) {

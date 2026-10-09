@@ -48,10 +48,18 @@
   // FIELDS.marker.note); value: the note id of an entity of that type.
   // how to make what apply cannot create (an UNSUPPORTED row says it)
   const CREATE_HOW = {
-    province:
-      "make them with regenerate {parts:['provinces'], provinces:{states, centres:[{state, burg|at, name}]}} (the spec's nested provinces give the centres), then check again",
-    river: "rivers come from the terrain: edit river (name, reroute, split) shapes the ones the map has",
     feature: "features come from the heights (set_heights, paint_cells height)"
+  };
+  // what a create needs beyond a name, for types whose entries often lack it (an error row says it)
+  const CREATE_NEEDS = {
+    province: {
+      ok: item => item.centre !== undefined,
+      how: "a new province needs a centre: capital:<burg>, centre:{burg}|Place or at/x,y (its state defaults to the centre's)"
+    },
+    river: {
+      ok: item => item.points !== undefined || item.cells !== undefined,
+      how: "a new river needs its course: points:[Place...] (a builder's from, via, to) or cells:[...]"
+    }
   };
   const NOTE_OWNER = {
     burg: x => `burg${x.i}`,
@@ -78,7 +86,10 @@
     culture: ["at", "expand"],
     religion: ["at", "expand"],
     // a custom biome is a copy of its base biome; an existing one has no base to compare
-    biome: ["base"]
+    biome: ["base"],
+    // where a province or river is made: its state, centre and cells, its course and parent
+    province: ["state", "centre", "at", "cells", "select"],
+    river: ["points", "cells", "parent"]
   };
 
   // Read-only keys an add would refuse: kept out of the item, compared once the entity exists.
@@ -872,6 +883,15 @@
         delete item[k];
       }
     if (type === "state" && item.capital !== undefined && !isObj(item.capital)) item.capital = { burg: item.capital };
+    // a province is made around its centre: the capital burg (the builder's provinces), else at
+    if (type === "province" && item.centre === undefined) {
+      if (item.capital !== undefined) {
+        item.centre = { burg: item.capital };
+        delete item.capital;
+      } else if (item.at !== undefined) item.centre = item.at;
+    }
+    if (type === "province") delete item.at;
+    if (CREATE_NEEDS[type] && !CREATE_NEEDS[type].ok(item)) return cannot("BAD_ARGS", CREATE_NEEDS[type].how);
     if (type === "label" && item.group !== undefined)
       try {
         labelGroupCheck(item.group);
@@ -1525,7 +1545,35 @@
       done.push({ at: "map", list: "map", type: "map", row: r });
     }
 
-    for (const L of Array.isArray(a.lists) ? a.lists : []) {
+    // Provinces are made in their states' final territory: the provinces list (Node puts it
+    // after the paint list) waits for the burgs' own cells (burg_cells) too, and paint entries
+    // that set only a province wait for the provinces list (they may paint what it creates), so
+    // a later state paint never splits a new province (adjustProvinces) into a namesake.
+    const lists = Array.isArray(a.lists) ? a.lists : [];
+    const hasProvinces = lists.some(L => L.type === "province");
+    let burgCellsDone = false;
+    const burgCells = async () => {
+      if (burgCellsDone) return;
+      burgCellsDone = true;
+      if (apply) await paintBurgCells(done, tol, S);
+    };
+    let provincePaint = null; // {L, entries, idx}: the paint entries that set only a province
+    const paintList = async (L, entries, idx) => {
+      const last = { state: [] };
+      for (const d of done) {
+        if (d.type !== "burg" || d.row.ro?.state === undefined) continue;
+        const x = rowEntity("burg", d.row);
+        if (x && Number.isInteger(x.cell)) last.state.push(x.cell);
+      }
+      const rows = await runPaint(entries, { mode, pending, last }, S, apply);
+      rows.forEach((r, j) => {
+        done.push({ at: `${L.key}[${idx[j]}]`, list: L.key, type: "paint", row: r });
+      });
+    };
+    const onlyProvince = e =>
+      isObj(e) && isObj(e.set) && Object.keys(e.set).length > 0 && Object.keys(e.set).every(k => k === "province");
+
+    for (const L of lists) {
       const type = L.type;
       const entries = Array.isArray(L.entries) ? L.entries : [];
       if (type === "note") {
@@ -1534,18 +1582,18 @@
         continue;
       }
       if (type === "paint") {
-        const last = { state: [] };
-        for (const d of done) {
-          if (d.type !== "burg" || d.row.ro?.state === undefined) continue;
-          const x = rowEntity("burg", d.row);
-          if (x && Number.isInteger(x.cell)) last.state.push(x.cell);
-        }
-        const rows = await runPaint(entries, { mode, pending, last }, S, apply);
-        rows.forEach((r, k) => {
-          done.push({ at: `${L.key}[${k}]`, list: L.key, type, row: r });
-        });
+        const idx = entries.map((_, k) => k);
+        const later = hasProvinces ? idx.filter(k => onlyProvince(entries[k])) : [];
+        const now = idx.filter(k => !later.includes(k));
+        if (later.length) provincePaint = { L, entries: later.map(k => entries[k]), idx: later };
+        await paintList(
+          L,
+          now.map(k => entries[k]),
+          now
+        );
         continue;
       }
+      if (type === "province") await burgCells();
       if (!FIELDS[type] && !ADD[type]) {
         unsupported.push(`${L.key} (no edit/add type '${type}' in this build)`);
         continue;
@@ -1596,6 +1644,11 @@
           const e = entries[k];
           for (const n of [r.key, e?.name, e?.text, e?.id])
             if (typeof n === "string" && n) set.add(fold(type === "label" ? n.replace(/\|/g, "") : n));
+          // a new state at a place makes its capital burg (capitalName names it)
+          if (type === "state" && typeof e?.capitalName === "string" && e.capitalName) {
+            if (!pending.has("burg")) pending.set("burg", new Set());
+            pending.get("burg").add(fold(e.capitalName));
+          }
         }
       }
       rows.forEach((r, k) => {
@@ -1632,6 +1685,8 @@
       });
     }
 
+    if (provincePaint) await paintList(provincePaint.L, provincePaint.entries, provincePaint.idx);
+
     const pendingNotes = [...listNotes, ...ownNotes];
     if (pendingNotes.length) {
       // one entry per note: a second entry for the same note id (a notes-list entry and an
@@ -1662,7 +1717,8 @@
     }
 
     // burg_cells: a burgs entry's state, painted on the burg's own cell after the paint list
-    if (apply) await paintBurgCells(done, tol, S);
+    // (before the provinces list when the spec has one)
+    await burgCells();
 
     // a later list can change what an earlier one set (a state's capital turns its burg's group
     // into 'capital', a culture paint a burg's culture): one more pass edits such fields back, so
