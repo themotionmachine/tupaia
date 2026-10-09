@@ -116,14 +116,19 @@ every save path (File > Save, browser storage, autosave, the shared map, MCP sav
 drops the icons, and `src/io/load.ts` calls `restoreReliefOnLoad()` after a load to draw the same
 icons again and turn the Relief button on. `generate()` in `public/main.js` clears the settings,
 so a new map starts as upstream. `public/modules/ui/relief-editor.js` warns that manual relief
-edits are not saved on such a map. Old files load unchanged. A client without these hooks (an
+edits are not saved on such a map. In the app the switch is a Style > Relief checkbox, "Redraw
+relief icons on load (smaller file)" (one row in `src/index.html`, its handler in
+`public/modules/ui/style.js`, calling `ReliefSettings.setOnLoad`). Old files load unchanged. A client without these hooks (an
 older deploy) loading such a file shows no relief and the Relief button off; turning Relief on
 draws unseeded icons at the style density, and its next save stores them again. So MCP
 `shared_save` and `sketch_promote` refuse (BUILD) a `data-regenerate` map unless the deployed
 build is the local one or its entry chunk contains the hook. Deploy the app before saving such a
-map to `shared` by hand. In-app edits that change what relief is drawn from (the biomes editor,
-heightmap tools) do not redraw the icons on a `data-regenerate` map until its next load; MCP
-calls do. Re-check after an upstream rebase (upstream has a `relief-webgl-renderer` branch).
+map to `shared` by hand. In-app edits that change what relief is drawn from redraw the icons on a
+`data-regenerate` map, so the page shows what its next load draws: `ReliefSettings.sync()` is
+called after the biomes editor's Apply and Restore defaults (`public/modules/ui/biomes-editor.js`)
+and after the heightmap editor's finalize (`public/modules/ui/heightmap-editor.js`); Tools >
+Regenerate > Relief and the Style relief controls already redraw with the stored settings. On
+other maps `sync()` does nothing. MCP calls redraw through the bridge. Re-check after an upstream rebase (upstream has a `relief-webgl-renderer` branch).
 
 Resampling (for the MCP `regrid` tool and the app's Transform tool): `src/generators/resample.ts`
 `process()` takes a `keepId` option; with it (scale 1) it keeps the map id and fires `map:resampled` instead of

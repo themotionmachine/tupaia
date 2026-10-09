@@ -211,6 +211,9 @@ function editHeightmap(options) {
     if (!layerIsOn("toggleBorders")) borders.selectAll("path").remove();
     if (!layerIsOn("toggleStates")) regions.selectAll("path").remove();
     if (!layerIsOn("toggleRivers")) rivers.selectAll("*").remove();
+    // tupaia-mcp: the Relief toggle above keeps the icons it finds; a relief-on-load map redraws them
+    // from the new heights (or drops them when the layer is off) to show what its next load draws
+    window.ReliefSettings?.sync();
 
     getCurrentPreset();
   }

@@ -445,6 +445,152 @@ describe("tupaia-mcp relief icons", () => {
     assert.ok(Math.abs((m.relief as Obj).icons - kept) <= kept * 0.02);
   });
 
+  // In-app UI (app hooks marked tupaia-mcp: style.js, biomes-editor.js, heightmap-editor.js). Each
+  // eval reads the icons right after the UI action: the app redraws them itself, so the MCP's own
+  // after-call redraw (bridge-ext/relief.js) finds nothing to do and adds no note.
+  const HASH = `const terrainHash = () => { const html = document.getElementById("terrain").innerHTML; let hash = 0; for (let k = 0; k < html.length; k++) hash = (Math.imul(hash, 31) + html.charCodeAt(k)) | 0; return hash; };`;
+  const MCP_REDRAW = /relief icons redrawn/;
+  const reloads = async (slug: string) => {
+    const saved = await h.ok("save_map", { path: `relief-ui-${slug}.map`, overwrite: true });
+    await h.ok("load_map", { path: saved.path as string });
+    return terrain();
+  };
+
+  test("in-app: the Style > Relief checkbox is the reliefOnLoad switch; save and load draw the same icons", async () => {
+    await h.ok("load_map", { path: "tests/fixtures/demo.map" });
+    await h.ok("display", { on: ["relief"] });
+    const ui = await h.ok("eval", {
+      code: `editStyle("terrain");
+        const cb = document.getElementById("styleReliefOnLoad");
+        const row = { shown: styleRelief.style.display === "block", was: cb.checked, label: document.querySelector("label[for=styleReliefOnLoad]").textContent, tip: cb.closest("tr").dataset.tip };
+        cb.click();
+        return { ...row, checked: cb.checked };`
+    });
+    const v = ui.value as Obj;
+    assert.deepEqual([v.shown, v.was, v.checked], [true, false, true]);
+    assert.equal(v.label, "Redraw relief icons on load (smaller file)");
+    assert.match(v.tip, /smaller/);
+    assert.doesNotMatch(JSON.stringify(ui.notes ?? []), MCP_REDRAW, "the app redrew the icons itself");
+    const drawn = await terrain();
+    assert.equal(drawn.attrs["data-regenerate"], "1");
+    assert.equal(drawn.attrs["data-seed"], mapSeed, "seeded with the map seed");
+    assert.ok(drawn.icons > 0);
+    const map = await h.ok("map_info", { since: "none" });
+    assert.equal((map.relief as Obj).onLoad, true);
+
+    // the MCP switch draws the very same icons
+    await h.ok("snapshot", { action: "undo" });
+    const undone = await terrain();
+    assert.equal(undone.attrs["data-regenerate"], undefined, "undo takes the click back");
+    await h.ok("edit", { type: "map", ops: [{ set: { reliefOnLoad: true } }] });
+    assert.equal((await terrain()).hash, drawn.hash);
+
+    const lean = await h.ok("save_map", { path: "relief-ui-lean.map", overwrite: true });
+    assert.match(
+      TERRAIN_RE.exec(fs.readFileSync(lean.path as string, "utf8"))?.[0] ?? "",
+      /data-regenerate="1"[^>]*\/>$/
+    );
+    await h.ok("load_map", { path: lean.path as string });
+    const loaded = await terrain();
+    assert.equal(loaded.hash, drawn.hash, "the load draws the icons the page showed");
+    // the checkbox shows the loaded map's setting; unchecking keeps the icons and saves them again
+    const off = await h.ok("eval", {
+      code: `editStyle("terrain"); const cb = document.getElementById("styleReliefOnLoad"); const was = cb.checked; cb.click(); return { was, checked: cb.checked };`
+    });
+    assert.deepEqual(off.value, { was: true, checked: false });
+    const kept = await terrain();
+    assert.equal(kept.attrs["data-regenerate"], undefined);
+    assert.equal(kept.hash, loaded.hash, "switching off keeps the icons on the page");
+    const full = await h.ok("save_map", { path: "relief-ui-full.map", overwrite: true });
+    assert.equal(
+      (TERRAIN_RE.exec(fs.readFileSync(full.path as string, "utf8"))?.[0].match(/<use /g) ?? []).length,
+      loaded.icons
+    );
+  });
+
+  test("in-app: on a relief-on-load map the biomes editor, heightmap editor and Tools > Regenerate redraw the icons (page = next load)", async () => {
+    await h.ok("load_map", { path: "tests/fixtures/demo.map" });
+    await h.ok("display", { on: ["relief"] });
+    await h.ok("edit", { type: "map", ops: [{ set: { reliefOnLoad: true } }] });
+
+    // biomes editor: paint cells that hold icons Glacier, then Apply
+    const paint = await h.ok("eval", {
+      code: `${CENTRES} ${HASH}
+        const before = terrainHash();
+        editBiomes();
+        document.getElementById("biomesManually").click();
+        const glacier = biomesData.name.indexOf("Glacier");
+        const cells = [...new Set(centres.map(c => c.cell))].filter(c => pack.cells.biome[c] !== glacier).slice(0, 60);
+        for (const i of cells) biomes.select("#temp").append("polygon").attr("data-cell", i).attr("data-biome", glacier).attr("points", getPackPolygon(i));
+        document.getElementById("biomesManuallyApply").click();
+        const after = terrainHash();
+        closeDialogs();
+        return { before, after, painted: cells.filter(c => pack.cells.biome[c] === glacier).length };`
+    });
+    let v = paint.value as Obj;
+    assert.ok(v.painted > 10, JSON.stringify(v));
+    assert.notEqual(v.after, v.before, "Apply redrew the icons");
+    assert.doesNotMatch(JSON.stringify(paint.notes ?? []), MCP_REDRAW);
+    assert.equal((await reloads("paint")).hash, v.after, "a load draws what the page showed");
+
+    // biomes editor: Restore defaults brings back icon densities (thinned here through the MCP)
+    const dense = await h.ok("eval", {
+      readOnly: true,
+      code: `const n = new Array(biomesData.i.length).fill(0); for (const c of pack.cells.i) n[pack.cells.biome[c]] += pack.cells.h[c] >= 20 ? 1 : 0; return biomesData.i.filter(b => biomesData.iconsDensity[b] > 0).sort((a, b) => n[b] - n[a])[0];`
+    });
+    const top = dense.value as number;
+    await h.ok("edit", { type: "biome", ops: [{ ref: top, set: { iconsDensity: 1 } }] });
+    const thinned = await terrain();
+    const restore = await h.ok("eval", {
+      code: `${HASH} const before = terrainHash(); editBiomes(); document.getElementById("biomesRestore").click(); const after = terrainHash(); closeDialogs(); return { before, after, density: biomesData.iconsDensity[${top}] };`
+    });
+    v = restore.value as Obj;
+    assert.equal(v.before, thinned.hash);
+    assert.ok(v.density > 1);
+    assert.notEqual(v.after, v.before, "Restore redrew the icons");
+    assert.doesNotMatch(JSON.stringify(restore.notes ?? []), MCP_REDRAW);
+    assert.equal((await reloads("restore")).hash, v.after);
+
+    // heightmap editor, Keep mode: raise the land under icons, then Exit Customization
+    const heights = await h.ok("eval", {
+      code: `${CENTRES} ${HASH}
+        const before = terrainHash();
+        editHeightmap({ mode: "keep" });
+        const gs = new Set(centres.map(c => pack.cells.g[c.cell]));
+        for (const g of gs) if (grid.cells.h[g] >= 20) grid.cells.h[g] = Math.min(100, grid.cells.h[g] + 30);
+        document.getElementById("finalizeHeightmap").click();
+        return { before, after: terrainHash(), raised: gs.size, customization, relief: layerIsOn("toggleRelief") };`
+    });
+    v = heights.value as Obj;
+    assert.deepEqual([v.customization, v.relief], [0, true], JSON.stringify(v));
+    assert.notEqual(v.after, v.before, "finalizing the heightmap redrew the icons");
+    assert.doesNotMatch(JSON.stringify(heights.notes ?? []), MCP_REDRAW);
+    const loaded = await reloads("heights");
+    assert.equal(loaded.hash, v.after);
+
+    // Tools > Regenerate > Relief draws the stored, seeded icons (thinned by hand first)
+    const regen = await h.ok("eval", {
+      code: `${HASH}
+        [...document.querySelectorAll("#terrain use")].forEach((u, k) => { if (k % 2) u.remove(); });
+        const thinned = terrainHash();
+        sessionStorage.setItem("regenerateFeatureDontAsk", true); // skip the confirm dialog
+        document.getElementById("regenerateReliefIcons").click();
+        sessionStorage.removeItem("regenerateFeatureDontAsk");
+        return { thinned, after: terrainHash() };`
+    });
+    v = regen.value as Obj;
+    assert.notEqual(v.thinned, loaded.hash);
+    assert.equal(v.after, loaded.hash, "the regenerated icons are the ones a load draws");
+
+    // a map that stores its icons: the editors leave them alone (upstream behaviour)
+    await h.ok("edit", { type: "map", ops: [{ set: { reliefOnLoad: false } }] });
+    const plain = await h.ok("eval", {
+      code: `${HASH} const before = terrainHash(); editBiomes(); document.getElementById("biomesRestore").click(); const after = terrainHash(); closeDialogs(); return { before, after };`
+    });
+    v = plain.value as Obj;
+    assert.equal(v.after, v.before);
+  });
+
   test("sketch: relief-only regenerate and edit map replay onto another copy; other parts do not", async () => {
     await h.ok("load_map", { path: "tests/fixtures/demo.map" });
     await h.ok("sketch", { action: "start", slug: "t-relief" });
