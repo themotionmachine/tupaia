@@ -531,10 +531,21 @@ describe("compact in the app (demo.map with removed entities)", () => {
     // the app's own removal paths through edit (Burgs.remove, stateRemove, Routes/Rivers.remove, ...)
     const rm = (type: string, ids: number[]) =>
       h.ok("edit", { type, ops: ids.map(ref => ({ ref, remove: true })), redraw: false });
-    await rm("burg", [...pick.free, ...pick.provBurgs]);
+    // the app's burg editor removal (Burgs.remove) leaves province capitals and trade deals naming
+    // the burg; edit remove (dx/clear) cleans both, so it would leave compact nothing to keep
+    const appRemoveBurgs = (ids: number[]) =>
+      h.ok("eval", { code: "for (const i of args.ids) Burgs.remove(i); return args.ids.length;", args: { ids } });
+    await rm("burg", pick.free);
+    await appRemoveBurgs(pick.provBurgs);
     await rm("state", pick.removeStates);
-    await rm("route", pick.routes);
-    await rm("river", pick.rivers);
+    // the app's Routes.remove / Rivers.remove leave the route's and river's notes behind (edit
+    // remove, since dx/clear, drops them), which compact must find
+    await h.ok("eval", {
+      code: `for (const i of args.routes) Routes.remove(pack.routes.find(r => r.i === i));
+for (const i of args.rivers) Rivers.remove(i);
+return true;`,
+      args: { routes: pick.routes, rivers: pick.rivers }
+    });
     await rm("zone", pick.zones);
     await rm("marker", pick.markers);
     // new deals leave the removed burgs out; burgs removed after this stay in deals (kept whole)
@@ -543,7 +554,7 @@ describe("compact in the app (demo.map with removed entities)", () => {
     assert.equal(t.freeDealt, 0, "regenerated deals name no removed burg");
     assert.ok(t.traded.length >= 3, JSON.stringify(t));
     pick.traded = t.traded;
-    await rm("burg", pick.traded);
+    await appRemoveBurgs(pick.traded);
     const rest = (await h.ok("eval", { code: REMOVE_REST, args: pick })).value as Obj;
     assert.ok(rest.province, "a province was removed the heightmap-editor way");
     assert.ok(rest.religions.length >= 1);
@@ -787,7 +798,7 @@ const bs = pack.burgs.filter(b => b && b.i && !b.removed && !b.capital && !marke
 const free = c => C.h[c] >= 20 && !C.burg[c] && C.c[c].every(k => !C.burg[k]);
 const cells = [...C.i].filter(free);
 const a = cells[Math.floor(cells.length / 3)], b = cells[Math.floor((cells.length * 2) / 3)];
-// X: a burg a trade deal names (kept whole); Y: one no deal names, when demo.map has one
+// X: a burg a trade deal names (edit remove drops its deals); Y: one no deal names, when demo.map has one
 const X = bs.find(x => dealt.has(x.i)), Y = bs.find(x => !dealt.has(x.i));
 return { X: X.i, Y: Y ? Y.i : null, zone: pack.zones[0].i, newAt: { x: C.p[a][0], y: C.p[a][1] }, otherAt: { x: C.p[b][0], y: C.p[b][1] } };`;
 
@@ -820,12 +831,13 @@ describe("compact in a sketch (logged with its resolved ids, replayed onto anoth
     const add = await h.ok("add", { type: "burg", items: [{ at: pk.newAt, name: "Sketchburg" }] });
     made = (add.created as Obj[])[0].i;
     await h.ok("add", { type: "note", items: [{ id: `zone${pk.zone}`, name: "Old zone" }] });
-    const stubbed = [pk.Y, made].filter(i => i !== null) as number[];
-    await h.ok("edit", { type: "burg", ops: [pk.X, ...stubbed].map(ref => ({ ref, remove: true })) });
+    // edit remove (dx/clear) drops the trade deals naming a removed burg, so X is stubbed as well
+    const stubbed = [pk.X, pk.Y, made].filter(i => i !== null) as number[];
+    await h.ok("edit", { type: "burg", ops: stubbed.map(ref => ({ ref, remove: true })) });
     await h.ok("edit", { type: "zone", ops: [{ ref: pk.zone, remove: true }] });
     const c = await h.ok("compact", {});
     assert.deepEqual(c.compacted, { burg: stubbed.length });
-    assert.deepEqual(c.kept, { burg: 1 }, "the burg a deal names stays whole");
+    assert.equal(c.kept, undefined, "edit remove left no deal naming the removed burgs");
     assert.equal(c.notesDropped, 1);
     const status = await h.ok("sketch", { action: "status" });
     const log = status.log as Obj[];
@@ -837,7 +849,7 @@ describe("compact in a sketch (logged with its resolved ids, replayed onto anoth
     assert.match(
       log[4].summary,
       new RegExp(
-        `^Shrank ${n} removed burg records? to id-keeping stubs \\(no live entity changed\\); dropped 1 note; about \\d+ (KB|B) smaller; 1 still referenced and kept whole\\.$`
+        `^Shrank ${n} removed burg records? to id-keeping stubs \\(no live entity changed\\); dropped 1 note; about \\d+ (KB|B) smaller\\.$`
       ),
       log[4].summary
     );
@@ -867,8 +879,7 @@ describe("compact in a sketch (logged with its resolved ids, replayed onto anoth
       };`
     });
     const v = ev.value as Obj;
-    assert.equal(v.X.removed, true);
-    assert.ok(v.X.name, "the burg a deal names is still whole after replay");
+    assert.deepEqual(v.X, { i: pk.X, removed: true }, "the replayed edit dropped X's deals, so compact stubbed it");
     if (pk.Y !== null) assert.deepEqual(v.Y, { i: pk.Y, removed: true });
     assert.deepEqual(v.moved, { i: moved, removed: true });
     assert.deepEqual(
