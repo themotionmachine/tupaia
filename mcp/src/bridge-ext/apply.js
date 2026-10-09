@@ -11,6 +11,9 @@
 // "step"; Node logs every step's resolved form as its own edit/add/paint_cells record (all under
 // the call's one auto-undo entry), so sketch replay, its conflict checks and its id remapping
 // of created entities work exactly as for those tools.
+//
+// It also adds one edit field, FIELDS.label.group (move a label into another #labels group),
+// unless another extension defines it, so a spec's label group is settable like any field.
 (root => {
   const T = root.__tupaia;
   if (!T?.mutations) return;
