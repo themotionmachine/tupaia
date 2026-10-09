@@ -224,17 +224,36 @@
   /**
    * Diff two projection maps {id: projectionObject} (plain objects).
    * Returns {added:[id], removed:[id], modified:[{i, fields:{k:[old,new]|'changed'}}]}.
+   * With identity maps ({id: uid} for base and cur) entities pair up by uid instead of id: an id
+   * the app reused for a new entity (regenerated routes, markers, zones are renumbered from 0) is
+   * removed + added, and a kept entity whose id changed is modified with fields.i [old, new].
    */
-  function diffProjections(base, cur, limit = 50) {
+  function diffProjections(base, cur, limit = 50, baseUids = null, curUids = null) {
     const added = [];
     const removed = [];
     const modified = [];
     let truncated = false;
-    for (const id of Object.keys(cur)) if (!(id in base)) added.push(id);
-    for (const id of Object.keys(base)) if (!(id in cur)) removed.push(id);
-    for (const id of Object.keys(cur)) {
-      if (!(id in base)) continue;
-      const a = base[id];
+    const pairs = []; // [baseId, curId]
+    if (baseUids && curUids) {
+      const baseByUid = new Map();
+      for (const id of Object.keys(base)) baseByUid.set(baseUids[id], id);
+      const seen = new Set();
+      for (const id of Object.keys(cur)) {
+        const b = baseByUid.get(curUids[id]);
+        if (b === undefined) added.push(id);
+        else {
+          pairs.push([b, id]);
+          seen.add(b);
+        }
+      }
+      for (const id of Object.keys(base)) if (!seen.has(id)) removed.push(id);
+    } else {
+      for (const id of Object.keys(cur)) if (!(id in base)) added.push(id);
+      for (const id of Object.keys(base)) if (!(id in cur)) removed.push(id);
+      for (const id of Object.keys(cur)) if (id in base) pairs.push([id, id]);
+    }
+    for (const [baseId, id] of pairs) {
+      const a = base[baseId];
       const b = cur[id];
       const fields = {};
       let n = 0;
@@ -945,6 +964,49 @@
     return Math.round((b.population || 0) * rate * urb);
   }
 
+  const STAT_TYPES = new Set(["state", "province", "culture", "religion"]);
+  const STAT_FIELDS = new Set(["cells", "area", "rural", "urban", "burgs"]);
+
+  /**
+   * Live territory stats {cells, area, rural, urban, burgs} by id, from the cells, the way the app's
+   * editors collect them (states/cultures/religions: land cells; provinces: every cell of the
+   * province). The stored fields are caches the app refreshes only when an editor opens (a culture
+   * or religion added later, or cells painted since, read 0 or stale), so find and inspect use these.
+   */
+  function liveStats(type) {
+    return cached(`stats:${type}`, () => {
+      const C = pack.cells;
+      const arr = C[type];
+      const m = new Map();
+      if (!arr) return m;
+      for (const i of C.i) {
+        if (type !== "province" && C.h[i] < 20) continue;
+        const id = arr[i];
+        if (type === "province" && !id) continue;
+        let s = m.get(id);
+        if (!s) {
+          s = { cells: 0, area: 0, rural: 0, urban: 0, burgs: 0 };
+          m.set(id, s);
+        }
+        s.cells++;
+        s.area += C.area?.[i] || 0;
+        s.rural += C.pop?.[i] || 0;
+        const b = C.burg[i] ? pack.burgs[C.burg[i]] : null;
+        if (b && !b.removed) {
+          s.urban += b.population || 0;
+          s.burgs++;
+        }
+      }
+      return m;
+    });
+  }
+
+  /** Live stat `field` of entity x (a STAT_TYPE), in stored units (area px², rural/urban thousands). */
+  function liveStat(type, x, field) {
+    const s = liveStats(type).get(x.i);
+    return s ? s[field] : 0;
+  }
+
   function fieldValue(type, x, field) {
     if (type === "burg" && field === "population") return people(x);
     if (type === "burg" && field === "capital") return !!x.capital;
@@ -971,14 +1033,17 @@
       // not stored: the app shows rural + urban people (states editor)
       return fieldValue(type, x, "rural") + fieldValue(type, x, "urban");
     }
-    if (
-      (type === "state" || type === "province" || type === "culture" || type === "religion") &&
-      (field === "rural" || field === "urban")
-    ) {
+    if (STAT_TYPES.has(type) && (field === "rural" || field === "urban")) {
       const rate = typeof populationRate !== "undefined" ? populationRate : 1000;
       const urb = typeof urbanization !== "undefined" ? urbanization : 1;
-      return Math.round((x[field] || 0) * rate * (field === "urban" ? urb : 1));
+      return Math.round(liveStat(type, x, field) * rate * (field === "urban" ? urb : 1));
     }
+    if (
+      STAT_TYPES.has(type) &&
+      STAT_FIELDS.has(field) &&
+      (field !== "burgs" || type === "state" || type === "province")
+    )
+      return field === "area" ? Math.round(liveStat(type, x, "area")) : liveStat(type, x, field);
     const v = x[field];
     if (v && typeof v === "object") return ArrayBuffer.isView(v) ? Array.from(v) : v;
     return v;
@@ -1053,10 +1118,10 @@
     label: ["text"],
     note: ["legend"],
     river: ["parent", "basin"],
-    state: ["population", "rural", "urban"],
-    province: ["population", "rural", "urban"],
-    culture: ["population", "rural", "urban"],
-    religion: ["population", "rural", "urban"]
+    state: ["population", "rural", "urban", "cells", "area", "burgs"],
+    province: ["population", "rural", "urban", "cells", "area", "burgs"],
+    culture: ["population", "rural", "urban", "cells", "area"],
+    religion: ["population", "rural", "urban", "cells", "area"]
   };
 
   /**
@@ -1351,6 +1416,21 @@
     if (r.type === "label") ent = { id: x.id, text: x.name, group: x.group };
     else if (EXT[r.type]?.entity) ent = EXT[r.type].entity(x);
     out.entity = safeJson(ent, { maxItems: 300, maxDepth: 6 });
+    if (STAT_TYPES.has(r.type) && out.entity && typeof out.entity === "object") {
+      // stored territory stats are caches the app refreshes only in its editors: show live ones
+      const stale = [];
+      for (const f of ["cells", "area", "rural", "urban", "burgs"]) {
+        if (f === "burgs" && r.type !== "state") continue;
+        const live = liveStat(r.type, x, f);
+        const v = f === "area" ? Math.round(live) : f === "rural" || f === "urban" ? rn(live, 3) : live;
+        const had = x[f];
+        if (had !== undefined && (typeof had !== "number" || Math.abs(had - live) > 1e-6 * Math.max(1, live)))
+          stale.push(f);
+        if (had !== undefined || f === "cells" || f === "area") out.entity[f] = v;
+      }
+      if (stale.length)
+        out.statsNote = `${stale.join(", ")} computed live from the cells (the stored values were stale)`;
+    }
     out.relations = relationsOf(r.type, x);
     if (r.type === "feature" && out.relations.bbox) out.bbox = out.relations.bbox;
     return out;
@@ -1512,17 +1592,37 @@
   ];
   const CELL_ARRAYS = ["h", "state", "province", "culture", "religion", "biome", "burg", "f", "r"];
 
-  function projections() {
+  // Entity identity for the diff: the app renumbers routes, markers and zones from 0 when it
+  // regenerates them, so an id alone would pair a new entity with an unrelated old one. Each live
+  // object of these types carries a page-session uid (a symbol key: never saved, kept by {...x}
+  // copies); within one map (same map id) the diff pairs entities by it. Across a reload (undo,
+  // restore, load) the objects are new, so the diff falls back to ids, which a save keeps.
+  const UID_TYPES = new Set(["route", "marker", "zone"]);
+  const UID = Symbol("tupaia.uid");
+  let uidSeq = 0;
+
+  /** Projections of every diff type; with `uids` ({}), also fills uids[type][id] for UID_TYPES. */
+  function projections(uids = null) {
     const out = {};
     for (const type of DIFF_TYPES) {
       const m = {};
+      const u = uids && UID_TYPES.has(type) ? {} : null;
       for (const x of liveList(type, true)) {
         if (type === "label") m[x.id] = { text: x.name, group: x.group };
         else if (type === "note") m[x.id] = { name: x.name, legend: hashStr(String(x.legend || "")) };
         else if (EXT[type]?.project) m[String(idOf(type, x))] = EXT[type].project(x);
         else m[String(idOf(type, x))] = projection(x);
+        if (u && x && typeof x === "object") {
+          if (!x[UID]) {
+            try {
+              x[UID] = ++uidSeq;
+            } catch {}
+          }
+          u[String(idOf(type, x))] = x[UID] ?? `id:${idOf(type, x)}`;
+        }
       }
       out[type] = m;
+      if (u) uids[type] = u;
     }
     return out;
   }
@@ -1538,7 +1638,8 @@
 
   FNS.setBaseline = a => {
     const key = String(a.key);
-    baselines.set(key, { at: Date.now(), proj: projections(), cells: cellCopies() });
+    const uids = {};
+    baselines.set(key, { at: Date.now(), proj: projections(uids), uids, mapId: currentMapId(), cells: cellCopies() });
     return { key, baselines: baselines.size };
   };
   FNS.dropBaseline = a => {
@@ -1549,12 +1650,21 @@
   FNS.listBaselines = () => [...baselines.keys()];
 
   function diffAgainst(base, limit) {
-    const cur = projections();
+    const uids = {};
+    const cur = projections(uids);
+    const sameMap = base.mapId !== undefined && base.mapId === currentMapId();
     const changes = {};
     let truncated = false;
     let empty = true;
     for (const type of DIFF_TYPES) {
-      const d = diffProjections(base.proj[type] || {}, cur[type] || {}, limit);
+      const byUid = sameMap && base.uids?.[type] && uids[type];
+      const d = diffProjections(
+        base.proj[type] || {},
+        cur[type] || {},
+        limit,
+        byUid ? base.uids[type] : null,
+        byUid ? uids[type] : null
+      );
       if (d.counts.added || d.counts.removed || d.counts.modified) {
         empty = false;
         if (d.truncated) truncated = true;

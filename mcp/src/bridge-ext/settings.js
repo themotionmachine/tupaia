@@ -414,8 +414,18 @@
         if (set) noContradiction(set);
         return names;
       },
-      get: () => null, // the lock state is a browser preference, not map state: never part of before/after
-      show: v => v,
+      // the locks in force (they ride in the .map text, so they are map state). The generic
+      // before/after drop the pseudo keys; FNS.edit below shows the whole set as row.locked
+      // {before, after} (dryRun's after is the set the op would leave)
+      get: () => lockedNames(),
+      show: names => {
+        const now = new Set(lockedNames());
+        for (const n of names) {
+          if (key === "lock") now.add(n);
+          else now.delete(n);
+        }
+        return NAMES.filter(n => now.has(n));
+      },
       set: (_x, names) => names.forEach(act),
       // the locks in force (they travel in the .map text): apply compares a spec's lock/unlock list with them
       state: () => lockedNames()
@@ -745,6 +755,21 @@
   const hasContent = row =>
     !!row.locks || Object.keys(row.before || {}).length > 0 || Object.keys(row.after || {}).length > 0;
 
+  // the locks in force before and after each row's op (in op order from the call's start): an edit
+  // map row with a lock directive shows the whole set it leaves, dryRun included
+  function stampLocked(rows, directives, start) {
+    let running = new Set(start);
+    for (const row of [...rows].sort((a, b) => a.index - b.index)) {
+      const lk = directives[row.index];
+      if (!lk) continue;
+      const before = NAMES.filter(n => running.has(n));
+      for (const n of lk.lock || []) running.add(n);
+      for (const n of lk.unlock || []) running.delete(n);
+      row.locked = { before, after: NAMES.filter(n => running.has(n)) };
+      running = new Set(row.locked.after);
+    }
+  }
+
   function locksOf(set) {
     const d = directivesOf(set);
     const out = {};
@@ -776,6 +801,7 @@
     const ops = foldOps(rawOps);
     const directives = Array.isArray(ops) ? ops.map(op => (isObj(op) ? locksOf(op.set) : null)) : [];
     const before = watchNow();
+    const lockedAtStart = lockedNames();
     const touchesDerived = stages.includes("rivers") || stages.includes("biomes");
     const derived = touchesDerived ? derivedPrint() : null;
     const out = await baseEdit({ ...a, ops });
@@ -790,6 +816,7 @@
         const lk = directives[row.index];
         if (lk) row.locks = lk;
       }
+      stampLocked(out.plan || [], directives, lockedAtStart);
       if (recalcOnly) out.plan = [];
       const stale = staleReport([...changed], mode);
       if (stale) out.stale = stale;
@@ -809,6 +836,7 @@
       const lk = directives[row.index];
       if (lk) row.locks = lk;
     }
+    stampLocked(out.applied || [], directives, lockedAtStart);
     for (const op of out.resolved?.ops || []) {
       dropPseudo(op.before);
       dropPseudo(op.after);
