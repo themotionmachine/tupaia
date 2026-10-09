@@ -26,9 +26,9 @@ function fileResource(
   });
 }
 
-/** Register the tools and resources on `server`. */
-export function registerSurface(server: McpServer, ctx: ToolContext): void {
-  ctx.attach(server);
+/** Register the tools and resources on `server` (`gone`: see ToolContext.attach). */
+export function registerSurface(server: McpServer, ctx: ToolContext, gone?: AbortSignal): void {
+  ctx.attach(server, gone);
   const { repoRoot, mcpRoot } = ctx.config;
   fileResource(
     server,
@@ -58,8 +58,8 @@ export function registerSurface(server: McpServer, ctx: ToolContext): void {
 }
 
 /** A fresh server with the full surface. */
-export function createServer(ctx: ToolContext, version: string, instructions: string): McpServer {
+export function createServer(ctx: ToolContext, version: string, instructions: string, gone?: AbortSignal): McpServer {
   const server = new McpServer({ name: "tupaia", version }, { instructions });
-  registerSurface(server, ctx);
+  registerSurface(server, ctx, gone);
   return server;
 }

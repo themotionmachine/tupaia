@@ -4,11 +4,13 @@
 //
 //   /mcp       MCP Streamable HTTP (the SDK's createMcpHandler: 2026-07-28 requests and stateless
 //              2025-era requests, a fresh McpServer per request over the shared context)
-//   POST /call {name, args?, timeoutMs?} -> {isError, text[], images[]} (images saved to files)
-//   GET /tools, GET /health, POST /shutdown
+//   POST /call {name, args?, timeoutMs?, caller?} -> {isError, text[], images[]} (images saved)
+//   GET /tools, GET /health, POST /shutdown, POST /listen {port} (also listen on that port, for a
+//   Claude Code registration that names it; see `tupaia headers`)
 //
-// Security: listens on 127.0.0.1 only; refuses a Host other than 127.0.0.1:<port> or
-// localhost:<port> (DNS rebinding) and any request carrying an Origin header (browsers) with 403;
+// Security: listens on 127.0.0.1 only; refuses a Host other than 127.0.0.1:<p> or localhost:<p>
+// (p = the port the connection arrived on; DNS rebinding) and any request carrying an Origin
+// header (browsers) with 403;
 // every request needs `Authorization: Bearer <token>` (random per start, in the 0600 state file)
 // or gets 401. The mode comes from the daemon's spawn environment only, exactly as for stdio.
 import crypto from "node:crypto";
@@ -21,11 +23,12 @@ import { type Config, readDistVersion } from "./config.ts";
 import type { ToolContext } from "./context.ts";
 import {
   type DaemonState,
+  LAST_FILE,
+  type LastExit,
   pidAlive,
   probeHealth,
   readState,
   removeStateIfOwned,
-  statePath,
   writeState
 } from "./daemon-state.ts";
 import { TIMEOUT_CAP_MS } from "./schemas.ts";
@@ -34,15 +37,21 @@ import { TIMEOUT_CAP_MS } from "./schemas.ts";
 const BODY_MAX = 32 * 1024 * 1024;
 /** How long a stop waits for running calls before closing their connections. */
 const DRAIN_MS = 15_000;
+/** How long a stop spends saving the page map (see saveOnExit). */
+const EXIT_SAVE_MS = 15_000;
+/** daemon-exit-*.map files kept in TUPAIA_OUT/maps. */
+const EXIT_SAVES_KEPT = 5;
 export const DEFAULT_IDLE_MIN = 120;
 
 export interface HttpOptions {
   ctx: ToolContext;
   config: Config;
-  /** A fresh McpServer with the full surface (called per MCP request). */
-  makeServer: () => McpServer;
+  /** A fresh McpServer with the full surface (called per MCP request; `gone` = the client left). */
+  makeServer: (gone?: AbortSignal) => McpServer;
   /** 0 = any free port. */
   port: number;
+  /** When `port` is taken, listen on any free port instead of failing (the CLI's remembered port). */
+  preferPort?: boolean;
   /** Idle shutdown after this many minutes without a call; 0 = never. */
   idleMin: number;
   version: string;
@@ -160,15 +169,40 @@ function jsonSchemaOf(schema: unknown): Record<string, unknown> {
   }
 }
 
-/** A 2026-07-28 `subscriptions/listen` request (a long-lived SSE stream of change notifications). */
-function isListenRequest(body: Buffer | undefined): boolean {
-  if (!body?.length || body.length > 65_536) return false;
+type RpcId = string | number;
+const isId = (v: unknown): v is RpcId => typeof v === "string" || typeof v === "number";
+
+/** Method, id, tool name (tools/call) and cancelled request id of a single JSON-RPC message body. */
+function rpcOf(body: Buffer | undefined): { method?: string; id?: RpcId; tool?: string; cancels?: RpcId } {
+  if (!body?.length || body.length > 4 * 1024 * 1024) return {};
   try {
-    const m = JSON.parse(body.toString("utf8")) as { method?: unknown };
-    return !!m && typeof m === "object" && m.method === "subscriptions/listen";
+    const m = JSON.parse(body.toString("utf8")) as {
+      method?: unknown;
+      id?: unknown;
+      params?: { name?: unknown; requestId?: unknown };
+    };
+    if (!m || typeof m !== "object" || typeof m.method !== "string") return {};
+    return {
+      method: m.method,
+      id: isId(m.id) ? m.id : undefined,
+      tool: typeof m.params?.name === "string" ? m.params.name : undefined,
+      cancels: m.method === "notifications/cancelled" && isId(m.params?.requestId) ? m.params.requestId : undefined
+    };
   } catch {
-    return false;
+    return {};
   }
+}
+
+const ROUTES = "POST /mcp (MCP Streamable HTTP), POST /call, GET /tools, GET /health, POST /shutdown, POST /listen";
+
+function listenOn(server: http.Server, port: number): Promise<number> {
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(port, "127.0.0.1", () => {
+      server.off("error", reject);
+      resolve((server.address() as { port: number }).port);
+    });
+  });
 }
 
 function extOf(mime: string): string {
@@ -182,7 +216,13 @@ export async function startHttpDaemon(o: HttpOptions): Promise<HttpDaemon> {
   const { ctx, config, log } = o;
   const outDir = config.outDir;
 
-  const prev = readState(outDir);
+  let prev = readState(outDir);
+  if (prev?.closing && prev.pid !== process.pid) {
+    // the previous daemon is shutting down: let it close its browser first
+    const end = Date.now() + DRAIN_MS + 15_000;
+    while (pidAlive(prev.pid) && Date.now() < end) await new Promise(r => setTimeout(r, 200));
+    prev = readState(outDir);
+  }
   if (prev && prev.pid !== process.pid && pidAlive(prev.pid) && (await probeHealth(prev))) {
     throw new Error(
       `a tupaia daemon already serves ${outDir} (pid ${prev.pid}, ${prev.url}); stop it first (tupaia stop) or use another TUPAIA_OUT`
@@ -198,12 +238,16 @@ export async function startHttpDaemon(o: HttpOptions): Promise<HttpDaemon> {
   };
 
   ctx.callPolicy.finishStartedCalls = true;
-  const mcp = createMcpHandler(() => o.makeServer(), {
+  /** TUPAIA_HTTP_TRACE=1: log every MCP request's method and protocol version (interop debugging). */
+  const trace = /^(1|true|yes|on)$/i.test(process.env.TUPAIA_HTTP_TRACE ?? "");
+  const mcp = createMcpHandler(c => o.makeServer(c.requestInfo?.signal), {
     maxRequestBodySize: BODY_MAX,
     onerror: e => log(`mcp: ${e.message}`)
   });
 
   let port = 0;
+  /** Listeners by port: the first one, plus any POST /listen added. */
+  const servers = new Map<number, http.Server>();
   let closing: Promise<void> | null = null;
   let active = 0;
   let lastActivity = Date.now();
@@ -255,7 +299,7 @@ export async function startHttpDaemon(o: HttpOptions): Promise<HttpDaemon> {
     const signal = goneSignal(res);
     const buf = await readBody(req, BODY_MAX);
     if (buf === null) return sendJson(res, 413, { error: `body over ${BODY_MAX} bytes` });
-    let body: { name?: unknown; args?: unknown; timeoutMs?: unknown };
+    let body: { name?: unknown; args?: unknown; timeoutMs?: unknown; caller?: unknown };
     try {
       body = buf.length ? JSON.parse(buf.toString("utf8")) : {};
     } catch (e) {
@@ -266,14 +310,44 @@ export async function startHttpDaemon(o: HttpOptions): Promise<HttpDaemon> {
     const t = body.timeoutMs;
     const timeoutMs =
       typeof t === "number" && Number.isFinite(t) ? Math.round(Math.min(TIMEOUT_CAP_MS, Math.max(500, t))) : undefined;
+    const who = typeof body.caller === "string" && body.caller ? ` [${body.caller.slice(0, 120)}]` : "";
     const t0 = Date.now();
-    const r = await ctx.callTool(body.name, body.args ?? {}, { timeoutMs, signal });
+    let skipped = false;
+    const r = await ctx.callTool(body.name, body.args ?? {}, {
+      timeoutMs,
+      signal,
+      onSkipped: () => {
+        skipped = true;
+      }
+    });
+    if (skipped) {
+      const why = signal.aborted
+        ? "the caller went away before it started"
+        : `shutting down (${ctx.callPolicy.closing})`;
+      log(`call ${body.name} skipped after ${Date.now() - t0} ms: ${why}${who}`);
+      // nothing ran: a caller may start a fresh daemon and call again
+      if (!signal.aborted)
+        return sendJson(res, 503, {
+          error: `the daemon is shutting down (${ctx.callPolicy.closing}); the call did not run`,
+          closing: true,
+          ran: false
+        });
+      return sendJson(res, 200, saveImages(r));
+    }
     const out = saveImages(r);
     log(
-      `call ${body.name} ${Date.now() - t0} ms ${out.isError ? "error" : "ok"}${signal.aborted ? " (caller gone)" : ""}`
+      `call ${body.name} ${Date.now() - t0} ms ${out.isError ? "error" : "ok"}${signal.aborted ? " (caller gone; finished anyway)" : ""}${who}`
     );
     sendJson(res, 200, out);
   };
+
+  /**
+   * tools/call requests in flight by JSON-RPC id. A 2025-era client cancels with a separate
+   * notifications/cancelled POST, which stateless serving cannot route; this does, for an id only
+   * one request in flight holds (ids are per client), so a queued call is skipped. A started call
+   * still finishes (finishStartedCalls).
+   */
+  const inflight = new Map<string, Set<AbortController>>();
 
   const handleMcp = async (req: http.IncomingMessage, res: http.ServerResponse) => {
     const method = (req.method ?? "GET").toUpperCase();
@@ -288,22 +362,87 @@ export async function startHttpDaemon(o: HttpOptions): Promise<HttpDaemon> {
     }
     // A connected client may hold a notification stream open for hours; that is not activity
     // (idle shutdown still applies, and a stop does not wait for it).
-    begin(res, method !== "GET" && !isListenRequest(body));
+    const rpc = rpcOf(body);
+    if (trace)
+      log(
+        `mcp ${method} ${rpc.method ?? "-"} protocol ${req.headers["mcp-protocol-version"] ?? "-"} session ${req.headers["mcp-session-id"] ?? "-"}`
+      );
+    begin(res, method !== "GET" && rpc.method !== "subscriptions/listen");
+    const t0 = Date.now();
+    if (rpc.cancels !== undefined) {
+      const held = inflight.get(String(rpc.cancels));
+      if (held?.size === 1) {
+        for (const ac of held) ac.abort();
+        log(`mcp cancel of request ${rpc.cancels}: skipped unless it had started`);
+      } else if (held?.size) log(`mcp cancel of request ${rpc.cancels} ignored: ${held.size} clients use that id`);
+    }
+    let cancel: AbortController | undefined;
+    if (rpc.method === "tools/call" && rpc.id !== undefined) {
+      const key = String(rpc.id);
+      cancel = new AbortController();
+      const set = inflight.get(key) ?? new Set<AbortController>();
+      set.add(cancel);
+      inflight.set(key, set);
+      const ac = cancel;
+      res.once("close", () => {
+        set.delete(ac);
+        if (!set.size && inflight.get(key) === set) inflight.delete(key);
+      });
+    }
+    const gone = goneSignal(res);
     const headers = new Headers();
     for (let i = 0; i + 1 < req.rawHeaders.length; i += 2) headers.append(req.rawHeaders[i], req.rawHeaders[i + 1]);
     const request = new Request(`http://127.0.0.1:${port}${req.url ?? "/mcp"}`, {
       method,
       headers,
       body: body?.length ? new Uint8Array(body) : undefined,
-      signal: goneSignal(res)
+      signal: cancel ? AbortSignal.any([gone, cancel.signal]) : gone
     });
-    await writeWeb(res, await mcp.fetch(request));
+    let reply: Response;
+    try {
+      reply = await mcp.fetch(request);
+    } catch (e) {
+      if (!cancel?.signal.aborted) throw e;
+      // cancelled: the client expects no answer for that request
+      return sendJson(res, 200, { jsonrpc: "2.0", id: rpc.id, error: { code: -32000, message: "request cancelled" } });
+    }
+    await writeWeb(res, reply);
+    if (rpc.method === "tools/call")
+      log(`mcp call ${rpc.tool ?? "?"} ${Date.now() - t0} ms${cancel?.signal.aborted ? " (cancelled)" : ""}`);
+  };
+
+  /** POST /listen {port}: also serve on that port (a registration names it). */
+  const handleListen = async (req: http.IncomingMessage, res: http.ServerResponse) => {
+    const buf = await readBody(req, 4096);
+    let want: unknown;
+    try {
+      want = buf?.length ? (JSON.parse(buf.toString("utf8")) as { port?: unknown }).port : undefined;
+    } catch {
+      want = undefined;
+    }
+    if (typeof want !== "number" || !Number.isInteger(want) || want < 1 || want > 65535)
+      return sendJson(res, 400, { error: "body must be {port: 1..65535}" });
+    if (!servers.has(want)) {
+      const extra = makeListener();
+      try {
+        await listenOn(extra, want);
+      } catch (e) {
+        return sendJson(res, 409, { error: `cannot listen on 127.0.0.1:${want}: ${(e as Error).message}` });
+      }
+      servers.set(want, extra);
+      state.ports = [...servers.keys()];
+      writeState(outDir, state);
+      log(`also listening on http://127.0.0.1:${want}/mcp`);
+    }
+    sendJson(res, 200, { ok: true, ports: [...servers.keys()] });
   };
 
   const health = () => ({
     ok: true,
     pid: process.pid,
     url: `http://127.0.0.1:${port}`,
+    mcpUrl: `http://127.0.0.1:${port}/mcp`,
+    ports: [...servers.keys()],
     mode: ctx.mode.mode,
     envMode: config.envMode,
     version: o.version,
@@ -320,18 +459,26 @@ export async function startHttpDaemon(o: HttpOptions): Promise<HttpDaemon> {
     repoRoot: config.repoRoot
   });
 
-  const server = http.createServer((req, res) => {
+  const handler = (req: http.IncomingMessage, res: http.ServerResponse) => {
     res.on("error", () => {});
     void (async () => {
       try {
+        const lp = req.socket.localPort;
         const host = (req.headers.host ?? "").toLowerCase();
-        if (host !== `127.0.0.1:${port}` && host !== `localhost:${port}`)
-          return sendJson(res, 403, { error: `Host '${req.headers.host ?? ""}' refused (only 127.0.0.1:${port})` });
+        if (host !== `127.0.0.1:${lp}` && host !== `localhost:${lp}`)
+          return sendJson(res, 403, { error: `Host '${req.headers.host ?? ""}' refused (only 127.0.0.1:${lp})` });
         if (req.headers.origin !== undefined)
           return sendJson(res, 403, { error: "requests with an Origin header are refused (no browser access)" });
         if (!authOk(req.headers.authorization))
-          return sendJson(res, 401, { error: `missing or wrong bearer token (see ${statePath(outDir)})` });
-        if (closing) return sendJson(res, 503, { error: "the daemon is shutting down" });
+          return sendJson(res, 401, {
+            error: "missing or wrong bearer token (it is in daemon.json in the daemon's TUPAIA_OUT)"
+          });
+        if (closing)
+          return sendJson(res, 503, {
+            error: `the daemon is shutting down (${ctx.callPolicy.closing})`,
+            closing: true,
+            ran: false
+          });
         const url = new URL(req.url ?? "/", `http://127.0.0.1:${port}`);
         const method = (req.method ?? "GET").toUpperCase();
         if (url.pathname === "/mcp") return await handleMcp(req, res);
@@ -352,25 +499,31 @@ export async function startHttpDaemon(o: HttpOptions): Promise<HttpDaemon> {
           setImmediate(() => o.onStop("stop requested over http"));
           return;
         }
-        return sendJson(res, 404, { error: `no route ${method} ${url.pathname}` });
+        if (url.pathname === "/listen" && method === "POST") return await handleListen(req, res);
+        return sendJson(res, 404, { error: `no route ${method} ${url.pathname}; routes: ${ROUTES}` });
       } catch (e) {
         log(`request error: ${(e as Error).stack ?? e}`);
         if (!res.headersSent) sendJson(res, 500, { error: (e as Error).message });
         else res.destroy();
       }
     })();
-  });
-  server.keepAliveTimeout = 5000;
+  };
+  const makeListener = () => {
+    const s = http.createServer(handler);
+    s.keepAliveTimeout = 5000;
+    s.on("error", e => log(`server error: ${e.message}`));
+    return s;
+  };
 
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(o.port, "127.0.0.1", () => {
-      server.off("error", reject);
-      resolve();
-    });
-  });
-  port = (server.address() as { port: number }).port;
-  server.on("error", e => log(`server error: ${e.message}`));
+  const first = makeListener();
+  try {
+    port = await listenOn(first, o.port);
+  } catch (e) {
+    if (!(o.preferPort && o.port && (e as NodeJS.ErrnoException).code === "EADDRINUSE")) throw e;
+    log(`port ${o.port} is taken; listening on another free port`);
+    port = await listenOn(first, 0);
+  }
+  servers.set(port, first);
   const url = `http://127.0.0.1:${port}`;
   ctx.serving = { transport: "http", url: `${url}/mcp`, pid: process.pid };
 
@@ -378,6 +531,8 @@ export async function startHttpDaemon(o: HttpOptions): Promise<HttpDaemon> {
     pid: process.pid,
     port,
     url,
+    mcpUrl: `${url}/mcp`,
+    ports: [port],
     mode: config.envMode,
     startedAt,
     version: o.version,
@@ -388,6 +543,8 @@ export async function startHttpDaemon(o: HttpOptions): Promise<HttpDaemon> {
     token
   };
   writeState(outDir, state);
+  // removed last thing on exit (after the browser closed), unless another daemon took it over
+  process.once("exit", () => removeStateIfOwned(outDir, process.pid));
 
   // Idle shutdown, and state-file ownership: if another daemon took this TUPAIA_OUT over, the
   // older one is undiscoverable, so it stops; a deleted file is written again.
@@ -404,7 +561,7 @@ export async function startHttpDaemon(o: HttpOptions): Promise<HttpDaemon> {
       try {
         writeState(outDir, state);
       } catch (e) {
-        log(`cannot rewrite ${statePath(outDir)}: ${(e as Error).message}`);
+        log(`cannot rewrite the state file in ${outDir}: ${(e as Error).message}`);
       }
     }
     if (idleMs > 0 && active === 0 && Date.now() - lastActivity >= idleMs)
@@ -412,15 +569,65 @@ export async function startHttpDaemon(o: HttpOptions): Promise<HttpDaemon> {
   }, period);
   timer.unref();
 
+  /**
+   * The page dies with the daemon (stop, idle, superseded), so a page anyone changed is saved
+   * first to TUPAIA_OUT/maps/daemon-exit-<time>.map; daemon.last.json names it for the next start.
+   */
+  const saveOnExit = async (reason: string): Promise<void> => {
+    const p = ctx.snapshots.provenance;
+    if (!ctx.browser.healthy || (p.kind === "boot" && p.opsSince === 0)) return;
+    const save = ctx.browser.exclusive(async () => {
+      const env = await ctx.browser.callBridge<{ text: string }>(
+        "mapData",
+        {},
+        { timeoutMs: EXIT_SAVE_MS - 1000, noAlerts: true }
+      );
+      if (!env.ok || !env.value?.text) throw new Error(env.error?.message ?? "no map text");
+      const dir = path.join(outDir, "maps");
+      fs.mkdirSync(dir, { recursive: true });
+      const stamp = new Date()
+        .toISOString()
+        .replace(/[-:]/g, "")
+        .replace(/\.\d+Z$/, "");
+      const file = path.join(dir, `daemon-exit-${stamp}.map`);
+      fs.writeFileSync(file, env.value.text);
+      const old = fs
+        .readdirSync(dir)
+        .filter(f => /^daemon-exit-.*\.map$/.test(f))
+        .sort()
+        .slice(0, -EXIT_SAVES_KEPT);
+      for (const f of old) fs.rmSync(path.join(dir, f), { force: true });
+      const last: LastExit = { pid: process.pid, reason, at: new Date().toISOString(), savedMap: file };
+      fs.writeFileSync(path.join(outDir, LAST_FILE), `${JSON.stringify(last)}\n`);
+      log(`saved the page map to ${file}`);
+    });
+    const timeout = new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error(`no map within ${EXIT_SAVE_MS} ms`)), EXIT_SAVE_MS).unref();
+    });
+    await Promise.race([save, timeout]).catch(e => log(`could not save the page map on exit: ${(e as Error).message}`));
+  };
+
+  // A stop refuses queued calls at once (nothing runs; the CLI starts a fresh daemon for them)
+  // and waits up to DRAIN_MS for the call in progress. The state file stays, marked closing,
+  // until the end, so callers wait for this pid to exit instead of starting a second browser.
   const close = (reason: string): Promise<void> => {
     closing ??= (async () => {
       clearInterval(timer);
-      removeStateIfOwned(outDir, process.pid);
-      server.close();
+      ctx.callPolicy.closing = reason;
+      const cur = readState(outDir);
+      if (!cur || cur.pid === process.pid) {
+        try {
+          writeState(outDir, { ...state, closing: reason });
+        } catch {
+          // the CLI still sees the port refuse and the pid alive
+        }
+      }
+      for (const s of servers.values()) s.close();
       const end = Date.now() + DRAIN_MS;
       while (active > 0 && Date.now() < end) await new Promise(r => setTimeout(r, 100));
       await mcp.close().catch(() => {});
-      server.closeAllConnections();
+      for (const s of servers.values()) s.closeAllConnections();
+      await saveOnExit(reason);
       log(`http daemon closed (${reason})`);
     })();
     return closing;

@@ -241,6 +241,41 @@ export class CallScope {
   }
 }
 
+type Issue = { path: PropertyKey[]; message: string; code?: string; errors?: Issue[][] };
+
+/** What one union branch wanted: "needs <key>" when the key is missing, else its first issue. */
+function branchSummary(b: readonly Issue[]): string {
+  const i = b[0];
+  if (!i) return "?";
+  const p = i.path.map(String).join(".");
+  const missing = (x: Issue): boolean =>
+    /received undefined/.test(x.message) ||
+    (x.code === "invalid_union" && !!x.errors?.length && x.errors.every(b => !!b[0] && missing(b[0])));
+  if (p && missing(i)) return `needs ${p}`;
+  if (i.code === "invalid_union") return `${p || "value"}: matches none of ${i.errors?.length ?? 0} shapes`;
+  return `${p || "value"}: ${i.message.replace(/^Invalid input: /, "")}`;
+}
+
+/** zod issues as one line; a failed union lists what each accepted shape wanted. */
+export function describeIssues(issues: readonly Issue[], prefix: PropertyKey[] = []): string {
+  const at = (i: Issue) => {
+    const p = [...prefix, ...i.path].map(String).join(".");
+    return p || "(args)";
+  };
+  const msg = (i: Issue) => i.message.replace(/^Invalid input: /, "");
+  return issues
+    .slice(0, 8)
+    .map(i => {
+      if (i.code !== "invalid_union" || !i.errors?.length) return `${at(i)}: ${msg(i)}`;
+      const branches = i.errors
+        .slice(0, 6)
+        .map((b, n) => `(${n + 1}) ${branchSummary(b)}`)
+        .join(" ");
+      return `${at(i)}: matches none of the accepted shapes: ${branches}`;
+    })
+    .join("; ");
+}
+
 /** A tool definition recorded by ctx.tool(). */
 export interface ToolDef {
   name: string;
@@ -258,6 +293,11 @@ export interface CallPolicy {
    * disconnect never interrupts a page mutation the others would then have to recover from.
    */
   finishStartedCalls: boolean;
+  /**
+   * Set (to the reason) while an --http daemon shuts down: calls still queued for the mutex are
+   * refused when their turn comes (nothing runs), so a stop only waits for the call in progress.
+   */
+  closing: string | null;
 }
 
 export class ToolContext {
@@ -271,7 +311,7 @@ export class ToolContext {
   readonly sketches = new SketchStore();
   /** Tool definitions in registration order (ctx.tool()). */
   readonly toolDefs = new Map<string, ToolDef>();
-  readonly callPolicy: CallPolicy = { finishStartedCalls: false };
+  readonly callPolicy: CallPolicy = { finishStartedCalls: false, closing: null };
   /** How this process is served (session status reports it). */
   serving: { transport: "stdio" } | { transport: "http"; url: string; pid: number } = { transport: "stdio" };
 
@@ -439,8 +479,10 @@ export class ToolContext {
    * Register every defined tool on `server`. Safe for any number of servers: they all share this
    * context (one browser, page, undo history and sketch) and its call mutex. Tools use the server
    * for nothing else (no logging, no notifications), so a per-request server holds no state.
+   * `gone` (--http: the HTTP request's signal) also counts as the caller going away, so a queued
+   * call is skipped when its client disconnects whatever the SDK does with the request.
    */
-  attach(server: McpServer): void {
+  attach(server: McpServer, gone?: AbortSignal): void {
     for (const d of this.toolDefs.values()) {
       server.registerTool(
         d.name,
@@ -451,8 +493,11 @@ export class ToolContext {
           annotations: d.spec.annotations,
           _meta: d.spec._meta
         },
-        (async (args: any, sctx: ServerContext) =>
-          this.#runSignal({ ...d.spec, name: d.name }, sctx?.mcpReq?.signal, args, d.impl)) as any
+        (async (args: any, sctx: ServerContext) => {
+          const own = sctx?.mcpReq?.signal;
+          const signal = gone && own ? AbortSignal.any([own, gone]) : (own ?? gone);
+          return this.#runSignal({ ...d.spec, name: d.name }, signal, args, d.impl);
+        }) as any
       );
     }
   }
@@ -465,7 +510,7 @@ export class ToolContext {
   async callTool(
     name: string,
     args: unknown,
-    opts: { timeoutMs?: number; signal?: AbortSignal } = {}
+    opts: { timeoutMs?: number; signal?: AbortSignal; onSkipped?: () => void } = {}
   ): Promise<CallToolResult> {
     const d = this.toolDefs.get(name);
     if (!d) return errorResult(new ToolError("NOT_FOUND", `no tool '${name}' (tools: ${this.toolNames.join(", ")})`));
@@ -475,14 +520,11 @@ export class ToolContext {
       if (o.timeoutMs === undefined) raw = { ...o, timeoutMs: opts.timeoutMs };
     }
     const parsed = await (d.spec.inputSchema as z.ZodType).safeParseAsync(raw);
-    if (!parsed.success) {
-      const issues = parsed.error.issues
-        .slice(0, 8)
-        .map(i => `${i.path.length ? i.path.join(".") : "(args)"}: ${i.message}`)
-        .join("; ");
-      return errorResult(new ToolError("BAD_ARGS", `invalid arguments for ${name}: ${issues}`));
-    }
-    return this.#runSignal({ ...d.spec, name }, opts.signal, parsed.data, d.impl, opts.timeoutMs);
+    if (!parsed.success)
+      return errorResult(
+        new ToolError("BAD_ARGS", `invalid arguments for ${name}: ${describeIssues(parsed.error.issues)}`)
+      );
+    return this.#runSignal({ ...d.spec, name }, opts.signal, parsed.data, d.impl, opts.timeoutMs, opts.onSkipped);
   }
 
   async run<A>(
@@ -499,12 +541,25 @@ export class ToolContext {
     signal: AbortSignal | undefined,
     args: A,
     impl: (args: A, scope: CallScope) => Promise<WithImages | Record<string, unknown>>,
-    timeoutMs?: number
+    timeoutMs?: number,
+    /** Called when the call is skipped before it starts (caller gone, or the daemon is closing). */
+    onSkipped?: () => void
   ): Promise<CallToolResult> {
     return this.browser.exclusive(async () => {
       const finish = this.callPolicy.finishStartedCalls;
-      if (finish && signal?.aborted)
+      if (finish && signal?.aborted) {
+        onSkipped?.();
         return errorResult(new ToolError("CANCELLED", "the caller went away before the call started; nothing ran"));
+      }
+      if (this.callPolicy.closing) {
+        onSkipped?.();
+        return errorResult(
+          new ToolError(
+            "CANCELLED",
+            `the server is shutting down (${this.callPolicy.closing}); this call did not run. The next call starts a fresh server with a fresh page.`
+          )
+        );
+      }
       const kind = spec.kind ?? "read";
       const rawTimeout = (args as { timeoutMs?: unknown } | undefined)?.timeoutMs;
       const scope = new CallScope(

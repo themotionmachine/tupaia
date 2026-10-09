@@ -41,7 +41,7 @@ const ctx = new ToolContext(config);
 const pkg = JSON.parse(fs.readFileSync(path.join(config.mcpRoot, "package.json"), "utf8")) as { version: string };
 registerAll(ctx);
 /** A server with every tool and resource; all of them share `ctx`. */
-const makeServer = () => createServer(ctx, pkg.version, INSTRUCTIONS);
+const makeServer = (gone?: AbortSignal) => createServer(ctx, pkg.version, INSTRUCTIONS, gone);
 
 const argv = process.argv.slice(2);
 const httpMode = argv.includes("--http");
@@ -52,7 +52,8 @@ async function shutdown(reason: string, code = 0): Promise<void> {
   if (closing) return;
   closing = true;
   process.stderr.write(`[tupaia-mcp] shutdown: ${reason}\n`);
-  setTimeout(() => process.exit(code), daemon ? 25_000 : 5000).unref();
+  // a daemon drains its running call (15 s) and saves the page map (15 s) first
+  setTimeout(() => process.exit(code), daemon ? 40_000 : 5000).unref();
   if (daemon) await daemon.close(reason).catch(() => {});
   await ctx.browser.close().catch(() => {});
   process.exit(code);
@@ -60,11 +61,18 @@ async function shutdown(reason: string, code = 0): Promise<void> {
 
 if (httpMode) {
   try {
+    // the daemon is found through TUPAIA_OUT: never serve a fallback directory nobody looks in
+    const asked = process.env.TUPAIA_OUT;
+    if (asked && path.resolve(asked) !== config.outDir)
+      throw new Error(`cannot use TUPAIA_OUT ${path.resolve(asked)} (not creatable or not writable)`);
+    // --prefer-port N: N if free, else any free port (the CLI's remembered port)
+    const preferred = argValue(argv, "--prefer-port");
     daemon = await startHttpDaemon({
       ctx,
       config,
       makeServer,
-      port: parsePort(argValue(argv, "--port") ?? process.env.TUPAIA_HTTP_PORT),
+      port: parsePort(preferred ?? argValue(argv, "--port") ?? process.env.TUPAIA_HTTP_PORT),
+      preferPort: preferred !== undefined,
       idleMin: parseIdleMin(process.env.TUPAIA_HTTP_IDLE_MIN),
       version: pkg.version,
       log: msg => process.stderr.write(`[tupaia-mcp] ${msg}\n`),

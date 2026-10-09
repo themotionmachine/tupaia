@@ -506,7 +506,8 @@ export class BrowserManager {
           sleep(2000).then(() => false)
         ])
       : false;
-    if (alive) return "The page still responds; read-only work was abandoned.";
+    if (alive)
+      return "The page still responds. Its result was dropped, but page JS cannot be cancelled: that read-only code may still be running.";
     this.dirty = `${name} ${what} and the page stopped responding`;
     return "The page stopped responding: it will be relaunched and the newest snapshot restored before the next call.";
   }

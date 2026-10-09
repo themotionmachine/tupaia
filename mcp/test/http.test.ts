@@ -10,14 +10,16 @@ import os from "node:os";
 import path from "node:path";
 import { after, before, describe, test } from "node:test";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
-import { mismatchWarnings } from "../src/cli.ts";
-import { type DaemonState, readState, statePath } from "../src/daemon-state.ts";
+import { absolutizeInputs, formatResult, mismatchWarnings, schemaType } from "../src/cli.ts";
+import { type DaemonState, readPortPref, readState, START_LOCK, statePath } from "../src/daemon-state.ts";
 import {
   alive,
   chromeDescendants,
+  DEMO_MAP,
   type Harness,
   imageSize,
   MCP_ROOT,
+  REPO_ROOT,
   rawStdoutCheck,
   SERVER,
   safeEnv,
@@ -48,7 +50,8 @@ async function spawnDaemon(extra: Record<string, string> = {}, args: string[] = 
     log.push(String(d));
     if (process.env.TUPAIA_TEST_VERBOSE) process.stderr.write(String(d));
   });
-  await waitFor(() => readState(env.TUPAIA_OUT)?.pid === child.pid || child.exitCode !== null, 30_000);
+  // generous: module loading alone can take tens of seconds on a loaded machine
+  await waitFor(() => readState(env.TUPAIA_OUT)?.pid === child.pid || child.exitCode !== null, 90_000);
   const st = readState(env.TUPAIA_OUT);
   if (!st || st.pid !== child.pid) throw new Error(`the daemon did not start: ${log.join("")}`);
   return {
@@ -118,10 +121,11 @@ async function callJson(st: DaemonState, name: string, args: Record<string, unkn
 function cli(
   args: string[],
   env: Record<string, string>,
-  stdin?: string
+  stdin?: string,
+  cwd = os.tmpdir()
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise(resolve => {
-    const child = spawn(CLI, args, { env, cwd: os.tmpdir(), stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(CLI, args, { env, cwd, stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", d => {
@@ -187,6 +191,8 @@ describe("tupaia-mcp --http daemon", () => {
     assert.equal(st.pid, d.child.pid);
     assert.ok(st.port > 0);
     assert.equal(st.url, `http://127.0.0.1:${st.port}`);
+    assert.equal(st.mcpUrl, `http://127.0.0.1:${st.port}/mcp`);
+    assert.deepEqual(st.ports, [st.port]);
     assert.equal(st.mode, "local");
     assert.ok(st.token.length >= 40, "token is long and random");
     assert.ok(Date.parse(st.startedAt) > 0);
@@ -253,7 +259,10 @@ describe("tupaia-mcp --http daemon", () => {
       });
       assert.notEqual(err, "connected", `reachable on ${ext.address}`);
     }
-    assert.equal((await raw(port, { headers: auth(d.st), path: "/nope" })).status, 404);
+    const nope = await raw(port, { headers: auth(d.st), path: "/nope" });
+    assert.equal(nope.status, 404);
+    assert.match(nope.json.error, /routes: POST \/mcp/, "a 404 names the routes");
+    assert.doesNotMatch((await raw(port, {})).text, /daemon\.json"|\//, "a 401 does not name file paths");
   });
 
   test("MCP over Streamable HTTP: same tools, resources and instructions as stdio; calls work", async () => {
@@ -279,6 +288,16 @@ describe("tupaia-mcp --http daemon", () => {
     const status = JSON.parse((s.content as Array<{ text: string }>).at(-1)?.text ?? "{}");
     assert.equal(status.mode, "local");
     assert.match(status.serving, /http daemon http:\/\/127\.0\.0\.1:\d+\/mcp/);
+
+    // nothing over HTTP reaches live mode: set_mode only drops to local, on both paths
+    const viaMcp = await legacy.callTool({ name: "session", arguments: { action: "set_mode", mode: "live" } });
+    assert.equal(viaMcp.isError, true);
+    const viaCall = await callJson(d.st, "session", { action: "set_mode", mode: "live" });
+    assert.equal(viaCall.isError, true);
+    assert.match(viaCall.text[0], /^BAD_ARGS/);
+    const dropped = await callJson(d.st, "session", { action: "set_mode", mode: "local" });
+    assert.equal(dropped.isError, false, dropped.text.join("\n"));
+    assert.equal((await raw(d.st.port, { headers: auth(d.st) })).json.mode, "local");
 
     const loaded = await legacy.callTool(
       { name: "load_map", arguments: { path: "tests/fixtures/demo.map" } },
@@ -375,12 +394,42 @@ describe("tupaia-mcp --http daemon", () => {
     assert.equal(left, "client left");
     assert.equal(started, "client left");
     assert.equal((await hold).isError, false);
-    await waitFor(() => d.log.join("").includes("(caller gone)"), 10_000);
+    await waitFor(() => d.log.join("").includes("(caller gone; finished anyway)"), 10_000);
+    assert.match(d.log.join(""), /call eval skipped after \d+ ms: the caller went away before it started/);
+
+    // the same over MCP, in both eras: a 2025-era client cancels with notifications/cancelled
+    // (a separate POST the daemon routes), a 2026-era client closes the request's stream
+    const legacy = await httpClient(d.st, "legacy");
+    const modern = await httpClient(d.st, "auto");
+    try {
+      const hold2 = callJson(d.st, "eval", {
+        code: "await new Promise(r => setTimeout(r, 2500)); return 1",
+        readOnly: true
+      });
+      await new Promise(r => setTimeout(r, 200));
+      const abortQueued = (c: Client, flag: string) =>
+        c
+          .callTool(
+            { name: "eval", arguments: { code: `globalThis.${flag} = 'ran'; return 1`, readOnly: true } },
+            { signal: AbortSignal.timeout(400) }
+          )
+          .then(
+            () => "returned",
+            () => "aborted"
+          );
+      const results = await Promise.all([abortQueued(legacy, "__mcpLegacy"), abortQueued(modern, "__mcpModern")]);
+      assert.deepEqual(results, ["aborted", "aborted"]);
+      assert.equal((await hold2).isError, false);
+    } finally {
+      await legacy.close().catch(() => {});
+      await modern.close().catch(() => {});
+    }
     const r = await callJson(d.st, "eval", {
-      code: "return [globalThis.__skipped ?? null, globalThis.__finished ?? null]",
+      code: "return [globalThis.__skipped, globalThis.__finished, globalThis.__mcpLegacy, globalThis.__mcpModern].map(v => v ?? null)",
       readOnly: true
     });
-    assert.deepEqual(JSON.parse(r.text[0]).value, [null, "yes"]);
+    assert.deepEqual(JSON.parse(r.text[0]).value, [null, "yes", null, null]);
+    assert.match(d.log.join(""), /mcp cancel of request \S+: skipped unless it had started/);
   });
 
   test("CLI: two concurrent calls serialize; text, images and exit codes", async () => {
@@ -407,7 +456,14 @@ describe("tupaia-mcp --http daemon", () => {
 
     const bad = await cli(["call", "find", '{"type":"nope"}'], env);
     assert.equal(bad.code, 1);
-    assert.match(bad.stdout, /^BAD_ARGS/);
+    assert.match(bad.stdout, /^ERROR BAD_ARGS: invalid arguments for find/);
+    assert.equal(bad.stdout.match(/invalid arguments/g)?.length, 1, "the message is printed once");
+    const union = await cli(["call", "screenshot", '{"target":{"entity":"x"}}'], env);
+    assert.equal(union.code, 1);
+    assert.match(
+      union.stdout,
+      /target: matches none of the accepted shapes: \(1\) entity: .*\(2\) needs bbox \(3\) needs at/
+    );
     const asJson = await cli(["call", "find", '{"type":"nope"}', "--json"], env);
     assert.equal(asJson.code, 1);
     assert.equal(JSON.parse(asJson.stdout).isError, true);
@@ -418,6 +474,23 @@ describe("tupaia-mcp --http daemon", () => {
     const names = await cli(["tools", "--names"], env);
     assert.equal(names.code, 0);
     assert.equal(names.stdout.trim().split("\n").length, 21);
+    const namesJson = await cli(["tools", "--names", "--json"], env);
+    assert.equal(JSON.parse(namesJson.stdout).length, 21);
+    const one = await cli(["tools", "screenshot"], env);
+    assert.equal(one.code, 0, one.stderr);
+    assert.match(one.stdout, /^screenshot \(/);
+    assert.match(one.stdout, /\n {2}target\?: \{entity: \{type: "burg"\|/);
+    assert.match(one.stdout, /\n {2}maxSide\?: integer {2}# /);
+    assert.equal((await cli(["help", "screenshot"], env)).stdout, one.stdout);
+    assert.equal((await cli(["tools", "nope"], env)).code, 2);
+
+    // a relative input path is taken from the caller's cwd when the file is there
+    const rel = await cli(["call", "load_map", '{"path":"demo.map"}'], env, undefined, path.dirname(DEMO_MAP));
+    assert.equal(rel.code, 0, rel.stdout + rel.stderr);
+    assert.equal(JSON.parse(rel.stdout).name, "Chanland");
+    const bogus = await cli(["status", "--out", "/nonexistent-root/tupaia"], env);
+    assert.equal(bogus.code, 2, "an unusable --out never falls back to another directory");
+    assert.match(bogus.stderr, /cannot use TUPAIA_OUT \/nonexistent-root\/tupaia/);
     const st = await cli(["status"], env);
     assert.equal(st.code, 0);
     assert.match(
@@ -447,6 +520,9 @@ describe("tupaia-mcp --http daemon", () => {
     const r = await cli(["stop"], d.env);
     assert.equal(r.code, 0, r.stderr);
     assert.match(r.stdout, new RegExp(`stopped: pid ${pid}`));
+    // the page held a loaded map, so it was saved on the way out
+    const saved = /^saved its page: (.+daemon-exit-.+\.map)$/m.exec(r.stdout);
+    assert.ok(saved && fs.existsSync(saved[1]), r.stdout);
     assert.ok(await waitFor(() => d.child.exitCode !== null, 10_000));
     assert.equal(d.child.exitCode, 0);
     assert.equal(fs.existsSync(statePath(d.env.TUPAIA_OUT)), false);
@@ -459,38 +535,208 @@ describe("tupaia-mcp --http daemon", () => {
 });
 
 describe("tupaia CLI daemon lifecycle", () => {
-  test("call auto-starts a daemon (local mode, caller env), on a fixed port when asked", async () => {
+  test("call auto-starts a daemon (caller env, relative TUPAIA_DIST), on a fixed port when asked", async () => {
     const env = safeEnv({ TUPAIA_HTTP_IDLE_MIN: "0" });
     const port = await freePort();
-    const r = await cli(["call", "session", '{"action":"status"}', "--port", String(port)], env);
+    const other = await freePort();
+    // TUPAIA_DIST relative to the caller's cwd (the daemon itself runs from mcp/)
+    const r = await cli(
+      ["call", "session", '{"action":"status"}', "--port", String(port)],
+      { ...env, TUPAIA_DIST: "dist" },
+      undefined,
+      REPO_ROOT
+    );
     try {
-      assert.equal(r.code, 0, r.stderr);
+      assert.equal(r.code, 0, r.stderr + r.stdout);
       assert.match(r.stderr, /no daemon serves .*; starting one/);
-      assert.match(r.stderr, /started a daemon: pid \d+/);
+      assert.match(r.stderr, /started a daemon: pid \d+.*fresh random map/);
       const st = readState(env.TUPAIA_OUT);
       assert.ok(st);
       assert.equal(st.port, port);
       assert.equal(st.idleMin, 0);
       assert.equal(JSON.parse(r.stdout).mode, "local");
+      assert.equal(JSON.parse(r.stdout).distDir, path.join(REPO_ROOT, "dist"));
       assert.ok(fs.readFileSync(path.join(env.TUPAIA_OUT, "daemon.log"), "utf8").includes("ready: http"));
       const again = await cli(["call", "session"], env);
       assert.doesNotMatch(again.stderr, /starting one/);
-      // Claude Code's headersHelper gets the registered URL; the port must match the daemon's
+      // Claude Code's headersHelper gets the registered URL
       const helper = await cli(["headers"], { ...env, CLAUDE_CODE_MCP_SERVER_URL: `http://127.0.0.1:${port}/mcp` });
       assert.equal(helper.code, 0, helper.stderr);
       assert.deepEqual(JSON.parse(helper.stdout), { Authorization: `Bearer ${st.token}` });
-      const wrong = await cli(["headers"], { ...env, CLAUDE_CODE_MCP_SERVER_URL: `http://127.0.0.1:${port + 1}/mcp` });
-      assert.equal(wrong.code, 2);
-      assert.equal(wrong.stdout, "");
-      assert.match(
-        wrong.stderr,
-        new RegExp(`listens on port ${port}, but this server is registered at port ${port + 1}`)
-      );
+      // a registration on another port: the running daemon (and its page) serves that port too
+      const added = await cli(["headers"], { ...env, CLAUDE_CODE_MCP_SERVER_URL: `http://127.0.0.1:${other}/mcp` });
+      assert.equal(added.code, 0, added.stderr);
+      assert.deepEqual(JSON.parse(added.stdout), { Authorization: `Bearer ${st.token}` });
+      assert.deepEqual(readState(env.TUPAIA_OUT)?.ports, [port, other]);
+      const viaOther = await raw(other, { headers: auth(st) });
+      assert.equal(viaOther.status, 200);
+      assert.equal(viaOther.json.pid, st.pid);
+      const crossHost = await raw(other, { headers: { ...auth(st), host: `127.0.0.1:${port}` } });
+      assert.equal(crossHost.status, 403, "Host must name the port the request arrived on");
+      assert.deepEqual(readPortPref(env.TUPAIA_OUT), { port: other, registered: true });
     } finally {
       const s = await cli(["stop"], env);
       assert.equal(s.code, 0, s.stderr);
     }
     assert.equal(fs.existsSync(statePath(env.TUPAIA_OUT)), false);
+    assert.equal(fs.existsSync(path.join(env.TUPAIA_OUT, "daemon.last.json")), false, "an untouched page is not saved");
+    // the next auto-start uses the registered port, not the one the first daemon had
+    const next = await cli(["tools", "--names"], env);
+    try {
+      assert.equal(next.code, 0, next.stderr);
+      assert.equal(readState(env.TUPAIA_OUT)?.port, other);
+    } finally {
+      await cli(["stop"], env);
+    }
+  });
+
+  test("an auto-started daemon keeps its port across restarts", async () => {
+    const env = safeEnv({ TUPAIA_HTTP_IDLE_MIN: "0" });
+    const first = await cli(["tools", "--names"], env);
+    assert.equal(first.code, 0, first.stderr);
+    const p1 = readState(env.TUPAIA_OUT)?.port;
+    assert.equal((await cli(["stop"], env)).code, 0);
+    const second = await cli(["tools", "--names"], env);
+    try {
+      assert.equal(second.code, 0, second.stderr);
+      assert.equal(readState(env.TUPAIA_OUT)?.port, p1);
+      assert.deepEqual(readPortPref(env.TUPAIA_OUT), { port: p1, registered: false });
+    } finally {
+      await cli(["stop"], env);
+    }
+  });
+
+  test("shutting down: queued calls are refused at once, the running call finishes, the page is saved", async () => {
+    const d = await spawnDaemon({ TUPAIA_HTTP_IDLE_MIN: "0" });
+    try {
+      const loaded = await callJson(d.st, "load_map", { path: DEMO_MAP }, 120_000);
+      assert.equal(loaded.isError, false, loaded.text.join("\n"));
+      const running = callJson(d.st, "eval", {
+        code: "await new Promise(r => setTimeout(r, 3000)); return 'done'",
+        readOnly: true
+      });
+      await new Promise(r => setTimeout(r, 300));
+      const queued = raw(d.st.port, {
+        method: "POST",
+        path: "/call",
+        headers: auth(d.st),
+        body: { name: "eval", args: { code: "return globalThis.__queuedRan = 1", readOnly: true } }
+      });
+      const end = Date.now() + 30_000;
+      while (Date.now() < end && (await raw(d.st.port, { headers: auth(d.st) })).json.active < 2)
+        await new Promise(r => setTimeout(r, 50));
+      const stop = await raw(d.st.port, { method: "POST", path: "/shutdown", headers: auth(d.st), body: {} });
+      assert.equal(stop.status, 200);
+      // the queued call is answered at once: nothing ran, so a caller may start a fresh daemon for it
+      const q = await queued;
+      assert.equal(q.status, 503, q.text);
+      assert.equal(q.json.closing, true);
+      assert.equal(q.json.ran, false);
+      // while it drains, the state file stays and says so: callers wait instead of starting a second browser
+      assert.ok(readState(d.env.TUPAIA_OUT)?.closing, "state marked closing");
+      const done = await running;
+      assert.equal(done.isError, false, "the call in progress finishes");
+      assert.equal(JSON.parse(done.text[0]).value, "done");
+      assert.ok(await waitFor(() => d.child.exitCode !== null, 30_000));
+      assert.match(d.log.join(""), /call eval skipped after \d+ ms: shutting down/);
+      assert.equal(fs.existsSync(statePath(d.env.TUPAIA_OUT)), false);
+      const last = JSON.parse(fs.readFileSync(path.join(d.env.TUPAIA_OUT, "daemon.last.json"), "utf8"));
+      assert.equal(last.pid, d.child.pid);
+      assert.match(last.savedMap, /maps\/daemon-exit-\d+T\d+\.map$/);
+      assert.ok(fs.statSync(last.savedMap).size > 1_000_000, "the loaded map was saved");
+      // the next start reports it
+      const next = await cli(["tools", "--names"], d.env);
+      assert.equal(next.code, 0, next.stderr);
+      assert.match(next.stderr, /previous daemon \(pid \d+\) stopped .* saved its page to .*daemon-exit-/);
+    } finally {
+      await cli(["stop"], d.env);
+      await d.stop();
+    }
+  });
+
+  test("CLI: a call refused by a daemon that is shutting down runs on a fresh daemon", async () => {
+    // a stand-in daemon that answers like one in its drain: healthy, but /call -> 503 closing
+    const env = safeEnv({ TUPAIA_HTTP_IDLE_MIN: "0" });
+    const dummy = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"]);
+    const fake = http.createServer((req, res) => {
+      res.setHeader("content-type", "application/json");
+      if (req.url === "/health") return res.end(JSON.stringify({ ok: true, pid: dummy.pid, mode: "local" }));
+      res.statusCode = 503;
+      res.end(JSON.stringify({ error: "the daemon is shutting down (test)", closing: true, ran: false }));
+      setTimeout(() => dummy.kill(), 300);
+    });
+    const port = await new Promise<number>(r =>
+      fake.listen(0, "127.0.0.1", () => r((fake.address() as net.AddressInfo).port))
+    );
+    try {
+      const st: DaemonState = {
+        pid: dummy.pid as number,
+        port,
+        url: `http://127.0.0.1:${port}`,
+        mcpUrl: `http://127.0.0.1:${port}/mcp`,
+        ports: [port],
+        mode: "local",
+        startedAt: new Date().toISOString(),
+        version: "0.0.0",
+        appVersion: null,
+        repoRoot: REPO_ROOT,
+        outDir: env.TUPAIA_OUT,
+        idleMin: 0,
+        token: "t"
+      };
+      // a state file marked closing: status says so at once
+      fs.writeFileSync(statePath(env.TUPAIA_OUT), JSON.stringify({ ...st, closing: "test" }), { mode: 0o600 });
+      const status = await cli(["status"], env);
+      assert.equal(status.code, 1);
+      assert.match(status.stdout, new RegExp(`^stopping: pid ${dummy.pid} \\(test\\)`));
+      fs.writeFileSync(statePath(env.TUPAIA_OUT), JSON.stringify(st), { mode: 0o600 });
+      const c = await cli(["call", "eval", '{"code":"return 7","readOnly":true}'], env);
+      assert.equal(c.code, 0, c.stderr + c.stdout);
+      assert.match(c.stderr, /the daemon shut down before eval started \(nothing ran\); a fresh daemon runs it/);
+      assert.match(c.stderr, /started a daemon: pid \d+/);
+      assert.equal(JSON.parse(c.stdout).value, 7);
+      assert.notEqual(readState(env.TUPAIA_OUT)?.pid, dummy.pid);
+    } finally {
+      dummy.kill();
+      fake.close();
+      await cli(["stop"], env);
+    }
+  });
+
+  test("a daemon whose state file another daemon took over stops itself", async () => {
+    const d = await spawnDaemon({ TUPAIA_HTTP_IDLE_MIN: "0.1" });
+    try {
+      const other: DaemonState = { ...d.st, pid: process.pid, port: await freePort(), token: "other" };
+      fs.writeFileSync(statePath(d.env.TUPAIA_OUT), JSON.stringify(other), { mode: 0o600 });
+      assert.ok(await waitFor(() => d.child.exitCode !== null, 20_000), "stops itself");
+      assert.match(d.log.join(""), new RegExp(`superseded: daemon pid ${process.pid} now serves`));
+      assert.equal(readState(d.env.TUPAIA_OUT)?.pid, process.pid, "the newer state file is left alone");
+    } finally {
+      fs.rmSync(statePath(d.env.TUPAIA_OUT), { force: true });
+      await d.stop();
+    }
+  });
+
+  test("a daemon still starting: status says so; a start that takes too long is stopped", async () => {
+    const env = safeEnv();
+    const dummy = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"]);
+    try {
+      fs.writeFileSync(
+        path.join(env.TUPAIA_OUT, START_LOCK),
+        JSON.stringify({ pid: process.pid, daemonPid: dummy.pid, at: Date.now() })
+      );
+      const st = await cli(["status"], env);
+      assert.equal(st.code, 1);
+      assert.match(st.stdout, new RegExp(`^starting: daemon pid ${dummy.pid} \\(started by pid ${process.pid}`));
+    } finally {
+      dummy.kill();
+      fs.rmSync(path.join(env.TUPAIA_OUT, START_LOCK), { force: true });
+    }
+    const slow = await cli(["tools", "--names"], { ...env, TUPAIA_START_TIMEOUT_MS: "50" });
+    assert.equal(slow.code, 2);
+    assert.match(slow.stderr, /did not come up within 0\.05 s, so it was stopped/);
+    assert.ok(await waitFor(() => !fs.existsSync(statePath(env.TUPAIA_OUT)), 30_000), "no daemon is left behind");
+    assert.equal(fs.existsSync(path.join(env.TUPAIA_OUT, START_LOCK)), false);
   });
 
   test("concurrent first calls start exactly one daemon", async () => {
@@ -513,6 +759,8 @@ describe("tupaia CLI daemon lifecycle", () => {
       pid: dead.pid as number,
       port: 9,
       url: "http://127.0.0.1:9",
+      mcpUrl: "http://127.0.0.1:9/mcp",
+      ports: [9],
       mode: "local",
       startedAt: new Date().toISOString(),
       version: "0.0.0",
@@ -550,6 +798,41 @@ describe("tupaia CLI daemon lifecycle", () => {
     }
   });
 
+  test("CLI helpers: input paths, error output, schema rendering", () => {
+    const cwd = path.dirname(DEMO_MAP);
+    assert.deepEqual(absolutizeInputs("load_map", { path: "demo.map" }, cwd), { path: DEMO_MAP });
+    assert.deepEqual(absolutizeInputs("load_map", { path: "missing.map" }, cwd), { path: "missing.map" });
+    assert.deepEqual(absolutizeInputs("save_map", { path: "demo.map" }, cwd), { path: "demo.map" });
+    assert.deepEqual(absolutizeInputs("sketch", { action: "rebase", onto: { path: "demo.map" } }, cwd), {
+      action: "rebase",
+      onto: { path: DEMO_MAP }
+    });
+    const err = formatResult({
+      isError: true,
+      text: [
+        'NOT_FOUND: no burg "x"\ncandidates: Oz (1)\n{"error":{"code":"NOT_FOUND","message":"no burg \\"x\\"","candidates":[{"i":1,"name":"Oz"}]},"notes":["n"]}'
+      ],
+      images: []
+    });
+    assert.deepEqual(err, ['ERROR NOT_FOUND: no burg "x"\ncandidates: Oz (1)', '{"notes":["n"]}']);
+    assert.deepEqual(formatResult({ isError: false, text: ["{}"], images: ["/a.jpg"] }), ["{}", "IMAGE: /a.jpg"]);
+    const root = { $defs: { P: { type: "object", properties: { x: { type: "number" } }, required: ["x"] } } };
+    assert.equal(
+      schemaType(
+        {
+          type: "object",
+          properties: {
+            a: { $ref: "#/$defs/P" },
+            b: { type: "array", items: { anyOf: [{ type: "string" }, { const: 1 }] } }
+          },
+          required: ["a"]
+        },
+        root
+      ),
+      "{a: {x: number}, b?: (string | 1)[]}"
+    );
+  });
+
   test("mode mismatch is a warning, never a restart", () => {
     const w = mismatchWarnings(
       { envMode: "live", repoRoot: "/r", port: undefined },
@@ -564,6 +847,14 @@ describe("tupaia CLI daemon lifecycle", () => {
         { pid: 1, port: 2, mode: "local", repoRoot: "/b" }
       ).join("\n"),
       /runs from \/b[\s\S]*listens on port 2, not 5/
+    );
+    assert.deepEqual(
+      mismatchWarnings(
+        { envMode: "local", repoRoot: "/a", port: "5" },
+        { pid: 1, port: 2, ports: [2, 5], mode: "local" }
+      ),
+      [],
+      "an added port counts"
     );
   });
 

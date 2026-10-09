@@ -11,12 +11,22 @@ export const STATE_FILE = "daemon.json";
 export const LOG_FILE = "daemon.log";
 /** Held by a CLI while it starts a daemon, so concurrent callers never start two. */
 export const START_LOCK = "daemon.start.lock";
+/**
+ * The port the CLI starts this TUPAIA_OUT's daemon on next time (not secret, kept after a stop),
+ * so a daemon keeps one port across restarts. `registered` marks a port a Claude Code http
+ * registration names (set by `tupaia headers`); a started daemon never overrides that.
+ */
+export const PORT_FILE = "daemon.port.json";
 
 export interface DaemonState {
   pid: number;
   port: number;
   /** http://127.0.0.1:<port> (MCP at <url>/mcp). */
   url: string;
+  /** http://127.0.0.1:<port>/mcp: the MCP Streamable HTTP endpoint. */
+  mcpUrl: string;
+  /** Every port it listens on: `port` first, then any added for a registration (POST /listen). */
+  ports: number[];
   /** Mode from the daemon's spawn environment (TUPAIA_MODE); /health reports the current one. */
   mode: Mode;
   startedAt: string;
@@ -31,6 +41,8 @@ export interface DaemonState {
   idleMin: number;
   /** Bearer token for every request. Random per daemon start. */
   token: string;
+  /** Set while it shuts down (the reason): it takes no new calls, so wait for the pid to exit. */
+  closing?: string;
 }
 
 export function statePath(outDir: string): string {
@@ -64,6 +76,59 @@ export function removeStateIfOwned(outDir: string, pid: number): void {
     fs.unlinkSync(statePath(outDir));
   } catch {
     // already gone
+  }
+}
+
+/** Written by a daemon that saved its page when it stopped; the CLI reports it on the next start. */
+export const LAST_FILE = "daemon.last.json";
+
+export interface LastExit {
+  pid: number;
+  reason: string;
+  at: string;
+  savedMap: string;
+}
+
+export interface PortPref {
+  port: number;
+  registered: boolean;
+}
+
+export function readPortPref(outDir: string): PortPref | null {
+  try {
+    const v = JSON.parse(fs.readFileSync(path.join(outDir, PORT_FILE), "utf8")) as PortPref;
+    if (!v || !Number.isInteger(v.port) || v.port <= 0 || v.port > 65535) return null;
+    return { port: v.port, registered: v.registered === true };
+  } catch {
+    return null;
+  }
+}
+
+/** Remember `port`; an unregistered port never replaces a registered one. */
+export function writePortPref(outDir: string, pref: PortPref): void {
+  const cur = readPortPref(outDir);
+  if (cur && cur.port === pref.port && cur.registered === pref.registered) return;
+  if (cur?.registered && !pref.registered) return;
+  try {
+    fs.writeFileSync(path.join(outDir, PORT_FILE), `${JSON.stringify(pref)}\n`);
+  } catch {
+    // best effort: it only picks the next port
+  }
+}
+
+/** Content of the start lock: the CLI holding it and, once spawned, the daemon it starts. */
+export interface StartLock {
+  pid: number;
+  daemonPid?: number;
+  at: number;
+}
+
+export function readStartLock(outDir: string): StartLock | null {
+  try {
+    const v = JSON.parse(fs.readFileSync(path.join(outDir, START_LOCK), "utf8")) as StartLock;
+    return v && typeof v.pid === "number" ? v : null;
+  } catch {
+    return null;
   }
 }
 
