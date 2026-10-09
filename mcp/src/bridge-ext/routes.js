@@ -795,10 +795,11 @@
       .map(r => ({ i: r.i, key: T.pure.hashStr(JSON.stringify([r.group, r.name ?? null, r.points])) }));
   const coreRegenerate = T.fns.regenerate;
   if (coreRegenerate)
-    T.fns.regenerate = async a => {
+    T.fns.regenerate = async (a, meta) => {
       const listBefore = pack.routes;
       const before = lockedRoutes();
-      const out = await coreRegenerate(a);
+      // meta passes through (bridge-ext/relief.js and regen.js wrappers read it)
+      const out = await coreRegenerate(a, meta);
       if (pack.routes === listBefore) return out; // the routes were not regenerated
       const after = lockedRoutes();
       const notesOut = Array.isArray(out?.notes) ? out.notes : [];
