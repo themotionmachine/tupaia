@@ -5,8 +5,8 @@
 // ids instead of names, literal generated names, literal cell lists, the created entities'
 // ids), so the ops can be replayed onto a newer copy of the base map (src/replay.ts).
 //
-// Calls that cannot be replayed (regenerate of parts other than provinces/emblems, generate_map,
-// load_map, snapshot restore, a call that failed part-way) are still logged, with replayable:false and a reason; the sketch is
+// Calls that cannot be replayed (regenerate, generate_map, load_map, snapshot restore, a call
+// that failed part-way) are still logged, with replayable:false and a reason; the sketch is
 // blobOnly while one of them is in the log. Undo pops the op it undid (redo re-appends it), so
 // undoing a non-replayable op makes the sketch replayable again. Stepping outside the sketch's
 // own history (undo past its start, a redo of something else, a crash restore that lost ops)
@@ -37,6 +37,8 @@ export interface ReplaySpec {
   unreplayable?: (r: Resolved | null) => string | null;
   /** Entities the op created, per op, for the replay id map (like AddResolved.created). */
   created?: (r: Resolved) => CreatedRef[][];
+  /** Entities the sketch summary may frame its shots on (higher score first), with the layers that show the change. */
+  focus?: (r: Resolved) => Array<{ type: string; i: number | string; score: number; layers?: string[] }>;
   /** Default true: validate then apply with phase 'apply'. */
   phased?: boolean;
   /** Timeout class for replay (default 'edit'). */

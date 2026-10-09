@@ -1,16 +1,22 @@
-// regenerate provinces / emblems: the option schemas and the sketch replay spec.
+// regenerate provinces / emblems: the option schemas, validation and dryRun, sketch recording and
+// the replay spec.
 //
 // The page side is src/bridge-ext/regen.js. A regenerate call whose parts are only 'provinces'
-// and/or 'emblems' records its literal outcome ({parts, graph?, provinces?, emblems?}): the new
-// provinces with their cells (run-length encoded) and coats of arms, and every regenerated coat
-// of arms. Replay re-applies that outcome through the bridge's regenerateLiteral, so those ops
-// stay replayable; any other part re-runs a random generator without a literal record and makes
-// the sketch blob-only, as before.
+// and/or 'emblems' is logged as op tool 'regenerate:provinces-emblems' (REGEN_OP) with its
+// literal outcome ({parts, graph?, provinces?, emblems?}): the new provinces with their cells
+// (run-length encoded) and coats of arms, and every regenerated coat of arms. Replay re-applies
+// that outcome through the bridge's regenerateLiteral. A call that mixes them with any other
+// part is logged as a plain 'regenerate', not replayable, like every other regenerate (the
+// 'regenerate' replay slot stays free for other parts).
 import { z } from "zod";
-import { type CreatedRef, NOT_REPLAYABLE, type Resolved, type Rewriter, registerReplayable } from "./ops.ts";
-import { EntityRef, Place } from "./schemas.ts";
+import type { CallScope } from "./context.ts";
+import { type CreatedRef, type Resolved, type Rewriter, registerReplayable } from "./ops.ts";
+import { ToolError } from "./result.ts";
+import { EntityRef, Place, TIMEOUTS } from "./schemas.ts";
 
+export const REGEN_OP = "regenerate:provinces-emblems";
 export const LITERAL_REGEN_PARTS = ["provinces", "emblems"] as const;
+const isLiteralPart = (p: string) => (LITERAL_REGEN_PARTS as readonly string[]).includes(p);
 
 export const RegenProvinces = z
   .object({
@@ -44,7 +50,7 @@ export const RegenProvinces = z
       .max(100)
       .optional()
       .describe(
-        "Provinces per state without centres, of about equal area, each centred on its biggest burg (the capital's on the capital; a place where there is none)"
+        "New provinces per state without centres (kept locked ones are extra), of balanced area, each centred on its biggest burg (the capital's on the capital; a place where there is none); names are generated"
       ),
     ratio: z
       .number()
@@ -57,8 +63,16 @@ export const RegenProvinces = z
     keepLocked: z
       .boolean()
       .optional()
+      .describe("Default true: locked provinces (of any state) keep their id and cells"),
+    lockedStates: z
+      .boolean()
+      .optional()
+      .describe("Also regenerate locked states (default false: skipped, and naming one is refused)"),
+    crossForeign: z
+      .boolean()
+      .optional()
       .describe(
-        "Default true: locked provinces keep their id and cells; locked states are skipped (naming one is refused)"
+        "centres/count: the spread may travel through other states' land to reach parts of the state (default false: those go to the nearest province, reported as fallback)"
       )
   })
   .strict();
@@ -74,7 +88,14 @@ export const RegenEmblems = z
     provinces: z.boolean().optional().describe("Also their provinces (default true)"),
     burgs: z.boolean().optional().describe("Also their burgs (default true)"),
     shieldOnly: z.boolean().optional().describe("Keep the designs; only reset each shield shape to its culture's"),
-    keepLocked: z.boolean().optional().describe("Default true: locked states, provinces and burgs keep their emblem")
+    keepLocked: z.boolean().optional().describe("Default true: locked states, provinces and burgs keep their emblem"),
+    lockedStates: z.boolean().optional().describe("Regenerate locked states' own emblems too (default false)"),
+    stateCulture: z
+      .boolean()
+      .optional()
+      .describe(
+        "Shields of provinces and burgs follow their state's culture (default: their own; a Wildlands one takes the state's)"
+      )
   })
   .strict();
 
@@ -83,8 +104,15 @@ interface CoaRow {
   /** Hash of the coat of arms before the op (replay: someone else changed it since -> conflict). */
   was?: string;
   coa: unknown;
+  /** The entity was locked at record time (replay: locked since -> conflict). */
+  locked?: boolean;
+  /** Provinces: state and centre cell (to find an unreported province of a state the sketch created). */
+  state?: number;
+  center?: number;
   /** Set by rewrite: the entity was created by an earlier op of the sketch (no both-changed check). */
   fresh?: boolean;
+  /** Set by rewrite: find the province by state and centre (its id was not reported when it was made). */
+  locate?: boolean;
 }
 
 interface ProvinceDef {
@@ -108,6 +136,9 @@ interface ReplacedRow {
   state: number;
   name: string;
   burg?: number | null;
+  /** Hashes of its cells and coat of arms at record time. */
+  cells?: string;
+  coa?: string;
   fresh?: boolean;
   [k: string]: unknown;
 }
@@ -118,12 +149,27 @@ export interface RegenResolved {
   graph?: string;
   provinces?: {
     states: number[];
+    /** State names at record time (summary only). */
+    names?: Array<string | null>;
     keepLocked?: boolean;
+    lockedStates?: boolean;
+    /** Target states that were locked at record time. */
+    locked?: number[];
     kept?: number[];
     replaced: ReplacedRow[];
     created: ProvinceDef[];
+    /** Set by rewrite: target states the sketch created (nobody else has provinces there). */
+    fresh?: number[];
   };
-  emblems?: { states?: CoaRow[]; provinces?: CoaRow[]; burgs?: CoaRow[] };
+  emblems?: {
+    states?: CoaRow[];
+    provinces?: CoaRow[];
+    burgs?: CoaRow[];
+    keepLocked?: boolean;
+    lockedStates?: boolean;
+    /** Counts regenerated (provinces include the ones created by the same call). */
+    n?: { states?: number; provinces?: number; burgs?: number };
+  };
 }
 
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
@@ -142,18 +188,24 @@ function literalShapeOk(x: RegenResolved): boolean {
   return true;
 }
 
-/** Why a logged regenerate cannot be replayed, or null (only the literal provinces/emblems forms). */
+const ONLY = "a regenerate of only parts provinces and/or emblems records its outcome and can be replayed";
+
+/** Why a logged REGEN_OP cannot be replayed, or null. */
 export function regenUnreplayable(r: Resolved | null): string | null {
-  const only = "; only a regenerate of parts provinces and/or emblems records a replayable outcome";
-  if (!isObj(r)) return `${NOT_REPLAYABLE.regenerate}${only}`;
+  if (!isObj(r)) return `this regenerate has no recorded outcome; ${ONLY}`;
   const x = r as unknown as RegenResolved;
-  if (!Array.isArray(x.parts) || !x.parts.length) return `${NOT_REPLAYABLE.regenerate}${only}`;
-  const other = x.parts.filter(p => !(LITERAL_REGEN_PARTS as readonly string[]).includes(p));
-  if (other.length)
-    return `regenerate ${other.join(", ")} re-runs random generators without recording the outcome (states reseeds Math.random), so it cannot be replayed (a regenerate of only parts provinces and/or emblems can be)`;
-  if (!literalShapeOk(x)) return `${NOT_REPLAYABLE.regenerate}; this op's recorded outcome is incomplete`;
+  if (!Array.isArray(x.parts) || !x.parts.length) return `this regenerate has no parts; ${ONLY}`;
+  const other = x.parts.filter(p => !isLiteralPart(p));
+  if (other.length) return mixedReason(other);
+  if (!literalShapeOk(x)) return "this regenerate's recorded outcome is incomplete, so it cannot be replayed";
   return null;
 }
+
+function mixedReason(other: string[]): string {
+  return `regenerate ${other.join(", ")} re-runs random generators without recording the outcome (states reseeds Math.random), so it cannot be replayed; ${ONLY}`;
+}
+
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
 /** One sentence for the log. */
 export function regenSummary(r: Resolved | null, _out: Record<string, unknown> | null, args?: unknown): string {
@@ -161,31 +213,51 @@ export function regenSummary(r: Resolved | null, _out: Record<string, unknown> |
   const parts = x?.parts ?? ((args as { parts?: string[] } | undefined)?.parts || []);
   const bits: string[] = [];
   const p = x?.provinces;
-  if (p && Array.isArray(p.created)) {
-    const kept = p.kept?.length ? `, ${p.kept.length} locked kept` : "";
+  if (p && Array.isArray(p.created) && Array.isArray(p.states)) {
+    const who =
+      p.states.length === 1
+        ? `${p.names?.[0] ? `${p.names[0]} ` : "state "}(${p.states[0]})`
+        : plural(p.states.length, "state");
+    const names = p.created.slice(0, 3).map(d => d.name);
+    const list = names.length ? ` (${names.join(", ")}${p.created.length > 3 ? ", ..." : ""})` : "";
+    const kept = p.kept?.length ? `; ${p.kept.length} locked kept` : "";
     bits.push(
-      `provinces of ${p.states.length} state${p.states.length === 1 ? "" : "s"}: ${p.created.length} new replace ${p.replaced.length}${kept}`
+      p.replaced.length
+        ? `replaced ${plural(p.replaced.length, "province")} of ${who} with ${p.created.length} new${list}${kept}`
+        : `gave ${who} ${p.created.length} new ${p.created.length === 1 ? "province" : "provinces"}${list}${kept}`
     );
   }
   const e = x?.emblems;
   if (e) {
-    const n = (k: "states" | "provinces" | "burgs") => e[k]?.length ?? 0;
-    bits.push(`emblems of ${n("states")} states, ${n("provinces")} provinces, ${n("burgs")} burgs`);
+    const n = (k: "states" | "provinces" | "burgs") => e.n?.[k] ?? e[k]?.length ?? 0;
+    const what = [plural(n("states"), "state"), plural(n("provinces"), "province"), plural(n("burgs"), "burg")];
+    bits.push(`new emblems for ${what.slice(0, 2).join(", ")} and ${what[2]}`);
   }
   if (!bits.length) return `Regenerated ${parts.join(", ") || "(nothing)"}.`;
-  return `Regenerated ${bits.join("; ")}.`;
+  const s = bits.join("; ");
+  return `${s[0].toUpperCase()}${s.slice(1)}.`;
 }
 
 /** Map sketch-created ids (states, burgs, provinces of earlier ops) to their replay ids. */
 export function regenRewrite(r: Resolved, rw: Rewriter): Resolved {
   const x = r as unknown as RegenResolved; // already a copy (rewriteResolved clones)
+  const madeState = (s: number) => rw.created.has(`state:${s}`);
   const p = x.provinces;
   if (p) {
+    // a state the sketch created holds nobody else's provinces: replay replaces whatever it has
+    // then (provinces made on the way, e.g. by paint_cells, are not reported, so their ids shift)
+    p.fresh = p.states.filter(madeState).map(s => rw.id("state", s) as number);
     p.states = p.states.map(s => rw.id("state", s) as number);
+    if (Array.isArray(p.locked)) p.locked = p.locked.map(s => rw.id("state", s) as number);
     if (Array.isArray(p.kept)) p.kept = p.kept.map(i => rw.id("province", i) as number);
     for (const row of p.replaced) {
-      if (rw.created.has(`province:${row.i}`)) row.fresh = true;
-      row.i = rw.id("province", row.i) as number;
+      if (madeState(row.state)) {
+        row.fresh = true;
+        if (rw.created.has(`province:${row.i}`)) row.i = rw.id("province", row.i) as number;
+      } else {
+        if (rw.created.has(`province:${row.i}`)) row.fresh = true;
+        row.i = rw.id("province", row.i) as number;
+      }
       row.state = rw.id("state", row.state) as number;
       if (row.burg) row.burg = rw.id("burg", row.burg) as number;
     }
@@ -202,8 +274,15 @@ export function regenRewrite(r: Resolved, rw: Rewriter): Resolved {
       ["burgs", "burg"]
     ] as const)
       for (const row of e[key] ?? []) {
-        if (rw.created.has(`${type}:${row.i}`)) row.fresh = true;
-        row.i = rw.id(type, row.i) as number;
+        if (rw.created.has(`${type}:${row.i}`)) {
+          row.fresh = true;
+          row.i = rw.id(type, row.i) as number;
+        } else if (type === "province" && typeof row.state === "number" && madeState(row.state)) {
+          // a province of a state the sketch created, not reported when it was made
+          row.fresh = true;
+          row.locate = true;
+        }
+        if (type === "province" && typeof row.state === "number") row.state = rw.id("state", row.state) as number;
       }
   }
   return x as unknown as Resolved;
@@ -216,11 +295,74 @@ export function regenCreated(r: Resolved): CreatedRef[][] {
   return [p.created.map(d => ({ type: "province", i: d.i }))];
 }
 
-registerReplayable("regenerate", {
+/** Where the sketch summary frames its shots: the states whose provinces or emblems changed. */
+export function regenFocus(r: Resolved): Array<{ type: string; i: number; score: number; layers: string[] }> {
+  const x = r as unknown as RegenResolved;
+  const layers = x.provinces ? ["provinces", "borders"] : ["emblems", "borders"];
+  const out = new Map<number, number>();
+  for (const s of x.provinces?.states ?? [])
+    out.set(s, (out.get(s) ?? 0) + 2 + (x.provinces?.created ?? []).filter(d => d.state === s).length);
+  for (const row of x.emblems?.states ?? []) out.set(row.i, (out.get(row.i) ?? 0) + 2);
+  return [...out].map(([i, score]) => ({ type: "state", i, score, layers }));
+}
+
+// ---------------------------------------------------------------- the regenerate tool's hooks
+
+interface RegenArgs {
+  parts: readonly string[];
+  provinces?: unknown;
+  emblems?: unknown;
+  timeoutMs?: number;
+}
+
+/**
+ * Before the undo point: check the provinces/emblems options in the page (nothing changes). With
+ * preview (a dryRun) the page also generates the provinces on a copy and reports their sizes.
+ * Returns null when the call has neither part.
+ */
+export async function planRegen(
+  scope: CallScope,
+  args: RegenArgs,
+  preview: boolean
+): Promise<Record<string, unknown> | null> {
+  if (args.provinces !== undefined && !args.parts.includes("provinces"))
+    throw new ToolError("BAD_ARGS", "provinces options need 'provinces' in parts. Nothing was changed.");
+  if (args.emblems !== undefined && !args.parts.includes("emblems"))
+    throw new ToolError("BAD_ARGS", "emblems options need 'emblems' in parts. Nothing was changed.");
+  if (!args.parts.some(isLiteralPart)) return null;
+  return scope.call<Record<string, unknown>>(
+    "regenPlan",
+    { parts: args.parts, provinces: args.provinces, emblems: args.emblems, preview },
+    { timeoutMs: args.timeoutMs ?? TIMEOUTS.heavy }
+  );
+}
+
+/**
+ * After the regenerate: take the literal outcome out of the result (it goes to the sketch log,
+ * not to the client) and, when every part was provinces/emblems, log the call as REGEN_OP. A
+ * call mixing them with other parts is logged as a plain, non-replayable regenerate; one with
+ * neither is left to the runner's fallback (unchanged behaviour).
+ */
+export async function recordRegen(scope: CallScope, args: RegenArgs, out: Record<string, unknown>): Promise<void> {
+  const resolved = out.resolved;
+  delete out.resolved;
+  if (!args.parts.some(isLiteralPart)) return;
+  const other = args.parts.filter(p => !isLiteralPart(p));
+  if (other.length) {
+    await scope.record("regenerate", args, null, { replayable: false, reason: mixedReason(other) });
+    return;
+  }
+  const why = regenUnreplayable((resolved ?? null) as Resolved | null);
+  if (why) await scope.record(REGEN_OP, args, null, { replayable: false, reason: why });
+  else await scope.record(REGEN_OP, args, resolved as Resolved, { out });
+}
+
+registerReplayable(REGEN_OP, {
   bridgeFn: "regenerateLiteral",
   rewrite: regenRewrite,
   summarize: regenSummary,
   unreplayable: regenUnreplayable,
   created: regenCreated,
+  focus: regenFocus,
   timeout: "heavy"
 });

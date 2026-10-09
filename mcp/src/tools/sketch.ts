@@ -15,6 +15,7 @@ import {
   blobOnlyReasons,
   type EditResolved,
   type PaintResolved,
+  REPLAY_EXT,
   type Sketch,
   type SketchBase,
   sanitizeRecord
@@ -126,17 +127,22 @@ function baseLine(b: SketchBase): string {
 }
 
 /** The entity the sketch touched most (edits per field, adds, paints), best first. */
-export function changeRanking(sk: Sketch): Array<{ type: string; i: number | string; score: number }> {
-  const score = new Map<string, { type: string; i: number | string; score: number }>();
-  const bump = (type: string, i: unknown, n: number) => {
+export function changeRanking(
+  sk: Sketch
+): Array<{ type: string; i: number | string; score: number; layers?: string[] }> {
+  const score = new Map<string, { type: string; i: number | string; score: number; layers?: string[] }>();
+  const bump = (type: string, i: unknown, n: number, layers?: string[]) => {
     if (typeof i !== "number" && typeof i !== "string") return;
     const k = `${type}:${i}`;
     const cur = score.get(k) ?? { type, i, score: 0 };
     cur.score += n;
+    if (layers) cur.layers = layers; // the latest op's view
     score.set(k, cur);
   };
   for (const o of sk.ops) {
     if (!o.resolved || !o.replayable) continue;
+    // tools registered with a focus hook (e.g. regenerate:provinces-emblems) name their own
+    for (const f of REPLAY_EXT[o.tool]?.focus?.(o.resolved) ?? []) bump(f.type, f.i, f.score, f.layers);
     if (o.tool === "edit") {
       const e = o.resolved as EditResolved;
       if (e.type === "map") continue;
@@ -163,7 +169,13 @@ interface Box {
 async function framedTarget(
   scope: CallScope,
   sk: Sketch
-): Promise<{ type: string; i: number | string; name: string | null; bbox: [number, number, number, number] } | null> {
+): Promise<{
+  type: string;
+  i: number | string;
+  name: string | null;
+  bbox: [number, number, number, number];
+  layers?: string[];
+} | null> {
   for (const c of changeRanking(sk).slice(0, 6)) {
     const env = await scope.envelope<Box & { name?: string }>(
       "entityBox",
@@ -177,7 +189,8 @@ async function framedTarget(
       type: c.type,
       i: c.i,
       name: b.name ?? null,
-      bbox: [b.x0 - pad, b.y0 - pad, b.x1 + pad, b.y1 + pad]
+      bbox: [b.x0 - pad, b.y0 - pad, b.x1 + pad, b.y1 + pad],
+      ...(c.layers ? { layers: c.layers } : {})
     };
   }
   return null;
@@ -240,7 +253,7 @@ async function summaryShots(
 ): Promise<Record<string, string | null>> {
   const shots: Record<string, string | null> = {};
   const dir = path.join("sketches", sk.slug);
-  const on = target ? (LAYERS_FOR[target.type] ?? []) : [];
+  const on = target ? ((target.layers as LayerNameT[] | undefined) ?? LAYERS_FOR[target.type] ?? []) : [];
   const layers0 = await scope.call<string[]>("layersOn", {}, { noAlerts: true });
   const view0 = await scope.call<{ x: number; y: number; scale: number }>("getView", {}, { noAlerts: true });
   const pair = async (which: "before" | "after") => {
@@ -893,7 +906,7 @@ export function register(ctx: ToolContext): void {
     {
       title: "Provisional sketches",
       description:
-        "Propose a change to the shared map without changing it: a sketch is base version N of the shared map plus the ops log that produced it. start {slug?, note?}: needs a page map from load_map {source:'shared'} with no edits; then every mutating call is logged in its resolved form (ids, literal names and cells). regenerate (unless its parts are only provinces/emblems), generate_map, load_map and snapshot restore make it blob-only (not replayable) until undone; snapshot undo takes the last op out of the log. status: base, ops, blobOnly, lastSaved, dirty, viewUrl. summary: markdown for humans with before/after screenshots under TUPAIA_OUT/sketches/<slug>/. stop: end recording. rebase {onConflict?}: replay the log onto the CURRENT shared map (a GET), keeping other people's edits; a removed target or a field both sides changed is a conflict ('stop' default, or 'skip'); does not save. Network (Worker id sketch-<slug>, never the shared map): save {confirm:true} PUTs the page map and ops.json and returns viewUrl (opens the sketch in the app); list (read-only) shows saved sketches with their headers; open {slug} loads one into the page as the active sketch; discard {slug, confirm:true} deletes it. save and discard need a server spawned with TUPAIA_MODE=live; without confirm they preview. To put a sketch on the shared map use sketch_promote.",
+        "Propose a change to the shared map without changing it: a sketch is base version N of the shared map plus the ops log that produced it. start {slug?, note?}: needs a page map from load_map {source:'shared'} with no edits; then every mutating call is logged in its resolved form (ids, literal names and cells). regenerate, generate_map, load_map and snapshot restore make it blob-only (not replayable) until undone; snapshot undo takes the last op out of the log. status: base, ops, blobOnly, lastSaved, dirty, viewUrl. summary: markdown for humans with before/after screenshots under TUPAIA_OUT/sketches/<slug>/. stop: end recording. rebase {onConflict?}: replay the log onto the CURRENT shared map (a GET), keeping other people's edits; a removed target or a field both sides changed is a conflict ('stop' default, or 'skip'); does not save. Network (Worker id sketch-<slug>, never the shared map): save {confirm:true} PUTs the page map and ops.json and returns viewUrl (opens the sketch in the app); list (read-only) shows saved sketches with their headers; open {slug} loads one into the page as the active sketch; discard {slug, confirm:true} deletes it. save and discard need a server spawned with TUPAIA_MODE=live; without confirm they preview. To put a sketch on the shared map use sketch_promote.",
       inputSchema: SketchInput,
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
       _meta: META_TEXT_HEAVY,

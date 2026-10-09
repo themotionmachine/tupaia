@@ -2,10 +2,10 @@
 // the current map). Both take an auto-undo entry first.
 import { z } from "zod";
 import type { ToolContext } from "../context.ts";
-import { RegenEmblems, RegenProvinces } from "../regen.ts";
-import { META_TEXT_HEAVY } from "../result.ts";
+import { planRegen, RegenEmblems, RegenProvinces, recordRegen } from "../regen.ts";
+import { META_TEXT_HEAVY, ToolError } from "../result.ts";
 import { TIMEOUTS, TimeoutMs } from "../schemas.ts";
-import { runPhased } from "./edit.ts";
+import { changesSinceUndo } from "./edit.ts";
 import { defineTools } from "./registry.ts";
 
 export const REGEN_PARTS = [
@@ -107,16 +107,19 @@ export function register(ctx: ToolContext): void {
     {
       title: "Regenerate parts of the map",
       description:
-        "Re-run generator parts on the current map (heightmap and cells stay). parts run in dependency order regardless of the order given: rivers, population, cultures, burgs, states, provinces, routes, religions, emblems, military, markers, zones, ice, goods, markets, economy, production. Locked entities are kept where the app supports locks. Several parts turn their layer on (reported in layerChanges); restoreLayers:true turns them back. states reseeds the random stream, so it is not reproducible. One auto-undo entry; dryRun:true validates and returns the plan. " +
-        "provinces replaces only the unlocked provinces of its states (other provinces keep their ids and cells) and works for hand-made states with few or no burgs: provinces {states?, centres?:[{state, burg | at:Place, name?, formName?, fullName?}], count?, ratio?, keepLocked?}. Default: every unlocked state, by the generator's rules (burg provinces, then wild ones); centres: exactly those provinces, each state's land going to the nearest centre by travel cost; count: that many per state, of about equal area, each centred on its biggest burg (or a place). Province emblems use the culture's shield. " +
-        "emblems {states?, provinces?, burgs?, shieldOnly?, keepLocked?} regenerates the coats of arms of those states (and by default their provinces and burgs) with each culture's shield; shieldOnly keeps the designs and only resets the shield shapes; locked and custom emblems are kept. " +
-        "provinces and emblems never turn a layer on (hidden layers are noted) and record their literal outcome, so a call with only those parts replays in a sketch; any other part makes a sketch blob-only.",
+        "Re-run generator parts on the current map (heightmap and cells stay). parts run in dependency order regardless of the order given: rivers, population, cultures, burgs, states, provinces, routes, religions, emblems, military, markers, zones, ice, goods, markets, economy, production. Locked entities are kept where the app supports locks. Several parts turn their layer on (reported in layerChanges); restoreLayers:true turns them back. states reseeds the random stream, so it is not reproducible. One auto-undo entry. " +
+        "provinces {states?, centres?:[{state, burg | at:Place, name?, formName?, fullName?}], count?, ratio?, keepLocked?, lockedStates?, crossForeign?} replaces only the provinces of those states (other states keep theirs; one left with no cells is removed) and works for hand-made states with few or no burgs: default every unlocked state by the generator's rules; centres: exactly those provinces, each state's land going to the nearest centre by travel cost; count: that many new ones per state, of balanced area. " +
+        "emblems {states?, provinces?, burgs?, shieldOnly?, keepLocked?, lockedStates?, stateCulture?} regenerates those coats of arms with each culture's shield (a Wildlands burg or province takes its state's); locked and custom ones are kept, and the result notes locked states it skipped. " +
+        "These two never turn a layer on and take dryRun:true (a preview with province sizes; names and random splits are drawn again for real); a call with only these parts replays in a sketch (logged as regenerate:provinces-emblems), any other part makes a sketch blob-only.",
       inputSchema: z.object({
         parts: z.array(z.enum(REGEN_PARTS)).min(1),
+        restoreLayers: z.boolean().optional().describe("Undo layer visibility changes made by the regenerators"),
         provinces: RegenProvinces.optional().describe("Options for part provinces"),
         emblems: RegenEmblems.optional().describe("Options for part emblems"),
-        restoreLayers: z.boolean().optional().describe("Undo layer visibility changes made by the regenerators"),
-        dryRun: z.boolean().optional().describe("Validate and return the plan without changing anything"),
+        dryRun: z
+          .boolean()
+          .optional()
+          .describe("parts provinces and/or emblems only: preview the outcome, change nothing"),
         timeoutMs: TimeoutMs
       }),
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
@@ -124,20 +127,34 @@ export function register(ctx: ToolContext): void {
       kind: "heavy"
     },
     async (args, scope) => {
-      const { dryRun, timeoutMs, ...rest } = args;
-      // dependency order: the page runs the parts in the order given
-      const parts = REGEN_PARTS.filter(p => args.parts.includes(p));
-      // validate -> auto-undo -> apply -> sketch log: the literal provinces/emblems outcome is
-      // replayable, any other part is logged as not replayable (regen.ts)
-      return runPhased(
-        ctx,
-        scope,
-        "regenerate",
-        args,
-        "regenerate",
-        { ...rest, parts },
-        { dryRun, timeoutMs: timeoutMs ?? TIMEOUTS.heavy }
-      );
+      // provinces/emblems options are checked in the page first (regen.ts): a bad one changes nothing
+      const { dryRun, ...rest } = args;
+      const plan = await planRegen(scope, rest, dryRun === true);
+      if (dryRun) {
+        if (!plan || args.parts.some(p => p !== "provinces" && p !== "emblems"))
+          throw new ToolError(
+            "BAD_ARGS",
+            "dryRun works with parts provinces and/or emblems only. Nothing was changed."
+          );
+        return { dryRun: true, ...plan, note: "dry run: nothing was changed" };
+      }
+      await scope.pushUndo("regenerate", args);
+      let out: Record<string, unknown>;
+      try {
+        out = await scope.call<Record<string, unknown>>("regenerate", rest, {
+          mutating: true,
+          timeoutMs: args.timeoutMs ?? TIMEOUTS.heavy
+        });
+      } finally {
+        ctx.snapshots.noteMutation();
+      }
+      await recordRegen(scope, rest, out);
+      const changes = await changesSinceUndo(ctx, scope);
+      return {
+        ...out,
+        ...(changes !== undefined ? { changes } : {}),
+        undo: "snapshot {action:'undo'} reverts this call"
+      };
     }
   );
 }
