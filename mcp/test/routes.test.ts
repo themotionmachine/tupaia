@@ -475,6 +475,61 @@ describe("tupaia-mcp routes (freehand routes, route groups)", () => {
     await undo(2);
   });
 
+  test("when the route that owns a shared link goes, another route through the same pair takes it over", async () => {
+    const A = { cell: pick.A.cell };
+    const far = { cell: pick.far.cell };
+    const r = await h.ok("add", {
+      type: "route",
+      items: [
+        { points: [A, far], noPathfind: true, group: "route-plain", name: "First" },
+        { points: [A, far, { x: 100, y: 100 }], noPathfind: true, group: "route-plain", name: "Second" }
+      ]
+    });
+    const [first, second] = created(r);
+    const pair = [Math.min(A.cell, far.cell), Math.max(A.cell, far.cell)];
+    assert.deepEqual(await linksOf(first.i), [pair], "the first route owns the pair");
+    assert.equal(second.links, 1, "the second one only links its other leg");
+    assert.equal(
+      (await linksOf(second.i)).some(p => p[0] === pair[0] && p[1] === pair[1]),
+      false
+    );
+    // removing the owner hands the pair on
+    await h.ok("edit", { type: "route", ops: [{ ref: first.i, remove: true }] });
+    assert.equal(
+      (await linksOf(second.i)).some(p => p[0] === pair[0] && p[1] === pair[1]),
+      true
+    );
+    assert.equal(await asymmetric(), 0);
+    await undo(); // the removal: the first route owns it again
+    assert.deepEqual(await linksOf(first.i), [pair]);
+    // editing the owner's points away hands it on too
+    await h.ok("edit", {
+      type: "route",
+      ops: [
+        {
+          ref: first.i,
+          set: {
+            points: [
+              { x: 100, y: 100 },
+              { x: 200, y: 200 }
+            ]
+          }
+        }
+      ]
+    });
+    assert.equal(
+      (await linksOf(second.i)).some(p => p[0] === pair[0] && p[1] === pair[1]),
+      true
+    );
+    assert.equal(
+      (await linksOf(first.i)).some(p => p[0] === pair[0] && p[1] === pair[1]),
+      false
+    );
+    assert.equal(await asymmetric(), 0);
+    await undo(2);
+    assert.equal(await routeOf(first.i), null);
+  });
+
   test("edit route {points}: path, links, feature and a cached length follow; other fields can ride along", async () => {
     const before = await linksOf(tunnel);
     assert.ok(before.length >= 3);
@@ -554,6 +609,15 @@ describe("tupaia-mcp routes (freehand routes, route groups)", () => {
         items: [{ points: burgPts(), noPathfind: true, group: "route-rm", name: "Mover" }]
       })
     )[0];
+    // force and moveTo belong to removing a routeGroup
+    const f1 = await fail("edit", { type: "burg", ops: [{ ref: pick.A.i, remove: true, force: true }] });
+    assert.equal(f1.code, "BAD_ARGS");
+    assert.match(f1.message, /only to removing a routeGroup/);
+    const f2 = await fail("edit", {
+      type: "routeGroup",
+      ops: [{ ref: "route-rm", set: { stroke: "#fff" }, force: true }]
+    });
+    assert.match(f2.message, /go with remove:true/);
     const full = await fail("edit", { type: "routeGroup", ops: [{ ref: "route-rm", remove: true }] });
     assert.equal(full.code, "REFUSED");
     assert.match(full.message, /holds 1 route/);

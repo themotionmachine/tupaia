@@ -107,7 +107,7 @@ World data is mainly stored in typed arrays within `cells` object in both `grid`
 - `pack.cells.conf`: `number[]` - cells flux amount in confluences. Confluences are cells where rivers meet each other. `Uint16Array`
 - `pack.cells.harbor`: `number[]` - cells harbor score. Shows how many water cells are adjacent to the cell. Used for scoring. `Uint8Array`
 - `pack.cells.haven`: `number[]` - cells haven cells index. Each coastal cell has haven cells defined for correct routes building. `Uint16Array` or `Uint32Array` (depending on cells number)
-- `pack.cells.routes`: `object` - cells connections via routes. E.g. `pack.cells.routes[8] = {9: 306, 10: 306}` shows that cell `8` has two route connections - with cell `9` via route `306` and with cell `10` by route `306`
+- `pack.cells.routes`: `object` - cells connections via routes. E.g. `pack.cells.routes[8] = {9: 306, 10: 306}` shows that cell `8` has two route connections - with cell `9` via route `306` and with cell `10` by route `306`. A link joins two cells that are consecutive points of a route, and is stored in both directions. The cells do not have to be neighbours: a route drawn by hand (the "Create route" tool, or the MCP `add route` with `noPathfind`) may jump over water or terrain, and each such jump is one direct link between the two far-apart cells. Two consecutive points in the same cell make no link (no cell links to itself). A cell pair holds one route id, so when two routes share a pair only one of them owns the link. `Routes.buildLinks` (run by "regenerate routes") rebuilds links from `pack.routes` by the same rule, and `Routes.remove` deletes exactly the links a route owns
 
 # Secondary data
 
@@ -300,12 +300,16 @@ Markers data is stored as an unordered array of objects (so element id is _not_ 
 Routes data is stored as an unordered array of objects (so element id is _not_ the array index). Object structure:
 
 - `i`: `number` - route id. Please note the element with id `0` is a fully valid route, not a placeholder
-- `points`: `number[]` - array of control points in format `[x, y, cellId]`
-- `feature`: `number` - feature id of the route. Auto-generated routes cannot be place on multiple features
-- `group`: `string` - route group. Default groups are: 'roads', 'trails', 'searoutes'
+- `points`: `number[]` - array of control points in format `[x, y, cellId]`. For a generated route they follow a path of neighbouring cells. For a hand-drawn (freehand) route they are exactly the points that were given, `cellId` is the cell under the point, and consecutive points need not be neighbours (see `pack.cells.routes` above for how links work then)
+- `feature`: `number` - feature id of the route. Auto-generated routes cannot be place on multiple features. A freehand route takes the feature of its first point (which may be water)
+- `group`: `string` - route group: the id of a `<g>` under `#routes`. Default groups are: 'roads', 'trails', 'searoutes'; any other `<g>` there is a custom group (see below)
 - `length`: `number` - route length in km. Optional
 - `name`: `string` - route name. Optional
-- `lock`: `boolean` - `true` if route is locked (not affected by regeneration). Optional
+- `lock`: `boolean` - `true` if route is locked (not affected by regeneration). Optional. Regenerating routes replaces every unlocked route and renumbers the locked ones, so hand-drawn routes are created locked
+
+### Route groups
+
+Route groups are not stored in `pack`. A group is an element `<g id="route-tunnels" stroke="#3d2b6b" stroke-width="1.2" stroke-dasharray="2 1.2" stroke-linecap="butt" opacity="0.95">` under `#routes`; its SVG attributes are its style, its position among its siblings is the draw order (later groups draw on top), and a route belongs to it through `route.group`. The map file keeps the whole `#map` markup, so custom groups, their styles and their order are saved and loaded with the map, and `drawRoutes` only refills the groups that exist (it never creates or removes one). A route whose group element is missing stays in `pack.routes` but is not drawn. The three default groups are created at startup and cannot be removed. The app's group editor (and the MCP) name custom groups `route-<name>`; the MCP also keeps an optional display name in a `data-name` attribute, which the app ignores.
 
 ## Zones
 

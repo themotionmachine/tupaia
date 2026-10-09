@@ -837,6 +837,8 @@
     if (op.remove) {
       if (op.set && Object.keys(op.set).length) fail("BAD_ARGS", "an op either sets fields or removes, not both");
       if (NO_REMOVE[type]) fail("REFUSED", NO_REMOVE[type]);
+      if ((op.force !== undefined || op.moveTo !== undefined) && !REMOVE[type].takesForce)
+        fail("BAD_ARGS", `force and moveTo apply only to removing a routeGroup, not a ${type}`);
       // check(entity, batch, op) may return plan info (shown by dryRun); op carries force/moveTo
       const info = REMOVE[type].check?.(r.entity, c, op);
       return {
@@ -852,6 +854,7 @@
       };
     }
     if (!isObj(op.set) || !Object.keys(op.set).length) fail("BAD_ARGS", "op needs set:{...} or remove:true");
+    if (op.force !== undefined || op.moveTo !== undefined) fail("BAD_ARGS", "force and moveTo go with remove:true");
     const table = FIELDS[type];
     const fs = [];
     for (const key of Object.keys(op.set)) {

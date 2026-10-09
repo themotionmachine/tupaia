@@ -243,6 +243,7 @@
   }
 
   REMOVE.routeGroup = {
+    takesForce: true,
     check(g, _c, op) {
       if (DEFAULT_GROUPS.includes(g.id))
         fail("REFUSED", `${g.id} is one of the app's built-in route groups and cannot be removed`);
@@ -381,16 +382,18 @@
     };
   }
 
-  /** Delete every link the route owns (both directions) and prune emptied rows. */
+  /** Delete every link the route owns (both directions) and prune emptied rows. Returns the freed [a, b] pairs. */
   function unlinkRoute(r) {
     const L = pack.cells.routes;
-    if (!L) return;
+    const freed = [];
+    if (!L) return freed;
     for (const pt of r.points || []) {
       const from = pt[2];
       const row = L[from];
       if (!row) continue;
       for (const [to, id] of Object.entries(row)) {
         if (id !== r.i) continue;
+        freed.push([from, Number(to)]);
         delete row[to];
         const back = L[to];
         if (back) {
@@ -399,6 +402,36 @@
         }
       }
       if (L[from] && !Object.keys(L[from]).length) delete L[from];
+    }
+    return freed;
+  }
+
+  /**
+   * A cell pair holds one route id. When its owner goes (removed, or its points edited away),
+   * give each freed pair that nobody holds now to the first other route that still runs through it.
+   */
+  function healLinks(freed, exceptId) {
+    const L = pack.cells.routes;
+    if (!L || !freed.length) return;
+    const key = (a, b) => (a < b ? `${a}-${b}` : `${b}-${a}`);
+    const open = new Map();
+    for (const [a, b] of freed) if (a !== b && L[a]?.[b] === undefined) open.set(key(a, b), [a, b]);
+    if (!open.size) return;
+    for (const other of pack.routes) {
+      if (!other || other.i === exceptId) continue;
+      const pts = other.points || [];
+      for (let k = 0; k < pts.length - 1; k++) {
+        const a = pts[k][2];
+        const b = pts[k + 1][2];
+        const hit = a !== b && open.get(key(a, b));
+        if (!hit) continue;
+        if (!L[a]) L[a] = {};
+        if (!L[b]) L[b] = {};
+        L[a][b] = other.i;
+        L[b][a] = other.i;
+        open.delete(key(a, b));
+      }
+      if (!open.size) return;
     }
   }
 
@@ -449,14 +482,27 @@
 
   /** Replace a route's points, keeping pack.cells.routes consistent. */
   function setRoutePoints(r, pts, c) {
-    unlinkRoute(r);
+    const freed = unlinkRoute(r);
     r.points = pts.map(p => p.slice());
     r.feature = pack.cells.f[r.points[0][2]];
     delete r.length; // the route editor caches it; recomputed when needed
     delete r.cells;
     linkRoute(r);
+    healLinks(freed, r.i); // pairs the route no longer uses go to another route through them
     redrawRoute(r, c);
   }
+
+  // remove route: the app's Routes.remove, then hand its links to other routes through the same pairs
+  const coreRemoveRoute = REMOVE.route.apply;
+  REMOVE.route.apply = (r, c, op) => {
+    const L = pack.cells.routes || {};
+    const freed = [];
+    for (const pt of r.points || [])
+      for (const [to, id] of Object.entries(L[pt[2]] || {})) if (id === r.i) freed.push([pt[2], Number(to)]);
+    const out = coreRemoveRoute(r, c, op);
+    healLinks(freed, r.i);
+    return out;
+  };
 
   // edit route: points (any route), group by id or name
   FIELDS.route.points = {
@@ -490,7 +536,7 @@
   function checkRouteGroup(v) {
     const g = v === undefined ? "roads" : v;
     if (typeof g !== "string") fail("BAD_ARGS", "group must be a route group id");
-    return T.resolve("routeGroup", g).i;
+    return groupRef(g, "group").i;
   }
 
   function freehandCheck(item, c) {
