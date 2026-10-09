@@ -10,6 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import { after, before, describe, test } from "node:test";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
+import { jsonArgs } from "../src/browser.ts";
 import { absolutizeInputs, formatResult, mismatchWarnings, schemaType } from "../src/cli.ts";
 import { type DaemonState, readPortPref, readState, START_LOCK, statePath } from "../src/daemon-state.ts";
 import {
@@ -338,6 +339,21 @@ describe("tupaia-mcp --http daemon", () => {
     assert.equal(size.type, "jpeg");
     assert.equal(Math.max(size.width, size.height), 300);
     assert.match(JSON.parse(shot.text[0]).shotId, /^s\d+$/);
+
+    // a large args payload (sent as one JSON string) arrives intact
+    const rows = Array.from({ length: 50_000 }, (_, i) => [i, i % 7, { k: `v${i}` }]);
+    const sum = await callJson(d.st, "eval", {
+      code: "return [args.length, args[49999][0], args[123][2].k, args.reduce((s, r) => s + r[1], 0)]",
+      args: rows,
+      readOnly: true
+    });
+    assert.equal(sum.isError, false, sum.text.join("\n"));
+    assert.deepEqual(JSON.parse(sum.text[0]).value, [
+      50_000,
+      49_999,
+      "v123",
+      rows.reduce((t, r) => t + (r[1] as number), 0)
+    ]);
 
     const bad = await callJson(d.st, "find", { type: "nope" });
     assert.equal(bad.isError, true);
@@ -883,6 +899,18 @@ describe("tupaia CLI daemon lifecycle", () => {
       ),
       "{a: {x: number}, b?: (string | 1)[]}"
     );
+  });
+
+  test("large plain args cross to the page as one JSON string", () => {
+    const big = Array.from({ length: 20_000 }, (_, i) => [i, i / 2]);
+    const j = jsonArgs({ code: "x", args: big, redraw: undefined });
+    assert.ok(j);
+    assert.deepEqual(JSON.parse(j), { code: "x", args: big });
+    assert.equal(jsonArgs({ args: [1, 2, 3] }), null, "small args keep the normal path");
+    for (const odd of [NaN, Infinity, new Date(0), new Float32Array(2), undefined])
+      assert.equal(jsonArgs({ args: big, odd: [odd] }), null, `${String(odd)} in an array keeps the normal path`);
+    assert.equal(jsonArgs({ args: big, m: new Map() }), null);
+    assert.equal(jsonArgs("x".repeat(100_000)), null, "a bare string is cheap already");
   });
 
   test("mode mismatch is a warning, never a restart", () => {

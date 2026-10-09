@@ -31,6 +31,8 @@ const START_WAIT_MS = positiveInt(process.env.TUPAIA_START_TIMEOUT_MS) ?? 90_000
 const HEARTBEAT_MS = positiveInt(process.env.TUPAIA_CLI_HEARTBEAT_MS) ?? 15_000;
 /** `headers` prints the token by then even if the daemon is still starting (from process start). */
 const HEADERS_SOON_MS = positiveInt(process.env.TUPAIA_HEADERS_WAIT_MS) ?? 7000;
+/** The daemon clamps a call's timeoutMs to 500..TIMEOUT_CAP_MS (schemas.ts; not imported: zod is heavy). */
+const CALL_TIMEOUT_MAX_MS = 300_000;
 /** How long to wait for a daemon that is shutting down (it drains its call and saves its page). */
 const EXIT_WAIT_MS = 45_000;
 const LOG_ROTATE_BYTES = 5 * 1024 * 1024;
@@ -493,6 +495,10 @@ async function cmdCall(cfg: Config, opts: Opts): Promise<number> {
       throw new CliError("arguments must be a JSON object");
     args = absolutizeInputs(tool, parsed as Record<string, unknown>, process.cwd());
   }
+  if (opts.timeout !== undefined && (opts.timeout < 500 || opts.timeout > CALL_TIMEOUT_MAX_MS)) {
+    opts.timeout = Math.min(CALL_TIMEOUT_MAX_MS, Math.max(500, opts.timeout));
+    note(`--timeout is 500..${CALL_TIMEOUT_MAX_MS} ms; using ${opts.timeout}`);
+  }
   const caller =
     process.env.TUPAIA_CALLER || `pid ${process.pid} in …/${process.cwd().split(path.sep).slice(-2).join("/")}`;
   let f = await ensureDaemon(cfg, opts);
@@ -514,7 +520,10 @@ async function cmdCall(cfg: Config, opts: Opts): Promise<number> {
         0
       );
     } catch (e) {
-      throw new CliError(`the daemon connection failed during the call: ${(e as Error).message}`);
+      // refused: the daemon stopped listening before it got the call, so nothing ran
+      if ((e as NodeJS.ErrnoException).code !== "ECONNREFUSED" || attempt > 0)
+        throw new CliError(`the daemon connection failed during the call: ${(e as Error).message}`);
+      r = { status: 503, body: JSON.stringify({ closing: true }) };
     } finally {
       stopBeat();
     }
@@ -766,7 +775,7 @@ async function cmdHeaders(cfg: Config, opts: Opts): Promise<number> {
     f = { st, health: {} };
   }
   // Claude Code abandons a helper after about 10 s: never wait for a slow start that long
-  const started = f ?? (await startDaemon(cfg, opts, Math.max(1000, HEADERS_SOON_MS - process.uptime() * 1000)));
+  const started = f ?? (await startDaemon(cfg, opts, Math.max(0, HEADERS_SOON_MS - process.uptime() * 1000)));
   if ("pending" in started) {
     note(
       `daemon pid ${started.pending.daemonPid} is still starting; if Claude Code gave up connecting, reconnect (/mcp) once it is up`
