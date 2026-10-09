@@ -41,6 +41,10 @@ export interface ReplaySpec {
   phased?: boolean;
   /** Timeout class for replay (default 'edit'). */
   timeout?: "edit" | "heavy";
+  /** The op can renumber pack cells (a heightmap rebuild): replay re-reads the page's cell graph after it. */
+  renumbers?: (r: Resolved) => boolean;
+  /** After a replayed apply: a note for the replay result (e.g. the outcome differs from the recording), or null. */
+  afterReplay?: (recorded: Resolved, applied: Resolved, out: Record<string, unknown>) => string | null;
 }
 
 export const REPLAY_EXT: Record<string, ReplaySpec> = {};

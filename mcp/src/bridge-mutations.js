@@ -2054,6 +2054,13 @@
     return dropped;
   }
 
+  // the drawn coastline, lakes and ocean layers refer to the old features; a risk rebuild redraws them
+  function clearFeatureShapes() {
+    defs.selectAll("#land, #water").selectAll("path").remove();
+    defs.select("#featurePaths").selectAll("path").remove();
+    viewbox.selectAll("#coastline use, #lakes path, #oceanLayers path").remove();
+  }
+
   // restoreRiskedData only groups and names features when erosion runs; do it here otherwise
   function finishRiskFeatures() {
     try {
@@ -2166,9 +2173,7 @@
       if (erosionEl) erosionEl.checked = !!H.erosion;
       try {
         if (H.rebuild === "risk") {
-          defs.selectAll("#land, #water").selectAll("path").remove();
-          defs.select("#featurePaths").selectAll("path").remove();
-          viewbox.selectAll("#coastline use, #lakes path, #oceanLayers path").remove();
+          clearFeatureShapes();
           // Without erosion the app keeps pack.rivers, whose cells/source/mouth are pack ids of
           // the old graph; reGraph renumbers cells, so drawRivers would read p[staleId] and
           // throw. Record them as grid ids here and map them back after the rebuild.
@@ -2570,5 +2575,17 @@
     };
   };
 
-  T.mutations = { FIELDS, ADD, selectCells, nameSpec };
+  T.mutations = {
+    FIELDS,
+    ADD,
+    selectCells,
+    nameSpec,
+    // shared with bridge-ext (terrain): the heightmap rebuild helpers and the batch plumbing
+    batchContext,
+    finishRedraw,
+    heightmapInternals,
+    featureSummary,
+    clearFeatureShapes,
+    finishRiskFeatures
+  };
 })(globalThis);
