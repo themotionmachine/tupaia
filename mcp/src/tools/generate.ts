@@ -2,10 +2,12 @@
 // the current map). Both take an auto-undo entry first.
 import { z } from "zod";
 import type { ToolContext } from "../context.ts";
-import { META_TEXT_HEAVY } from "../result.ts";
+import { registerReplayable } from "../ops.ts";
+import { META_TEXT_HEAVY, ToolError } from "../result.ts";
 import { TIMEOUTS, TimeoutMs } from "../schemas.ts";
 import { changesSinceUndo } from "./edit.ts";
 import { defineTools } from "./registry.ts";
+import { RELIEF_REPLAY, ReliefParams, regenerateRelief } from "./relief.ts";
 
 export const REGEN_PARTS = [
   "rivers",
@@ -24,8 +26,12 @@ export const REGEN_PARTS = [
   "goods",
   "markets",
   "economy",
-  "production"
+  "production",
+  "relief"
 ] as const;
+
+// relief-only regenerate calls are seeded and replay in sketches (tools/relief.ts); other parts do not
+registerReplayable("regenerate", RELIEF_REPLAY);
 
 export function register(ctx: ToolContext): void {
   ctx.tool(
@@ -106,10 +112,15 @@ export function register(ctx: ToolContext): void {
     {
       title: "Regenerate parts of the map",
       description:
-        "Re-run generator parts on the current map (heightmap and cells stay). parts run in dependency order regardless of the order given: rivers, population, cultures, burgs, states, provinces, routes, religions, emblems, military, markers, zones, ice, goods, markets, economy, production. Locked entities are kept where the app supports locks. Several parts turn their layer on (reported in layerChanges); restoreLayers:true turns them back. states reseeds the random stream, so it is not reproducible. One auto-undo entry.",
+        "Re-run generator parts on the current map (heightmap and cells stay). parts run in dependency order regardless of the order given: rivers, population, cultures, burgs, states, provinces, routes, religions, emblems, military, markers, zones, ice, goods, markets, economy, production, relief. Locked entities are kept where the app supports locks. Several parts turn their layer on (reported in layerChanges); restoreLayers:true turns them back. states reseeds the random stream, so it is not reproducible. relief redraws the relief icons seeded (same settings, same icons) with relief:{density, perBiome, minHeight, exclude, nearBurgs, seed, onLoad}; the settings are stored with the map and every later draw uses them. parts:['relief'] alone is replayable in sketches and takes dryRun (returns the stored settings before/after; with no relief keys it just reads them). One auto-undo entry.",
       inputSchema: z.object({
         parts: z.array(z.enum(REGEN_PARTS)).min(1),
         restoreLayers: z.boolean().optional().describe("Undo layer visibility changes made by the regenerators"),
+        relief: ReliefParams.optional(),
+        dryRun: z
+          .boolean()
+          .optional()
+          .describe("parts:['relief'] only: return the relief settings before/after, draw nothing"),
         timeoutMs: TimeoutMs
       }),
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
@@ -117,6 +128,11 @@ export function register(ctx: ToolContext): void {
       kind: "heavy"
     },
     async (args, scope) => {
+      const reliefOnly = args.parts.every(p => p === "relief");
+      if (args.relief !== undefined && !args.parts.includes("relief"))
+        throw new ToolError("BAD_ARGS", "relief settings need 'relief' in parts. Nothing was changed.");
+      if (args.dryRun && !reliefOnly) throw new ToolError("BAD_ARGS", "dryRun works with parts:['relief'] only");
+      if (reliefOnly) return regenerateRelief(ctx, scope, args);
       await scope.pushUndo("regenerate", args);
       let out: Record<string, unknown>;
       try {

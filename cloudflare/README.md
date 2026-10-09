@@ -85,6 +85,22 @@ load that never completes cannot lend its version to the next load, and so `load
 versionless PUT whose 409 dialog offered an `X-Map-Overwrite` button. Re-check all three after
 an upstream rebase.
 
+Relief icons (MCP `regenerate {parts:['relief']}` and `edit map {set:{reliefOnLoad}}`) add one
+new file and four marked hooks. `src/renderers/relief-settings.ts` reads map-level settings from
+attributes of `#terrain` (`data-seed`, `data-scale`, `data-biomes`, `data-min-height`,
+`data-exclude`, `data-near-burgs`, `data-regenerate`); `src/renderers/draw-relief-icons.ts`
+applies them (with none set it draws as upstream; a seeded draw swaps `Math.random` per cell
+and `drawReliefIcons` puts it back). With `data-regenerate` set, `prepareMapData`
+(`src/io/save.ts`) empties `#terrain` in the saved SVG, so every save path (File > Save, browser
+storage, autosave, the shared map, MCP saves and snapshots) drops the icons, and `src/io/load.ts`
+calls `restoreReliefOnLoad()` after a load to draw the same icons again and turn the Relief button
+on. `public/modules/ui/relief-editor.js` warns that manual relief edits are not saved on such a
+map. Old files load unchanged. A client without these hooks (an older deploy) loading such a file
+shows no relief and the Relief button off; turning Relief on draws unseeded icons at the style
+density, and its next save stores them again. Deploy the app before saving a map with
+`data-regenerate` to `shared`. Re-check after an upstream rebase (upstream has a
+`relief-webgl-renderer` branch).
+
 ## Local smoke test (no Cloudflare account needed)
 
 `wrangler dev --local` runs the Worker against an in-memory R2 + D1 (miniflare):
