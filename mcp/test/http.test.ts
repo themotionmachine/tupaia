@@ -590,6 +590,34 @@ describe("tupaia CLI daemon lifecycle", () => {
     }
   });
 
+  test("headers prints the token before a slow daemon is up; the daemon then serves it", async () => {
+    // Claude Code abandons a helper after about 10 s; TUPAIA_HEADERS_WAIT_MS stands in for a slow start
+    const env = safeEnv({ TUPAIA_HTTP_IDLE_MIN: "0" });
+    const port = await freePort();
+    const r = await cli(["headers"], {
+      ...env,
+      TUPAIA_HEADERS_WAIT_MS: "1",
+      CLAUDE_CODE_MCP_SERVER_URL: `http://127.0.0.1:${port}/mcp`
+    });
+    try {
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stderr, /is still starting; if Claude Code gave up connecting, reconnect/);
+      const token = /^Bearer (.+)$/.exec(JSON.parse(r.stdout).Authorization)?.[1];
+      assert.ok(token && token.length >= 40);
+      assert.ok(await waitFor(() => !!readState(env.TUPAIA_OUT), 90_000), "the daemon comes up on its own");
+      const st = readState(env.TUPAIA_OUT) as DaemonState;
+      assert.equal(st.token, token, "it uses the token the helper printed");
+      assert.equal(st.port, port);
+      assert.ok(await waitFor(() => !fs.existsSync(path.join(env.TUPAIA_OUT, START_LOCK)), 5000), "lock removed");
+      assert.equal((await raw(port, { headers: { authorization: `Bearer ${token}` } })).status, 200);
+      const again = await cli(["headers"], { ...env, CLAUDE_CODE_MCP_SERVER_URL: `http://127.0.0.1:${port}/mcp` });
+      assert.equal(again.code, 0, again.stderr);
+      assert.equal(again.stdout, r.stdout);
+    } finally {
+      await cli(["stop"], env);
+    }
+  });
+
   test("an auto-started daemon keeps its port across restarts", async () => {
     const env = safeEnv({ TUPAIA_HTTP_IDLE_MIN: "0" });
     const first = await cli(["tools", "--names"], env);
@@ -794,6 +822,30 @@ describe("tupaia CLI daemon lifecycle", () => {
       assert.match(d.log.join(""), /idle for 0\.03 min/);
       assert.equal(fs.existsSync(statePath(d.env.TUPAIA_OUT)), false);
     } finally {
+      await d.stop();
+    }
+  });
+
+  test("an attached MCP client (open subscriptions/listen stream) holds off idle shutdown", async () => {
+    // Claude Code holds such a stream for its whole session and does not reconnect after a stop
+    const d = await spawnDaemon({ TUPAIA_HTTP_IDLE_MIN: "0.03" });
+    let client: Client | undefined;
+    try {
+      client = await httpClient(d.st, "auto");
+      assert.equal(client.getProtocolEra(), "modern");
+      const sub = await client.listen({ toolsListChanged: true } as Parameters<Client["listen"]>[0]);
+      await new Promise(r => setTimeout(r, 5000));
+      assert.equal(d.child.exitCode, null, "still running while a client is attached");
+      const h = await raw(d.st.port, { headers: auth(d.st) });
+      assert.equal(h.json.attached, 1);
+      assert.equal(h.json.active, 0, "a stream is not a call: a stop does not wait for it");
+      await sub.close();
+      await client.close();
+      client = undefined;
+      assert.ok(await waitFor(() => d.child.exitCode !== null, 20_000), "exits once the client left");
+      assert.match(d.log.join(""), /idle for 0\.03 min/);
+    } finally {
+      await client?.close().catch(() => {});
       await d.stop();
     }
   });

@@ -121,6 +121,8 @@ export interface StartLock {
   pid: number;
   daemonPid?: number;
   at: number;
+  /** The token the starting daemon will use (the lock file is 0600 like daemon.json). */
+  token?: string;
 }
 
 export function readStartLock(outDir: string): StartLock | null {

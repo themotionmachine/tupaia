@@ -27,8 +27,10 @@ import {
   type LastExit,
   pidAlive,
   probeHealth,
+  readStartLock,
   readState,
   removeStateIfOwned,
+  START_LOCK,
   writeState
 } from "./daemon-state.ts";
 import { TIMEOUT_CAP_MS } from "./schemas.ts";
@@ -229,7 +231,10 @@ export async function startHttpDaemon(o: HttpOptions): Promise<HttpDaemon> {
     );
   }
 
-  const token = crypto.randomBytes(32).toString("base64url");
+  // the CLI that starts a daemon makes its token (so `tupaia headers` can print it early)
+  const given = process.env.TUPAIA_HTTP_TOKEN;
+  delete process.env.TUPAIA_HTTP_TOKEN; // never passed on to the browser
+  const token = given && /^[A-Za-z0-9_-]{32,}$/.test(given) ? given : crypto.randomBytes(32).toString("base64url");
   const expectedAuth = Buffer.from(`Bearer ${token}`);
   const authOk = (h: string | undefined): boolean => {
     if (!h) return false;
@@ -250,20 +255,29 @@ export async function startHttpDaemon(o: HttpOptions): Promise<HttpDaemon> {
   const servers = new Map<number, http.Server>();
   let closing: Promise<void> | null = null;
   let active = 0;
+  /** Open subscriptions/listen streams (attached MCP clients). */
+  let attached = 0;
   let lastActivity = Date.now();
   let requests = 0;
   let shotSeq = 0;
   const startedAt = new Date().toISOString();
   let toolsCache: unknown[] | null = null;
 
-  /** Count a request; `busy` ones (calls, not long-lived notification streams) hold off idle shutdown. */
-  const begin = (res: http.ServerResponse, busy = true) => {
+  /**
+   * Count a request. A call is `busy` (a stop waits for it); a `stream` is a client's long-lived
+   * subscriptions/listen stream: Claude Code holds one for its whole session (verified with
+   * 2.1.293) and does not reconnect after the daemon stops, so an open stream holds off idle
+   * shutdown (a stop does not wait for it).
+   */
+  const begin = (res: http.ServerResponse, kind: "busy" | "stream" | "other" = "busy") => {
     requests++;
     lastActivity = Date.now();
-    if (!busy) return;
-    active++;
+    if (kind === "other") return;
+    if (kind === "busy") active++;
+    else attached++;
     res.once("close", () => {
-      active--;
+      if (kind === "busy") active--;
+      else attached--;
       lastActivity = Date.now();
     });
   };
@@ -360,14 +374,13 @@ export async function startHttpDaemon(o: HttpOptions): Promise<HttpDaemon> {
       }
       body = b;
     }
-    // A connected client may hold a notification stream open for hours; that is not activity
-    // (idle shutdown still applies, and a stop does not wait for it).
+    // an attached client's notification stream holds off idle shutdown; a stop does not wait for it
     const rpc = rpcOf(body);
     if (trace)
       log(
         `mcp ${method} ${rpc.method ?? "-"} protocol ${req.headers["mcp-protocol-version"] ?? "-"} session ${req.headers["mcp-session-id"] ?? "-"}`
       );
-    begin(res, method !== "GET" && rpc.method !== "subscriptions/listen");
+    begin(res, method === "GET" ? "other" : rpc.method === "subscriptions/listen" ? "stream" : "busy");
     const t0 = Date.now();
     if (rpc.cancels !== undefined) {
       const held = inflight.get(String(rpc.cancels));
@@ -450,8 +463,9 @@ export async function startHttpDaemon(o: HttpOptions): Promise<HttpDaemon> {
     startedAt,
     uptimeS: Math.round(process.uptime()),
     idleMin: o.idleMin,
-    idleS: active ? 0 : Math.round((Date.now() - lastActivity) / 1000),
+    idleS: active || attached ? 0 : Math.round((Date.now() - lastActivity) / 1000),
     active,
+    attached,
     requests,
     browser: ctx.browser.state,
     tools: ctx.toolDefs.size,
@@ -543,6 +557,8 @@ export async function startHttpDaemon(o: HttpOptions): Promise<HttpDaemon> {
     token
   };
   writeState(outDir, state);
+  // the CLI that started this daemon may have left its start lock for it to remove
+  if (readStartLock(outDir)?.daemonPid === process.pid) fs.rmSync(path.join(outDir, START_LOCK), { force: true });
   // removed last thing on exit (after the browser closed), unless another daemon took it over
   process.once("exit", () => removeStateIfOwned(outDir, process.pid));
 
@@ -564,7 +580,7 @@ export async function startHttpDaemon(o: HttpOptions): Promise<HttpDaemon> {
         log(`cannot rewrite the state file in ${outDir}: ${(e as Error).message}`);
       }
     }
-    if (idleMs > 0 && active === 0 && Date.now() - lastActivity >= idleMs)
+    if (idleMs > 0 && active === 0 && attached === 0 && Date.now() - lastActivity >= idleMs)
       o.onStop(`idle for ${o.idleMin} min (TUPAIA_HTTP_IDLE_MIN)`);
   }, period);
   timer.unref();

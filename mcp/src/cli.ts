@@ -2,6 +2,7 @@
 // mcp/bin/tupaia. One daemon serves one TUPAIA_OUT; it is found through $TUPAIA_OUT/daemon.json.
 // Node built-ins only (no new dependencies), and nothing heavy is imported: this runs per call.
 import { execFileSync, spawn } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,6 +20,7 @@ import {
   readState,
   removeStateIfOwned,
   START_LOCK,
+  type StartLock,
   writePortPref
 } from "./daemon-state.ts";
 
@@ -27,6 +29,8 @@ const SERVER = path.join(path.dirname(fileURLToPath(import.meta.url)), "server.t
 const START_WAIT_MS = positiveInt(process.env.TUPAIA_START_TIMEOUT_MS) ?? 90_000;
 /** First progress line on stderr for a slow call or start, then every 2x this. */
 const HEARTBEAT_MS = positiveInt(process.env.TUPAIA_CLI_HEARTBEAT_MS) ?? 15_000;
+/** `headers` prints the token by then even if the daemon is still starting (from process start). */
+const HEADERS_SOON_MS = positiveInt(process.env.TUPAIA_HEADERS_WAIT_MS) ?? 7000;
 /** How long to wait for a daemon that is shutting down (it drains its call and saves its page). */
 const EXIT_WAIT_MS = 45_000;
 const LOG_ROTATE_BYTES = 5 * 1024 * 1024;
@@ -206,8 +210,10 @@ function tryLock(file: string): number | null {
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
     try {
-      const held = JSON.parse(fs.readFileSync(file, "utf8")) as { pid: number; at: number };
-      if (!pidAlive(held.pid) || Date.now() - held.at > START_WAIT_MS + 20_000) fs.unlinkSync(file);
+      // stale once neither the starting CLI nor the daemon it spawned is alive, or too old
+      const held = JSON.parse(fs.readFileSync(file, "utf8")) as StartLock;
+      const alive = pidAlive(held.pid) || (!!held.daemonPid && pidAlive(held.daemonPid));
+      if (!alive || Date.now() - held.at > START_WAIT_MS + 20_000) fs.unlinkSync(file);
     } catch {
       // unreadable or just removed: retry
     }
@@ -238,23 +244,39 @@ function heartbeat(what: () => Promise<string> | string): () => void {
   return () => clearTimeout(timer);
 }
 
-async function startDaemon(cfg: Config, opts: Opts): Promise<Found> {
+/** A daemon still starting: its pid and the token it will use (`headers` prints it without waiting). */
+interface Pending {
+  pending: { daemonPid: number; token: string };
+}
+
+/**
+ * Start a daemon for cfg.outDir: one start at a time per TUPAIA_OUT (the start lock). The token is
+ * made here and handed to the daemon, so with `soonMs` (headers: Claude Code gives its helper about
+ * 10 s) a start still running after soonMs returns Pending and is left running; the daemon removes
+ * the lock once it serves. Otherwise a start that takes over START_WAIT_MS is stopped.
+ */
+async function startDaemon(cfg: Config, opts: Opts): Promise<Found>;
+async function startDaemon(cfg: Config, opts: Opts, soonMs: number): Promise<Found | Pending>;
+async function startDaemon(cfg: Config, opts: Opts, soonMs?: number): Promise<Found | Pending> {
   const lockFile = path.join(cfg.outDir, START_LOCK);
-  const deadline = Date.now() + START_WAIT_MS + 30_000;
+  const t0 = Date.now();
+  const late = () => soonMs !== undefined && Date.now() - t0 > soonMs;
+  const deadline = t0 + START_WAIT_MS + 30_000;
   let fd = tryLock(lockFile);
   if (fd === null) note(`another caller is starting the daemon for ${cfg.outDir}; waiting for it`);
   while (fd === null) {
     if (Date.now() > deadline) throw new CliError(`timed out waiting for ${lockFile} (another start in progress)`);
     await sleep(200);
-    if (!fs.existsSync(lockFile)) {
-      // the other caller finished starting one
-      const found = await findDaemon(cfg, true);
-      if (found) return found;
-    }
+    const found = await findDaemon(cfg, true);
+    if (found) return found;
+    const lock = readStartLock(cfg.outDir);
+    if (late() && lock?.token && lock.daemonPid && pidAlive(lock.daemonPid))
+      return { pending: { daemonPid: lock.daemonPid, token: lock.token } };
     fd = tryLock(lockFile);
   }
   let child: ReturnType<typeof spawn> | null = null;
   let up = false;
+  let leaveRunning = false;
   try {
     const again = await findDaemon(cfg, true);
     if (again) return again;
@@ -264,8 +286,9 @@ async function startDaemon(cfg: Config, opts: Opts): Promise<Found> {
     const log = fs.openSync(logFile, "a");
     const where = startPort(cfg, opts);
     const portArgs = where.port ? [where.strict ? "--port" : "--prefer-port", String(where.port)] : [];
+    const token = crypto.randomBytes(32).toString("base64url");
     // the daemon runs from mcp/: path variables are made absolute against the caller's cwd
-    const env: NodeJS.ProcessEnv = { ...process.env, TUPAIA_OUT: cfg.outDir };
+    const env: NodeJS.ProcessEnv = { ...process.env, TUPAIA_OUT: cfg.outDir, TUPAIA_HTTP_TOKEN: token };
     if (process.env.TUPAIA_DIST) env.TUPAIA_DIST = cfg.distDir;
     child = spawn(process.execPath, [SERVER, "--http", ...portArgs], {
       detached: true,
@@ -275,9 +298,10 @@ async function startDaemon(cfg: Config, opts: Opts): Promise<Found> {
     });
     fs.closeSync(log);
     const pid = child.pid as number;
-    // `status` and `stop` read the lock to see a daemon that is still starting
+    // `status` and `stop` read the lock to see a daemon that is still starting (the lock is 0600)
+    const held: StartLock = { pid: process.pid, daemonPid: pid, at: Date.now(), token };
     fs.ftruncateSync(fd);
-    fs.writeSync(fd, JSON.stringify({ pid: process.pid, daemonPid: pid, at: Date.now() }), 0);
+    fs.writeSync(fd, JSON.stringify(held), 0);
     let exited: number | null = null;
     child.on("exit", code => {
       exited = code ?? -1;
@@ -305,6 +329,10 @@ async function startDaemon(cfg: Config, opts: Opts): Promise<Found> {
             return { st, health: p.health };
           }
         }
+        if (late()) {
+          leaveRunning = true;
+          return { pending: { daemonPid: pid, token } };
+        }
       }
     } finally {
       stopBeat();
@@ -313,8 +341,8 @@ async function startDaemon(cfg: Config, opts: Opts): Promise<Found> {
       `the daemon did not come up within ${START_WAIT_MS / 1000} s, so it was stopped; see ${logFile}. On a busy machine raise TUPAIA_START_TIMEOUT_MS.`
     );
   } finally {
-    // never leave a half-started daemon behind (the next caller would race it)
-    if (!up && child?.pid && pidAlive(child.pid)) {
+    // never leave a half-started daemon behind (the next caller would race it), unless asked to
+    if (!up && !leaveRunning && child?.pid && pidAlive(child.pid)) {
       try {
         process.kill(child.pid, "SIGTERM");
       } catch {
@@ -322,10 +350,12 @@ async function startDaemon(cfg: Config, opts: Opts): Promise<Found> {
       }
     }
     fs.closeSync(fd);
-    try {
-      fs.unlinkSync(lockFile);
-    } catch {
-      // already gone
+    if (!leaveRunning) {
+      try {
+        fs.unlinkSync(lockFile);
+      } catch {
+        // already gone
+      }
     }
   }
 }
@@ -635,7 +665,7 @@ async function cmdStatus(cfg: Config, opts: Opts): Promise<number> {
     const idle = Number(h.idleMin) ? `idle shutdown after ${h.idleMin} min (idle ${h.idleS} s)` : "no idle shutdown";
     const extra = (f.st.ports ?? []).filter(p => p !== f.st.port);
     out(
-      `running: pid ${f.st.pid}, ${mcpUrlOf(f.st)}${extra.length ? ` (also port ${extra.join(", ")})` : ""}, mode ${h.mode}, browser ${h.browser}, ${h.active} active request(s), up ${h.uptimeS} s, ${idle}`
+      `running: pid ${f.st.pid}, ${mcpUrlOf(f.st)}${extra.length ? ` (also port ${extra.join(", ")})` : ""}, mode ${h.mode}, browser ${h.browser}, ${h.active} active request(s), ${h.attached ?? 0} attached MCP client(s), up ${h.uptimeS} s, ${idle}`
     );
     out(`version ${f.st.version}, app ${f.st.appVersion ?? "?"}, TUPAIA_OUT ${cfg.outDir}, repo ${h.repoRoot}`);
   }
@@ -726,23 +756,42 @@ async function cmdHeaders(cfg: Config, opts: Opts): Promise<number> {
   const registered = opts.port ? Number(opts.port) : 0;
   // the registered port is where this TUPAIA_OUT's daemon starts from now on
   if (registered) writePortPref(cfg.outDir, { port: registered, registered: true });
-  const f = (await findDaemon(cfg)) ?? (await startDaemon(cfg, opts));
-  warnMismatch(cfg, f, { ...opts, port: undefined });
-  const ports = f.st.ports ?? [f.st.port];
+  let f: Found | null;
+  try {
+    f = await findDaemon(cfg);
+  } catch (e) {
+    // a daemon too busy to answer /health in time still has a valid token
+    const st = readState(cfg.outDir);
+    if (!st || !pidAlive(st.pid) || st.closing) throw e;
+    f = { st, health: {} };
+  }
+  // Claude Code abandons a helper after about 10 s: never wait for a slow start that long
+  const started = f ?? (await startDaemon(cfg, opts, Math.max(1000, HEADERS_SOON_MS - process.uptime() * 1000)));
+  if ("pending" in started) {
+    note(
+      `daemon pid ${started.pending.daemonPid} is still starting; if Claude Code gave up connecting, reconnect (/mcp) once it is up`
+    );
+    out(JSON.stringify({ Authorization: `Bearer ${started.pending.token}` }));
+    return 0;
+  }
+  warnMismatch(cfg, started, { ...opts, port: undefined });
+  const ports = started.st.ports ?? [started.st.port];
   if (registered && !ports.includes(registered)) {
     // a daemon started elsewhere (another port) holds this TUPAIA_OUT: it serves the registered port too
     let r: { status: number; body: string };
     try {
-      r = await daemonRequest(f.st.port, f.st.token, "POST", "/listen", { port: registered }, 10_000);
+      r = await daemonRequest(started.st.port, started.st.token, "POST", "/listen", { port: registered }, 10_000);
     } catch (e) {
-      throw new CliError(`could not ask daemon pid ${f.st.pid} to listen on ${registered}: ${(e as Error).message}`);
+      throw new CliError(
+        `could not ask daemon pid ${started.st.pid} to listen on ${registered}: ${(e as Error).message}`
+      );
     }
     if (r.status !== 200)
       throw new CliError(
-        `the daemon for ${cfg.outDir} (pid ${f.st.pid}, port ${f.st.port}) cannot also listen on the registered port ${registered}: ${r.body.slice(0, 300)}`
+        `the daemon for ${cfg.outDir} (pid ${started.st.pid}, port ${started.st.port}) cannot also listen on the registered port ${registered}: ${r.body.slice(0, 300)}`
       );
   }
-  out(JSON.stringify({ Authorization: `Bearer ${f.st.token}` }));
+  out(JSON.stringify({ Authorization: `Bearer ${started.st.token}` }));
   return 0;
 }
 
@@ -760,6 +809,8 @@ function checkOutDir(): void {
 }
 
 export async function main(argv: string[]): Promise<number> {
+  // a reader that went away (a helper caller that timed out, `| head`) is not a crash
+  process.stdout.on("error", () => {});
   let opts: Opts;
   try {
     opts = parseArgs(argv);
