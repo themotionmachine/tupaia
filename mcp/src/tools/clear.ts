@@ -108,6 +108,7 @@ registerReplayable("clear", {
   bridgeArgs: r => {
     const c = asClear(r) as ClearResolved;
     const a: Record<string, unknown> = { ids: c.removed, idents: c.idents ?? {} };
+    if (c.orphanRoutes) a.orphanCount = c.orphanRoutes;
     if (c.redraw !== undefined) a.redraw = c.redraw;
     return a;
   },

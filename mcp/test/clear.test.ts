@@ -297,6 +297,55 @@ describe("tupaia-mcp clear and removal", () => {
     await h.ok("snapshot", { action: "undo" }); // the lock
   });
 
+  test("clear labels, notes, rivers and emblems by filter; a kept burg keeps its emblem", async () => {
+    await h.ok("add", {
+      type: "label",
+      items: [
+        { at: { x: 300, y: 300 }, text: "Wipe Me" },
+        { at: { x: 400, y: 400 }, text: "Keep Me" }
+      ]
+    });
+    const lab = await h.ok("clear", { types: ["labels"], where: { text: "Wipe Me" } });
+    assert.deepEqual(lab.removed, { labels: 1 });
+    const texts = (await h.ok("find", { type: "label", limit: 50 })).rows as Obj[];
+    assert.deepEqual(
+      texts.map(t => t.name),
+      ["Keep Me"]
+    );
+
+    const noteName = await ev(`notes.find(n => n.id.startsWith("marker")).name`);
+    const nNotes = await ev(`notes.filter(n => n.name === ${JSON.stringify(noteName)}).length`);
+    const nr = await h.ok("clear", { types: ["notes"], where: { name: noteName } });
+    assert.deepEqual(nr.removed, { notes: nNotes });
+
+    const river = await ev(
+      `const n = {}; for (const r of pack.rivers) n[r.type] = (n[r.type] || 0) + 1; const t = Object.keys(n).sort((a, b) => n[b] - n[a])[0];
+       return { type: t, count: n[t], total: pack.rivers.length, ids: pack.rivers.filter(r => r.type === t).map(r => r.i) };`
+    );
+    const rr = await h.ok("clear", { types: ["rivers"], where: { rivers: { type: river.type } } });
+    assert.deepEqual(rr.removed, { rivers: river.count });
+    const rv = await ev(
+      `({ left: pack.rivers.length, cells: pack.cells.r.filter(x => args.includes(x)).length, svg: args.filter(i => document.getElementById("river" + i)).length })`,
+      river.ids
+    );
+    assert.deepEqual(rv, { left: river.total - river.count, cells: 0, svg: 0 });
+
+    const keepBurg = await ev(`pack.burgs.find(b => b && b.i && !b.removed && b.coa).i`);
+    const em = await h.ok("clear", {
+      types: ["emblems"],
+      where: { type: "burg" },
+      keep: [{ type: "burg", ref: keepBurg }]
+    });
+    const ev2 = await ev(
+      `({ burgs: pack.burgs.filter(b => b && b.i && !b.removed && b.coa).map(b => b.i), states: pack.states.filter(s => s.i && !s.removed && s.coa).length })`
+    );
+    assert.deepEqual(ev2.burgs, [keepBurg]);
+    assert.ok(ev2.states > 0, "state emblems stay");
+    assert.equal((em.kept as Obj).emblems.items[0].i, `burg:${keepBurg}`);
+    for (let k = 0; k < 5; k++) await h.ok("snapshot", { action: "undo" });
+    assert.equal(await ev(`pack.rivers.length`), river.total);
+  });
+
   test("clear everything: one undo entry, no stale references, a clean save/load round trip, undo restores", async () => {
     const before = await ev(COUNTS);
     const depth = await undoDepth();
@@ -423,6 +472,7 @@ describe("tupaia-mcp clear and removal", () => {
         type: "burg",
         ops: [{ ref: pick.capital.i, remove: true, force: true, newCapital: pick.alt.i }]
       });
+      await h.ok("edit", { type: "religion", ops: [{ ref: pick.religion.i, remove: true }] });
       const add = await h.ok("add", { type: "burg", items: [{ at: { cell: pick.S2.free } }] });
       sketchBurg = (add.created as Obj[])[0].i;
       await h.ok("clear", { types: ["markers", "zones"] });
@@ -433,30 +483,40 @@ describe("tupaia-mcp clear and removal", () => {
       const recs = full.records as Obj[];
       assert.deepEqual(
         recs.map(o => o.tool),
-        ["edit", "add", "clear", "clear"]
+        ["edit", "edit", "add", "clear", "clear"]
       );
       assert.equal(full.blobOnly, false);
       const op1 = recs[0].resolved.ops[0];
       assert.equal(op1.force, true);
       assert.equal(op1.newCapital, pick.alt.i);
       assert.match(recs[0].summary, /\(forced\)/);
-      assert.ok(recs[2].resolved.removed.marker.includes(pick.lastMarker.i));
-      assert.ok(recs[2].resolved.idents.marker[String(pick.lastMarker.i)]);
-      assert.ok(recs[3].resolved.removed.burg.includes(sketchBurg));
-      assert.match(recs[3].summary, /^Cleared \d+ burgs/, recs[3].summary);
+      assert.equal(recs[1].resolved.ops[0].remove, true);
+      assert.ok(recs[3].resolved.removed.marker.includes(pick.lastMarker.i));
+      assert.ok(recs[3].resolved.idents.marker[String(pick.lastMarker.i)]);
+      assert.ok(recs[4].resolved.removed.burg.includes(sketchBurg));
+      assert.match(recs[4].summary, /^Cleared \d+ burgs/, recs[4].summary);
 
       const r = await h.ok("sketch", { action: "rebase", onto: { path: files.ok } }, 240_000);
       assert.equal(r.completed, true, JSON.stringify(r.conflicts));
-      assert.deepEqual(r.applied, [1, 2, 3, 4]);
+      assert.deepEqual(r.applied, [1, 2, 3, 4, 5]);
       const mapped = (r.idMap as Obj).burg[String(sketchBurg)];
       assert.ok(mapped !== undefined && mapped !== sketchBurg, JSON.stringify(r.idMap));
       const v = await ev(
         `({ capital: pack.states[args.pick.S.i].capital, theirs: pack.burgs.find(b => b && b.name === "Theirford" && !b.removed)?.i ?? null,
             mine: pack.burgs[args.mapped].removed ?? false, s2: pack.burgs.filter(b => b && b.i && !b.removed && b.state === args.pick.S2.i).length,
-            markers: pack.markers.length, zones: pack.zones.length })`,
+            markers: pack.markers.length, zones: pack.zones.length,
+            religion: pack.cells.religion.filter(x => x === args.pick.religion.i).length + (pack.religions[args.pick.religion.i].removed ? 0 : 1) })`,
         { pick, mapped }
       );
-      assert.deepEqual(v, { capital: pick.alt.i, theirs: sketchBurg, mine: true, s2: 0, markers: 0, zones: 0 });
+      assert.deepEqual(v, {
+        capital: pick.alt.i,
+        theirs: sketchBurg,
+        mine: true,
+        s2: 0,
+        markers: 0,
+        zones: 0,
+        religion: 0
+      });
       assert.deepEqual(await ev(LINK_CHECK), { bad: 0, missing: 0, empty: 0 });
     });
 
@@ -464,13 +524,13 @@ describe("tupaia-mcp clear and removal", () => {
       const gone = await h.ok("sketch", { action: "rebase", onto: { path: files.burgGone } }, 240_000);
       assert.equal(gone.completed, false);
       const c = (gone.conflicts as Obj[])[0];
-      assert.equal(c.seq, 4, JSON.stringify(gone.conflicts).slice(0, 1500));
+      assert.equal(c.seq, 5, JSON.stringify(gone.conflicts).slice(0, 1500));
       assert.match(c.reason, /REMOVED/);
 
       const reused = await h.ok("sketch", { action: "rebase", onto: { path: files.markerReused } }, 240_000);
       assert.equal(reused.completed, false);
       const c2 = (reused.conflicts as Obj[])[0];
-      assert.equal(c2.seq, 3);
+      assert.equal(c2.seq, 4);
       assert.match(c2.reason, /CHANGED/);
       assert.match(c2.reason, /id was reused or someone changed it/);
     });

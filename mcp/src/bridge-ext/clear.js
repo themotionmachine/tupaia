@@ -535,6 +535,15 @@
     };
   }
 
+  // stateRemove takes the state's own province list; a province of the state missing from it goes too
+  const stateApply = REMOVE.state.apply;
+  REMOVE.state.apply = (st, c, op, info) => {
+    const out = stateApply(st, c, op, info);
+    const left = I.liveList("province").filter(p => p.state === st.i);
+    if (left.length) dropNotes(left.map(p => removeProvinceData(p)));
+    return out;
+  };
+
   // a label's note goes with it (as a burg's or a marker's does)
   const labelApply = REMOVE.label.apply;
   REMOVE.label.apply = (l, c, op, info) => {
@@ -942,7 +951,10 @@
 
     const resolved = { removed };
     if (Object.keys(idents).length) resolved.idents = idents;
-    if (orphans.size) resolved.orphanRoutes = orphans.size; // for the log summary only
+    // how many of removed.route were orphans (the log summary only; replay passes it back)
+    const orphanCount = a.ids !== undefined ? Number(a.orphanCount) || 0 : orphans.size;
+    if (orphanCount) resolved.orphanRoutes = orphanCount;
+    if (a.orphanRoutes && !pick.burg?.size) c.notes.add("orphanRoutes applies only when burgs are cleared");
     if (a.redraw !== undefined) resolved.redraw = a.redraw;
     const counts = {};
     for (const type of Object.keys(removed)) counts[MANY[type]] = removed[type].length;
