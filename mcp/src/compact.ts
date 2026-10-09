@@ -96,6 +96,7 @@ interface FindResult {
   matchedBy?: string | null;
   near?: { x: number; y: number; cell?: number };
   rows?: Obj[];
+  warnings?: string[];
 }
 
 const POSITION_KEYS = new Set(["x", "y"]);
@@ -187,6 +188,7 @@ export function compactFind(r: FindResult, fields?: string[]): string {
   }
   const shown = offset + rows.length;
   if (total > shown) lines.push(`+${total - shown} more (offset=${shown})`);
+  for (const w of r.warnings ?? []) lines.push(`warning: ${w}`);
   return lines.join("\n");
 }
 

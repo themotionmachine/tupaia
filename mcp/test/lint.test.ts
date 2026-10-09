@@ -620,16 +620,17 @@ describe("tupaia-mcp lint (browser)", () => {
       });
       // after the merge with dx/terrain the risk rebuild carries route points and markers over to the
       // new cells and rebuilds cells.routes with Routes.buildLinks (riskRebuild): no holes, no link
-      // the routes do not make (a carried point can still sit a cell away from its recorded cell)
-      const carried = await lint({ checks: ["route-link"], limit: 3 });
+      // the routes do not make; a carried point records the cell under it (dx/core-2)
+      const carried = await lint({ checks: ["route-link", "route-point-cell"], limit: 3 });
       assert.equal(carried.counts["route-link"] ?? 0, 0, JSON.stringify(rowsOf(carried, "route-link")));
+      assert.equal(carried.counts["route-point-cell"] ?? 0, 0, JSON.stringify(rowsOf(carried, "route-point-cell")));
       // the stale state an older rebuild (or a hand edit) leaves: holes in cells.routes, a route point
       // on a cell that does not exist, markers whose cell is elsewhere
       await h.ok("eval", {
         code: `const C = pack.cells; let n = 0;
           for (const k of Object.keys(C.routes)) if (n++ % 3 === 0) C.routes[k] = undefined;
-          const r = pack.routes.find(r => r && r.points && r.points.length > 2);
-          r.points[1][2] = C.i.length + 7;
+          for (const r of pack.routes.filter(r => r && r.points && r.points.length > 2).slice(0, 2))
+            r.points[1][2] = C.i.length + 7;
           for (const m of pack.markers.filter(m => m && m.cell !== undefined).slice(0, 3))
             m.cell = (m.cell + Math.floor(C.i.length / 2)) % C.i.length;
           return n;`

@@ -505,6 +505,18 @@
         get: x => x.expansionism ?? null,
         set: (x, v) => (x.expansionism = v)
       },
+      // the culture's coat-of-arms shield shape (emblems of its states, provinces and burgs use it
+      // when the emblem shape option is 'culture')
+      shield: {
+        check: v => {
+          const known = shieldNames();
+          if (typeof v !== "string" || (known.length && !known.includes(v)))
+            fail("BAD_ARGS", `shield must be one of the shield shapes`, { details: known });
+          return v;
+        },
+        get: x => x.shield || null,
+        set: (x, v) => (x.shield = v)
+      },
       lock: { check: bool("lock"), get: x => !!x.lock, set: (x, v) => (x.lock = v) }
     },
 
@@ -1574,6 +1586,9 @@
         Cultures.add(q.p.cell);
         const x = pack.cultures[pack.cultures.length - 1];
         applyFields(q.fs, x, c, item);
+        // Cultures.add gives a shield only when the emblem shape option is 'random'; generated
+        // cultures always have one (COA.getShield otherwise logs an error and falls back to heater)
+        if (!x.shield) x.shield = cultureShield(x);
         if (q.expand) {
           Cultures.expand();
           for (const b of pack.burgs) if (b?.i && !b.removed) b.culture = pack.cells.culture[b.cell];
@@ -1583,6 +1598,7 @@
         const lit = { at: literalPlace(item.at, q.p), name: x.name, color: x.color };
         if (typeof x.type === "string") lit.type = x.type;
         if (Number.isInteger(x.base)) lit.base = x.base;
+        if (typeof x.shield === "string" && x.shield) lit.shield = x.shield;
         if (typeof x.expansionism === "number" && x.expansionism >= 0 && x.expansionism <= 10)
           lit.expansionism = x.expansionism;
         if (q.expand) lit.expand = true;
@@ -1633,6 +1649,31 @@
       }
     }
   };
+
+  /** Every shield shape name COA knows (empty when the emblem module is not loaded). */
+  function shieldNames() {
+    if (typeof COA === "undefined" || !COA.shields?.types) return [];
+    return Object.keys(COA.shields.types).flatMap(t => Object.keys(COA.shields[t] || {}));
+  }
+
+  /**
+   * A shield for a culture added without one: the default culture of that slot when Cultures.add
+   * took one (its first cultures come from the current culture set, in order), else a culture of the
+   * same names base, else a random one as the app's 'random' option does.
+   */
+  function cultureShield(x) {
+    try {
+      const def = Cultures.getDefault?.()?.[x.i];
+      if (def?.shield && def.name === x.name) return def.shield;
+    } catch {}
+    const same = pack.cultures.find(o => o?.i && o !== x && !o.removed && o.base === x.base && o.shield);
+    if (same) return same.shield;
+    try {
+      return Cultures.getRandomShield();
+    } catch {
+      return "heater";
+    }
+  }
 
   FNS.add = async a => {
     const type = a.type;
@@ -2292,6 +2333,23 @@
     return out;
   }
 
+  /** The cell to record for a route point at x,y (cell `near` holds it): itself, or for a sea route on land the nearest water neighbour. */
+  function pointCell(near, x, y, water) {
+    const C = pack.cells;
+    if (C.h[near] < 20 === water) return near;
+    let best = near;
+    let bd = Infinity;
+    for (const k of C.c[near] || []) {
+      if (C.h[k] < 20 !== water) continue;
+      const d = (C.p[k][0] - x) ** 2 + (C.p[k][1] - y) ** 2;
+      if (d < bd) {
+        bd = d;
+        best = k;
+      }
+    }
+    return best;
+  }
+
   /** Cell and feature references the rebuild left on the old numbering, moved to the new one. */
   function carryCellRefs(old, features, opts = {}) {
     const C = pack.cells;
@@ -2315,9 +2373,23 @@
     }
     if (burgsKept) out.burgsBackOnTheirCell = burgsKept;
     let bridged = 0;
+    let repointed = 0;
     for (const r of pack.routes || []) {
       if (!r || !Array.isArray(r.points)) continue;
-      for (const pt of r.points) if (Number.isInteger(pt[2])) pt[2] = remap(pt[2]);
+      const water = r.group === "searoutes";
+      for (const pt of r.points) {
+        if (!Number.isInteger(pt[2])) continue;
+        pt[2] = remap(pt[2]);
+        // a point keeps its x,y; its remapped cell (nearest the old cell's centre on the same grid
+        // cell) can lie a cell away from it. Record the cell under the point instead (a sea route:
+        // the nearest water cell around it), the way lint's route-point-cell fix does, so the
+        // links built below join the cells the drawn route passes through.
+        if (!Number.isFinite(pt[0]) || !Number.isFinite(pt[1])) continue;
+        const near = findCell(pt[0], pt[1]);
+        if (near === pt[2] || C.c[near]?.includes(pt[2])) continue;
+        pt[2] = pointCell(near, pt[0], pt[1], water);
+        repointed++;
+      }
       // two cells that were neighbours can come out of the re-pack with an edge flipped between
       // them: step through the neighbour they share, so every route link joins neighbours
       for (let k = 1; k < r.points.length; k++) {
@@ -2340,6 +2412,7 @@
       out.routes++;
     }
     if (bridged) out.routeLinksBridged = bridged;
+    if (repointed) out.routePointsRepointed = repointed;
     if (typeof Routes !== "undefined" && typeof Routes.buildLinks === "function")
       C.routes = Routes.buildLinks(pack.routes || []);
     for (const mk of pack.markers || [])
@@ -2737,8 +2810,45 @@
     // Markers.add for a custom type marks its cell occupied until the next generateTypes run;
     // a stale set would make this generation differ from the same seed on a clean page
     if (typeof Markers !== "undefined" && Array.isArray(Markers.occupied)) Markers.occupied = [];
+    // Names caches one Markov chain per name base for the page session, and the cached chains
+    // depend on what was named before (the random boot map, earlier maps): the same seed then gave
+    // other river and burg names in another session. Start every generation from fresh chains.
+    if (typeof Names !== "undefined" && typeof Names.clearChains === "function") Names.clearChains();
+    // Rivers caches the 'small river' length threshold from the first map of the session (the random
+    // boot map) and never resets it, so river types (Brook, Stream, River) depended on it too
+    if (typeof Rivers !== "undefined" && "smallLength" in Rivers) Rivers.smallLength = null;
+    // randomizeOptions writes the random culture count into a range input whose max is still the
+    // previous map's culture set max (changeCultureSet sets it, and it then clamps to the new
+    // set's max): a range input clamps the value it is given, so after a map with a small culture
+    // set the same seed gave fewer cultures. Drop the stale max; changeCultureSet sets it again.
+    for (const id of ["culturesInput", "culturesOutput"]) document.getElementById(id)?.removeAttribute("max");
     undraw();
-    await T.awaitMap(() => generate({ seed: seedStr }), a.timeoutMs || 110000, meta?.op);
+    // A precreated heightmap (an image template such as taklamakan) loads asynchronously after
+    // HeightmapGenerator.generate seeded Math.random, and any task that draws a random number while
+    // the image loads shifts the seeded stream: the same seed then gave other features, cultures and
+    // states now and then. Loading the image draws no random number, so put the stream back to
+    // where the seeding left it once the heights are in.
+    const HG = typeof HeightmapGenerator !== "undefined" ? HeightmapGenerator : null;
+    const hgGenerate = HG?.generate;
+    if (HG && typeof hgGenerate === "function")
+      HG.generate = async function (graph) {
+        const id = document.getElementById("templateInput")?.value;
+        const precreated = typeof heightmapTemplates === "undefined" || !(id in heightmapTemplates);
+        const pending = hgGenerate.call(this, graph);
+        const seeded = Math.random;
+        const state = precreated && typeof seeded?.exportState === "function" ? seeded.exportState() : null;
+        const heights = await pending;
+        if (state) {
+          seeded.importState(state);
+          Math.random = seeded;
+        }
+        return heights;
+      };
+    try {
+      await T.awaitMap(() => generate({ seed: seedStr }), a.timeoutMs || 110000, meta?.op);
+    } finally {
+      if (HG && typeof hgGenerate === "function") HG.generate = hgGenerate;
+    }
     drawLayers();
     fitMapToScreen();
     await FNS.resetView();
@@ -2763,7 +2873,17 @@
 
   // each runs with the regenerate args; an object it returns is reported under details[part]
   const REGEN = [
-    ["rivers", () => regenerateRivers()],
+    [
+      "rivers",
+      () => {
+        // Rivers.generate erodes pack.cells.h, which a .map file does not keep (a load rebuilds pack
+        // heights from the grid): put the heights back so the page stays what a save holds and a
+        // second regenerate does not cut deeper (Configure World's updateWorld does the same)
+        const h = pack.cells.h;
+        regenerateRivers();
+        if (pack.cells.h !== h && pack.cells.h.length === h.length) pack.cells.h = h;
+      }
+    ],
     ["biomes", a => FNS.defineBiomes({ ...(a.biomes || {}), phase: "apply" })], // bridge-ext/biomes.js
     [
       "population",

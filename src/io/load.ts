@@ -2,6 +2,7 @@ import { lazy } from "@/lazy-loaders";
 import { restoreReliefOnLoad } from "@/renderers/relief-settings";
 import { calculateVoronoi, ensureEl, last, link, minmax, parseError, rn } from "@/utils";
 import { applyBiomeExtras } from "./biome-extras"; // tupaia-mcp: biome icon density/icons/cost
+import { repairInvalidCultures, repairStateCapital } from "./load-repairs"; // tupaia-mcp: load repairs
 
 export async function quickLoad(): Promise<void> {
   const blob = await ldb.get("lastMap");
@@ -592,13 +593,10 @@ async function parseLoadedData(data: string[], mapVersion: string | null): Promi
         ERROR && console.error("[Data integrity] Invalid province", p, "is assigned to cells", invalidCells);
       });
 
-      const invalidCultures = [...new Set(cells.culture)].filter(c => !pack.cultures[c] || pack.cultures[c].removed);
+      // tupaia-mcp: reset the cells' culture (upstream reset their province); see load-repairs.ts
+      const invalidCultures = repairInvalidCultures(cells, pack.cultures);
       invalidCultures.forEach(c => {
-        const invalidCells = cells.i.filter(i => cells.culture[i] === c);
-        invalidCells.forEach(i => {
-          cells.province[i] = 0;
-        });
-        ERROR && console.error("[Data integrity] Invalid culture", c, "is assigned to cells", invalidCells);
+        ERROR && console.error("[Data integrity] Invalid culture", c, "was assigned to cells (reset to 0)");
       });
 
       const invalidReligions = [...new Set(cells.religion)].filter(
@@ -695,47 +693,18 @@ async function parseLoadedData(data: string[], mapVersion: string | null): Promi
         }
       });
 
+      // tupaia-mcp: the capital checks keep state.capital in step (upstream promoted a burg without
+      // setting it); see load-repairs.ts
       pack.states.forEach(state => {
-        if (state.removed) return;
-
-        const stateBurgs = pack.burgs.filter(b => b.state === state.i && !b.removed);
-        const capitalBurgs = stateBurgs.filter(b => b.capital);
-
-        if (!state.i && capitalBurgs.length) {
-          ERROR &&
-            console.error(
-              `[Data integrity] Neutral burgs (${capitalBurgs.map(b => b.i).join(", ")}) marked as capitals`
-            );
-
-          capitalBurgs.forEach(burg => {
-            burg.capital = 0;
-            Burgs.changeGroup(burg, null);
-          });
-
-          return;
-        }
-
-        if (capitalBurgs.length > 1) {
-          const message = `[Data integrity] State ${state.i} has multiple capitals (${capitalBurgs
-            .map(b => b.i)
-            .join(", ")}) assigned. Keeping the first as capital and moving others`;
-          ERROR && console.error(message);
-
-          capitalBurgs.forEach((burg, i) => {
-            if (!i) return;
-            burg.capital = 0;
-            Burgs.changeGroup(burg, null);
-          });
-
-          return;
-        }
-
-        if (state.i && stateBurgs.length && !capitalBurgs.length) {
-          ERROR && console.error(`[Data integrity] State ${state.i} has no capital. Making the first burg capital`);
-          const capital = stateBurgs[0];
-          capital.capital = 1;
-          Burgs.changeGroup(capital, null);
-        }
+        const fix = repairStateCapital(state, pack.burgs, burg => Burgs.changeGroup(burg as any, null));
+        if (!fix || !ERROR) return;
+        if (fix.kind === "neutral")
+          console.error(`[Data integrity] Neutral burgs (${fix.demoted.join(", ")}) marked as capitals`);
+        else if (fix.kind === "multiple")
+          console.error(
+            `[Data integrity] State ${fix.state} has multiple capitals assigned. Keeping ${fix.kept} as capital and moving others (${fix.demoted.join(", ")})`
+          );
+        else console.error(`[Data integrity] State ${fix.state} has no capital. Making burg ${fix.promoted} capital`);
       });
 
       pack.provinces.forEach(p => {

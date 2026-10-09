@@ -163,6 +163,26 @@ export async function mapInfo(
   return out;
 }
 
+const PLACE_HEAD = ["kind", "x", "y", "cell", "lat", "lon", "via"];
+
+/** inspect {fields}: the names that are not a key of the entity or its relations (or of a place). */
+export function unknownInspectFields(r: Record<string, unknown>, fields: string[]): string[] {
+  const keys = new Set<string>();
+  const add = (o: unknown) => {
+    if (o && typeof o === "object" && !Array.isArray(o)) for (const k of Object.keys(o)) keys.add(k);
+  };
+  if (r.kind === "entity") {
+    add(r.entity);
+    add(r.relations);
+    // compact shows relations.people as pop
+    if (keys.has("people")) keys.add("pop");
+  } else add(r);
+  const unknown = fields.filter(f => !keys.has(f) && !PLACE_HEAD.includes(f));
+  if (!unknown.length) return [];
+  const where = r.kind === "entity" ? `${String(r.type)} ${String(r.i)} (entity or relations)` : "this place";
+  return [`no key ${unknown.join(", ")} in ${where}; keys: ${[...keys].slice(0, 60).join(", ")}`];
+}
+
 /** inspect {fields} in JSON mode: keep only the named keys of entity and relations (or of a place). */
 function pickFields(r: Record<string, unknown>, fields: string[]): Record<string, unknown> {
   const keep = new Set(fields);
@@ -171,8 +191,7 @@ function pickFields(r: Record<string, unknown>, fields: string[]): Record<string
       ? Object.fromEntries(Object.entries(o as Record<string, unknown>).filter(([k]) => keep.has(k)))
       : o;
   if (r.kind === "entity") return { ...r, entity: pick(r.entity), relations: pick(r.relations) };
-  const head = ["kind", "x", "y", "cell", "lat", "lon", "via"];
-  return Object.fromEntries(Object.entries(r).filter(([k]) => head.includes(k) || keep.has(k)));
+  return Object.fromEntries(Object.entries(r).filter(([k]) => PLACE_HEAD.includes(k) || keep.has(k)));
 }
 
 export function register(ctx: ToolContext): void {
@@ -282,8 +301,11 @@ export function register(ctx: ToolContext): void {
       const r = args.at
         ? await scope.call<Record<string, unknown>>("inspect", { at: bridgePlace(ctx, args.at) })
         : await scope.call<Record<string, unknown>>("inspect", { entity: args.entity });
-      if (args.format === "compact") return new WithText(compactInspect(r, args.fields));
-      return args.fields?.length ? pickFields(r, args.fields) : r;
+      const warnings = args.fields?.length ? unknownInspectFields(r, args.fields) : [];
+      if (args.format === "compact")
+        return new WithText([compactInspect(r, args.fields), ...warnings.map(w => `warning: ${w}`)].join("\n"));
+      const out = args.fields?.length ? pickFields(r, args.fields) : r;
+      return warnings.length ? { ...out, warnings } : out;
     }
   );
 }

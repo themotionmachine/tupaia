@@ -45,7 +45,7 @@ export function register(ctx: ToolContext): void {
     {
       title: "Generate a new map",
       description:
-        "Replace the page's map with a newly generated one (undoable). The same seed and options give the same map (compare the returned digest). Options given here are set in the app's options panel and locked so the generator does not randomise them; options locked by an earlier generate_map call but not given now are unlocked again. cells is a density 1-13 (4 = 10K cells) or a cell count; cultures is limited by the culture set (e.g. european 15). width/height set the map size in px and resize the browser viewport to match. options sets any other option input by element id (e.g. {temperatureEquatorInput: 25}). World settings (temperatures, winds, precipitation, mapSize, latitude, units) are not parameters of their own: set and lock them with edit {type:'map'} first (locks survive generate_map; settingsLocked in the result lists them) or pass them in options. Returns the seed, counts and digest; take a screenshot to see it.",
+        "Replace the page's map with a newly generated one (undoable). The same seed and options give the same map (compare the returned digest). The page is then reloaded from its own .map text, so it holds exactly what save_map and snapshots hold (the generator's river erosion of pack heights is not kept by .map files). Options given here are set in the app's options panel and locked so the generator does not randomise them; options locked by an earlier generate_map call but not given now are unlocked again. cells is a density 1-13 (4 = 10K cells) or a cell count; cultures is limited by the culture set (e.g. european 15). width/height set the map size in px and resize the browser viewport to match (omitted: the server's default viewport, not an earlier call's size). options sets any other option input by element id (e.g. {temperatureEquatorInput: 25}). World settings (temperatures, winds, precipitation, mapSize, latitude, units) are not parameters of their own: set and lock them with edit {type:'map'} first (locks survive generate_map; settingsLocked in the result lists them) or pass them in options. Returns the seed, counts and digest; take a screenshot to see it.",
       inputSchema: z.object({
         seed: z
           .union([z.string().min(1), z.number().int()])
@@ -81,19 +81,29 @@ export function register(ctx: ToolContext): void {
     },
     async (args, scope) => {
       const timeoutMs = args.timeoutMs ?? TIMEOUTS.heavy;
-      await scope.call("generateMap", { ...args, phase: "validate" });
+      // the map size is pinned like every other option: omitted means the server's default
+      // viewport (TUPAIA_VIEWPORT, 1280x720), never the size an earlier call left behind, so the
+      // same arguments give the same map whatever ran before
+      const def = ctx.config.viewport;
+      const sized = { ...args, width: args.width ?? def.width, height: args.height ?? def.height };
+      await scope.call("generateMap", { ...sized, phase: "validate" });
       await scope.pushUndo("generate_map", args);
-      if (args.width !== undefined || args.height !== undefined) {
-        const vp = ctx.browser.viewport;
-        await ctx.browser.setViewport(args.width ?? vp.width, args.height ?? vp.height);
-      }
+      await ctx.browser.setViewport(sized.width, sized.height);
       let out: Record<string, unknown>;
       try {
         out = await scope.call<Record<string, unknown>>(
           "generateMap",
-          { ...args, timeoutMs: Math.max(5000, timeoutMs - 5000) },
+          { ...sized, timeoutMs: Math.max(5000, timeoutMs - 5000) },
           { mutating: true, timeoutMs }
         );
+        // The page now holds what the generator made, but a .map file does not keep all of it:
+        // river erosion lowers pack.cells.h, and a load rebuilds pack heights from the grid
+        // (likewise conf and pop round). Reload the map from its own .map text, so the page is
+        // exactly what save_map, snapshots, undo and the shared map hold (a snapshot restore
+        // gives back the same heights), and the digest describes that map.
+        const text = await scope.mapText();
+        await scope.loadMap({ text }, true);
+        out.digest = (await scope.call<{ hash: string }>("digest", {}, { noAlerts: true })).hash;
       } catch (e) {
         // The app may have undrawn and regenerated before failing (APP_ALERT 'Generation error'):
         // keep the provenance only if the page still holds the same map.
