@@ -1,9 +1,11 @@
 // The shared tool context: config, mode, browser, snapshots, shots, and the tool runner that
 // every tool goes through (mutex, health check, per-call console errors, result formatting).
 //
-// Adding a tool (next builders): create src/tools/<name>.ts exporting
-//   export function register(ctx: ToolContext): void { ctx.tool("name", {...}, impl) }
-// and add one `import "./tools/<name>.ts"`-style line to the TOOL_MODULES list in server.ts.
+// Adding a tool (next builders): create src/tools/<name>.ts that calls
+//   defineTools("<name>", ctx => ctx.tool("name", {...}, impl))
+// server.ts imports every tools/*.ts. ctx.tool() only records the definition; attach(server)
+// registers the definitions on an McpServer (once for stdio, once per request under --http) and
+// callTool() runs one by name without MCP (the --http JSON API). Both go through the same runner.
 import type { CallToolResult, McpServer, ServerContext } from "@modelcontextprotocol/server";
 import type { z } from "zod";
 import { BrowserManager, type CallOptions } from "./browser.ts";
@@ -239,6 +241,25 @@ export class CallScope {
   }
 }
 
+/** A tool definition recorded by ctx.tool(). */
+export interface ToolDef {
+  name: string;
+  /** One map holds definitions of every input type; args are validated against inputSchema first. */
+  spec: ToolSpec<any>;
+  impl: (args: any, scope: CallScope) => Promise<WithImages | Record<string, unknown>>;
+}
+
+/** How a call reacts to its caller going away. */
+export interface CallPolicy {
+  /**
+   * false (stdio, the default): a cancellation aborts the call wherever it is, as before.
+   * true (--http: one page shared by many callers): a call whose caller left before it started
+   * is skipped, and a started call runs to completion (bounded by its timeout), so one caller's
+   * disconnect never interrupts a page mutation the others would then have to recover from.
+   */
+  finishStartedCalls: boolean;
+}
+
 export class ToolContext {
   readonly config: Config;
   readonly mode: ModeState;
@@ -248,8 +269,11 @@ export class ToolContext {
   readonly shared: SharedApi;
   /** The provisional sketch (ops log) being recorded, if any. */
   readonly sketches = new SketchStore();
-  server!: McpServer;
-  readonly toolNames: string[] = [];
+  /** Tool definitions in registration order (ctx.tool()). */
+  readonly toolDefs = new Map<string, ToolDef>();
+  readonly callPolicy: CallPolicy = { finishStartedCalls: false };
+  /** How this process is served (session status reports it). */
+  serving: { transport: "stdio" } | { transport: "http"; url: string; pid: number } = { transport: "stdio" };
 
   constructor(config: Config) {
     this.config = config;
@@ -397,24 +421,68 @@ export class ToolContext {
     return this.#restoreNewest("restart");
   }
 
-  /** Register a tool that runs through the shared runner. */
+  get toolNames(): string[] {
+    return [...this.toolDefs.keys()];
+  }
+
+  /** Define a tool that runs through the shared runner (attach() registers it on servers). */
   tool<S extends z.ZodType>(
     name: string,
     spec: ToolSpec<S>,
     impl: (args: z.infer<S>, scope: CallScope) => Promise<WithImages | Record<string, unknown>>
   ): void {
-    this.toolNames.push(name);
-    this.server.registerTool(
-      name,
-      {
-        title: spec.title,
-        description: spec.description,
-        inputSchema: spec.inputSchema,
-        annotations: spec.annotations,
-        _meta: spec._meta
-      },
-      (async (args: any, sctx: ServerContext) => this.run({ ...spec, name }, sctx, args, impl)) as any
-    );
+    if (this.toolDefs.has(name)) throw new Error(`tool '${name}' is defined twice`);
+    this.toolDefs.set(name, { name, spec, impl });
+  }
+
+  /**
+   * Register every defined tool on `server`. Safe for any number of servers: they all share this
+   * context (one browser, page, undo history and sketch) and its call mutex. Tools use the server
+   * for nothing else (no logging, no notifications), so a per-request server holds no state.
+   */
+  attach(server: McpServer): void {
+    for (const d of this.toolDefs.values()) {
+      server.registerTool(
+        d.name,
+        {
+          title: d.spec.title,
+          description: d.spec.description,
+          inputSchema: d.spec.inputSchema,
+          annotations: d.spec.annotations,
+          _meta: d.spec._meta
+        },
+        (async (args: any, sctx: ServerContext) =>
+          this.#runSignal({ ...d.spec, name: d.name }, sctx?.mcpReq?.signal, args, d.impl)) as any
+      );
+    }
+  }
+
+  /**
+   * Run a defined tool by name without an MCP server (the --http JSON API): validate `args`
+   * against its input schema, then go through the same runner as MCP calls. `timeoutMs` is the
+   * call's budget (also passed as args.timeoutMs when the tool takes one and args has none).
+   */
+  async callTool(
+    name: string,
+    args: unknown,
+    opts: { timeoutMs?: number; signal?: AbortSignal } = {}
+  ): Promise<CallToolResult> {
+    const d = this.toolDefs.get(name);
+    if (!d) return errorResult(new ToolError("NOT_FOUND", `no tool '${name}' (tools: ${this.toolNames.join(", ")})`));
+    let raw: unknown = args ?? {};
+    if (opts.timeoutMs !== undefined && raw && typeof raw === "object" && !Array.isArray(raw)) {
+      const o = raw as Record<string, unknown>;
+      if (o.timeoutMs === undefined) raw = { ...o, timeoutMs: opts.timeoutMs };
+    }
+    const parsed = await (d.spec.inputSchema as z.ZodType).safeParseAsync(raw);
+    if (!parsed.success) {
+      const issues = parsed.error.issues
+        .slice(0, 8)
+        .map(i => `${i.path.length ? i.path.join(".") : "(args)"}: ${i.message}`)
+        .join("; ");
+      return errorResult(new ToolError("BAD_ARGS", `invalid arguments for ${name}: ${issues}`));
+    }
+    return this.#runSignal({ ...d.spec, name }, opts.signal, parsed.data, d.impl, opts.timeoutMs);
   }
 
   async run<A>(
@@ -423,14 +491,27 @@ export class ToolContext {
     args: A,
     impl: (args: A, scope: CallScope) => Promise<WithImages | Record<string, unknown>>
   ): Promise<CallToolResult> {
+    return this.#runSignal(spec, sctx?.mcpReq?.signal, args, impl);
+  }
+
+  async #runSignal<A>(
+    spec: { kind?: ToolKind; launch?: boolean; name?: string },
+    signal: AbortSignal | undefined,
+    args: A,
+    impl: (args: A, scope: CallScope) => Promise<WithImages | Record<string, unknown>>,
+    timeoutMs?: number
+  ): Promise<CallToolResult> {
     return this.browser.exclusive(async () => {
+      const finish = this.callPolicy.finishStartedCalls;
+      if (finish && signal?.aborted)
+        return errorResult(new ToolError("CANCELLED", "the caller went away before the call started; nothing ran"));
       const kind = spec.kind ?? "read";
       const rawTimeout = (args as { timeoutMs?: unknown } | undefined)?.timeoutMs;
       const scope = new CallScope(
         this,
-        sctx?.mcpReq?.signal,
+        finish ? undefined : signal,
         kind,
-        typeof rawTimeout === "number" ? rawTimeout : undefined,
+        typeof rawTimeout === "number" ? rawTimeout : timeoutMs,
         spec.name ?? ""
       );
       try {

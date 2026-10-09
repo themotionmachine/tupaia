@@ -1,15 +1,18 @@
 // Tupaia MCP server entry point: `node mcp/src/server.ts` (Node >= 24 type stripping, no tsx).
 // Startup only registers tools/resources and connects stdio: no browser, no network. The
 // browser launches on the first tool call that needs it.
+// `--http [--port N]` (or TUPAIA_HTTP_PORT) serves the same tools as a shared local daemon
+// instead (see http.ts; mcp/bin/tupaia is its CLI). Stdio is the default.
 import "./stdout-guard.ts"; // must stay the first import: it guards fd 1 before anything else loads
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { McpServer } from "@modelcontextprotocol/server";
 import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import { loadConfig } from "./config.ts";
 import { ToolContext } from "./context.ts";
+import { argValue, type HttpDaemon, parseIdleMin, parsePort, startHttpDaemon } from "./http.ts";
 import { protocolOut } from "./stdout-guard.ts";
+import { createServer } from "./surface.ts";
 import { registerAll } from "./tools/registry.ts";
 
 // Tool modules: every src/tools/*.ts except registry.ts, in name order; each self-registers
@@ -36,58 +39,47 @@ export const INSTRUCTIONS = `Tupaia MCP drives the Tupaia fantasy-map app (Azgaa
 const config = loadConfig();
 const ctx = new ToolContext(config);
 const pkg = JSON.parse(fs.readFileSync(path.join(config.mcpRoot, "package.json"), "utf8")) as { version: string };
-
-const server = new McpServer({ name: "tupaia", version: pkg.version }, { instructions: INSTRUCTIONS });
-ctx.server = server;
 registerAll(ctx);
+/** A server with every tool and resource; all of them share `ctx`. */
+const makeServer = () => createServer(ctx, pkg.version, INSTRUCTIONS);
 
-function fileResource(name: string, uri: string, title: string, description: string, file: string, prefix = "") {
-  server.registerResource(name, uri, { title, description, mimeType: "text/markdown" }, async u => {
-    let text: string;
-    try {
-      text = prefix + fs.readFileSync(file, "utf8");
-    } catch (e) {
-      text = `# ${title}\n\n(unavailable: ${(e as Error).message})\n`;
-    }
-    return { contents: [{ uri: u.href, mimeType: "text/markdown", text }] };
-  });
-}
-
-fileResource(
-  "runtime-api",
-  "tupaia://docs/runtime-api.md",
-  "Tupaia runtime API reference",
-  "Globals, lazy modules, generate/edit/redraw recipes and pitfalls for scripting the page (read before eval).",
-  path.join(config.repoRoot, "docs", "architecture", "runtime_api.md")
-);
-fileResource(
-  "cheatsheet",
-  "tupaia://docs/cheatsheet.md",
-  "Tupaia MCP cheatsheet",
-  "Tools in one line each, ref/place grammar, error codes, layer names, recipes.",
-  path.join(config.mcpRoot, "resources", "cheatsheet.md")
-);
-fileResource(
-  "data-model",
-  "tupaia://docs/data-model.md",
-  "Tupaia data model",
-  "Entity and cell data structures (pack, grid, burgs, states, ...).",
-  path.join(config.repoRoot, "docs", "architecture", "data_model.md"),
-  "> Note from tupaia-mcp: notes use the key `id` (e.g. burg12, marker3), not `i` as written below.\n\n"
-);
+const argv = process.argv.slice(2);
+const httpMode = argv.includes("--http");
+let daemon: HttpDaemon | null = null;
 
 let closing = false;
 async function shutdown(reason: string, code = 0): Promise<void> {
   if (closing) return;
   closing = true;
   process.stderr.write(`[tupaia-mcp] shutdown: ${reason}\n`);
-  setTimeout(() => process.exit(code), 5000).unref();
+  setTimeout(() => process.exit(code), daemon ? 25_000 : 5000).unref();
+  if (daemon) await daemon.close(reason).catch(() => {});
   await ctx.browser.close().catch(() => {});
   process.exit(code);
 }
 
-await server.connect(new StdioServerTransport(process.stdin, protocolOut));
-server.server.onclose = () => void shutdown("transport closed");
+if (httpMode) {
+  try {
+    daemon = await startHttpDaemon({
+      ctx,
+      config,
+      makeServer,
+      port: parsePort(argValue(argv, "--port") ?? process.env.TUPAIA_HTTP_PORT),
+      idleMin: parseIdleMin(process.env.TUPAIA_HTTP_IDLE_MIN),
+      version: pkg.version,
+      log: msg => process.stderr.write(`[tupaia-mcp] ${msg}\n`),
+      onStop: reason => void shutdown(reason)
+    });
+  } catch (e) {
+    process.stderr.write(`[tupaia-mcp] cannot start the http daemon: ${(e as Error).message}\n`);
+    await ctx.browser.close().catch(() => {});
+    process.exit(1);
+  }
+} else {
+  const server = makeServer();
+  await server.connect(new StdioServerTransport(process.stdin, protocolOut));
+  server.server.onclose = () => void shutdown("transport closed");
+}
 for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(sig, () => void shutdown(sig));
 process.on("uncaughtException", e => {
   process.stderr.write(`[tupaia-mcp] uncaughtException: ${e.stack ?? e}\n`);
@@ -97,6 +89,13 @@ process.on("unhandledRejection", e => {
   process.stderr.write(`[tupaia-mcp] unhandledRejection: ${(e as Error)?.stack ?? e}\n`);
 });
 for (const w of config.warnings) process.stderr.write(`[tupaia-mcp] warning: ${w}\n`);
-process.stderr.write(
-  `[tupaia-mcp] ready: mode ${ctx.mode.mode}, ${ctx.toolNames.length} tools, live origin ${config.liveOrigin ?? "none"} (browser launches on first call)\n`
-);
+if (daemon) {
+  const idle = daemon.state.idleMin ? `idle shutdown after ${daemon.state.idleMin} min` : "no idle shutdown";
+  process.stderr.write(
+    `[tupaia-mcp] ready: http ${daemon.url}/mcp (pid ${process.pid}), mode ${ctx.mode.mode}, ${ctx.toolNames.length} tools, live origin ${config.liveOrigin ?? "none"}, state ${path.join(config.outDir, "daemon.json")}, ${idle} (browser launches on first call)\n`
+  );
+} else {
+  process.stderr.write(
+    `[tupaia-mcp] ready: mode ${ctx.mode.mode}, ${ctx.toolNames.length} tools, live origin ${config.liveOrigin ?? "none"} (browser launches on first call)\n`
+  );
+}
