@@ -5,8 +5,8 @@
 // ids instead of names, literal generated names, literal cell lists, the created entities'
 // ids), so the ops can be replayed onto a newer copy of the base map (src/replay.ts).
 //
-// Calls that cannot be replayed (regenerate, generate_map, load_map, snapshot restore, a call
-// that failed part-way) are still logged, with replayable:false and a reason; the sketch is
+// Calls that cannot be replayed (regenerate of parts other than provinces/emblems, generate_map,
+// load_map, snapshot restore, a call that failed part-way) are still logged, with replayable:false and a reason; the sketch is
 // blobOnly while one of them is in the log. Undo pops the op it undid (redo re-appends it), so
 // undoing a non-replayable op makes the sketch replayable again. Stepping outside the sketch's
 // own history (undo past its start, a redo of something else, a crash restore that lost ops)
