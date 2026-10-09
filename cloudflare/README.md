@@ -76,7 +76,10 @@ client guard, each marked `// tupaia-mcp:`:
 `stateRemove` on `window.__tupaiaInternals` when the states editor module loads, and
 `public/modules/ui/heightmap-editor.js` returns its rebuild closures (`restoreKeptData`,
 `restoreRiskedData`, `regenerateErasedData`) from `editHeightmap({tupaiaExport: true})`
-without opening the editor. The guard: `src/io/load.ts` fires a `map:loading` event when a load
+without opening the editor; `restoreRiskedData(opts)` also takes an optional
+`{erosion, regenerateRivers, redefineBiomes, afterRivers}` (MCP `set_heights`: regenerate the
+rivers without erosion, recompute every biome, restore heights right after the rivers), and
+without it behaves exactly as before. The guard: `src/io/load.ts` fires a `map:loading` event when a load
 starts (before the loader's callback) and a `map:loaded` event after a successful load (one line
 each), and `src/io/cloud-cloudflare.ts` uses them (with the existing `map:generated`) so a shared
 load that never completes cannot lend its version to the next load, and so `loadedVersion` only holds while the page still has the map it loaded from

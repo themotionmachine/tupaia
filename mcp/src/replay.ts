@@ -216,7 +216,7 @@ export async function replayOps(
   // the pre-existing entity for the ops before that add
   const rw = new Rewriter(res.idMap, new Set());
   let prev: OpRecord | null = null;
-  // fingerprint of the page's cell graph, read once (replayable ops never renumber cells)
+  // fingerprint of the page's cell graph, read once and again after an op that renumbers cells
   let pageGraph: string | null | undefined;
   const conflict = (op: OpRecord, reason: string, hard = false): boolean => {
     res.conflicts.push({ seq: op.seq, reason, op });
@@ -344,6 +344,18 @@ export async function replayOps(
       if (unpaired.length)
         res.notes.push(
           `op ${op.seq}: the replay did not create a counterpart for ${unpaired.map(c => `${c.type} ${c.i}`).join(", ")}; ops that use them will conflict`
+        );
+    }
+    if (ext?.renumbers?.(r)) pageGraph = undefined;
+    const extNote = ext?.afterReplay?.(r, applied, out);
+    if (extNote) res.notes.push(`op ${op.seq}: ${extNote}`);
+    const wanted = op.tool === "paint_cells" ? (r as PaintResolved).graphAfter : undefined;
+    if (typeof wanted === "string") {
+      // a height rebuild:'risk' renumbered the cells
+      pageGraph = undefined;
+      if ((applied as PaintResolved).graphAfter !== wanted)
+        res.notes.push(
+          `op ${op.seq}: the height rebuild produced another cell graph than the sketch recorded (the heights or burgs there differ now): later literal cell lists will conflict`
         );
     }
     res.applied.push(op.seq);
