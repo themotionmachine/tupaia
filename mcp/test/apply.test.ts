@@ -327,6 +327,13 @@ describe("tupaia-mcp apply", () => {
     assert.equal(conflict.error.code, "CONFLICT");
     assert.equal(rowAt(e, "notes[0]").status, "updated", "the notes list entry comes first");
     assert.equal(rowAt(e, "labels[0]").error.code, "REFUSED");
+    const n0 = await undoCount();
+    const bad = await h.ok("apply", {
+      routes: [{ name: "Bad Road", through: ["Applyton", "Specburg"], group: "no-such-group" }]
+    });
+    assert.equal(bad.note, "nothing to change", JSON.stringify(bad));
+    assert.equal(rowAt(bad, "routes[0]").status, "error");
+    assert.equal(await undoCount(), n0, "a create that cannot work takes no undo entry");
     const nothing = await h.call("apply", { mode: "check", burgs: [{ name: "x" }], only: ["labels"] });
     assert.equal(nothing.isError, true);
     assert.equal(errorBody(nothing).error.code, "BAD_ARGS");

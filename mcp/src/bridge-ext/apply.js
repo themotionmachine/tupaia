@@ -105,10 +105,11 @@
 
   /** Strings compare after: label text without '|' breaks, legends HTML-decoded, colours folded. */
   function textOf(field, v) {
+    const f = String(field).split(".").pop();
     let s = String(v);
-    if (field === "text") s = s.replace(/\|/g, "");
-    if (field === "legend") s = decodeHtml(s);
-    if (isColorField(field)) s = normColor(s);
+    if (f === "text") s = s.replace(/\|/g, "");
+    if (f === "legend") s = decodeHtml(s);
+    if (isColorField(f)) s = normColor(s);
     return s;
   }
 
@@ -301,7 +302,7 @@
       const pts = (r.points || []).map(p => [p[0], p[1]]);
       const own = isObj(tol.fields) && isNum(tol.fields[field]) ? tol.fields[field] : null;
       const lim =
-        own ?? rn(Math.max(tolFor(tol, field, "px"), Math.sqrt((graphWidth * graphHeight) / pack.cells.i.length)));
+        own ?? Math.max(tolFor(tol, field, "px"), Math.sqrt((graphWidth * graphHeight) / pack.cells.i.length));
       const off = [];
       let worst = 0;
       want.forEach((w, k) => {
@@ -317,7 +318,11 @@
         if (d > lim) off.push({ k, px: rn(d) });
       });
       if (!off.length) return { same: true };
-      return { same: false, have: { off: off.slice(0, 6), worstPx: rn(worst) }, want: `every place within ${lim} px` };
+      return {
+        same: false,
+        have: { off: off.slice(0, 6), worstPx: rn(worst) },
+        want: `every place within ${rn(lim)} px (tolerance.fields.${field})`
+      };
     };
   }
 
@@ -325,9 +330,12 @@
     burg: {
       state: (b, want) => {
         let wantId = null;
-        try {
-          wantId = T.resolve("state", want).i;
-        } catch {}
+        // "", null, "Neutral(s)": no state
+        if (want === null || (typeof want === "string" && /^(neutrals?)?$/i.test(want.trim()))) wantId = 0;
+        else
+          try {
+            wantId = T.resolve("state", want).i;
+          } catch {}
         const have = pack.states[b.state]?.name ?? "Neutrals";
         if (wantId === null)
           return fold(have) === fold(String(want))
@@ -645,7 +653,8 @@
     const F = {};
     if (e.name !== undefined) F.name = e.name;
     if (e.legend !== undefined) F.legend = e.legend;
-    for (const k of Object.keys(e)) if (!["ref", "id", "entity", "name", "legend"].includes(k)) row.ignored.push(k);
+    for (const k of Object.keys(e))
+      if (!["ref", "id", "entity", "name", "legend", "_name"].includes(k)) row.ignored.push(k);
     if (existing) {
       row.name = existing.name;
       settle(row, compare("note", existing, F, ctx.tol), ctx.mode);
@@ -655,7 +664,7 @@
       row.status = "missing";
       return row;
     }
-    const nm = F.name ?? r.owner?.name ?? r.id;
+    const nm = F.name ?? e._name ?? r.owner?.name ?? r.id;
     row.name = nm;
     const item = { name: nm, legend: F.legend ?? "" };
     if (r.owner && NOTE_ENTITY_TYPES.includes(r.owner.type)) item.entity = { type: r.owner.type, ref: r.owner.i };
@@ -714,10 +723,16 @@
     }
   }
 
-  async function runCreates(type, rows, S) {
-    const todo = rows.filter(r => r.act === "create");
-    if (!todo.length) return;
-    // keys the add does not take: FIELDS fields are set right after it, the rest are dropped
+  // Add errors that can clear up once earlier lists of the same apply exist (a route through a
+  // burg the burgs list creates): a preview keeps those rows as creates.
+  const LATER = ["NOT_FOUND", "REMOVED"];
+
+  /**
+   * Validate the create rows with FNS.add (phase validate). A key the add does not take moves to
+   * r.post when FIELDS can set it right after the add, else it is dropped (r.ignored); any other
+   * error makes the row an error, except LATER codes in a preview.
+   */
+  async function probeCreates(type, todo, preview) {
     for (const r of todo) r.post = {};
     let pending = todo;
     for (let round = 0; round < 12 && pending.length; round++) {
@@ -734,7 +749,7 @@
           else r.ignored.push(m[1]);
           delete r.item[m[1]];
           next.push(r);
-        } else {
+        } else if (!(preview && LATER.includes(err.code))) {
           r.status = "error";
           r.act = "none";
           r.error = errOf(err);
@@ -742,6 +757,19 @@
       }
       pending = next;
     }
+  }
+
+  // A preview marks the creates that cannot work (a bad route group) as errors, so they do not
+  // count as changes: a re-apply where only those remain changes nothing and takes no undo entry.
+  async function previewCreates(type, rows) {
+    const todo = rows.filter(r => r.act === "create");
+    if (todo.length) await probeCreates(type, todo, true);
+  }
+
+  async function runCreates(type, rows, S) {
+    const todo = rows.filter(r => r.act === "create");
+    if (!todo.length) return;
+    await probeCreates(type, todo, false);
     const ok = todo.filter(r => r.act === "create");
     if (!ok.length) return;
     const out = await FNS.add({ type, items: ok.map(r => r.item), continueOnError: true, phase: "apply" });
@@ -865,7 +893,7 @@
       if (apply) {
         await runEdits(type, rows, S);
         await runCreates(type, rows, S);
-      }
+      } else if (mode === "upsert") await previewCreates(type, rows);
       rows.forEach((r, k) => {
         done.push({ at: `${L.key}[${k}]`, list: L.key, type, row: r });
         if (r.note === undefined || (!apply && r.act === "create")) return;
@@ -873,7 +901,9 @@
         if (!x) return;
         const n = typeof r.note === "string" ? { legend: r.note } : isObj(r.note) ? r.note : null;
         if (!n) return;
-        const ne = { name: n.name ?? I.nameOf(type, x) };
+        // without a name the note is named after the entity when created, and its name is
+        // not compared afterwards (the spec did not give one)
+        const ne = n.name !== undefined ? { name: n.name } : { _name: I.nameOf(type, x) };
         if (n.legend !== undefined) ne.legend = n.legend;
         if (NOTE_ENTITY_TYPES.includes(type)) ne.entity = { type, ref: r.i };
         else ne.id = NOTE_OWNER[type](x);
@@ -905,7 +935,7 @@
       if (apply) {
         await runEdits("note", rows, S);
         await runCreates("note", rows, S);
-      }
+      } else if (mode === "upsert") await previewCreates("note", rows);
       rows.forEach((r, j) => {
         done.push({ at: pendingNotes[j].at, list: pendingNotes[j].list, type: "note", row: r });
       });

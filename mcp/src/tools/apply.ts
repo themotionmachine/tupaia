@@ -70,7 +70,8 @@ export function shapeResult(
   const byList: Record<string, Record<string, number>> = {};
   for (const r of res.rows) {
     counts[r.status] = (counts[r.status] ?? 0) + 1;
-    const list = r.at.replace(/\[.*$/, "");
+    // "burgs[3].note" (an entity's note shorthand) counts under "burgs.note"
+    const list = r.at.replace(/\[\d+\]/, "");
     byList[list] ??= {};
     byList[list][r.status] = (byList[list][r.status] ?? 0) + 1;
   }
