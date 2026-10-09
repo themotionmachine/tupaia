@@ -196,7 +196,7 @@ export function register(ctx: ToolContext): void {
     {
       title: "Edit or remove entities",
       description:
-        "Batch-edit entities of ONE type: ops [{ref, set:{field: value}} | {ref, remove:true}]. All ops are validated first; if any is invalid nothing changes (unless continueOnError). One auto-undo entry covers the call; redraws are coalesced. dryRun:true returns before/after per op. Fields per type are in tupaia://docs/cheatsheet.md, e.g. burg {name, population (people), group, type, culture, port, lock, move:Place}; state {name, fullName, form, formName, color, capital:burgRef, culture, lock}; marker {type, icon, size, pinned, note:{name, legend}, move}; label {text, move}; map (no ref) {name, populationRate, urbanization, year, era}. name can be {generate:{base:<namesbase>}} | {generate:{culture:<ref>}} | {generate:{}} (own culture). A state's capital changes only through edit state {capital}. remove works for burg (not capitals or market centres), state, marker, route, river, zone, note, label; provinces, cultures and religions are REFUSED (repaint their cells with paint_cells instead).",
+        "Batch-edit entities of ONE type: ops [{ref, set:{field: value}} | {ref, remove:true}]. All ops are validated first; if any is invalid nothing changes (unless continueOnError). One auto-undo entry covers the call; redraws are coalesced. dryRun:true returns before/after per op. Fields per type are in tupaia://docs/cheatsheet.md, e.g. burg {name, population (people), group, type, culture, port, lock, move:Place}; state {name, fullName, form, formName, color, capital:burgRef, culture, lock}; marker {type, icon, size, pinned, note:{name, legend}, move}; label {text, move}; map (no ref) {name, populationRate, urbanization, year, era} and the world settings {mapSize (% of the world), latitude/longitude (shift 0..100, 50 = centred), temperatureEquator/NorthPole/SouthPole, winds (6 tier angles, north to south), precipitation (%), distanceScale, distanceUnit, areaUnit, heightUnit, heightExponent, temperatureScale}: a setting takes a value or {value, lock:true|false}, and an op may add lock:[names] / unlock:[names] ('all' works): the app's own lock(), so generate_map and the options panel keep the value (browser-local: not in the .map, not reverted by undo). Settings only set inputs and mapCoordinates; recalculate 'climate' also recomputes temperature and precipitation, 'climate+biomes' also rivers, lakes and biomes (default 'none': the result lists the layers left stale and how to refresh them). name can be {generate:{base:<namesbase>}} | {generate:{culture:<ref>}} | {generate:{}} (own culture). A state's capital changes only through edit state {capital}. remove works for burg (not capitals or market centres), state, marker, route, river, zone, note, label; provinces, cultures and religions are REFUSED (repaint their cells with paint_cells instead).",
       inputSchema: z.object({
         type: z.enum(EDIT_TYPES),
         ops: z
@@ -204,11 +204,17 @@ export function register(ctx: ToolContext): void {
             z.object({
               ref: EntityRef.optional().describe("Entity ref (omit for type 'map')"),
               set: z.record(z.string(), z.unknown()).optional(),
-              remove: z.boolean().optional()
+              remove: z.boolean().optional(),
+              lock: z.array(z.string()).optional().describe("type 'map': setting names to lock (or 'all')"),
+              unlock: z.array(z.string()).optional().describe("type 'map': setting names to unlock (or 'all')")
             })
           )
           .min(1)
           .max(500),
+        recalculate: z
+          .enum(["none", "climate", "climate+biomes"])
+          .optional()
+          .describe("type 'map': refresh derived data after settings changed (default none)"),
         ...Common
       }),
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
@@ -218,7 +224,23 @@ export function register(ctx: ToolContext): void {
     async (args, scope) => {
       const { dryRun, timeoutMs, ...rest } = args;
       const continueOnError = args.continueOnError;
-      return runPhased(ctx, scope, `edit ${args.type}`, args, "edit", rest, { dryRun, continueOnError, timeoutMs });
+      const recalculates = args.recalculate !== undefined && args.recalculate !== "none";
+      const result = await runPhased(ctx, scope, `edit ${args.type}`, args, "edit", rest, {
+        dryRun,
+        continueOnError,
+        timeoutMs: timeoutMs ?? (recalculates ? TIMEOUTS.heavy : undefined)
+      });
+      // settings are already in `applied` (before/after), and a climate recalculation renumbers rivers:
+      // a map edit reports counts only
+      const diff = result.changes as Record<string, unknown> | undefined;
+      if (args.type === "map" && diff && typeof diff === "object") {
+        const counts: Record<string, unknown> = {};
+        for (const [type, d] of Object.entries(diff))
+          if (type !== "settings") counts[type] = (d as { counts?: unknown } | null)?.counts ?? d;
+        if (Object.keys(counts).length) result.changes = counts;
+        else delete result.changes;
+      }
+      return result;
     }
   );
 

@@ -93,7 +93,7 @@ export function register(ctx: ToolContext): void {
     {
       title: "Map overview and changes",
       description:
-        "Overview of the map in the page: name, seed, graph size, cell count, live entity counts (states, burgs, provinces, cultures, religions, rivers, routes, markers, zones, notes, labels), islands by group and lakes, mapCoordinates, current view, layers on, provenance and ops since load. Also reports what changed since a baseline: since:'snapshot' (default: newest snapshot or auto-undo point, so right after an edit it shows that edit), 'checkpoint' (the previous map_info call; every call sets a new checkpoint), a snapshot index or label, or 'none'. Changes list added/removed/modified entities with old/new field values and changed-cell counts per cell array.",
+        "Overview of the map in the page: name, seed, graph size, cell count, live entity counts (states, burgs, provinces, cultures, religions, rivers, routes, markers, zones, notes, labels), islands by group and lakes, mapCoordinates, the world settings (mapSize, latitude, longitude, temperatures, winds, precipitation, units, heightExponent) with the names of the locked ones, current view, layers on, provenance and ops since load. Also reports what changed since a baseline: since:'snapshot' (default: newest snapshot or auto-undo point, so right after an edit it shows that edit), 'checkpoint' (the previous map_info call; every call sets a new checkpoint), a snapshot index or label, or 'none'. Changes list added/removed/modified entities with old/new field values and changed-cell counts per cell array.",
       inputSchema: z.object({
         since: z
           .union([z.enum(["snapshot", "checkpoint", "none"]), z.number().int(), z.string()])

@@ -86,7 +86,7 @@ export function bridgeArgs(tool: string, r: Resolved): Record<string, unknown> {
         if (o.remove) return { ref: o.ref, remove: true };
         return o.ref === undefined ? { set: o.set } : { ref: o.ref, set: o.set };
       });
-      return withRedraw({ type: e.type, ops }, e.redraw);
+      return withRedraw({ type: e.type, ops, ...(e.recalculate ? { recalculate: e.recalculate } : {}) }, e.redraw);
     }
     case "add": {
       const a = r as AddResolved;

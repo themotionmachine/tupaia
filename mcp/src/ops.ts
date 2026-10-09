@@ -103,6 +103,8 @@ export interface EditResolved {
     ident?: Record<string, unknown> | null;
   }>;
   redraw?: unknown;
+  /** type 'map': the climate refresh that ran after the settings changed ('climate' | 'climate+biomes'). */
+  recalculate?: string;
 }
 
 export interface CreatedRef {
@@ -480,7 +482,7 @@ export function summarizeOp(tool: string, resolved: Resolved | null, out: Row | 
           );
           return `${who}: ${fields.join(", ")}`;
         });
-        return `Edited ${listOut(parts)}.`;
+        return `Edited ${listOut(parts)}${r.recalculate ? ` (recalculated ${r.recalculate})` : ""}.`;
       }
       case "add": {
         const r = resolved as AddResolved;
