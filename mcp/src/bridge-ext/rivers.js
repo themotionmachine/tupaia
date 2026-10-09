@@ -1329,6 +1329,7 @@
 
   // find river fields:['joinsAt', 'tributaries' (count)]
   const coreFind = T.fns.find;
+  T.addFindFields?.("river", ["joinsAt", "tributaries"]);
   T.fns.find = a =>
     later(coreFind(a), out => {
       const want = Array.isArray(a?.fields) ? a.fields.filter(f => f === "joinsAt" || f === "tributaries") : [];

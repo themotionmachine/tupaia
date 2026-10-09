@@ -17,7 +17,10 @@ export function register(ctx: ToolContext): void {
         code: z.string().min(1),
         args: z.unknown().optional().describe("JSON value passed to the code as `args`"),
         readOnly: z.boolean().optional().describe("true: no undo snapshot (use for pure reads)"),
-        redraw: z.array(RedrawLayer).optional().describe("Layers to redraw after the code ran"),
+        redraw: z
+          .union([z.literal(false), z.array(RedrawLayer)])
+          .optional()
+          .describe("Layers to redraw after the code ran; false or omitted = redraw nothing (the default for eval)"),
         timeoutMs: TimeoutMs
       }),
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
@@ -26,6 +29,7 @@ export function register(ctx: ToolContext): void {
     },
     async (args, scope) => {
       const readOnly = !!args.readOnly;
+      const redraw = args.redraw === false ? undefined : args.redraw;
       if (!readOnly) await scope.pushUndo("eval", { code: args.code });
       const idBefore = await ctx.pageMapId();
       let replaced = false;
@@ -33,7 +37,7 @@ export function register(ctx: ToolContext): void {
       try {
         const env = await scope.envelope<Record<string, unknown>>(
           "evalUser",
-          { code: args.code, args: args.args, redraw: args.redraw },
+          { code: args.code, args: args.args, redraw },
           { timeoutMs: args.timeoutMs ?? TIMEOUTS.edit, mutating: !readOnly }
         );
         const v = unwrap(env);
@@ -54,7 +58,7 @@ export function register(ctx: ToolContext): void {
       if (!readOnly) {
         const resolved: EvalResolved = { code: args.code };
         if (args.args !== undefined) resolved.args = args.args;
-        if (args.redraw !== undefined) resolved.redraw = args.redraw;
+        if (redraw !== undefined) resolved.redraw = redraw;
         await scope.record("eval", args, resolved, {
           unsafe: true,
           replayable: !replaced,

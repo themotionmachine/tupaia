@@ -273,7 +273,9 @@ export function describeIssues(issues: readonly Issue[], prefix: PropertyKey[] =
   return issues
     .slice(0, 8)
     .map(i => {
-      if (i.code !== "invalid_union" || !i.errors?.length) return `${at(i)}: ${msg(i)}`;
+      // a union with its own error message (z.union([...], {error})) says it best
+      if (i.code !== "invalid_union" || !i.errors?.length || i.message !== "Invalid input")
+        return `${at(i)}: ${msg(i)}`;
       const branches = i.errors
         .slice(0, 6)
         .map((b, n) => `(${n + 1}) ${branchSummary(b)}`)
@@ -283,12 +285,105 @@ export function describeIssues(issues: readonly Issue[], prefix: PropertyKey[] =
     .join("; ");
 }
 
+type JsonSchema = {
+  properties?: Record<string, unknown>;
+  additionalProperties?: unknown;
+  anyOf?: JsonSchema[];
+  oneOf?: JsonSchema[];
+  allOf?: JsonSchema[];
+  [k: string]: unknown;
+};
+
+/** The JSON Schema (input side) a zod schema advertises in tools/list. */
+function inputJsonSchema(schema: z.ZodType): JsonSchema | null {
+  try {
+    const std = (schema as unknown as { "~standard": { jsonSchema?: { input(o: object): JsonSchema } } })["~standard"];
+    return std.jsonSchema?.input({ target: "draft-2020-12" }) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Top-level argument names a tool's input schema accepts (every branch of a root union), or null
+ * when it takes any key (a record or loose root, or a shape we cannot read).
+ */
+export function allowedArgKeys(schema: z.ZodType): string[] | null {
+  const root = inputJsonSchema(schema);
+  if (!root) return null;
+  const keys = new Set<string>();
+  let seen = false;
+  const visit = (s: JsonSchema): boolean => {
+    if (!s || typeof s !== "object") return true;
+    if (s.additionalProperties !== undefined && s.additionalProperties !== false) return false;
+    if (s.properties) {
+      seen = true;
+      for (const k of Object.keys(s.properties)) keys.add(k);
+    }
+    return [...(s.anyOf ?? []), ...(s.oneOf ?? []), ...(s.allOf ?? [])].every(visit);
+  };
+  if (!visit(root) || !seen) return null;
+  return [...keys];
+}
+
+/**
+ * What the SDK sees as a tool's input schema: the same JSON Schema in tools/list (a plain object
+ * root also says additionalProperties:false), but validation passes everything through, so the
+ * runner's own check (validateArgs) reports bad arguments as BAD_ARGS for MCP and --http alike.
+ */
+function sdkInputSchema(schema: z.ZodType): unknown {
+  const listed = (o: object, io: "input" | "output") => {
+    const std = (
+      schema as unknown as {
+        "~standard": { jsonSchema: Record<"input" | "output", (o: object) => JsonSchema> };
+      }
+    )["~standard"];
+    const js = std.jsonSchema[io](o);
+    if (io === "input" && js.properties && js.additionalProperties === undefined && !js.anyOf && !js.oneOf)
+      return { ...js, additionalProperties: false };
+    return js;
+  };
+  return {
+    "~standard": {
+      version: 1,
+      vendor: "tupaia",
+      validate: (value: unknown) => ({ value }),
+      jsonSchema: { input: (o: object) => listed(o, "input"), output: (o: object) => listed(o, "output") }
+    }
+  };
+}
+
+/**
+ * Validate a tool's raw arguments: unknown top-level keys are refused (they used to be dropped
+ * silently, so a typo or a wrong option did nothing), then the zod schema runs. Throws BAD_ARGS.
+ */
+export async function validateArgs(name: string, schema: z.ZodType, allowed: string[] | null, raw: unknown) {
+  if (raw === undefined || raw === null) raw = {};
+  if (allowed && typeof raw === "object" && !Array.isArray(raw)) {
+    const unknown = Object.keys(raw as object).filter(k => !allowed.includes(k));
+    if (unknown.length) {
+      const list = unknown.map(k => `'${k}'`).join(", ");
+      throw new ToolError(
+        "BAD_ARGS",
+        `${name} does not take ${list}; allowed arguments: ${allowed.length ? allowed.join(", ") : "(none)"}`,
+        { details: { unknown, allowed } }
+      );
+    }
+  }
+  const parsed = await schema.safeParseAsync(raw);
+  if (!parsed.success)
+    throw new ToolError("BAD_ARGS", `invalid arguments for ${name}: ${describeIssues(parsed.error.issues)}`);
+  return parsed.data;
+}
+
 /** A tool definition recorded by ctx.tool(). */
 export interface ToolDef {
   name: string;
   /** One map holds definitions of every input type; args are validated against inputSchema first. */
   spec: ToolSpec<any>;
   impl: (args: any, scope: CallScope) => Promise<WithImages | WithText | Record<string, unknown>>;
+  /** Top-level argument names the schema accepts (null: any). */
+  allowed: string[] | null;
 }
 
 /** How a call reacts to its caller going away. */
@@ -492,7 +587,7 @@ export class ToolContext {
     impl: (args: z.infer<S>, scope: CallScope) => Promise<WithImages | WithText | Record<string, unknown>>
   ): void {
     if (this.toolDefs.has(name)) throw new Error(`tool '${name}' is defined twice`);
-    this.toolDefs.set(name, { name, spec, impl });
+    this.toolDefs.set(name, { name, spec, impl, allowed: allowedArgKeys(spec.inputSchema) });
   }
 
   /**
@@ -509,11 +604,17 @@ export class ToolContext {
         {
           title: d.spec.title,
           description: d.spec.description,
-          inputSchema: d.spec.inputSchema,
+          inputSchema: sdkInputSchema(d.spec.inputSchema),
           annotations: d.spec.annotations,
           _meta: d.spec._meta
-        },
-        (async (args: any, sctx: ServerContext) => {
+        } as any,
+        (async (raw: any, sctx: ServerContext) => {
+          let args: unknown;
+          try {
+            args = await validateArgs(d.name, d.spec.inputSchema, d.allowed, raw);
+          } catch (e) {
+            return errorResult(e);
+          }
           const own = sctx?.mcpReq?.signal;
           const signal = gone && own ? AbortSignal.any([own, gone]) : (own ?? gone);
           return this.#runSignal({ ...d.spec, name: d.name }, signal, args, d.impl);
@@ -535,16 +636,18 @@ export class ToolContext {
     const d = this.toolDefs.get(name);
     if (!d) return errorResult(new ToolError("NOT_FOUND", `no tool '${name}' (tools: ${this.toolNames.join(", ")})`));
     let raw: unknown = args ?? {};
-    if (opts.timeoutMs !== undefined && raw && typeof raw === "object" && !Array.isArray(raw)) {
+    const takesTimeout = !d.allowed || d.allowed.includes("timeoutMs");
+    if (takesTimeout && opts.timeoutMs !== undefined && raw && typeof raw === "object" && !Array.isArray(raw)) {
       const o = raw as Record<string, unknown>;
       if (o.timeoutMs === undefined) raw = { ...o, timeoutMs: opts.timeoutMs };
     }
-    const parsed = await (d.spec.inputSchema as z.ZodType).safeParseAsync(raw);
-    if (!parsed.success)
-      return errorResult(
-        new ToolError("BAD_ARGS", `invalid arguments for ${name}: ${describeIssues(parsed.error.issues)}`)
-      );
-    return this.#runSignal({ ...d.spec, name }, opts.signal, parsed.data, d.impl, opts.timeoutMs, opts.onSkipped);
+    let valid: unknown;
+    try {
+      valid = await validateArgs(name, d.spec.inputSchema, d.allowed, raw);
+    } catch (e) {
+      return errorResult(e);
+    }
+    return this.#runSignal({ ...d.spec, name }, opts.signal, valid, d.impl, opts.timeoutMs, opts.onSkipped);
   }
 
   async run<A>(

@@ -1040,6 +1040,60 @@
     biome: ["color", "habitability", "iconsDensity", "cost", "cells", "custom"]
   };
 
+  /** Fields a bridge-ext file adds to find rows after the core ran (T.addFindFields). */
+  const EXTRA_FIELDS = {};
+  /** Computed by fieldValue/rowOf, or optional flags that may be absent on every row. */
+  const KNOWN_FIELDS = {
+    "*": ["i", "name", "lock", "x", "y", "lat", "lon", "distance"],
+    burg: ["population", "capital", "port"],
+    marker: ["note", "pinned", "size", "hidden"],
+    route: ["length", "feature"],
+    zone: ["cells", "hidden"],
+    biome: ["cells"],
+    label: ["text"],
+    note: ["legend"],
+    river: ["parent", "basin"],
+    state: ["population", "rural", "urban"],
+    province: ["population", "rural", "urban"],
+    culture: ["population", "rural", "urban"],
+    religion: ["population", "rural", "urban"]
+  };
+
+  /**
+   * find: names in fields/where/sort that no live row of this type has (they read null in every
+   * row, or make a where match nothing). Empty when the list is empty (nothing to judge by).
+   */
+  function unknownFindFields(type, a) {
+    const items = liveList(type, true);
+    if (!items.length) return [];
+    const fixed = new Set([...KNOWN_FIELDS["*"], ...(KNOWN_FIELDS[type] || []), ...(EXTRA_FIELDS[type] || [])]);
+    const cache = new Map();
+    const known = f => {
+      if (fixed.has(f)) return true;
+      if (!cache.has(f))
+        cache.set(
+          f,
+          items.some(x => fieldValue(type, x, f) !== undefined)
+        );
+      return cache.get(f);
+    };
+    const asked = [];
+    for (const f of Array.isArray(a.fields) ? a.fields : []) asked.push(["fields", f]);
+    for (const k of Object.keys(a.where || {})) {
+      const mm = /^(.*)(Min|Max)$/.exec(k);
+      asked.push(["where", mm && !known(k) ? mm[1] : k]);
+    }
+    if (typeof a.sort === "string" && a.sort) asked.push(["sort", a.sort.replace(/^-/, "")]);
+    const out = [];
+    for (const [where, f] of asked) if (typeof f === "string" && !known(f)) out.push(`${where}: ${f}`);
+    if (!out.length) return out;
+    const seen = new Set([...fixed].filter(f => !["x", "y", "lat", "lon", "distance"].includes(f)));
+    for (const x of items.slice(0, 20)) for (const k of Object.keys(x)) if (k !== "removed") seen.add(k);
+    return [
+      `no ${type} has ${out.join(", ")} (reads null in every row; a where on it matches nothing or everything); ${type} fields: ${[...seen].slice(0, 40).join(", ")}`
+    ];
+  }
+
   function rowOf(type, x, fields, withPos) {
     const row = { i: idOf(type, x), name: nameOf(type, x) };
     for (const f of fields) {
@@ -1131,6 +1185,7 @@
       });
     }
     const total = rows.length;
+    const warnings = unknownFindFields(type, a);
     return {
       type,
       total,
@@ -1138,7 +1193,8 @@
       returned: Math.min(limit, Math.max(0, total - offset)),
       matchedBy,
       near: near ? { x: near.x, y: near.y, cell: near.cell } : undefined,
-      rows: rows.slice(offset, offset + limit)
+      rows: rows.slice(offset, offset + limit),
+      ...(warnings.length ? { warnings } : {})
     };
   };
 
@@ -2192,6 +2248,11 @@
    *   count():         number of rows; adds counts.<type>s to the map summary (map_info, load_map, sketch counts)
    * Editing and creating are registered separately (T.mutations.FIELDS / ADD / REMOVE / IDENT).
    */
+  /** A bridge-ext find wrapper fills these fields: find then does not call them unknown. */
+  T.addFindFields = (type, names) => {
+    EXTRA_FIELDS[type] = [...new Set([...(EXTRA_FIELDS[type] || []), ...names])];
+  };
+
   T.registerType = (type, spec) => {
     if (typeof spec?.list !== "function") fail("PAGE_ERROR", `registerType(${type}) needs list()`);
     if (!TYPES.includes(type)) TYPES.push(type);
