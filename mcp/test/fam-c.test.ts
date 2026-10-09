@@ -116,6 +116,53 @@ describe("fam-c: screenshot, map_info and edit across tracks", () => {
     assert.equal(ids.applied, undefined);
   });
 
+  test("lint's label checks follow display {labels} overrides (alwaysShow shows, a never-show bound hides)", async () => {
+    await h.ok("load_map", { path: "tests/fixtures/demo.map" });
+    await h.ok("eval", { code: "1", readOnly: true, redraw: ["labels"] });
+    // a burg label group with two labels that the app's rule hides at zoom 1: stack its two labels
+    const hid = await evalRO(`
+      for (const g of document.querySelectorAll('#burgLabels > g')) {
+        const t = [...g.querySelectorAll('text')];
+        const d = +g.dataset.size, rel = Math.max(Math.round(((d + d) / 2) * 100) / 100, 1);
+        if (t.length >= 2 && d > 0 && rel < 6) return { g: g.id, a: t[0].id, b: t[1].id };
+      }
+      return null;`);
+    assert.ok(hid, "premise: a burg label group hidden at zoom 1");
+    await evalRO(
+      `const a = document.getElementById(args.a), b = document.getElementById(args.b);
+       b.setAttribute('x', a.getAttribute('x')); b.setAttribute('y', a.getAttribute('y')); return 1`,
+      hid
+    );
+    const idA = Number(hid.a.replace("burgLabel", ""));
+    const idB = Number(hid.b.replace("burgLabel", ""));
+    const pairFound = (out: Obj) =>
+      ((out.rows?.["label-overlap"] ?? []) as Obj[]).some(
+        r =>
+          r.e.some((t: unknown[]) => t[0] === "burg" && t[1] === idA) &&
+          r.e.some((t: unknown[]) => t[0] === "burg" && t[1] === idB)
+      );
+    const lint = (args: Obj) => h.ok("lint", { checks: ["label-overlap"], limit: 200, ...args });
+
+    assert.equal(pairFound(await lint({ atScale: 1 })), false, "hidden at zoom 1 by the app's rule");
+    await h.ok("display", { labels: { [hid.g]: { alwaysShow: true } } });
+    const shown = await lint({ atScale: 1 });
+    assert.equal(pairFound(shown), true, `alwaysShow: the group shows at zoom 1 (${JSON.stringify(shown.notes)})`);
+
+    // an upper bound under any reachable size: the group never shows, so lint does not measure it
+    await h.ok("display", { labels: { [hid.g]: { alwaysShow: null, minSize: 0, maxSize: 0.5 } } });
+    const never = await lint({});
+    assert.equal(pairFound(never), false, JSON.stringify(never.notes));
+    assert.ok(
+      (never.notes as string[]).some(n => /never show/.test(n)),
+      `the note counts never-shown labels: ${JSON.stringify(never.notes)}`
+    );
+    // and a raised lower bound moves the probe zoom up, where the pair is found again
+    await h.ok("display", { labels: { [hid.g]: { minSize: 30, maxSize: null } } });
+    const raised = await lint({});
+    assert.equal(pairFound(raised), true, JSON.stringify(raised.notes));
+    await h.ok("display", { labels: { [hid.g]: null } });
+  });
+
   test("a float-noise-free digest: an unchanged map has an empty counts diff after a checkpoint", async () => {
     await h.ok("map_info", { since: "none" }); // sets the checkpoint
     const c = await h.ok("map_info", { since: "checkpoint", diff: "counts" });

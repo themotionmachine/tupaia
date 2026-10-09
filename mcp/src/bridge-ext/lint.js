@@ -597,6 +597,18 @@
   }
 
   /**
+   * The on-screen size bounds of a label group: the app's 6 / 60 px, or the group's own override
+   * that `display {labels}` (bridge-ext/labels.js) writes as data-min-size / data-max-size /
+   * data-always-show and the app's zoom handler honours (public/main.js, `tupaia-mcp:` hook).
+   */
+  function groupBounds(g) {
+    const min = parseFloat(g.dataset.minSize);
+    const max = parseFloat(g.dataset.maxSize);
+    const always = g.dataset.alwaysShow === "1" || g.dataset.alwaysShow === "true";
+    return { min: Number.isFinite(min) ? min : 6, max: Number.isFinite(max) ? max : 60, always };
+  }
+
+  /**
    * What the app's invokeActiveZooming (public/main.js) does to a label group at zoom S:
    * {size, hidden}, size null when labels do not rescale; null for a group without data-size,
    * which the app leaves as drawn.
@@ -605,9 +617,10 @@
     const desired = +g.dataset.size;
     if (!(desired > 0)) return null;
     const relative = Math.max(rn((desired + desired / S) / 2, 2), 1);
+    const b = groupBounds(g);
     return {
       size: checked("rescaleLabels") ? relative : null,
-      hidden: checked("hideLabels") && (relative * S < 6 || relative * S > 60)
+      hidden: checked("hideLabels") && !b.always && (relative * S < b.min || relative * S > b.max)
     };
   }
 
@@ -628,7 +641,8 @@
       for (const g of labelGroups()) {
         const desired = +g.dataset.size;
         if (!(desired > 0) || !groupAt(g, 1).hidden) continue;
-        let S = Math.ceil(Math.max(1, 12 / desired - 1) * 100) / 100;
+        // the on-screen size is about desired * (S + 1) / 2: the lower bound is met from 2 * min / desired - 1
+        let S = Math.ceil(Math.max(1, (2 * groupBounds(g).min) / desired - 1) * 100) / 100;
         for (let k = 0; k < 400 && groupAt(g, S).hidden; k++) S = rn(S + 0.01, 2);
         if (!groupAt(g, S).hidden) out.add(S);
       }
