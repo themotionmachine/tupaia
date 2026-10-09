@@ -6,8 +6,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { after, before, describe, test } from "node:test";
-import { LINT_CHECKS } from "../src/tools/lint.ts";
-import { alive, errorBody, type Harness, MCP_ROOT, startServer } from "./helpers.ts";
+import { LINT_CHECKS, LINT_OPT_IN } from "../src/tools/lint.ts";
+import { alive, errorBody, type Harness, MCP_ROOT, startServer, textOf } from "./helpers.ts";
 
 type Obj = Record<string, any>;
 
@@ -17,6 +17,7 @@ interface Row {
   at?: [number, number];
   msg: string;
   fix?: { tool: string; args: Obj };
+  fixNote?: string;
   hint?: string;
 }
 
@@ -33,6 +34,8 @@ interface LintOut {
   skipped?: Array<{ check: string; reason: string }>;
   notes?: string[];
   scanned: Record<string, number>;
+  unlocated?: Record<string, number>;
+  ignored?: number;
 }
 
 describe("tupaia-mcp lint (browser)", () => {
@@ -76,35 +79,49 @@ describe("tupaia-mcp lint (browser)", () => {
     assert.ok((t.description ?? "").length <= 2048);
     const ids = await evalv("return __tupaia.lint.CHECK_IDS");
     assert.deepEqual(ids, [...LINT_CHECKS]);
+    const opt = await evalv("return __tupaia.lint.CHECK_IDS.filter(id => __tupaia.lint.DEFS[id].optIn)");
+    assert.deepEqual(opt, [...LINT_OPT_IN], "opt-in checks match the page");
   });
 
   test("baseline: demo.map has no errors, label checks say why they were skipped, and it is fast", async () => {
     const t0 = Date.now();
     const out = await lint();
-    const ms = Date.now() - t0;
-    assert.ok(ms < 3000, `lint took ${ms} ms`);
+    const wall = Date.now() - t0;
+    assert.ok(out.ms < 3000, `lint took ${out.ms} ms in the page (${wall} ms with the round trip)`);
     assert.equal(out.totals.error, 0, JSON.stringify(out.rows));
     assert.equal(out.map.cells, 7462);
     // the fixture was saved without label elements: label checks cannot measure and say so
     const skipped = (out.skipped ?? []).map(s => s.check);
     assert.deepEqual(skipped.sort(), ["label-offcanvas", "label-overlap"]);
     assert.match((out.skipped ?? [])[0].reason, /no label elements/);
-    // 578 unnamed routes dominate the counts but are info and broken down by type
-    assert.equal(out.kinds?.unnamed?.route, 578);
-    assert.equal(out.counts.unnamed, 578);
+    // the generator names no route: 578 unnamed routes are one info row, not 578
+    assert.equal(out.kinds?.unnamed?.route, 1);
+    assert.equal(out.counts.unnamed, 1);
+    // an overview counts info findings but lists only warn and error rows; naming the check lists it
+    assert.equal(out.rows.unnamed, undefined);
+    assert.equal(out.more?.unnamed, 1);
+    const named = await lint({ checks: ["unnamed"] });
+    assert.match(named.rows.unnamed[0].msg, /^578 of 578 routes have no name/);
+    const explicit = await lint({ minSeverity: "info" });
+    assert.match(explicit.rows.unnamed[0].msg, /^578 of 578 routes have no name/);
     for (const id of [
       "burg-in-water",
       "burg-shared-cell",
+      "burg-cell-link",
       "capital-outside",
       "river-loop",
       "route-link",
+      "route-point-cell",
+      "marker-cell-link",
       "note-orphan"
     ])
       assert.ok(out.clean.includes(id), `${id} is clean on the fixture`);
+    // opt-in checks are not part of a default run
+    for (const id of LINT_OPT_IN) assert.ok(!(id in out.counts) && !out.clean.includes(id), `${id} is opt-in`);
     assert.ok(out.scanned.burgs === 753 && out.scanned.rivers === 370 && out.scanned.routes === 578);
     // compact: counts first, rows capped per check
     for (const rows of Object.values(out.rows)) assert.ok(rows.length <= 20);
-    assert.ok(JSON.stringify(out).length < 40_000, "default output stays small");
+    assert.ok(JSON.stringify(out).length < 15_000, "default output stays small");
   });
 
   test("read-only: no undo entry, no checkpoint, no sketch log entry, map unchanged", async () => {
@@ -143,7 +160,7 @@ describe("tupaia-mcp lint (browser)", () => {
         const b = pack.burgs.find(b => b && b.i && !b.removed && !b.capital && C.c[b.cell].some(c => C.h[c] < 20));
         const w = C.c[b.cell].find(c => C.h[c] < 20);
         C.burg[b.cell] = 0; b.cell = w; b.x = C.p[w][0]; b.y = C.p[w][1]; C.burg[w] = b.i;
-        return { i: b.i, name: b.name, x: b.x, y: b.y };`);
+        return { i: b.i, name: b.name, x: b.x, y: b.y, state: b.state };`);
       const { rows } = await found("burg-in-water", 1);
       assert.equal(rows[0].sev, "error");
       assert.ok(hasEntity(rows[0], "burg", b.i));
@@ -154,10 +171,46 @@ describe("tupaia-mcp lint (browser)", () => {
       await found("burg-in-water", 0, { bbox: [0, 0, 20, 20] });
       await found("burg-in-water", 1, { types: ["burg"] });
       await found("burg-in-water", 0, { types: ["river"] });
+      assert.ok(!rows[0].fixNote, "a cell of its own state was free: no state change to report");
       await apply(rows[0].fix);
       await clean("burg-in-water");
-      const now = await evalv("return pack.cells.h[pack.burgs[args].cell]", b.i);
-      assert.ok(now >= 20);
+      const now = await evalv("return [pack.cells.h[pack.burgs[args].cell], pack.burgs[args].state]", b.i);
+      assert.ok(now[0] >= 20);
+      assert.equal(now[1], b.state, "the fix keeps the burg in its own state");
+    });
+
+    test("burg fixes: with no free cell in its own state a non-capital moves abroad and says so; a locked burg gets a hint", async () => {
+      const p = await evalv(`
+        const C = pack.cells;
+        const b = pack.burgs.find(b => b && b.i && !b.removed && !b.capital && C.c[b.cell].some(c => C.h[c] < 20));
+        const w = C.c[b.cell].find(c => C.h[c] < 20);
+        C.burg[b.cell] = 0; b.cell = w; b.x = C.p[w][0]; b.y = C.p[w][1]; C.burg[w] = b.i;
+        b.state = 9999; // a state that owns no cell anywhere
+        return { i: b.i, name: b.name };`);
+      const { rows } = await found("burg-in-water", 1);
+      assert.equal(rows[0].fix?.tool, "edit");
+      assert.match(rows[0].fixNote ?? "", /no free land cell in its own state nearby.*its state changes/);
+      await evalv("pack.burgs[args].lock = true", p.i);
+      const locked = await found("burg-in-water", 1);
+      assert.ok(!locked.rows[0].fix && /is locked/.test(locked.rows[0].hint ?? ""), JSON.stringify(locked.rows[0]));
+      await evalv("pack.burgs[args].lock = false", p.i);
+      await apply((await found("burg-in-water", 1)).rows[0].fix);
+      await clean("burg-in-water");
+    });
+
+    test("burg-cell-link: coordinates that fall in another cell than the recorded one; the fix moves the burg there", async () => {
+      const p = await evalv(`
+        const C = pack.cells;
+        const b = pack.burgs.filter(b => b && b.i && !b.removed && !b.capital)[12];
+        const spot = C.i.find(c => C.h[c] >= 20 && !C.burg[c] && Math.hypot(C.p[c][0] - b.x, C.p[c][1] - b.y) > 80);
+        b.x = C.p[spot][0]; b.y = C.p[spot][1];
+        return { i: b.i, cell: b.cell, spot };`);
+      const { rows } = await found("burg-cell-link", 1);
+      assert.ok(hasEntity(rows[0], "burg", p.i));
+      assert.match(rows[0].msg, new RegExp(`records cell ${p.cell}, but its coordinates fall in cell ${p.spot}`));
+      assert.equal(rows[0].fix?.tool, "edit");
+      await apply(rows[0].fix);
+      await clean("burg-cell-link");
     });
 
     test("burg-shared-cell + burg-cell-link: two burgs in one cell, then a stale cells.burg entry", async () => {
@@ -172,7 +225,12 @@ describe("tupaia-mcp lint (browser)", () => {
       assert.match(rows[0].msg, new RegExp(`cell ${p.cell}`));
       // the cell link is fine for the owner of cells.burg and is not double-reported for the other
       await found("burg-cell-link", 0);
-      await apply(rows[0].fix);
+      // a locked burg is not moved: the fix says so instead
+      await evalv("pack.burgs[args].lock = true", p.B);
+      const locked = await found("burg-shared-cell", 1);
+      assert.ok(!locked.rows[0].fix && /is locked/.test(locked.rows[0].hint ?? ""), JSON.stringify(locked.rows[0]));
+      await evalv("pack.burgs[args].lock = false", p.B);
+      await apply((await found("burg-shared-cell", 1)).rows[0].fix);
       await clean("burg-shared-cell");
       await clean("burg-cell-link");
 
@@ -221,12 +279,24 @@ describe("tupaia-mcp lint (browser)", () => {
       const pe = await found("province-empty", 1);
       assert.ok(hasEntity(pe.rows[0], "province", p.prov));
       assert.equal(pe.rows[0].fix?.tool, "eval");
+      // the province's coat of arms goes with it, as in the provinces editor
+      await evalv(
+        `const g = document.createElementNS('http://www.w3.org/2000/svg', 'g'); g.id = 'provinceCOA' + args; defs.node().appendChild(g);
+         const u = document.createElementNS('http://www.w3.org/2000/svg', 'use'); u.setAttribute('data-i', args);
+         document.querySelector('#emblems #provinceEmblems').appendChild(u)`,
+        p.prov
+      );
       const se = await found("state-empty", 1);
       assert.ok(hasEntity(se.rows[0], "state", p.st));
       await apply(pe.rows[0].fix);
       await clean("province-empty");
       const removed = await evalv("return pack.provinces[args].removed === true", p.prov);
       assert.equal(removed, true);
+      const emblem = await evalv(
+        "return [!!document.getElementById('provinceCOA' + args), !!document.querySelector('#provinceEmblems > use[data-i=\"' + args + '\"]')]",
+        p.prov
+      );
+      assert.deepEqual(emblem, [false, false], "the emblem of the removed province is gone");
       await apply(se.rows[0].fix);
       await clean("state-empty");
     });
@@ -278,6 +348,52 @@ describe("tupaia-mcp lint (browser)", () => {
       assert.ok(hasEntity(rows[0], "state", 3) && hasEntity(rows[0], "state", 4));
       await apply(rows[0].fix);
       await found("name-duplicate", 0, { types: ["state"] });
+    });
+
+    test("name-duplicate: a locked state keeps its name, the other is renamed; when all are locked the row says so", async () => {
+      await h.ok("edit", {
+        type: "state",
+        ops: [
+          { ref: 3, set: { name: "Lockland" } },
+          { ref: 4, set: { name: "Lockland", lock: true } }
+        ]
+      });
+      const first = await found("name-duplicate", 1, { types: ["state"] });
+      const ops = first.rows[0].fix?.args.ops as Obj[];
+      assert.deepEqual(
+        ops.map(o => o.ref),
+        [3],
+        "state 4 is locked and keeps the name"
+      );
+      await h.ok("edit", { type: "state", ops: [{ ref: 3, set: { lock: true } }] });
+      const all = await found("name-duplicate", 1, { types: ["state"] });
+      assert.ok(!all.rows[0].fix && /locked/.test(all.rows[0].hint ?? ""), JSON.stringify(all.rows[0]));
+      await h.ok("edit", {
+        type: "state",
+        ops: [
+          { ref: 3, set: { lock: false } },
+          { ref: 4, set: { lock: false } }
+        ]
+      });
+      await reload();
+    });
+
+    test("unnamed routes are one row; its fix names them all, and under an area filter only those inside", async () => {
+      const { rows } = await found("unnamed", 1, { types: ["route"] });
+      assert.match(rows[0].msg, /^578 of 578 routes have no name/);
+      assert.equal(rows[0].fix?.tool, "eval");
+      const m = (await lint({ checks: ["unnamed"], types: ["route"] })).map;
+      const half = await found("unnamed", 1, { types: ["route"], bbox: [0, 0, m.w / 2, m.h / 2] });
+      const n = Number(/^(\d+) of 578/.exec(half.rows[0].msg)?.[1]);
+      assert.ok(n > 20 && n < 578, `routes in the north-west quarter: ${n}`);
+      const part = await apply(half.rows[0].fix);
+      assert.equal(part.value, n, "the area-limited fix names exactly the routes it counted");
+      const left = await lint({ checks: ["unnamed"], types: ["route"] });
+      assert.match(left.rows.unnamed[0].msg, new RegExp(`^${578 - n} of 578`));
+      const res = await apply(left.rows.unnamed[0].fix);
+      assert.equal(res.value, 578 - n);
+      await clean("unnamed", { types: ["route"] });
+      await reload();
     });
 
     test("note-orphan: notes of removed or missing entities; fixAll removes them, real notes stay", async () => {
@@ -339,10 +455,32 @@ describe("tupaia-mcp lint (browser)", () => {
       assert.ok(!loop.rows.some(r => hasEntity(r, "river", p.rep)), "a consecutive repeat is harmless");
       const gap = await found("river-gap", 2);
       assert.ok(gap.rows.some(r => hasEntity(r, "river", p.b)));
-      await apply(loop.rows[0].fix);
+      // removing a river (with its tributaries) is the bigger change: a hint, not a ready fix
+      assert.ok(!loop.rows[0].fix && !gap.rows[0].fix, "no automatic fix for a loop or a gap");
+      assert.match(loop.rows[0].hint ?? "", new RegExp(`edit river \\{ref:${p.a}, remove:true\\}`));
+      await h.ok("edit", { type: "river", ops: [{ ref: p.a, remove: true }] });
       await clean("river-loop");
       const left = await evalv("return pack.rivers.some(r => r.i === args)", p.a);
       assert.equal(left, false);
+    });
+
+    test("river-uphill: several rising cells are one row with one fix that clears them", async () => {
+      await reload();
+      const p = await evalv(`
+        const C = pack.cells;
+        const r = pack.rivers.find(r => r.cells.length >= 9 && r.cells.every(c => c >= 0 && C.h[c] >= 25));
+        const a = r.cells[3], b = r.cells[6];
+        C.h[a] = 100; C.h[b] = 100;
+        return { r: r.i, a, b };`);
+      const out = await lint({ checks: ["river-uphill"], types: ["river"], limit: 100 });
+      const rows = rowsOf(out, "river-uphill").filter(r => hasEntity(r, "river", p.r));
+      assert.equal(rows.length, 1, "one row per river");
+      assert.match(rows[0].msg, /\d+ cells rise in all/);
+      const sel = (rows[0].fix?.args.select as Obj).cells as number[];
+      assert.ok(sel.includes(p.a) && sel.includes(p.b), `both raised cells are selected: ${JSON.stringify(sel)}`);
+      await apply(rows[0].fix);
+      const again = await lint({ checks: ["river-uphill"], types: ["river"], limit: 100 });
+      assert.ok(!rowsOf(again, "river-uphill").some(r => hasEntity(r, "river", p.r)), "one pass clears the river");
     });
 
     test("route-link: stale, wrong and missing cells.routes links; fixAll relinks everything", async () => {
@@ -365,31 +503,67 @@ describe("tupaia-mcp lint (browser)", () => {
       assert.ok(rows.some(r => hasEntity(r, "route", p.m) && /no cells.routes link/.test(r.msg)));
       assert.ok(rows.some(r => hasEntity(r, "route", p.other) && /does not pass/.test(r.msg)));
       assert.equal(out.fixAll?.["route-link"].tool, "eval");
-      await apply(out.fixAll?.["route-link"]);
+      const fixed = await apply(out.fixAll?.["route-link"]);
+      assert.equal(typeof fixed.value, "number", "the fix snippets return a value");
       await clean("route-link");
     });
 
-    test("route-point-cell: a point dragged away from its cell; the fix snaps it back", async () => {
+    test("route-point-cell: dragged points are found and snapped back; a point in its own nearest cell is never flagged", async () => {
+      await reload();
       const p = await evalv(`
-        const r = pack.routes.find(r => r.points.length > 4 && r.i > 20);
-        r.points[2][0] += 90;
-        return { r: r.i };`);
-      const { rows } = await found("route-point-cell", 1);
-      assert.ok(hasEntity(rows[0], "route", p.r));
-      assert.match(rows[0].msg, /1 point\(s\)/);
-      await apply(rows[0].fix);
+        const rs = pack.routes.filter(r => r.points.length > 6 && r.i > 20);
+        const [a, b, c, d, e] = rs;
+        a.points[2][0] += 90;
+        b.points[3][1] += 90; b.points[4][0] -= 90;
+        // 40 px from the cell centre, but its recorded cell is the nearest one there: not an error
+        const q = c.points[3]; q[0] += 40; q[2] = findCell(q[0], q[1]);
+        window.__lintMore = [d.i, e.i];
+        return { a: a.i, b: b.i, c: c.i, d: d.i, e: e.i };`);
+      const first = await lint({ checks: ["route-point-cell"], limit: 50 });
+      const rows = rowsOf(first, "route-point-cell");
+      assert.equal(rows.length, 2, JSON.stringify(rows.map(r => r.msg)));
+      assert.ok(hasEntity(rows[0], "route", p.a) || hasEntity(rows[1], "route", p.a));
+      assert.ok(!rows.some(r => hasEntity(r, "route", p.c)), "recorded cell == nearest cell is fine at any distance");
+      assert.match(rows.find(r => hasEntity(r, "route", p.b))?.msg ?? "", /^route \d+: 2 point\(s\)/);
+      assert.ok(first.fixAll?.["route-point-cell"], "several routes: one call repairs them all");
+      const aRow = rows.find(r => hasEntity(r, "route", p.a));
+      assert.ok(aRow && !aRow.fix, "with a fixAll beside them the rows carry no fix of their own");
+      // filtered to one route, its own fix is offered, and it clears its own row
+      const single = rowsOf(
+        await lint({ checks: ["route-point-cell"], near: { x: aRow.at?.[0] ?? 0, y: aRow.at?.[1] ?? 0 }, radius: 4 }),
+        "route-point-cell"
+      );
+      assert.equal(single.length, 1);
+      await apply(single[0].fix);
+      assert.equal((await lint({ checks: ["route-point-cell"], limit: 50 })).counts["route-point-cell"], 1);
+      // two more, then fixAll
+      await evalv(
+        "for (const i of window.__lintMore) { const r = pack.routes.find(r => r.i === i); r.points[2][0] += 120; }"
+      );
+      const many = await lint({ checks: ["route-point-cell"], limit: 50 });
+      assert.equal(many.counts["route-point-cell"], 3);
+      // ignoring one route scopes the fixAll to the others
+      const scoped = await lint({ checks: ["route-point-cell"], ignore: [{ type: "route", id: p.d }] });
+      assert.equal(scoped.counts["route-point-cell"], 2);
+      await apply(scoped.fixAll?.["route-point-cell"]);
+      const left = rowsOf(await lint({ checks: ["route-point-cell"], limit: 50 }), "route-point-cell");
+      assert.equal(left.length, 1, "only the ignored route is still off");
+      assert.ok(hasEntity(left[0], "route", p.d));
+      const res = await apply(many.fixAll?.["route-point-cell"]);
+      assert.ok((res.value as number) >= 1, "the fix reports how many points it re-derived");
       await clean("route-point-cell");
       await clean("route-link");
     });
 
-    test("route-end-burg: a route left ending where its burg was removed; the fix removes the route", async () => {
+    test("route-end-burg: a route left ending where its burg was removed; the fix trims the dangling end", async () => {
+      await reload();
       const p = await evalv(`
         const C = pack.cells;
         const market = b => (pack.markets || []).some(m => m.centerBurgId === b.i);
         for (const r of pack.routes) {
           const p0 = r.points[0];
           const b = pack.burgs[C.burg[p0[2]]];
-          if (b && b.i && !b.capital && !market(b)) return { r: r.i, b: b.i, name: b.name };
+          if (b && b.i && !b.capital && !market(b) && r.points.length >= 8) return { r: r.i, b: b.i, name: b.name, n: r.points.length };
         }
         return null;`);
       assert.ok(p, "a route that starts at a plain burg exists");
@@ -399,10 +573,71 @@ describe("tupaia-mcp lint (browser)", () => {
       const mine = rows.find(r => hasEntity(r, "route", p.r));
       assert.ok(mine && hasEntity(mine, "burg", p.b), JSON.stringify(rows));
       assert.match(mine.msg, new RegExp(p.name));
-      assert.equal(mine.fix?.tool, "edit");
-      // a burg with several roads leaves several dangling ends; removing them all clears the check
-      for (const r of rows) await apply(r.fix);
+      // trimming the end is the suggestion, not removing the route: one fix per row, or one fixAll for several
+      assert.equal(out.fixAll?.["route-end-burg"].tool, "eval");
+      if (rows.length === 1) assert.equal(mine.fix?.tool, "eval");
+      else assert.ok(!mine.fix, "several rows: the fixAll is the fix");
+      // a burg with several roads leaves several dangling ends: one call trims them all
+      const res = await apply(out.fixAll?.["route-end-burg"]);
+      assert.ok((res.value as number) >= rows.length);
       await clean("route-end-burg");
+      const len = await evalv("return pack.routes.find(r => r.i === args)?.points.length ?? null", p.r);
+      assert.ok(len !== null && len < p.n, "the route is trimmed, not removed");
+      await clean("route-link");
+      await clean("note-orphan");
+    });
+
+    test("a check that throws is skipped alone, with its name; the checks beside it still report", async () => {
+      await reload();
+      // cells.routes throws, but only for the route-link check (the harness reads it too)
+      await evalv(`
+        const saved = pack.cells.routes;
+        Object.defineProperty(pack.cells, 'routes', {
+          get() { if (new Error().stack.includes('checkRouteLink')) throw new Error('boom'); return saved; },
+          set(v) { Object.defineProperty(pack.cells, 'routes', { value: v, writable: true, enumerable: true, configurable: true }); },
+          enumerable: true,
+          configurable: true
+        });
+        return 1;`);
+      const out = await lint({ checks: ["route-link", "route-point-cell", "route-end-burg"] });
+      assert.deepEqual(
+        (out.skipped ?? []).map(s => s.check),
+        ["route-link"]
+      );
+      assert.match((out.skipped ?? [])[0].reason, /check failed: boom/);
+      assert.deepEqual(out.clean, ["route-point-cell", "route-end-burg"]);
+      await reload();
+    });
+  });
+
+  describe("stale cell ids after a height rebuild", () => {
+    before(reload);
+
+    test("cells.routes full of holes and stale cells on routes, markers and rivers: every check reports, none crashes", async () => {
+      await h.ok("paint_cells", {
+        select: { circle: { at: { x: 500, y: 300 }, radius: 80 } },
+        set: { height: { value: 5, rebuild: "risk" } }
+      });
+      const holes = await evalv(
+        "const C = pack.cells; return Object.keys(C.routes).filter(k => C.routes[k] === undefined).length"
+      );
+      assert.ok(holes > 100, `the rebuild leaves undefined rows in cells.routes (${holes})`);
+      const out = await lint({ limit: 3 });
+      assert.deepEqual(
+        (out.skipped ?? []).filter(s => /check failed/.test(s.reason)),
+        []
+      );
+      for (const id of ["route-link", "route-point-cell", "marker-cell-link"])
+        assert.ok((out.counts[id] ?? 0) > 0, `${id} names the stale data`);
+      assert.match(rowsOf(out, "route-point-cell")[0].msg, /does not exist|px from cell/);
+      // the repair calls clear what they name
+      for (const id of ["marker-cell-link", "route-point-cell", "route-link"]) {
+        const fix = out.fixAll?.[id];
+        assert.ok(fix, `${id} has a fixAll`);
+        const res = await apply(fix);
+        assert.equal(typeof res.value, "number");
+      }
+      for (const id of ["marker-cell-link", "route-point-cell", "route-link"]) await clean(id);
     });
   });
 
@@ -466,6 +701,46 @@ describe("tupaia-mcp lint (browser)", () => {
       const left = await lint({ checks: ["marker-in-water"], near: p, radius: 400, minSeverity: "error" });
       assert.equal(left.counts["marker-in-water"] ?? 0, 0);
     });
+
+    test("marker-cell-link: a stale recorded cell is reported, and does not make a marker on land look 'in water'", async () => {
+      await reload();
+      const p = await evalv(`
+        const C = pack.cells;
+        const m = pack.markers.find(m => !['sea-monsters', 'pirates', 'lake-monsters'].includes(m.type) && C.h[findCell(m.x, m.y)] >= 20 && C.h[m.cell] >= 20);
+        const water = C.i.find(c => C.h[c] < 20 && Math.hypot(C.p[c][0] - m.x, C.p[c][1] - m.y) > 100);
+        m.cell = water;
+        return { i: m.i, x: m.x, y: m.y, water, real: findCell(m.x, m.y) };`);
+      const here = { near: { x: p.x, y: p.y }, radius: 10 };
+      const link = await found("marker-cell-link", 1, here);
+      assert.ok(hasEntity(link.rows[0], "marker", p.i));
+      assert.match(link.rows[0].msg, new RegExp(`records cell ${p.water}, but its coordinates fall in cell ${p.real}`));
+      await clean("marker-in-water", here); // it stands on land: judged by its coordinates, not its stale cell
+      await apply(link.rows[0].fix);
+      await clean("marker-cell-link", here);
+      const cell = await evalv("return pack.markers.find(m => m.i === args).cell", p.i);
+      assert.equal(cell, p.real);
+    });
+
+    test("marker-near-burg (opt-in): a marker beside a burg is found by name only; the fix moves it away", async () => {
+      await reload();
+      const b = await evalv(`
+        const bs = pack.burgs.filter(b => b && b.i && !b.removed);
+        const b = bs.find(b => pack.markers.every(m => Math.hypot(m.x - b.x, m.y - b.y) > 80) && bs.every(o => o === b || Math.hypot(o.x - b.x, o.y - b.y) > 60) && b.x > 80 && b.x < 1200);
+        return { i: b.i, x: b.x, y: b.y, name: b.name };`);
+      await h.ok("add", { type: "marker", items: [{ at: { x: b.x + 4, y: b.y }, type: "inns" }] });
+      const here = { near: { x: b.x, y: b.y }, radius: 12 };
+      const plain = await lint({ near: { x: b.x, y: b.y }, radius: 12 });
+      assert.ok(
+        !("marker-near-burg" in plain.counts) && !plain.clean.includes("marker-near-burg"),
+        "not in a default run"
+      );
+      const { rows } = await found("marker-near-burg", 1, here);
+      assert.ok(hasEntity(rows[0], "burg", b.i));
+      assert.match(rows[0].msg, new RegExp(`is 4 px from ${b.name}`));
+      assert.equal(rows[0].fix?.args.type, "marker");
+      await apply(rows[0].fix);
+      await clean("marker-near-burg", { near: { x: b.x, y: b.y }, radius: 60 });
+    });
   });
 
   describe("labels", () => {
@@ -524,7 +799,93 @@ describe("tupaia-mcp lint (browser)", () => {
       assert.ok(hit, `custom label over the state's glyphs: ${JSON.stringify(rowsOf(out, "label-overlap"))}`);
     });
 
+    test("label groups hidden by the zoom rule are measured at the lowest zoom where they show, and the DOM is left as it was", async () => {
+      await h.ok("eval", { code: "1", readOnly: true, redraw: ["labels"] });
+      const hid = await evalv(`
+        for (const g of document.querySelectorAll('#burgLabels > g')) {
+          const t = [...g.querySelectorAll('text')];
+          if (t.length >= 2 && g.classList.contains('hidden')) return { g: g.id, a: t[0].id, b: t[1].id, size: +g.dataset.size };
+        }
+        return null;`);
+      assert.ok(hid, "a burg label group is hidden by the hide-labels rule at zoom 1");
+      await evalv(
+        `const a = document.getElementById(args.a), b = document.getElementById(args.b);
+         b.setAttribute('x', a.getAttribute('x')); b.setAttribute('y', a.getAttribute('y'));`,
+        hid
+      );
+      const idA = Number(hid.a.replace("burgLabel", ""));
+      const idB = Number(hid.b.replace("burgLabel", ""));
+      const dom = () => evalv("return document.getElementById('labels').outerHTML");
+      const before = await dom();
+      const out = await lint({ checks: ["label-overlap"], limit: 200 });
+      assert.equal(await dom(), before, "font sizes and hidden classes are put back exactly");
+      const hit = rowsOf(out, "label-overlap").find(r => hasEntity(r, "burg", idA) && hasEntity(r, "burg", idB));
+      assert.ok(
+        hit,
+        `the two stacked labels of a hidden group are found: ${JSON.stringify(rowsOf(out, "label-overlap").slice(0, 3))}`
+      );
+      assert.match(hit.msg, /at zoom \d/);
+      assert.ok(out.notes?.some(n => /lowest zoom where it shows/.test(n)));
+      // atScale 1 pins the zoom: the group is hidden there, so the pair is not seen
+      const one = await lint({ checks: ["label-overlap"], limit: 200, atScale: 1 });
+      assert.ok(!rowsOf(one, "label-overlap").some(r => hasEntity(r, "burg", idA) && hasEntity(r, "burg", idB)));
+      assert.ok(
+        one.notes?.some(n => /measured at zoom 1 \(\d+ of \d+ labels are hidden/.test(n)),
+        JSON.stringify(one.notes)
+      );
+      const ten = await lint({ checks: ["label-overlap"], limit: 200, atScale: 10 });
+      assert.ok(rowsOf(ten, "label-overlap").some(r => hasEntity(r, "burg", idA) && hasEntity(r, "burg", idB)));
+      assert.equal(await dom(), before);
+      await h.ok("eval", { code: "1", readOnly: true, redraw: ["labels"] });
+    });
+
+    test("label-marker-overlap (opt-in): a pin over a burg label is found by name only; the fix nudges the pin", async () => {
+      const spot = await evalv(`
+        const t = document.querySelector('#burgLabels #capital text');
+        const r = t.getBBox();
+        const vb = document.getElementById('viewbox').getCTM().inverse().multiply(t.getCTM());
+        const x = vb.a * (r.x + r.width / 2) + vb.c * (r.y + r.height / 2) + vb.e;
+        const y = vb.b * (r.x + r.width / 2) + vb.d * (r.y + r.height / 2) + vb.f;
+        return { x, y, burg: +t.id.replace('burgLabel', '') };`);
+      await h.ok("add", { type: "marker", items: [{ at: { x: spot.x, y: spot.y + 3 }, type: "inns" }] });
+      const mk = await evalv("return Math.max(...pack.markers.map(m => m.i))");
+      const here = { near: { x: spot.x, y: spot.y }, radius: 12 };
+      const plain = await lint({ checks: ["label-overlap", "label-offcanvas"], ...here });
+      assert.ok(!("label-marker-overlap" in plain.counts));
+      const out = await lint({ checks: ["label-marker-overlap"], limit: 50, ...here });
+      const hit = rowsOf(out, "label-marker-overlap").find(r => hasEntity(r, "marker", mk));
+      assert.ok(hit && hasEntity(hit, "burg", spot.burg), JSON.stringify(out.rows));
+      assert.match(hit.msg, new RegExp(`^marker ${mk} \\(inns\\) covers \\d+% of burg label`));
+      assert.equal(hit.fix?.args.type, "marker");
+      assert.ok(
+        out.notes?.some(n => /markers layer is off/.test(n)),
+        "pins are measured while the layer is off, and it says so"
+      );
+      await apply(hit.fix);
+      const left = await lint({ checks: ["label-marker-overlap"], limit: 50, ...here });
+      assert.ok(
+        !rowsOf(left, "label-marker-overlap").some(r => hasEntity(r, "marker", mk) && hasEntity(r, "burg", spot.burg)),
+        "the pin no longer covers that label"
+      );
+    });
+
+    test("label-offcanvas ignores an overhang of 2 px or less", async () => {
+      await h.ok("add", { type: "label", items: [{ at: { x: 3, y: 300 }, text: "Edge Reach" }] });
+      const near = { near: { x: 3, y: 300 }, radius: 60 };
+      const row = rowsOf(await lint({ checks: ["label-offcanvas"], ...near }), "label-offcanvas")[0];
+      assert.ok(row, "the label sticks out by a lot");
+      const left = Number(/left (\d+)/.exec(row.msg)?.[1]);
+      const id = row.e[0][1];
+      // shift it right until about 1 px is left outside
+      await h.ok("edit", { type: "label", ops: [{ ref: id, set: { move: { x: 3 + left - 1, y: 300 } } }] });
+      await clean("label-offcanvas", near);
+      await h.ok("edit", { type: "label", ops: [{ ref: id, set: { move: { x: 3 + left - 6, y: 300 } } }] });
+      const four = rowsOf(await lint({ checks: ["label-offcanvas"], ...near }), "label-offcanvas");
+      assert.equal(four.length, 1, "a 5 px overhang is reported again");
+    });
+
     test("label-orphan: labels of a removed burg and a removed state; the fixes remove the elements", async () => {
+      await h.ok("eval", { code: "1", readOnly: true, redraw: ["labels"] });
       const p = await evalv(`
         const st = pack.states.find(s => s.i && !s.removed && document.getElementById('stateLabel' + s.i));
         const bu = pack.burgs.find(b => b && b.i && !b.removed && !b.capital && document.getElementById('burgLabel' + b.i));
@@ -535,6 +896,17 @@ describe("tupaia-mcp lint (browser)", () => {
       assert.ok(rows.some(r => hasEntity(r, "burg", p.bu) && /burg label/.test(r.msg)));
       for (const r of rows) await apply(r.fix);
       await clean("label-orphan");
+    });
+
+    test("a map with nothing to label is clean for the label checks, not skipped", async () => {
+      await evalv(
+        `for (const b of pack.burgs) if (b && b.i) b.removed = true; for (const s of pack.states) if (s && s.i) s.removed = true;
+         document.querySelectorAll('#labels text').forEach(t => t.remove());`
+      );
+      const out = await lint({ checks: ["label-offcanvas", "label-overlap"] });
+      assert.deepEqual(out.skipped ?? [], []);
+      assert.deepEqual(out.clean, ["label-offcanvas", "label-overlap"]);
+      await reload();
     });
   });
 
@@ -548,7 +920,7 @@ describe("tupaia-mcp lint (browser)", () => {
       assert.equal(counts.more?.unnamed, counts.counts.unnamed);
       const few = await lint({ limit: 2 });
       for (const rows of Object.values(few.rows)) assert.ok(rows.length <= 2);
-      const capped = await lint({ limit: 20, maxRows: 5 });
+      const capped = await lint({ limit: 20, maxRows: 5, minSeverity: "info" });
       assert.equal(Object.values(capped.rows).flat().length, 5);
       assert.equal(Object.values(capped.rows).flat()[0].sev, "warn", "the cap keeps the most severe rows");
       const bare = await lint({ limit: 3, fixes: false });
@@ -578,6 +950,112 @@ describe("tupaia-mcp lint (browser)", () => {
       });
       assert.ok(near.counts["marker-stacked"] >= 1);
     });
+  });
+
+  describe("area filters, ignore and argument errors", () => {
+    before(reload);
+
+    test("area filter: rows without a location are counted as unlocated, never reported as clean", async () => {
+      await h.ok("add", { type: "note", items: [{ id: "burg60000", name: "ghost" }] });
+      const all = await lint({ checks: ["note-orphan"] });
+      assert.equal(all.counts["note-orphan"], 1);
+      const area = await lint({ checks: ["note-orphan"], bbox: [0, 0, all.map.w, all.map.h] });
+      assert.deepEqual(area.counts, {});
+      assert.deepEqual(area.clean, [], "a filtered-away row must not turn the check clean");
+      assert.equal(area.unlocated?.["note-orphan"], 1);
+      const circle = await lint({ checks: ["note-orphan"], near: { x: 100, y: 100 }, radius: 50 });
+      assert.equal(circle.unlocated?.["note-orphan"], 1);
+      await h.ok("edit", { type: "note", ops: [{ ref: "burg60000", remove: true }] });
+      const gone = await lint({ checks: ["note-orphan"], bbox: [0, 0, all.map.w, all.map.h] });
+      assert.deepEqual(gone.clean, ["note-orphan"]);
+      assert.equal(gone.unlocated, undefined);
+    });
+
+    test("an inverted bbox is the same box", async () => {
+      const a = await lint({ checks: ["marker-stacked"], bbox: [0, 0, 1280, 720] });
+      const b = await lint({ checks: ["marker-stacked"], bbox: [1280, 720, 0, 0] });
+      assert.deepEqual(b.counts, a.counts);
+      assert.ok((a.counts["marker-stacked"] ?? 0) > 0, "the box covers the map");
+    });
+
+    test("ignore drops known findings by check, by entity or both, and counts them", async () => {
+      await h.ok("add", {
+        type: "note",
+        items: [
+          { id: "burg60000", name: "ghost one" },
+          { id: "marker88888", name: "ghost two" }
+        ]
+      });
+      const run = (ignore?: Obj[]) => lint({ checks: ["note-orphan"], ...(ignore ? { ignore } : {}) });
+      assert.equal((await run()).counts["note-orphan"], 2);
+      const one = await run([{ check: "note-orphan", id: "burg60000" }]);
+      assert.equal(one.counts["note-orphan"], 1);
+      assert.equal(one.ignored, 1);
+      assert.equal((await run([{ id: "marker88888" }])).counts["note-orphan"], 1);
+      assert.equal((await run([{ id: "no-such-note" }])).counts["note-orphan"], 2);
+      assert.equal((await run([{ type: "burg" }])).counts["note-orphan"], 2, "no row involves a burg entity");
+      const all = await run([{ check: "note-orphan" }]);
+      assert.deepEqual(all.clean, ["note-orphan"]);
+      assert.equal(all.ignored, 2);
+      const bad = await h.call("lint", { ignore: [{}] });
+      assert.equal(bad.isError, true);
+      await h.ok("edit", {
+        type: "note",
+        ops: [
+          { ref: "burg60000", remove: true },
+          { ref: "marker88888", remove: true }
+        ]
+      });
+    });
+
+    test("bad arguments: the place error lists the accepted forms; atScale and thresholds are range-checked", async () => {
+      const place = await h.call("lint", { near: { burg: "Sahawan" }, radius: 5 });
+      assert.equal(place.isError, true);
+      assert.match(textOf(place), /near is a Place: \{x,y\} \| \{lat,lon\} \| \{cell\}/);
+      for (const bad of [{ atScale: 0 }, { atScale: 500 }, { markerGap: 0 }, { limit: -1 }, { minSeverity: "fatal" }]) {
+        assert.equal((await h.call("lint", bad)).isError, true, JSON.stringify(bad));
+      }
+    });
+  });
+
+  describe("generated maps (no false alarms on pristine data)", () => {
+    const PRISTINE = [
+      "route-link",
+      "route-point-cell",
+      "route-end-burg",
+      "marker-in-water",
+      "marker-cell-link",
+      "burg-in-water",
+      "burg-shared-cell",
+      "burg-cell-link",
+      "capital-outside",
+      "province-empty",
+      "state-empty",
+      "river-uphill",
+      "river-loop",
+      "river-gap",
+      "note-orphan",
+      "label-orphan"
+    ];
+    for (const [seed, template, cells] of [
+      ["lintA", undefined, 4],
+      ["lintB", "pangea", 3]
+    ] as const) {
+      test(`seed ${seed}${template ? ` (${template})` : ""}: every data check is clean, label checks measure at several zooms`, async () => {
+        await h.ok("generate_map", { seed, ...(template ? { template } : {}), cells });
+        const out = await lint({ limit: 5 });
+        assert.ok(out.ms < 3000, `lint took ${out.ms} ms in the page`);
+        for (const id of PRISTINE) assert.ok(out.clean.includes(id), `${id}: ${JSON.stringify(out.rows[id])}`);
+        assert.deepEqual(out.skipped ?? [], []);
+        assert.equal(out.counts.unnamed, 1, "the unnamed generated routes are one row");
+        assert.ok(out.scanned.labels > 100, `labels measured: ${out.scanned.labels}`);
+        assert.ok(
+          out.notes?.some(n => /labels measured at zoom 1, /.test(n)),
+          JSON.stringify(out.notes)
+        );
+        assert.ok(JSON.stringify(out).length < 20_000, "the default output is small");
+      });
+    }
   });
 
   test("the server is still healthy after all the synthetic problems", async () => {
@@ -630,10 +1108,12 @@ describe("lint geometry (pure functions)", () => {
     assert.ok(naive.size > 20, "the random scene has overlaps to find");
 
     const big = mk(20000, 6000, 3000);
-    const t0 = Date.now();
+    // CPU time, not wall time: other processes on the machine must not fail the test
+    const c0 = process.cpuUsage();
     const pairs = L.overlapPairs(big, 0.15) as Obj[];
-    const ms = Date.now() - t0;
-    assert.ok(ms < 1000, `20000 boxes took ${ms} ms`);
+    const cpu = process.cpuUsage(c0);
+    const ms = (cpu.user + cpu.system) / 1000;
+    assert.ok(ms < 1500, `20000 boxes took ${ms} ms of CPU (an all-pairs scan takes many seconds)`);
     assert.ok(pairs.length > 0);
   });
 
@@ -644,6 +1124,33 @@ describe("lint geometry (pure functions)", () => {
     const onLetter = box(95, 48, 105, 58);
     const hit = (L.overlapPairs([arc, onLetter], 0.01) as Obj[])[0];
     assert.ok(hit && hit.frac > 0.2 && hit.a === 0 && hit.b === 1);
+  });
+
+  test("overlapPairs reports the intersection and both areas", () => {
+    const [pr] = L.overlapPairs([box(0, 0, 10, 10), box(5, 5, 20, 20)], 0.01) as Obj[];
+    assert.equal(pr.inter, 25);
+    assert.equal(pr.areaA, 100);
+    assert.equal(pr.areaB, 225);
+    assert.equal(pr.frac, 0.25);
+  });
+
+  test("riverRises lists every land cell standing tol above the lowest land cell before it", () => {
+    const H = [50, 40, 30, 70, 35, 45, 10, 90];
+    const r = L.riverRises([0, 1, 2, 3, 4, 5], H, 12) as Obj;
+    assert.deepEqual(
+      r.cells.map((c: Obj) => [c.cell, c.rise, c.min]),
+      [
+        [3, 40, 30],
+        [5, 15, 30]
+      ]
+    );
+    assert.equal(r.first, 30, "one value that clears them all: the lowest height before the first rise");
+    const w = L.riverRises([0, -1, 6, 1, 7], H, 12) as Obj; // -1 and the water cell 6 are skipped
+    assert.deepEqual(
+      w.cells.map((c: Obj) => c.cell),
+      [7]
+    );
+    assert.equal((L.riverRises([0, 1, 2], H, 12) as Obj).first, null);
   });
 
   test("closePairs and clusters", () => {
