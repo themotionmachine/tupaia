@@ -2434,7 +2434,13 @@
   const REGEN = [
     ["rivers", () => regenerateRivers()],
     ["biomes", a => FNS.defineBiomes({ ...(a.biomes || {}), phase: "apply" })], // bridge-ext/biomes.js
-    ["population", () => recalculatePopulation()],
+    [
+      "population",
+      () => {
+        recalculatePopulation();
+        States.collectStatistics(); // state rural/urban totals follow the new cell populations
+      }
+    ],
     ["cultures", () => regenerateCultures()],
     ["burgs", () => regenerateBurgs()],
     ["states", () => regenerateStates()],

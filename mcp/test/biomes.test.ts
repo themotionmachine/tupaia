@@ -79,8 +79,8 @@ describe("tupaia-mcp biomes (local)", () => {
     const a = await h.ok("add", {
       type: "biome",
       items: [
-        { name: "Glass desert", base: "Hot desert", color: "#ecdcae", habitability: 4 },
-        { name: "Ash plain", color: "#888888" }
+        { name: "Glass desert", base: "Hot desert", color: "#ECDCAE", habitability: 4 },
+        { name: "Ash plain", color: "rgb(136, 136, 136)" }
       ]
     });
     const created = a.created as Obj[];
@@ -106,12 +106,25 @@ describe("tupaia-mcp biomes (local)", () => {
       }
     );
     const ash = await biome("Ash plain");
-    assert.deepEqual([ash.habitability, ash.iconsDensity, ash.icons, ash.cost], [50, 0, {}, 50]);
+    assert.deepEqual([ash.color, ash.habitability, ash.iconsDensity, ash.icons, ash.cost], ["#888888", 50, 0, {}, 50]);
+    // the dry-run plan shows the values the new biome would get (base copy + explicit fields)
+    const plan = await h.ok("add", {
+      type: "biome",
+      dryRun: true,
+      items: [{ name: "Salt flats", base: "Cold desert", color: "Teal" }]
+    });
+    const row = (plan.plan as Obj[])[0];
+    assert.deepEqual(
+      [row.i, row.name, row.base, row.color, row.habitability, row.iconsDensity, row.icons, row.cost],
+      [15, "Salt flats", "Cold desert", "#008080", 10, 2, { dune: 9, deadTree: 1 }, 150]
+    );
+    // icon density with no icons would draw missing relief symbols
+    assert.equal(await code("add", { type: "biome", items: [{ name: "Bare", iconsDensity: 5 }] }), "BAD_ARGS");
     // invalid items: nothing changes
     assert.equal(await code("add", { type: "biome", items: [{ name: "glass DESERT" }] }), "REFUSED");
     assert.equal(await code("add", { type: "biome", items: [{ name: "Salt, flats" }] }), "BAD_ARGS");
     assert.equal(await code("add", { type: "biome", items: [{ name: "removed" }] }), "BAD_ARGS");
-    assert.equal(await code("add", { type: "biome", items: [{ name: "X", color: "rgb(1,2,3)" }] }), "BAD_ARGS");
+    assert.equal(await code("add", { type: "biome", items: [{ name: "X", color: "not-a-colour" }] }), "BAD_ARGS");
     assert.equal(await code("add", { type: "biome", items: [{ name: "X", icons: { cactis: 2 } }] }), "BAD_ARGS");
     assert.equal(await code("add", { type: "biome", items: [{ name: "X", speed: 2 }] }), "BAD_FIELD");
     assert.equal(await code("add", { type: "biome", items: [{ name: "X" }, { name: "x" }] }), "REFUSED");
@@ -136,29 +149,64 @@ describe("tupaia-mcp biomes (local)", () => {
     assert.equal(await code("edit", { type: "biome", ops: [{ ref: 13, remove: true }] }), "REFUSED");
     assert.equal(await code("edit", { type: "biome", ops: [{ ref: 14, set: { name: "Glass desert" } }] }), "REFUSED");
     assert.equal(await code("edit", { type: "biome", ops: [{ ref: 14, set: { iconsDensity: 9000 } }] }), "BAD_ARGS");
-    // habitability re-ranks cell suitability (cells.pop) but keeps burg populations
-    const popBefore = await h.ok("eval", {
-      readOnly: true,
-      code: "[pack.cells.pop.reduce((s, v) => s + v, 0), pack.burgs.reduce((s, b) => s + (b && b.population || 0), 0)]"
+    // icon density needs icons (Ash plain has none); emptying the icons of a dense biome too
+    assert.equal(
+      await code("edit", { type: "biome", ops: [{ ref: "Ash plain", set: { iconsDensity: 9 } }] }),
+      "BAD_ARGS"
+    );
+    assert.equal(await code("edit", { type: "biome", ops: [{ ref: 13, set: { icons: {} } }] }), "BAD_ARGS");
+    const dry = await h.ok("edit", {
+      type: "biome",
+      dryRun: true,
+      ops: [{ ref: "Ash plain", set: { iconsDensity: 9, icons: { grass: 1 } } }]
     });
+    assert.equal((dry.plan as Obj[])[0].after.iconsDensity, 9);
+    // habitability re-ranks the cells of that biome only, keeps burgs, refreshes state totals
+    const SNAP =
+      "[Array.from(pack.cells.pop), Array.from(pack.cells.biome), pack.burgs.reduce((s, b) => s + (b && b.population || 0), 0)]";
+    const [pop0, biomes0, burgs0] = (await h.ok("eval", { readOnly: true, code: SNAP })).value as [
+      number[],
+      number[],
+      number
+    ];
     const hab = await h.ok("edit", {
       type: "biome",
       ops: [{ ref: "Temperate rainforest", set: { habitability: 10 } }]
     });
-    assert.match(JSON.stringify(hab.notes), /rankCells/);
-    const popAfter = await h.ok("eval", {
-      readOnly: true,
-      code: "[pack.cells.pop.reduce((s, v) => s + v, 0), pack.burgs.reduce((s, b) => s + (b && b.population || 0), 0)]"
-    });
-    assert.ok((popAfter.value as number[])[0] < (popBefore.value as number[])[0], "rural population fell");
-    assert.equal((popAfter.value as number[])[1], (popBefore.value as number[])[1], "burgs untouched");
+    assert.match(JSON.stringify(hab.notes), /re-ranked its \d+ land cells: rural population [\d,]+ -> [\d,]+ people/);
+    const [pop1, , burgs1] = (await h.ok("eval", { readOnly: true, code: SNAP })).value as [number[], number[], number];
+    let own0 = 0;
+    let own1 = 0;
+    for (let i = 0; i < pop0.length; i++) {
+      if (biomes0[i] === 8) {
+        own0 += pop0[i];
+        own1 += pop1[i];
+      } else assert.equal(pop1[i], pop0[i], `cell ${i} (biome ${biomes0[i]}) kept its population`);
+    }
+    assert.ok(own1 < own0, `rural population of the rainforest fell (${own0} -> ${own1})`);
+    assert.equal(burgs1, burgs0, "burgs untouched");
+    const STALE = `const r = new Map(); pack.cells.i.forEach(i => { if (pack.cells.h[i] >= 20) r.set(pack.cells.state[i], (r.get(pack.cells.state[i]) || 0) + pack.cells.pop[i]); });
+        return pack.states.filter(s => s && !s.removed).reduce((m, s) => Math.max(m, Math.abs((s.rural || 0) - (r.get(s.i) || 0))), 0);`;
+    const stale = await h.ok("eval", { readOnly: true, code: STALE });
+    assert.ok((stale.value as number) < 0.01, `state rural totals follow the cells (max diff ${stale.value})`);
+    await h.ok("snapshot", { action: "undo" });
+    // regenerate population refreshes the state totals too
+    await h.ok("regenerate", { parts: ["population"] });
+    const stale2 = await h.ok("eval", { readOnly: true, code: STALE });
+    assert.ok(
+      (stale2.value as number) < 0.01,
+      `state rural totals after regenerate population (max diff ${stale2.value})`
+    );
     await h.ok("snapshot", { action: "undo" });
     assert.equal((await biome("Temperate rainforest")).habitability, 90);
   });
 
   test("the reload bug: icon density, icons and cost survive save/load and undo (4th field); old files load as before", async () => {
     // undo restores the map from its saved text: before the fix every undo reset these
-    await h.ok("edit", { type: "biome", ops: [{ ref: "Ash plain", set: { cost: 333, iconsDensity: 12 } }] });
+    await h.ok("edit", {
+      type: "biome",
+      ops: [{ ref: "Ash plain", set: { cost: 333, iconsDensity: 12, icons: { grass: 1 } } }]
+    });
     await h.ok("edit", { type: "map", ops: [{ set: { name: "Undo probe" } }] });
     await h.ok("snapshot", { action: "undo" });
     let ash = await biome("Ash plain");
@@ -194,18 +242,39 @@ describe("tupaia-mcp biomes (local)", () => {
     await h.ok("load_map", { path: saved.path as string });
   });
 
-  test("regenerate biomes without noise equals the app's Biomes.define", async () => {
+  test("regenerate biomes without noise equals the app's Biomes.define, cell for cell", async () => {
     const define = await h.ok("eval", {
       readOnly: true,
       code: `const keep = Uint8Array.from(pack.cells.biome);
         Biomes.define();
-        let n = 0; for (let i = 0; i < keep.length; i++) if (pack.cells.biome[i] !== keep[i]) n++;
+        const out = Array.from(pack.cells.biome);
         pack.cells.biome = keep;
-        return n;`
+        return out;`
     });
+    const expected = define.value as number[];
+    const current = (await h.ok("eval", { readOnly: true, code: BIOME_ARRAY })).value as number[];
+    const differ = expected.filter((b, i) => b !== current[i]).length;
     const dry = await h.ok("regenerate", { parts: ["biomes"], dryRun: true, biomes: { keepPainted: false } });
     assert.equal(dry.dryRun, true);
-    assert.equal((dry.details as Obj).biomes.changed, define.value);
+    assert.equal((dry.details as Obj).biomes.changed, differ);
+    // the same cells painted away from the climate count as painted (and are kept by default)
+    const def = await h.ok("regenerate", { parts: ["biomes"], dryRun: true });
+    assert.equal(
+      (def.details as Obj).biomes.keptBy?.painted ?? 0,
+      differ - expected.filter((b, i) => b !== current[i] && current[i] >= 13).length
+    );
+    await h.ok("regenerate", { parts: ["biomes"], biomes: { keepPainted: false } });
+    const got = (await h.ok("eval", { readOnly: true, code: BIOME_ARRAY })).value as number[];
+    assert.deepEqual(got, expected);
+    for (const mode of ["warp", "jitter"]) {
+      const z = await h.ok("regenerate", {
+        parts: ["biomes"],
+        dryRun: true,
+        biomes: { noise: 0, mode, keepPainted: false }
+      });
+      assert.equal((z.details as Obj).biomes.changed, 0, `noise 0 (${mode}) is the climate`);
+    }
+    await h.ok("snapshot", { action: "undo" });
   });
 
   test("regenerate biomes with noise and smoothing: deterministic per seed, keeps custom and listed biomes", async () => {
@@ -268,6 +337,74 @@ describe("tupaia-mcp biomes (local)", () => {
     assert.equal(await code("regenerate", { parts: ["rivers"], biomes: { noise: 0.5 } }), "BAD_ARGS");
     assert.equal(await code("regenerate", { parts: ["biomes", "population"], dryRun: true }), "BAD_ARGS");
     assert.equal(await code("regenerate", { parts: ["biomes"], biomes: { keep: ["Nowhere"] } }), "NOT_FOUND");
+    // unknown option keys are refused, not ignored
+    assert.equal((await h.call("regenerate", { parts: ["biomes"], biomes: { nois: 0.5 } })).isError, true);
+  });
+
+  test("painted default biomes, excluded cells and river cells survive a noisy regenerate", async () => {
+    const CIRCLE = { circle: { at: { x: 640, y: 300 }, radius: 70 }, where: { land: true } };
+    const cellsOf = async (sel: Obj) =>
+      (
+        await h.ok("eval", {
+          readOnly: true,
+          code: `return __tupaia.fns.selectCells({select: ${JSON.stringify(sel)}, limit: 100000}).cells;`
+        })
+      ).value as number[];
+    const dry = async (biomes: Obj) =>
+      ((await h.ok("regenerate", { parts: ["biomes"], dryRun: true, biomes })).details as Obj).biomes as Obj;
+    // hand-paint a default biome (Hot desert) where the climate gives something else
+    const p = await h.ok("paint_cells", { select: CIRCLE, set: { biome: "Hot desert" } });
+    const painted = ((p.set as Obj).biome as Obj).changed as number;
+    assert.ok(painted > 10, `painted ${painted}`);
+    const paintedCells = await cellsOf(CIRCLE);
+    const opts = { noise: 0.6, smooth: 2, seed: 9 };
+    const whole = await dry(opts);
+    assert.ok(whole.keptBy.painted >= painted, JSON.stringify(whole.keptBy));
+    assert.match(JSON.stringify(whole.notes), /differ from their climate biome/);
+    // kept cells are kept whatever the scope: none of the painted cells changes
+    assert.equal((await dry({ ...opts, select: { cells: paintedCells } })).changed, 0);
+    // keepPainted:'custom' (custom biomes only) re-derives most of them
+    const loose = await dry({ ...opts, keepPainted: "custom", select: { cells: paintedCells } });
+    assert.equal(loose.keptBy?.painted, undefined);
+    assert.ok(loose.changed > painted / 2, `re-derived ${loose.changed} of ${painted}`);
+    await h.ok("snapshot", { action: "undo" }); // the paint
+
+    // exclude: a locked area keeps its biomes
+    const EX = { circle: { at: { x: 500, y: 400 }, radius: 120 } };
+    assert.ok((await dry({ noise: 1, smooth: 1, seed: 5, select: EX })).changed > 0, "the area would change");
+    const ex = await dry({ noise: 1, smooth: 1, seed: 5, select: EX, exclude: EX });
+    assert.equal(ex.changed, 0);
+    assert.ok(ex.keptBy.excluded > 0);
+
+    // smoothing and small-region merging leave river cells alone (keepRivers, default)
+    const rivers = (
+      await h.ok("eval", { readOnly: true, code: "pack.cells.i.filter(i => pack.cells.r[i] && pack.cells.h[i] >= 20)" })
+    ).value as number[];
+    assert.ok(rivers.length > 20);
+    const CLEAN = { from: "current", smooth: 3, minRegion: 6, keepPainted: "custom" };
+    assert.equal((await dry({ ...CLEAN, select: { cells: rivers } })).changed, 0);
+    // minRegion merges small free regions (no river or custom cell, a mergeable neighbour)
+    const SMALL = `const C = pack.cells, seen = new Uint8Array(C.i.length); let n = 0;
+      for (const s of C.i) { if (C.h[s] < 20 || seen[s]) continue; const list = [s]; seen[s] = 1;
+        for (let q = 0; q < list.length; q++) for (const j of C.c[list[q]]) if (C.h[j] >= 20 && !seen[j] && C.biome[j] === C.biome[s]) { seen[j] = 1; list.push(j); }
+        if (list.length >= 6 || list.some(c => C.r[c] || C.biome[c] >= 13)) continue;
+        if (list.some(c => C.c[c].some(j => C.h[j] >= 20 && C.biome[j] !== C.biome[s] && C.biome[j] < 13))) n++; }
+      return n;`;
+    const small0 = (await h.ok("eval", { readOnly: true, code: SMALL })).value as number;
+    const sm = await h.ok("regenerate", { parts: ["biomes"], biomes: CLEAN });
+    const smd = (sm.details as Obj).biomes as Obj;
+    assert.ok(smd.changed > 0 && smd.merged > 0, JSON.stringify(smd));
+    const small1 = (await h.ok("eval", { readOnly: true, code: SMALL })).value as number;
+    assert.ok(small1 < small0 / 4, `small free regions ${small0} -> ${small1}`);
+    await h.ok("snapshot", { action: "undo" });
+
+    // jitter is the other noise mode; both are deterministic per seed
+    const w = await dry({ noise: 0.6, seed: 4 });
+    const j1 = await dry({ noise: 0.6, seed: 4, mode: "jitter" });
+    const j2 = await dry({ noise: 0.6, seed: 4, mode: "jitter" });
+    assert.equal(w.mode, "warp");
+    assert.deepEqual(j1, j2);
+    assert.notDeepEqual(w.net, j1.net);
   });
 
   test("feathered biome paint dithers the boundary and is deterministic", async () => {
@@ -304,6 +441,9 @@ describe("tupaia-mcp biomes (local)", () => {
       "BAD_ARGS",
       "feather is biome-only"
     );
+    const thin = await h.ok("paint_cells", { ...args, feather: { width: 2 }, dryRun: true });
+    assert.equal((thin.feather as Obj).band, 0);
+    assert.match(JSON.stringify(thin.notes), /below the cell spacing/);
     await h.ok("snapshot", { action: "undo" });
   });
 });
@@ -350,7 +490,9 @@ describe("tupaia-mcp biomes in a sketch (replay remaps biome ids)", () => {
       ["add", "edit", "paint_cells", BIOMES_OP, "paint_cells"]
     );
     assert.equal(st.blobOnly, false, JSON.stringify(st));
-    assert.match(log[3].summary, /Regenerated biomes .*noise 0\.6.*cells changed/);
+    assert.match(log[3].summary, /Regenerated biomes .*warp noise 0\.6.*seed 3.*cells changed/);
+    const sum = await h.ok("sketch", { action: "summary", shots: false });
+    assert.match(sum.markdown as string, /\| biomes \| 13 \| 14 \| \+1 \|/);
     const sketchPage = (await h.ok("eval", { readOnly: true, code: BIOME_ARRAY })).value as number[];
 
     // a combined regenerate is not replayable (blob-only) until undone
@@ -369,6 +511,8 @@ describe("tupaia-mcp biomes in a sketch (replay remaps biome ids)", () => {
     });
     const [n13, n14, dens, cost, cells] = ev.value as [string, string, number, number, number[]];
     assert.deepEqual([n13, n14, dens, cost], ["Their biome", "Glass desert", 40, 250]);
+    const rebased = (await h.ok("sketch", { action: "status" })).log as Obj[];
+    assert.match(rebased[3].summary, /seed 3/, "the rebased log keeps the seed");
     const expected = sketchPage.map(b => (b === 13 ? 14 : b));
     let diff = 0;
     for (let i = 0; i < expected.length; i++) if (cells[i] !== expected[i]) diff++;
@@ -379,10 +523,10 @@ describe("tupaia-mcp biomes in a sketch (replay remaps biome ids)", () => {
 describe("biomes ops log (pure)", () => {
   test("regenerate:biomes rewrites created biome ids, paint rewrites set.biome", () => {
     const rw = new Rewriter({ biome: { "13": 14 } }, new Set(["biome:13"]));
-    const reg = { cells: { "13": [5, 6], "3": [7] }, graph: "g" };
+    const reg = { cells: { "13": [5, 6], "3": [7] }, graph: "g", seed: 3 };
     const out = rewriteResolved(BIOMES_OP, reg as never, rw) as unknown as { cells: Record<string, number[]> };
     assert.deepEqual(out.cells, { "14": [5, 6], "3": [7] });
-    assert.deepEqual(bridgeArgs(BIOMES_OP, out as never), { cells: { "14": [5, 6], "3": [7] } });
+    assert.deepEqual(bridgeArgs(BIOMES_OP, out as never), { cells: { "14": [5, 6], "3": [7] }, seed: 3 });
     assert.equal(unreplayableReason(BIOMES_OP, reg as never), null);
     assert.match(String(unreplayableReason(BIOMES_OP, null)), /literal cell list/);
     const paint = rewriteResolved("paint_cells", { select: { cells: [1] }, set: { biome: 13 } }, rw) as Obj;

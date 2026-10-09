@@ -304,7 +304,10 @@ async function summaryShots(
 async function summary(ctx: ToolContext, scope: CallScope, args: { shots?: boolean }) {
   const sk = needSketch(ctx);
   const now = await scope.call<{ counts: Record<string, number> }>("summary", {}, { noAlerts: true });
-  const keys = [...new Set([...Object.keys(sk.baseCounts), ...Object.keys(now.counts)])];
+  // a count the base never recorded (a sketch started before it was counted) is left out
+  const keys = [...new Set([...Object.keys(sk.baseCounts), ...Object.keys(now.counts)])].filter(
+    k => sk.baseCounts[k] !== undefined
+  );
   const counts = keys.map(k => ({ k, base: sk.baseCounts[k] ?? 0, now: now.counts[k] ?? 0 }));
   const target = await framedTarget(scope, sk);
   const shots: Record<string, string | null> = args.shots !== false ? await summaryShots(ctx, scope, sk, target) : {};

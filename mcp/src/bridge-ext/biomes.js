@@ -5,8 +5,10 @@
 // - edit/add type 'biome' (FIELDS.biome, ADD.biome): name, color, habitability, iconsDensity,
 //   icons, cost; add copies a base biome. Biome ids are indexes into biomesData's arrays.
 // - FNS.defineBiomes (phased): re-derive biomes from the climate with deterministic low-frequency
-//   noise on temperature and moisture, then a boundary majority filter that leaves water and kept
-//   (custom / listed) biomes alone. regenerate {parts:['biomes'], biomes:{...}} runs it.
+//   noise (a domain warp of the climate, or jitter on temperature and moisture), then a boundary
+//   majority filter and a small-region merge. Water, river cells (smoothing) and kept cells are
+//   left alone: custom or listed biomes, cells that differ from their noise-free climate biome
+//   (painted), and an exclude selection. regenerate {parts:['biomes'], biomes:{...}} runs it.
 // - FNS.setBiomeCells (phased): the literal per-cell form the sketch log replays it with.
 // - paint_cells feather: soft-edged biome painting; the dithered edge resolves to a literal cell
 //   list, so the logged op replays as a plain paint.
@@ -44,7 +46,7 @@
     "vulcan"
   ];
   const RELIEF_NOTE =
-    "iconsDensity and icons take effect when relief icons are next drawn; the icons on the map now are unchanged";
+    "iconsDensity and icons take effect when relief icons are next drawn (regenerate {parts:['relief']} redraws them); the icons on the map now are unchanged";
 
   const num = (field, min, max) => v => {
     if (typeof v !== "number" || !Number.isFinite(v) || v < min || v > max)
@@ -69,10 +71,12 @@
 
   function colourCheck(v) {
     const s = typeof v === "string" ? v.trim() : "";
-    // biome colours are saved comma-joined, so rgb()/hsl() forms would corrupt the file
-    if (!/^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(s) && !/^[a-z]+$/i.test(s))
-      fail("BAD_ARGS", "biome color must be a hex colour such as #aa3322 (or a CSS colour name)");
-    return s;
+    const col = s && typeof d3 !== "undefined" ? d3.color(s) : null;
+    if (!col?.displayable()) fail("BAD_ARGS", "biome color must be a colour such as #aa3322, 'teal' or rgb(170,51,34)");
+    // stored as lowercase #rrggbb, as the biomes editor's colour picker writes it (and never with
+    // commas: the .map joins biome colours with them); the page's d3 predates color.formatHex()
+    const { r, g, b } = col.rgb();
+    return `#${[r, g, b].map(v => Math.round(v).toString(16).padStart(2, "0")).join("")}`;
   }
 
   function iconWeights(list) {
@@ -111,6 +115,62 @@
     return false;
   }
 
+  // a biome with icon density but no icons makes the relief drawer reference missing symbols
+  // (#relief-undefined-1), so the pair is checked together
+  function iconPairCheck(density, weights) {
+    if (density > 0 && !Object.keys(weights).length)
+      fail(
+        "BAD_ARGS",
+        `iconsDensity ${density} with no icons would draw missing relief symbols: give icons too (e.g. icons:{grass:1}) or iconsDensity 0`
+      );
+  }
+
+  /** Weights the op leaves the biome with (its own icons value if valid, else the current icons). */
+  function iconsAfter(x, set) {
+    if (set && set.icons !== undefined) {
+      try {
+        return iconsCheck(set.icons);
+      } catch {
+        return null; // reported by the icons field's own check
+      }
+    }
+    return iconWeights(biomesData.icons[x.i]);
+  }
+
+  /**
+   * Re-rank the cells of biome `id` after a habitability change. rankCells() recomputes every
+   * cell (and the stored values of a curated map rarely match a fresh ranking), so every other
+   * cell gets its old suitability and population back; state statistics are then refreshed.
+   */
+  function rerankBiome(id, c) {
+    const C = pack.cells;
+    const s0 = C.s;
+    const p0 = C.pop;
+    let before = 0;
+    let n = 0;
+    for (let i = 0; i < C.i.length; i++)
+      if (C.biome[i] === id && C.h[i] >= 20) {
+        before += p0?.[i] || 0;
+        n++;
+      }
+    rankCells();
+    let after = 0;
+    for (let i = 0; i < C.i.length; i++) {
+      if (C.biome[i] === id) {
+        if (C.h[i] >= 20) after += C.pop[i];
+      } else if (s0 && p0 && s0.length === C.s.length) {
+        C.s[i] = s0[i];
+        C.pop[i] = p0[i];
+      }
+    }
+    if (typeof States !== "undefined" && States.collectStatistics) States.collectStatistics();
+    const rate = typeof populationRate !== "undefined" ? populationRate : 1000;
+    const people = v => Math.round(v * rate).toLocaleString("en-US");
+    c.notes.add(
+      `habitability of '${biomesData.name[id]}' re-ranked its ${n} land cells: rural population ${people(before)} -> ${people(after)} people (other cells unchanged; state statistics refreshed). Burg populations were kept (regenerate {parts:['population']} re-rolls them).`
+    );
+  }
+
   FIELDS.biome = {
     name: {
       check: (v, x, c) => nameCheck(v, x.i, c),
@@ -132,16 +192,18 @@
       get: x => biomesData.habitability[x.i] ?? null,
       set: (x, v, c) => {
         biomesData.habitability[x.i] = v;
-        if (x.i >= 0 && hasCells(x.i) && typeof rankCells === "function") {
-          rankCells();
-          c.notes.add(
-            "habitability re-ranked cell suitability and rural population (rankCells); burg populations were kept (regenerate {parts:['population']} re-rolls them)"
-          );
-        }
+        if (x.i >= 0 && hasCells(x.i) && typeof rankCells === "function") rerankBiome(x.i, c);
       }
     },
     iconsDensity: {
-      check: num("iconsDensity", 0, 500),
+      check: (v, x, _c, set) => {
+        num("iconsDensity", 0, 500)(v);
+        if (x.i >= 0) {
+          const w = iconsAfter(x, set);
+          if (w) iconPairCheck(v, w);
+        }
+        return v;
+      },
       get: x => biomesData.iconsDensity[x.i] ?? null,
       set: (x, v, c) => {
         biomesData.iconsDensity[x.i] = v;
@@ -149,7 +211,14 @@
       }
     },
     icons: {
-      check: iconsCheck,
+      check: (v, x, _c, set) => {
+        const w = iconsCheck(v);
+        if (x.i >= 0) {
+          const d = set && typeof set.iconsDensity === "number" ? set.iconsDensity : biomesData.iconsDensity[x.i];
+          iconPairCheck(d, w);
+        }
+        return w;
+      },
       get: x => iconWeights(biomesData.icons[x.i]),
       set: (x, w, c) => {
         biomesData.icons[x.i] = expandIcons(w);
@@ -183,10 +252,22 @@
       const fs = Object.keys(item)
         .filter(k => k !== "base")
         .map(key => ({ key, f: FIELDS.biome[key], v: FIELDS.biome[key].check(item[key], pseudo, c, item) }));
-      return { base: base ? base.i : null, baseName: base ? base.name : null, fs, id };
+      // the values the new biome gets (explicit fields over the base's, else the editor's defaults)
+      const d = biomesData;
+      const b = base ? base.i : null;
+      const given = Object.fromEntries(fs.map(f => [f.key, f.v]));
+      const values = {
+        name: given.name,
+        color: given.color ?? (b !== null ? d.color[b] : "random"),
+        habitability: given.habitability ?? (b !== null ? d.habitability[b] : 50),
+        iconsDensity: given.iconsDensity ?? (b !== null ? d.iconsDensity[b] : 0),
+        icons: given.icons ?? (b !== null ? iconWeights(d.icons[b]) : {}),
+        cost: given.cost ?? (b !== null ? d.cost[b] : 50)
+      };
+      iconPairCheck(values.iconsDensity, values.icons);
+      return { base: b, baseName: base ? base.name : null, fs, id, values };
     },
-    plan: (q, row) =>
-      Object.assign(row, { i: q.id, name: q.fs.find(f => f.key === "name").v, base: q.baseName ?? undefined }),
+    plan: (q, row) => Object.assign(row, { i: q.id, ...q.values, base: q.baseName ?? undefined }),
     apply(q, c) {
       const d = biomesData;
       const i = d.i.length;
@@ -282,8 +363,10 @@
 
   // ---------------------------------------------------------------- regenerate biomes
 
-  const TEMP_AMP = 4; // °C at noise 1
-  const MOIST_AMP = 6; // moisture units at noise 1 (bands are 5 wide; hot desert is < 8)
+  const TEMP_AMP = 4; // jitter: °C at noise 1
+  const MOIST_AMP = 6; // jitter: moisture units at noise 1 (bands are 5 wide; hot desert is < 8)
+  const WARP_AMP = 1; // warp: displacement in noise feature sizes at noise 1
+  const KEPT_WHY = ["", "custom", "listed", "painted", "excluded"];
 
   function defaultBiomeCount() {
     return Biomes.getDefault().name.length;
@@ -292,69 +375,151 @@
   function regenOptions(a) {
     const from = a.from ?? "climate";
     if (!["climate", "current"].includes(from)) fail("BAD_ARGS", "from is 'climate' (default) or 'current'");
+    const mode = a.mode ?? "warp";
+    if (!["warp", "jitter"].includes(mode)) fail("BAD_ARGS", "mode is 'warp' (default) or 'jitter'");
     const noise = a.noise === undefined ? 0 : num("noise", 0, 1)(a.noise);
     const smooth = a.smooth === undefined ? 0 : num("smooth", 0, 10)(a.smooth);
     if (!Number.isInteger(smooth)) fail("BAD_ARGS", "smooth is a number of passes (integer 0..10)");
+    const minRegion = a.minRegion === undefined ? 0 : num("minRegion", 0, 1000)(a.minRegion);
+    if (!Number.isInteger(minRegion)) fail("BAD_ARGS", "minRegion is a cell count (integer 0..1000)");
     if (from === "current" && noise) fail("BAD_ARGS", "noise perturbs the climate inputs, so it needs from:'climate'");
-    if (from === "current" && !smooth)
-      fail("BAD_ARGS", "from:'current' only smooths the biomes as they are: give smooth >= 1");
+    if (from === "current" && !smooth && minRegion < 2)
+      fail("BAD_ARGS", "from:'current' only cleans up the biomes as they are: give smooth >= 1 or minRegion >= 2");
     const featurePx =
       a.scale === undefined ? Math.round(Math.max(graphWidth, graphHeight) / 12) : num("scale", 10, 20000)(a.scale);
     if (a.seed !== undefined && typeof a.seed !== "number" && typeof a.seed !== "string")
       fail("BAD_ARGS", "seed is a number or a string");
     // default: derived from the map seed, so the same map and options give the same biomes
     const seedNum = seedOf(a.seed !== undefined ? a.seed : `${typeof seed !== "undefined" ? seed : ""}:biomes`);
-    if (a.keepPainted !== undefined && typeof a.keepPainted !== "boolean")
-      fail("BAD_ARGS", "keepPainted must be true or false");
     const keepPainted = a.keepPainted ?? true;
+    if (![true, false, "custom"].includes(keepPainted))
+      fail("BAD_ARGS", "keepPainted is true (default: custom biomes and painted cells), 'custom' or false");
+    if (a.keepRivers !== undefined && typeof a.keepRivers !== "boolean")
+      fail("BAD_ARGS", "keepRivers must be true or false");
+    const keepRivers = a.keepRivers ?? true;
     if (a.keep !== undefined && !Array.isArray(a.keep)) fail("BAD_ARGS", "keep is a list of biome refs");
-    const keepIds = new Set((a.keep || []).map(v => T.resolve("biome", v).i));
-    if (keepPainted) for (let i = defaultBiomeCount(); i < biomesData.name.length; i++) keepIds.add(i);
+    const listedIds = new Set((a.keep || []).map(v => T.resolve("biome", v).i));
+    const customFrom = keepPainted === false ? Infinity : defaultBiomeCount();
     const scope = a.select !== undefined ? new Set(selectCells(a.select)) : null;
-    return { from, noise, smooth, featurePx, seedNum, keepPainted, keepIds, scope };
+    const exclude = a.exclude !== undefined ? new Set(selectCells(a.exclude)) : null;
+    return {
+      from,
+      mode,
+      noise,
+      smooth,
+      minRegion,
+      featurePx,
+      seedNum,
+      keepPainted,
+      keepRivers,
+      listedIds,
+      customFrom,
+      scope,
+      exclude
+    };
+  }
+
+  /** Climate inputs as Biomes.define reads them, and the noise-free biome of a cell. */
+  function climateKit() {
+    const C = pack.cells;
+    const { fl, r, h, g } = C;
+    const precG = grid.cells.prec;
+    const tempG = grid.cells.temp;
+    const riverBonus = i => (r[i] ? Math.max(fl[i] / 10, 2) : 0);
+    // own precipitation (+ the cell's river bonus) averaged with the land neighbours'
+    const moistureAt = (j, bonus) => {
+      let sum = precG[g[j]] + bonus;
+      let k = 1;
+      for (const nb of C.c[j])
+        if (h[nb] >= 20) {
+          sum += precG[g[nb]];
+          k++;
+        }
+      return Math.round(4 + sum / k);
+    };
+    const climateOf = i =>
+      h[i] < 20 ? 0 : Biomes.getId(moistureAt(i, riverBonus(i)), tempG[g[i]], h[i], Boolean(r[i]));
+    return { C, tempG, riverBonus, moistureAt, climateOf };
+  }
+
+  /**
+   * The noisy biome of a land cell. warp (default): the climate is read at a point displaced by
+   * smooth noise (temperature corrected back to the cell's own altitude, the cell's own river and
+   * height), so boundaries wiggle while biome totals stay close to the noise-free ones. jitter:
+   * noise added to temperature and moisture; it shifts totals where moisture sits near its floor
+   * (dry biomes grow).
+   */
+  function noisyClimate(K, o) {
+    const C = K.C;
+    const { h, g, r, p: P } = C;
+    const seedA = o.seedNum;
+    const seedB = (o.seedNum + 7919) % 2147483647;
+    if (o.mode === "jitter") {
+      return i => {
+        const x = P[i][0] / o.featurePx;
+        const y = P[i][1] / o.featurePx;
+        const t = Math.round(K.tempG[g[i]] + fbm(seedA, x, y) * o.noise * TEMP_AMP);
+        const m = Math.max(0, K.moistureAt(i, K.riverBonus(i)) + fbm(seedB, x, y) * o.noise * MOIST_AMP);
+        return Biomes.getId(m, t, h[i], Boolean(r[i]));
+      };
+    }
+    const hExp = Number(document.getElementById("heightExponentInput")?.value) || 2;
+    const gh = grid.cells.h;
+    // as calculateTemperatures: 6.5 °C per km of altitude
+    const drop = hh => (hh < 20 ? 0 : Math.round(((hh - 18) ** hExp / 1000) * 6.5));
+    const amp = o.noise * o.featurePx * WARP_AMP;
+    const find = typeof findCell === "function" ? findCell : null;
+    return i => {
+      const x = P[i][0] / o.featurePx;
+      const y = P[i][1] / o.featurePx;
+      const dx = fbm(seedA, x, y) * amp;
+      const dy = fbm(seedB, x, y) * amp;
+      let j = i;
+      // the displaced point must be land (else a shorter displacement, else the cell itself)
+      for (const f of find ? [1, 0.5, 0.25] : []) {
+        const qx = Math.min(graphWidth, Math.max(0, P[i][0] + dx * f));
+        const qy = Math.min(graphHeight, Math.max(0, P[i][1] + dy * f));
+        const k = find(qx, qy);
+        if (k !== undefined && h[k] >= 20) {
+          j = k;
+          break;
+        }
+      }
+      const t = j === i ? K.tempG[g[i]] : K.tempG[g[j]] + drop(gh[g[j]]) - drop(gh[g[i]]);
+      return Biomes.getId(K.moistureAt(j, K.riverBonus(i)), t, h[i], Boolean(r[i]));
+    };
   }
 
   /** The new biome per pack cell (a copy; nothing is written). */
   function computeBiomes(o) {
-    const C = pack.cells;
+    const K = climateKit();
+    const C = K.C;
+    const h = C.h;
     const n = C.i.length;
     const before = C.biome;
     const next = Uint8Array.from(before);
-    const keptCell = i => o.keepIds.has(before[i]);
     const inScope = i => !o.scope || o.scope.has(i);
-    let kept = 0;
-    for (let i = 0; i < n; i++) if (inScope(i) && C.h[i] >= 20 && keptCell(i)) kept++;
+    // why a land cell keeps its biome (KEPT_WHY index); kept cells neither change nor spread
+    const kept = new Uint8Array(n);
+    const keptBy = {};
+    for (let i = 0; i < n; i++) {
+      if (h[i] < 20) continue;
+      const b = before[i];
+      let why = 0;
+      if (b >= o.customFrom) why = 1;
+      else if (o.listedIds.has(b)) why = 2;
+      else if (o.exclude?.has(i)) why = 4;
+      else if (o.keepPainted === true && b !== K.climateOf(i)) why = 3;
+      kept[i] = why;
+      if (why && inScope(i)) keptBy[KEPT_WHY[why]] = (keptBy[KEPT_WHY[why]] || 0) + 1;
+    }
+    const held = i => kept[i] || (o.keepRivers && C.r[i]);
     let fromClimate = 0;
     if (o.from === "climate") {
-      const { fl, r, h, g } = C;
-      const tempGrid = grid.cells.temp;
-      const precGrid = grid.cells.prec;
-      const seedT = o.seedNum;
-      const seedM = (o.seedNum + 7919) % 2147483647;
-      // as Biomes.define: own precipitation (+ river flux) averaged with land neighbours
-      const moisture = i => {
-        let m = precGrid[g[i]];
-        if (r[i]) m += Math.max(fl[i] / 10, 2);
-        let sum = m;
-        let k = 1;
-        for (const j of C.c[i])
-          if (h[j] >= 20) {
-            sum += precGrid[g[j]];
-            k++;
-          }
-        return Math.round(4 + sum / k);
-      };
+      const noisy = o.noise > 0 ? noisyClimate(K, o) : null;
       for (let i = 0; i < n; i++) {
-        if (!inScope(i) || keptCell(i)) continue;
-        let m = h[i] < 20 ? 0 : moisture(i);
-        let t = tempGrid[g[i]];
-        if (o.noise > 0 && h[i] >= 20) {
-          const x = C.p[i][0] / o.featurePx;
-          const y = C.p[i][1] / o.featurePx;
-          t = Math.round(t + fbm(seedT, x, y) * o.noise * TEMP_AMP);
-          m = Math.max(0, m + fbm(seedM, x, y) * o.noise * MOIST_AMP);
-        }
-        const b = Biomes.getId(m, t, h[i], Boolean(r[i]));
+        if (!inScope(i) || kept[i]) continue;
+        const b = h[i] < 20 ? 0 : noisy ? noisy(i) : K.climateOf(i);
         if (b !== next[i]) fromClimate++;
         next[i] = b;
       }
@@ -363,12 +528,12 @@
     for (let pass = 0; pass < o.smooth; pass++) {
       const upd = [];
       for (let i = 0; i < n; i++) {
-        if (C.h[i] < 20 || !inScope(i) || keptCell(i)) continue;
-        // majority of the land neighbours that are not kept (kept biomes neither change nor spread)
+        if (h[i] < 20 || !inScope(i) || held(i)) continue;
+        // majority of the land neighbours that are not kept (river cells hold but still count)
         const counts = new Map();
         let land = 0;
         for (const j of C.c[i]) {
-          if (C.h[j] < 20 || keptCell(j)) continue;
+          if (h[j] < 20 || kept[j]) continue;
           land++;
           counts.set(next[j], (counts.get(next[j]) || 0) + 1);
         }
@@ -386,14 +551,51 @@
       for (const [i, b] of upd) next[i] = b;
       smoothed += upd.length;
     }
-    return { next, kept, fromClimate, smoothed };
+    let merged = 0;
+    if (o.minRegion > 1) {
+      // connected land regions of one biome under minRegion cells join their most common
+      // neighbouring biome; regions holding a kept, held or out-of-scope cell stay
+      const snap = Uint8Array.from(next);
+      const comp = new Int32Array(n).fill(-1);
+      let id = 0;
+      for (let s = 0; s < n; s++) {
+        if (h[s] < 20 || comp[s] >= 0) continue;
+        const list = [s];
+        comp[s] = id;
+        for (let q = 0; q < list.length; q++)
+          for (const j of C.c[list[q]])
+            if (h[j] >= 20 && comp[j] < 0 && snap[j] === snap[s]) {
+              comp[j] = id;
+              list.push(j);
+            }
+        id++;
+        if (list.length >= o.minRegion || list.some(c => !inScope(c) || held(c))) continue;
+        const votes = new Map();
+        for (const c of list)
+          for (const j of C.c[c])
+            if (h[j] >= 20 && snap[j] !== snap[s] && !kept[j]) votes.set(snap[j], (votes.get(snap[j]) || 0) + 1);
+        let best = -1;
+        let bestN = 0;
+        for (const [b, k] of votes)
+          if (k > bestN) {
+            best = b;
+            bestN = k;
+          }
+        if (best < 0) continue;
+        for (const c of list) next[c] = best;
+        merged += list.length;
+      }
+    }
+    return { next, keptBy, fromClimate, smoothed, merged };
   }
 
   function changeStats(before, next) {
     const delta = {};
     const byBiome = {};
+    const had = {};
     let changed = 0;
     for (let i = 0; i < next.length; i++) {
+      had[before[i]] = (had[before[i]] || 0) + 1;
       if (next[i] === before[i]) continue;
       changed++;
       delta[before[i]] = (delta[before[i]] || 0) - 1;
@@ -402,8 +604,18 @@
       byBiome[next[i]].push(i);
     }
     const net = {};
-    for (const [b, d] of Object.entries(delta)) if (d) net[biomesData.name[b] ?? `biome ${b}`] = d;
-    return { changed, net, byBiome };
+    const shifts = [];
+    for (const [b, d] of Object.entries(delta)) {
+      if (!d) continue;
+      const nm = biomesData.name[b] ?? `biome ${b}`;
+      net[nm] = d;
+      const base = had[b] || 0;
+      if (Math.abs(d) >= 20 && Math.abs(d) >= 0.15 * base)
+        shifts.push(
+          `${nm} ${d > 0 ? "+" : ""}${d}${base ? ` (${d > 0 ? "+" : ""}${Math.round((100 * d) / base)}%)` : ""}`
+        );
+    }
+    return { changed, net, byBiome, shifts };
   }
 
   async function redrawBiomes(a, msgs) {
@@ -419,34 +631,51 @@
     const before = Uint8Array.from(pack.cells.biome);
     const r = computeBiomes(o);
     const st = changeStats(before, r.next);
+    const keptTotal = Object.values(r.keptBy).reduce((s, v) => s + v, 0);
     const report = {
       from: o.from,
+      ...(o.noise ? { mode: o.mode } : {}),
       noise: o.noise,
       smooth: o.smooth,
+      ...(o.minRegion ? { minRegion: o.minRegion, merged: r.merged } : {}),
       scale: o.featurePx,
       seed: o.seedNum,
       cells: o.scope ? o.scope.size : pack.cells.i.length,
-      kept: r.kept,
+      kept: keptTotal,
+      ...(keptTotal ? { keptBy: r.keptBy } : {}),
       changed: st.changed,
       smoothed: r.smoothed,
       net: st.net
     };
-    if (a.phase !== "apply") return { phase: "validate", ...report };
+    const notes = [];
+    if (o.noise && st.shifts.length)
+      notes.push(
+        `biome totals shifted: ${st.shifts.join(", ")}${o.mode === "jitter" ? "; mode:'warp' (default) keeps totals closer" : ""}`
+      );
+    if (r.keptBy.painted)
+      notes.push(
+        `${r.keptBy.painted} land cells differ from their climate biome (painted or edited) and were kept; keepPainted:'custom' re-derives them`
+      );
+    if (a.phase !== "apply") return { phase: "validate", ...report, ...(notes.length ? { notes } : {}) };
     const B = pack.cells.biome;
     for (let i = 0; i < r.next.length; i++) B[i] = r.next[i];
     T.resetMemo?.();
-    const msgs = [];
     if (st.changed) {
-      msgs.push(
-        "population and relief icons were not recomputed: add 'population' to parts to re-rank cells, and redraw relief to match the new biomes"
+      notes.push(
+        "population and relief icons were not recomputed: add 'population' to parts to re-rank cells, and redraw relief icons (regenerate {parts:['relief']}) to match the new biomes"
       );
     }
-    const rd = st.changed ? await redrawBiomes(a, msgs) : { redrawn: [], skippedHidden: [] };
+    const rd = st.changed ? await redrawBiomes(a, notes) : { redrawn: [], skippedHidden: [] };
     return {
       ...report,
       redrawn: rd.redrawn,
-      notes: msgs,
-      resolved: { cells: st.byBiome, graph: T.cellGraph?.() ?? null }
+      notes,
+      resolved: {
+        cells: st.byBiome,
+        graph: T.cellGraph?.() ?? null,
+        ...(o.noise ? { seed: o.seedNum } : {}),
+        net: st.net
+      }
     };
   };
 
@@ -466,6 +695,7 @@
     let changed = 0;
     let water = 0;
     let unchanged = 0;
+    const delta = {};
     for (const [id, list] of plan) {
       for (const c of list) {
         if (C.h[c] < 20) {
@@ -477,15 +707,21 @@
           continue;
         }
         changed++;
+        delta[C.biome[c]] = (delta[C.biome[c]] || 0) - 1;
+        delta[id] = (delta[id] || 0) + 1;
         if (a.phase === "apply") C.biome[c] = id;
       }
     }
-    const out = { changed, skipped: { water, unchanged } };
+    const net = {};
+    for (const [b, d] of Object.entries(delta)) if (d) net[biomesData.name[b] ?? `biome ${b}`] = d;
+    const out = { changed, skipped: { water, unchanged }, net };
     if (a.phase !== "apply") return { phase: "validate", ...out };
     T.resetMemo?.();
     const msgs = [];
     const rd = changed ? await redrawBiomes(a, msgs) : { redrawn: [] };
-    return { ...out, redrawn: rd.redrawn, notes: msgs, resolved: { cells: a.cells, graph: T.cellGraph?.() ?? null } };
+    const resolved = { cells: a.cells, graph: T.cellGraph?.() ?? null, net };
+    if (typeof a.seed === "number") resolved.seed = a.seed; // the original call's seed, for the op summary
+    return { ...out, redrawn: rd.redrawn, notes: msgs, resolved };
   };
 
   // ---------------------------------------------------------------- feathered biome paint
@@ -594,7 +830,15 @@
     const lit = featherCells(a.select, a.set.biome, f);
     const { feather: _feather, ...rest } = a;
     const out = await basePaint({ ...rest, select: { cells: lit.cells } }, meta);
-    return { ...out, feather: lit.stats };
+    const res = { ...out, feather: lit.stats };
+    if (!lit.stats.band) {
+      const spacing = Math.sqrt((graphWidth * graphHeight) / pack.cells.i.length);
+      res.notes = [
+        ...(Array.isArray(out.notes) ? out.notes : []),
+        `feather width ${lit.stats.width} px is below the cell spacing (~${Math.round(spacing)} px), so no cell fell in the band and the edge stayed hard; use a wider width or unit:'cells'`
+      ];
+    }
+    return res;
   };
 
   T.biomes = { seedOf, hash01, valueNoise, fbm, iconWeights, RELIEF_ICONS };

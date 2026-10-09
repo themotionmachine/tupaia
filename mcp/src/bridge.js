@@ -1393,7 +1393,8 @@
         markers: countLive(pack.markers),
         zones: countLive(pack.zones),
         notes: typeof notes !== "undefined" && Array.isArray(notes) ? notes.length : 0,
-        labels: labelList().length
+        labels: labelList().length,
+        biomes: liveList("biome").length
       },
       features: featureCounts(),
       mapCoordinates: typeof mapCoordinates !== "undefined" ? mapCoordinates : null,
