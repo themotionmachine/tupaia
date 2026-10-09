@@ -134,6 +134,8 @@ export interface DisplayResolved {
   layersPreset?: string;
   stylePreset?: string;
   styleRules?: Record<string, unknown>;
+  /** Per label/emblem group visibility override (literal group ids; null clears the group's override). */
+  labels?: Record<string, { minSize?: number | null; alwaysShow?: boolean | null } | null>;
 }
 
 export interface EvalResolved {
@@ -464,6 +466,18 @@ function listOut(parts: string[], max = 3): string {
 
 type Row = Record<string, unknown>;
 
+/** "city min size 0, town always shown, states default" for a display `labels` override. */
+function labelsText(labels: NonNullable<DisplayResolved["labels"]>): string {
+  const parts = Object.entries(labels).map(([group, spec]) => {
+    if (!spec || typeof spec !== "object") return `${group} default`;
+    const bits: string[] = [];
+    if (spec.minSize !== undefined) bits.push(spec.minSize === null ? "default min size" : `min size ${spec.minSize}`);
+    if (spec.alwaysShow !== undefined) bits.push(spec.alwaysShow ? "always shown" : "auto-hide");
+    return `${group} ${bits.join(", ") || "default"}`;
+  });
+  return listOut(parts);
+}
+
 /** One sentence for a recorded call, from the resolved form and the bridge's result rows. */
 export function summarizeOp(tool: string, resolved: Resolved | null, out: Row | null, args?: unknown): string {
   try {
@@ -513,6 +527,7 @@ export function summarizeOp(tool: string, resolved: Resolved | null, out: Row | 
         }
         if (r.stylePreset) parts.push(`style ${q(r.stylePreset)}`);
         if (r.styleRules) parts.push(`style rules for ${Object.keys(r.styleRules).join(", ")}`);
+        if (r.labels && typeof r.labels === "object") parts.push(`label visibility ${labelsText(r.labels)}`);
         return `Display: ${parts.join("; ") || "no change"}.`;
       }
       case "eval": {

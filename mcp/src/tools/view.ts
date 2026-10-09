@@ -55,6 +55,12 @@ export const ScreenshotInput = z.object({
     .boolean()
     .optional()
     .describe("Keep the layer changes after the shot (default: revert); kept changes are undoable like display"),
+  labels: z
+    .enum(["all"])
+    .optional()
+    .describe(
+      "'all': show every label for this shot only, including the ones the zoom rule hides (turns the labels layer on if it is off); nothing is kept and there is no undo entry"
+    ),
   hideUi: z.boolean().optional().describe("Hide UI overlays and dialogs (default true)"),
   format: z.enum(["jpeg", "png"]).optional().describe("Returned image format (default jpeg)"),
   quality: z.number().min(0.3).max(1).optional().describe("JPEG quality (default 0.85)"),
@@ -90,7 +96,11 @@ export async function takeScreenshot(
   const format = args.format ?? "jpeg";
   const maxSide = args.maxSide ?? 1024;
   const hideUi = args.hideUi ?? true;
+  if (args.labels === "all" && args.layers?.off?.includes("labels"))
+    throw new ToolError("BAD_ARGS", "labels:'all' needs the labels layer on, but layers.off lists 'labels'");
 
+  let labelsShot: { layerTurnedOn: boolean } | null = null;
+  let labelsRevealed: number | undefined;
   let layerChange: { changed: unknown[]; previous: { on: string[]; off: string[] } } | null = null;
   let png: Buffer;
   let view: ViewInfo;
@@ -104,6 +114,7 @@ export async function takeScreenshot(
       if (args.keepLayers)
         await scope.record("display", args, { on: args.layers.on ?? [], off: args.layers.off ?? [] });
     }
+    if (args.labels === "all") labelsShot = await scope.call<{ layerTurnedOn: boolean }>("labelsShot", { on: true });
     if (full) {
       const r = await scope.call<Encoded>("rasterize", { scale, format: "png" }, { noAlerts: true });
       png = Buffer.from(r.b64, "base64");
@@ -136,6 +147,13 @@ export async function takeScreenshot(
       png = await ctx.browser.screenshotMap({ hideUi, scale, timeoutMs: scope.remainingMs });
     }
   } finally {
+    if (labelsShot) {
+      // a <style> tag and (maybe) the labels layer: removed/restored here, never in the map or the undo stack
+      const r = await scope
+        .call<{ revealed: number }>("labelsShot", { on: false, restoreLayer: labelsShot.layerTurnedOn })
+        .catch(() => null);
+      labelsRevealed = r?.revealed;
+    }
     if (layerChange && !args.keepLayers) {
       const prev = layerChange.previous;
       if (prev.on.length || prev.off.length)
@@ -220,6 +238,7 @@ export async function takeScreenshot(
       view: full ? undefined : { x: view.x, y: view.y, scale: view.scale },
       mapBboxShown: full ? [0, 0, view.graphWidth, view.graphHeight] : view.mapBboxShown,
       target: view.target,
+      labels: args.labels === "all" ? { mode: "all", revealed: labelsRevealed } : undefined,
       layersChanged: layerChange?.changed.length
         ? { changed: layerChange.changed, reverted: !args.keepLayers }
         : undefined,
@@ -236,7 +255,7 @@ export function register(ctx: ToolContext): void {
     {
       title: "Screenshot the map",
       description:
-        "See the map. Frames target {entity:{type,ref}} | {bbox:[x0,y0,x1,y1]} | {at:Place} at an optional zoom (1-20; default fits the target, 8 for a point), or reuses an earlier shot's exact view (view:'last'|shotId), or keeps the current view. full:true rasterises the whole map instead. layers:{on,off} apply only for this shot (keepLayers:true keeps them). Returns a JPEG (maxSide 1024 by default) plus {shotId, file (full-resolution PNG), view, mapBboxShown}. compare:shotId diffs against that shot at the same view and returns the diff image (red = changed) with changedPct. Take one after any visual change, framed on what changed; skip it after pure reads.",
+        "See the map. Frames target {entity:{type,ref}} | {bbox:[x0,y0,x1,y1]} | {at:Place} at an optional zoom (1-20; default fits the target, 8 for a point), or reuses an earlier shot's exact view (view:'last'|shotId), or keeps the current view. full:true rasterises the whole map instead. layers:{on,off} apply only for this shot (keepLayers:true keeps them). labels:'all' shows every label for this shot only, including the ones the zoom rule hides at full-map zoom (display {labels} changes that for good). Returns a JPEG (maxSide 1024 by default) plus {shotId, file (full-resolution PNG), view, mapBboxShown}. compare:shotId diffs against that shot at the same view and returns the diff image (red = changed) with changedPct. Take one after any visual change, framed on what changed; skip it after pure reads.",
       inputSchema: ScreenshotInput,
       annotations: { readOnlyHint: true, openWorldHint: false },
       kind: "view"

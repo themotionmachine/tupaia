@@ -85,6 +85,13 @@ load that never completes cannot lend its version to the next load, and so `load
 versionless PUT whose 409 dialog offered an `X-Map-Overwrite` button. Re-check all three after
 an upstream rebase.
 
+One more hook, in `public/main.js` `invokeActiveZooming` (two `// tupaia-mcp:` blocks, labels
+and emblems): a label or emblem group may carry `data-min-size` (replaces the lower bound of the
+automatic hiding, 6 for labels and 25 for emblems) and `data-always-show` (`1` skips the lower
+and upper bound). The MCP `display {labels}` writes them on the SVG groups, so they ride in the
+`.map` file; a group without them behaves exactly as upstream, and an older client ignores them.
+Re-check after an upstream rebase.
+
 ## Local smoke test (no Cloudflare account needed)
 
 `wrangler dev --local` runs the Worker against an in-memory R2 + D1 (miniflare):

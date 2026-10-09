@@ -563,7 +563,12 @@ function invokeActiveZooming() {
       const relative = Math.max(rn((desired + desired / scale) / 2, 2), 1);
       if (rescaleLabels.checked) this.setAttribute("font-size", relative);
 
-      const hidden = hideLabels.checked && (relative * scale < 6 || relative * scale > 60);
+      // tupaia-mcp: per-group override written by the MCP `display {labels}`: data-min-size replaces the
+      // lower bound (6), data-always-show skips both bounds; without the attributes this is unchanged
+      const minAttr = parseFloat(this.dataset.minSize);
+      const minSize = Number.isFinite(minAttr) ? minAttr : 6;
+      const alwaysShow = this.dataset.alwaysShow === "1" || this.dataset.alwaysShow === "true";
+      const hidden = hideLabels.checked && !alwaysShow && (relative * scale < minSize || relative * scale > 60);
       if (hidden) this.classList.add("hidden");
       else this.classList.remove("hidden");
     });
@@ -573,7 +578,11 @@ function invokeActiveZooming() {
   if (emblems.style("display") !== "none") {
     emblems.selectAll("g").each(function () {
       const size = this.getAttribute("font-size") * scale;
-      const hidden = hideEmblems.checked && (size < 25 || size > 300);
+      // tupaia-mcp: same per-group override as the labels above (data-min-size replaces 25)
+      const minAttr = parseFloat(this.dataset.minSize);
+      const minSize = Number.isFinite(minAttr) ? minAttr : 25;
+      const alwaysShow = this.dataset.alwaysShow === "1" || this.dataset.alwaysShow === "true";
+      const hidden = hideEmblems.checked && !alwaysShow && (size < minSize || size > 300);
       if (hidden) this.classList.add("hidden");
       else this.classList.remove("hidden");
       if (!hidden && window.COArenderer && this.children.length && !this.children[0].getAttribute("href"))
