@@ -136,7 +136,9 @@ async function openTransformTool() {
     applyGraphSize();
     fitMapToScreen();
     resetZoom(0);
+    const keptNotes = notes; // tupaia-mcp: undraw() empties notes; Resample carries them over
     undraw();
+    notes = keptNotes;
     Resample.process({projection, inverse, scale: 1});
 
     drawLayers();

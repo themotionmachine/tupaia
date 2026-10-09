@@ -54,6 +54,7 @@
   };
   const LAKE_KEYS = ["temp", "flux", "evaporation", "inlets", "outlet", "closed"];
   const AREA_FIELDS = ["province", "state", "culture", "religion"];
+  const BREACH_HEIGHT = 22; // openNearSeaLakes' LIMIT
   const WORKER_MAX_BYTES = 64 * 1024 * 1024;
 
   function targetCells(v) {
@@ -79,9 +80,12 @@
   }
 
   // .map lines (save.ts prepareMapData) by how they grow with the cell count
+  // how each .map line grows with the cell count (save.ts prepareMapData order): grid arrays with
+  // the grid points, pack arrays with the pack cells, the rest by an exponent of the pack ratio
+  // measured on demo.map at 10K -> 50K (the svg 0.75, pack features 0.6, rivers 0.5)
   const GRID_LINES = [6, 7, 8, 9, 10, 11];
-  const PACK_LINES = [16, 17, 18, 19, 20, 21, 22, 24, 25, 26, 27, 36, 38, 40, 44];
-  const OUTLINE_LINES = [5, 12]; // svg and pack features: outlines, ~sqrt of the cell count
+  const PACK_LINES = [16, 17, 18, 19, 20, 21, 22, 24, 25, 26, 27, 38, 40, 44];
+  const PACK_EXPONENT = { 5: 0.75, 12: 0.6, 32: 0.5 };
 
   async function bytesEstimate(gridRatio, packRatio) {
     const { prepareMapData } = await lazy.save();
@@ -93,7 +97,7 @@
       now += n;
       if (GRID_LINES.includes(k)) est += n * gridRatio;
       else if (PACK_LINES.includes(k)) est += n * packRatio;
-      else if (OUTLINE_LINES.includes(k)) est += n * Math.sqrt(packRatio);
+      else if (PACK_EXPONENT[k]) est += n * packRatio ** PACK_EXPONENT[k];
       else est += n;
     });
     return { now, est: Math.round(est) };
@@ -121,7 +125,13 @@
       fail("BAD_ARGS", `the map already has this density (${want} points, ${pack.cells.i.length} cells)`);
     const gridNow = grid.points.length;
     const packNow = pack.cells.i.length;
-    const packEst = Math.round((shape.points * packNow) / gridNow);
+    // pack = land grid cells (scale with the point count) + the water rings and coastline
+    // refinement points along the coasts (scale with the coast length in cells, the square root)
+    const ratio = shape.points / gridNow;
+    const landGrid = new Set();
+    for (const i of pack.cells.i) if (pack.cells.h[i] >= 20) landGrid.add(pack.cells.g[i]);
+    const landNow = landGrid.size;
+    const packEst = Math.round(landNow * ratio + (packNow - landNow) * Math.sqrt(ratio));
     const warnings = [];
     if (shape.points < gridNow)
       warnings.push(
@@ -793,9 +803,27 @@
         grid.cells.h[g] = Math.max(0, Math.min(19, v));
       }
     }
+    // a land point between an old lake and an old ocean stays above the app's breach height
+    // (openNearSeaLakes turns a lake into sea through a coast cell of height 22 or less)
+    relabel();
+    let dams = 0;
+    for (let g = 0; g < n; g++) {
+      if (!cls[g] || grid.cells.h[g] > BREACH_HEIGHT) continue;
+      let lake = false;
+      let ocean = false;
+      for (const y of C[g]) {
+        const t = cls[y] ? null : PF[label[y]]?.type;
+        if (t === "lake") lake = true;
+        else if (t === "ocean") ocean = true;
+      }
+      if (lake && ocean) {
+        grid.cells.h[g] = BREACH_HEIGHT + 1;
+        dams++;
+      }
+    }
     grid.cells.temp = temp;
     grid.cells.prec = prec;
-    report.heights = { method: "interpolate", samples: m, claimed, forced, keptAreas, rejoined: joined, dropped, separated, spurious, carved, outsideHull: outside };
+    report.heights = { method: "interpolate", samples: m, claimed, forced, keptAreas, rejoined: joined, dropped, separated, spurious, dams, carved, outsideHull: outside };
   }
 
   /** The cell within `maxDepth` rings of `start` that passes `ok` and is closest to (x, y), or -1. */
@@ -1048,15 +1076,63 @@
     pack.zones = (parentMap.pack.zones || []).map((z, k) => ({ ...z, cells: lists[k] }));
   }
 
+  /**
+   * After Resample.restoreCellData: a culture, state, religion or province that had cells but
+   * got none (smaller than a new cell) takes the land cell nearest to its old centre from an
+   * area that keeps others (a province only within its own state), so Resample keeps it.
+   */
+  function rescueAreas(parentMap, projection, report) {
+    const C = pack.cells;
+    const PC = parentMap.pack.cells;
+    const rescued = [];
+    for (const [k, list] of [
+      ["culture", "cultures"],
+      ["state", "states"],
+      ["religion", "religions"],
+      ["province", "provinces"]
+    ]) {
+      if (!PC[k] || !C[k]) continue;
+      const had = new Set(PC[k]);
+      const count = new Map();
+      for (const i of C.i) count.set(C[k][i], (count.get(C[k][i]) || 0) + 1);
+      for (const e of parentMap.pack[list] || []) {
+        if (!e?.i || e.removed || !had.has(e.i) || count.get(e.i)) continue;
+        const at = PC.p[e.center];
+        if (!at) continue;
+        const [x, y] = projection(at[0], at[1]);
+        const ok = c => C.h[c] >= 20 && (count.get(C[k][c]) || 0) > 1 && (k !== "province" || C.state[c] === e.state);
+        const cell = nearestCellWhere(findCell(x, y), x, y, ok, 4);
+        if (cell < 0) continue;
+        count.set(C[k][cell], count.get(C[k][cell]) - 1);
+        C[k][cell] = e.i;
+        count.set(e.i, 1);
+        rescued.push(`${k} ${e.name} (${e.i})`);
+      }
+    }
+    report.areasRescued = rescued;
+  }
+
   /** Instance overrides on window.Resample for one process() call; returns the undo. */
   function patchResample(P, report) {
     const R = Resample;
-    for (const k of ["resamplePrimaryGridData", "restoreBurgs", "restoreFeatureDetails", "restoreZones", "restoreRoutes"])
+    for (const k of [
+      "resamplePrimaryGridData",
+      "restoreCellData",
+      "restoreBurgs",
+      "restoreFeatureDetails",
+      "restoreZones",
+      "restoreRoutes"
+    ])
       if (typeof R[k] !== "function")
         fail("PAGE_ERROR", `the app's Resample has no ${k}(); this bridge needs a matching build (CF_BUILD=1 npx vite build)`);
     const own = {};
     if (P.heights === "interpolate")
       own.resamplePrimaryGridData = parentMap => interpolateGrid(parentMap, IDENTITY, IDENTITY, report);
+    const origCells = R.restoreCellData;
+    own.restoreCellData = function (parentMap, inverse, sc) {
+      origCells.call(this, parentMap, inverse, sc);
+      rescueAreas(parentMap, IDENTITY, report);
+    };
     const origBurgs = R.restoreBurgs;
     own.restoreBurgs = function (parentMap, projection, sc) {
       origBurgs.call(this, parentMap, projection, sc);
@@ -1178,6 +1254,10 @@
     if (report.portsMovedToCoast?.length)
       warnings.push(
         `${report.portsMovedToCoast.length} port(s) ended inland and were moved to the nearest free coastal cell: ${report.portsMovedToCoast.slice(0, 10).join(", ")}`
+      );
+    if (report.areasRescued?.length)
+      warnings.push(
+        `${report.areasRescued.length} area(s) fell between the new cells and were given the cell nearest their old centre: ${report.areasRescued.slice(0, 10).join(", ")}`
       );
     if (report.portsWithoutWater?.length)
       warnings.push(`port burg(s) with no water next to them now: ${report.portsWithoutWater.slice(0, 10).join(", ")}`);

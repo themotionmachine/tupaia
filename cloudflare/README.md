@@ -82,8 +82,13 @@ each), and `src/io/cloud-cloudflare.ts` uses them (with the existing `map:genera
 load that never completes cannot lend its version to the next load, and so `loadedVersion` only holds while the page still has the map it loaded from
 `shared`; when it does not (a `?maplink` sketch, a file, a new map), `saveSharedMap` shows
 "Replace the shared map v<N>?" and, on Replace, PUTs with `X-Map-Version: N` instead of the old
-versionless PUT whose 409 dialog offered an `X-Map-Overwrite` button. Re-check all three after
-an upstream rebase.
+versionless PUT whose 409 dialog offered an `X-Map-Overwrite` button. Resampling (for the MCP
+`regrid` tool and the app's Transform tool): `src/generators/resample.ts` `process()` keeps the
+map id at scale 1 and fires `map:resampled` instead of `showStatistics()` (a new id and
+`map:generated`), so a regridded or transformed shared map still saves with its loaded version
+(a submap, scale > 1, stays a new map); `public/modules/ui/transform-tool.js` keeps `notes`
+across its `undraw()` so Resample carries them over (it dropped them). Re-check all of these
+after an upstream rebase.
 
 ## Local smoke test (no Cloudflare account needed)
 

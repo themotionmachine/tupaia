@@ -36,7 +36,9 @@ let loadedVersion: number | null = null;
 // takes it over. So a shared load that never completes (invalid/newer file, cancelled, parse
 // error) cannot lend its version to the next load. "map:generated" (fired by every generate AND,
 // before "map:loaded", by every load) clears loadedVersion too. So a map opened from a ?maplink
-// sketch, a file or a new map never saves over `shared` without a confirmation.
+// sketch, a file or a new map never saves over `shared` without a confirmation. A resample at
+// scale 1 (Transform, a cell density change) fires "map:resampled" instead and keeps the map id
+// (src/generators/resample.ts), so its save still carries the loaded version (409 if stale).
 let pendingVersion: number | null = null;
 window.addEventListener("map:loading", () => {
   pendingVersion = null;

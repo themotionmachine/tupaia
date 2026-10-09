@@ -463,7 +463,13 @@ class Resampler {
     this.restoreZones(parentMap, projection, scale);
     this.restoreEconomy(parentMap);
 
-    showStatistics();
+    // tupaia-mcp: a resample at scale 1 (Transform, a cell density change) is the same map on a
+    // new grid, so it keeps its id and does not fire "map:generated": the shared-map save still
+    // knows the version the map was loaded at (src/io/cloud-cloudflare.ts). A submap is a new map.
+    if (scale === 1 && mapId) {
+      INFO && console.info(`Resampled: ${grid.points.length} points, ${pack.cells.i.length} cells, map id kept`);
+      window.dispatchEvent(new CustomEvent("map:resampled", { detail: { seed, mapId, cells: pack.cells.i.length } }));
+    } else showStatistics();
   }
 }
 
