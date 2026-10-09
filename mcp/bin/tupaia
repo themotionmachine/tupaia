@@ -1,0 +1,6 @@
+#!/usr/bin/env node
+// tupaia: CLI for the shared tupaia-mcp daemon. Implementation: ../src/cli.ts (Node >= 24 runs
+// it directly). `tupaia --help` for usage.
+import { main } from "../src/cli.ts";
+
+process.exitCode = await main(process.argv.slice(2));

@@ -99,6 +99,39 @@ function listExtBridges(dir: string): string[] {
   }
 }
 
+/** Args at least this large (as JSON) go to the page as one JSON string. */
+const JSON_ARGS_MIN = 32 * 1024;
+
+/**
+ * `args` as a JSON string when it is large and plain JSON (objects, arrays, strings, finite
+ * numbers, booleans, null), else null. Playwright passes arguments value by value, which costs
+ * seconds per MB of nested arrays; one string and a JSON.parse in the page cost milliseconds.
+ * An undefined object property is dropped (reads the same); anything else JSON would change
+ * (undefined in an array, NaN/Infinity, Dates, typed arrays, class instances) keeps the normal path.
+ */
+export function jsonArgs(args: unknown): string | null {
+  if (args === null || typeof args !== "object") return null;
+  let plain = true;
+  let text: string;
+  try {
+    text = JSON.stringify(args, function (this: Record<string, unknown>, key: string, value: unknown) {
+      const orig = this[key];
+      if (orig === undefined) {
+        if (Array.isArray(this)) plain = false;
+      } else if (typeof orig === "bigint" || typeof orig === "function" || typeof orig === "symbol") plain = false;
+      else if (typeof orig === "number" && !Number.isFinite(orig)) plain = false;
+      else if (orig !== null && typeof orig === "object" && !Array.isArray(orig)) {
+        const proto = Object.getPrototypeOf(orig);
+        if (proto !== Object.prototype && proto !== null) plain = false;
+      }
+      return value;
+    });
+  } catch {
+    return null;
+  }
+  return plain && text.length >= JSON_ARGS_MIN ? text : null;
+}
+
 export class BrowserManager {
   readonly config: Config;
   readonly modeState: ModeState;
@@ -443,14 +476,16 @@ export class BrowserManager {
     const timeoutMs = Math.max(500, Math.min(opts.timeoutMs, TIMEOUT_CAP_MS));
     const op = opts.mutating ? `op${++this.#opSeq}` : undefined;
     const meta = { op, json: opts.json, noAlerts: opts.noAlerts };
+    // tupaia-mcp: large plain-JSON args cross as one string (Playwright serializes value by value)
+    const asJson = jsonArgs(args);
     const evalP = page.evaluate(
-      ([n, a, m]) =>
+      ([n, a, m, j]) =>
         (globalThis as unknown as { __tupaia: { call: (n: string, a: unknown, m: unknown) => unknown } }).__tupaia.call(
           n,
-          a,
+          j ? JSON.parse(a as string) : a,
           m
         ),
-      [name, args, meta] as const
+      [name, asJson ?? args, meta, asJson !== null] as const
     ) as Promise<Envelope<T>>;
     evalP.catch(() => {});
     let timer: NodeJS.Timeout | undefined;
@@ -506,7 +541,8 @@ export class BrowserManager {
           sleep(2000).then(() => false)
         ])
       : false;
-    if (alive) return "The page still responds; read-only work was abandoned.";
+    if (alive)
+      return "The page still responds. Its result was dropped, but page JS cannot be cancelled: that read-only code may still be running.";
     this.dirty = `${name} ${what} and the page stopped responding`;
     return "The page stopped responding: it will be relaunched and the newest snapshot restored before the next call.";
   }
