@@ -95,6 +95,9 @@ export interface EditResolved {
     before?: Record<string, unknown>;
     after?: Record<string, unknown>;
     remove?: boolean;
+    /** routeGroup removal: its routes moved to `moveTo` (force). */
+    force?: boolean;
+    moveTo?: number | string;
     /**
      * The entity's identifying and main fields before the op (bridge identOf): replay checks
      * that the target is still the same entity (marker, route and zone ids are reused) and,
@@ -488,7 +491,8 @@ export function summarizeOp(tool: string, resolved: Resolved | null, out: Row | 
         const parts = r.items.map((it, k) => {
           const row = rows[k] ?? {};
           const name = (row.name as string | undefined) ?? (it.name as string | undefined);
-          const extra = r.type === "route" ? ` through ${(it.through as unknown[]).length} places` : "";
+          const pts = (it.points ?? it.through) as unknown[] | undefined;
+          const extra = r.type === "route" && pts ? ` ${it.noPathfind ? "along" : "through"} ${pts.length} places` : "";
           return `${r.type} ${name ? `${q(name)} ` : ""}(${row.i ?? r.created[k]?.[0]?.i ?? "?"})${extra}`;
         });
         return `Added ${listOut(parts)}.`;
@@ -620,14 +624,17 @@ export const EDIT_REF_FIELDS: Record<string, Record<string, string>> = {
   state: { capital: "burg", culture: "culture" },
   province: { capital: "burg" },
   marker: { move: "@place" },
-  label: { move: "@place" }
+  label: { move: "@place" },
+  route: { points: "@places", group: "routeGroup" },
+  routeGroup: { after: "routeGroup", before: "routeGroup" }
 };
 
 export const ADD_REF_FIELDS: Record<string, Record<string, string>> = {
   burg: { at: "@place", culture: "culture" },
   state: { capital: "@capital", culture: "culture" },
   marker: { at: "@place" },
-  route: { through: "@places" },
+  route: { through: "@places", points: "@places", group: "routeGroup" },
+  routeGroup: { after: "routeGroup", before: "routeGroup" },
   label: { at: "@place" },
   note: { entity: "@entity", id: "@noteId" },
   culture: { at: "@place" },
@@ -665,6 +672,7 @@ export function rewriteResolved(tool: string, resolved: Resolved, rw: Rewriter):
       const fields = EDIT_REF_FIELDS[e.type] ?? {};
       for (const o of e.ops) {
         if (o.ref !== undefined) o.ref = rw.id(e.type, o.ref) as number | string;
+        if (o.moveTo !== undefined && e.type === "routeGroup") o.moveTo = rw.id("routeGroup", o.moveTo) as string;
         for (const [k, kind] of Object.entries(fields))
           if (o.set && k in o.set) o.set[k] = rewriteField(rw, kind, o.set[k]);
         // before/after hold the same fields as get() returns them (e.g. a capital burg id)
