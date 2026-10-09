@@ -71,7 +71,14 @@
 
   // Fields with nothing to compare (a set-only action): never compared or set by apply. A FIELDS
   // entry can also say so itself with writeOnly:true.
-  const WRITE_ONLY = { map: ["lock", "unlock"] };
+  // River structure (bridge-ext/rivers.js) is an action, not a state: its get() is the course, so
+  // it never equals the spec value, and applying it again would repeat it (mainStem swaps back,
+  // split cuts again), so a spec cannot hold it.
+  const WRITE_ONLY = { map: ["lock", "unlock"], river: ["mainStem", "split", "merge", "reroute"] };
+  const WRITE_ONLY_WHY = {
+    map: "nothing to compare; a setting lock is a browser preference",
+    river: "structural actions, not state: applying them again would repeat them"
+  };
 
   // The core types (numeric ids, or note/label string ids that are never created by id). An entry
   // `id` of any other type (a route group 'route-tunnels') is its key and may create it.
@@ -1319,7 +1326,7 @@
     });
     for (const [type, keys] of Object.entries(writeOnly))
       S.notes.add(
-        `${type} ${[...keys].join(", ")}: write-only (nothing to compare; a setting lock is a browser preference), so apply skips it; set it with edit ${type}`
+        `${type} ${[...keys].join(", ")}: write-only (${WRITE_ONLY_WHY[type] ?? "nothing to compare"}), so apply skips it; set it with edit ${type}`
       );
     return {
       rows: rowsOut,

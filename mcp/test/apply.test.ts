@@ -606,7 +606,10 @@ describe("tupaia-mcp apply", () => {
     const grouped = (k.rows as Obj[]).find(r => r.count === 3) as Obj;
     assert.deepEqual(grouped.keys, ["Pa", "Pb", "Pc"], JSON.stringify(k.rows));
     assert.match(grouped.error.message, /^missing; apply cannot create provinces/);
-    assert.match(rowAt(k, "routes[0]").error.message, /need the routes extension/);
+    // with dx/routes merged the freehand route is an ordinary create: missing, and no error
+    const freeWay = rowAt(k, "routes[0]");
+    assert.equal(freeWay?.status, "missing", JSON.stringify(k.rows));
+    assert.equal(freeWay.error, undefined, JSON.stringify(freeWay));
     assert.equal(rowAt(k, "burgs[1]").error.code, "CONFLICT");
     assert.equal(rowAt(k, "burgs[2]"), undefined, "x,y picks one of two Twinfords: unchanged");
     const refused = rowAt(k, "burgs[3]").error.message;
