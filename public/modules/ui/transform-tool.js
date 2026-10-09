@@ -132,6 +132,7 @@ async function openTransformTool() {
     if (transformPointsValue !== globalPointsValue) changeCellsDensity(transformPointsValue);
 
     const [projection, inverse] = getProjection();
+    const keepId = isDensityOnly(); // tupaia-mcp: before applyGraphSize, which may resize the canvas
 
     applyGraphSize();
     fitMapToScreen();
@@ -139,11 +140,27 @@ async function openTransformTool() {
     const keptNotes = notes; // tupaia-mcp: undraw() empties notes; Resample carries them over
     undraw();
     notes = keptNotes;
-    Resample.process({projection, inverse, scale: 1});
+    // tupaia-mcp: only a pure density change (no shift, rotation, zoom or mirror) stays the same
+    // map (keeps its id, so a shared map saves with its loaded version); the rest is a new map
+    Resample.process({projection, inverse, scale: 1, keepId});
 
     drawLayers();
 
     INFO && console.groupEnd("transformMap");
+  }
+
+  // tupaia-mcp: true when the transform changes nothing but the cell density
+  function isDensityOnly() {
+    return (
+      graphWidth === +mapWidthInput.value &&
+      graphHeight === +mapHeightInput.value &&
+      +ensureEl("transformShiftX").value === 0 &&
+      +ensureEl("transformShiftY").value === 0 &&
+      +ensureEl("transformAngleInput").value === 0 &&
+      +ensureEl("transformScaleResult").value === 1 &&
+      !ensureEl("transformMirrorH").checked &&
+      !ensureEl("transformMirrorV").checked
+    );
   }
 
   function getProjection() {

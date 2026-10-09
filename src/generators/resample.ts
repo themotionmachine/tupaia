@@ -21,6 +21,9 @@ interface ResamplerProcessOptions {
   projection: (x: number, y: number) => [number, number];
   inverse: (x: number, y: number) => [number, number];
   scale: number;
+  /** tupaia-mcp: the caller changes only the cell density (identity projection, scale 1), so the
+   * result is the same map: keep its id (see the end of process()). Default false: a new map. */
+  keepId?: boolean;
 }
 
 type ParentMapDefinition = {
@@ -423,7 +426,7 @@ class Resampler {
   }
 
   process(options: ResamplerProcessOptions): void {
-    const { projection, inverse, scale } = options;
+    const { projection, inverse, scale, keepId } = options;
     const parentMap = {
       grid: structuredClone(grid),
       pack: structuredClone(pack),
@@ -463,10 +466,12 @@ class Resampler {
     this.restoreZones(parentMap, projection, scale);
     this.restoreEconomy(parentMap);
 
-    // tupaia-mcp: a resample at scale 1 (Transform, a cell density change) is the same map on a
-    // new grid, so it keeps its id and does not fire "map:generated": the shared-map save still
-    // knows the version the map was loaded at (src/io/cloud-cloudflare.ts). A submap is a new map.
-    if (scale === 1 && mapId) {
+    // tupaia-mcp: a pure cell density change (the caller passes keepId: the MCP regrid, or the
+    // Transform tool with no shift, rotation, zoom or mirror) is the same map on a new grid, so it
+    // keeps its id and does not fire "map:generated": the shared-map save still knows the version
+    // the map was loaded at (src/io/cloud-cloudflare.ts). Anything that crops, moves or zooms the
+    // map (Transform with a zoom/shift/rotation/mirror, a submap) is a new map, as upstream.
+    if (keepId && scale === 1 && mapId) {
       INFO && console.info(`Resampled: ${grid.points.length} points, ${pack.cells.i.length} cells, map id kept`);
       window.dispatchEvent(new CustomEvent("map:resampled", { detail: { seed, mapId, cells: pack.cells.i.length } }));
     } else showStatistics();
