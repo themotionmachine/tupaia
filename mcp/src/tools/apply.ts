@@ -16,7 +16,7 @@ import { z } from "zod";
 import { type Ignore, type Mapping, normalizeSpec, type SpecInput } from "../apply-spec.ts";
 import type { CallScope, ToolContext } from "../context.ts";
 import { type Resolved, summarizeOp, unreplayableReason } from "../ops.ts";
-import { resolveReadPath } from "../paths.ts";
+import { READ_RULE, resolveReadPath } from "../paths.ts";
 import { META_TEXT_HEAVY, ToolError } from "../result.ts";
 import { TimeoutMs } from "../schemas.ts";
 import { defineTools } from "./registry.ts";
@@ -50,7 +50,7 @@ const LIST_ORDER = ["error", "differs", "missing", "updated", "created", "unchan
 
 const Entries = z.array(z.record(z.string(), z.unknown())).max(5000).optional();
 
-/** Read a spec file (same path policy as load_map: repo-relative or absolute, must exist). */
+/** Read a spec file (same read rule as load_map: paths.ts READ_RULE, must exist). */
 export function readSpecFile(repoPathResolver: (p: string) => string, p: string): SpecInput {
   const abs = repoPathResolver(p);
   let v: unknown;
@@ -180,10 +180,14 @@ export function register(ctx: ToolContext): void {
     {
       title: "Apply or check a spec",
       description:
-        "Bring the map in line with a spec in one call, or check it. Lists burgs, markers, labels, zones, routes, notes, states, provinces, cultures, religions, rivers, features, biomes, routeGroups (any list whose singular is an edit/add type) and map {name, year, era, ...}; inline or specPath (JSON file; repo-relative or absolute). Entries are keyed by name (labels: text; notes: id | entity:{type,name} | entity:'Name' (an entity, else a note of that title) | name), by id (types with string ids, e.g. route groups) or by ref. Found (exact, then case/diacritic-folded name; several of that name: the one at the entry's x,y, else an AMBIGUOUS error row with candidates) -> only differing fields are edited; missing -> created. mode 'upsert' (default) | 'update' (no creates) | 'check' (read-only: reports what upsert would do). Row status: unchanged | updated | created | differs | missing | error, with diffs [{field, have, want}] (readOnly + fix: another tool sets it, e.g. a burg's state; pending: created by this spec). Two entries for one entity or note: CONFLICT. Tolerance: places 1 px, numbers exact, colours case-insensitive, legends HTML-decoded; tolerance {px, number, fields:{population: 50}, legend:'contains'}. Shapes: x,y or at:[x,y]; routes through:[burg names or [x,y]] (pathfound) or draw:'points' (freehand, may go in a routeGroups group); rivers: name/type (structure via edit river); zones shape/select {polygon:[[x,y]], circle:[x,y,r], where}; an entry's note (string or {name, legend}) becomes its note; states[].provinces are checked as provinces. mapping {lists:{a:'b'}, keys:{burgs:{type:'group'}}, values:{burgs:{group:{'tunnel town':'town'}}, routes:{group:{roads:'roads', '*':'route-{}'}}, labels:{group:'lbl_{}'}}} renames first; ignore {burgs:['note'], '*':[...]} leaves keys out. One auto-undo entry, none when nothing changes; replayable in sketches. Result: counts; rows most actionable first, identical errors grouped (verbose: every row); created {list: {key: id}}.",
+        "Bring the map in line with a spec in one call, or check it. Lists burgs, markers, labels, zones, routes, notes, states, provinces, cultures, religions, rivers, features, biomes, routeGroups (any list whose singular is an edit/add type) and map {name, year, era, ...}; inline or specPath (JSON file). Entries are keyed by name (labels: text; notes: id | entity:{type,name} | entity:'Name' (an entity, else a note of that title) | name), by id (types with string ids, e.g. route groups) or by ref. Found (exact, then case/diacritic-folded name; several of that name: the one at the entry's x,y, else an AMBIGUOUS error row with candidates) -> only differing fields are edited; missing -> created. mode 'upsert' (default) | 'update' (no creates) | 'check' (read-only: reports what upsert would do). Row status: unchanged | updated | created | differs | missing | error, with diffs [{field, have, want}] (readOnly + fix: another tool sets it, e.g. a burg's state; pending: created by this spec). Two entries for one entity or note: CONFLICT. Tolerance: places 1 px, numbers exact, colours case-insensitive, legends HTML-decoded; tolerance {px, number, fields:{population: 50}, legend:'contains'}. Shapes: x,y or at:[x,y]; routes through:[burg names or [x,y]] (pathfound) or draw:'points' (freehand, may go in a routeGroups group); rivers: name/type (structure via edit river); zones shape/select {polygon:[[x,y]], circle:[x,y,r], where}; an entry's note (string or {name, legend}) becomes its note; states[].provinces are checked as provinces. mapping {lists:{a:'b'}, keys:{burgs:{type:'group'}}, values:{burgs:{group:{'tunnel town':'town'}}, routes:{group:{roads:'roads', '*':'route-{}'}}, labels:{group:'lbl_{}'}}} renames first; ignore {burgs:['note'], '*':[...]} leaves keys out. One auto-undo entry, none when nothing changes; replayable in sketches. Result: counts; rows most actionable first, identical errors grouped (verbose: every row); created {list: {key: id}}.",
       inputSchema: z
         .object({
-          specPath: z.string().min(1).optional().describe("JSON file with the lists (repo-relative or absolute)"),
+          specPath: z
+            .string()
+            .min(1)
+            .optional()
+            .describe(`JSON file with the lists: ${READ_RULE}. The result names the file read (specPath)`),
           burgs: Entries,
           markers: Entries,
           labels: Entries,
@@ -272,7 +276,9 @@ async function runApply(ctx: ToolContext, scope: CallScope, args: Record<string,
     [k: string]: unknown;
   };
   const mode = modeArg ?? "upsert";
-  const fileSpec = specPath ? readSpecFile(p => resolveReadPath(ctx.config, p), specPath) : null;
+  const specAbs = specPath ? resolveReadPath(ctx.config, specPath) : null;
+  const fileSpec = specAbs ? readSpecFile(p => p, specAbs) : null;
+  const named = (r: Record<string, unknown>) => (specAbs ? { specPath: specAbs, ...r } : r);
   const spec = normalizeSpec(fileSpec, inline as SpecInput, mapping ?? {}, only, ignore);
   if (!spec.lists.length && !spec.map) {
     if (only && spec.present.length)
@@ -290,8 +296,8 @@ async function runApply(ctx: ToolContext, scope: CallScope, args: Record<string,
   const shapeOpts = { mode, verbose, limit, skipped: spec.skipped, notes: spec.notes };
 
   const plan = await scope.call<PageResult>("applySpec", { ...bridgeArgs, phase: "validate" }, callOpts);
-  if (mode === "check") return { ...shapeResult(plan, shapeOpts), changed: false };
-  if (!plan.wouldChange) return { ...shapeResult(plan, shapeOpts), changed: false, note: "nothing to change" };
+  if (mode === "check") return named({ ...shapeResult(plan, shapeOpts), changed: false });
+  if (!plan.wouldChange) return named({ ...shapeResult(plan, shapeOpts), changed: false, note: "nothing to change" });
 
   const listSummary = spec.lists.map(l => `${l.key} ${l.entries.length}`).join(", ");
   await scope.pushUndo("apply", { mode, ...(specPath ? { specPath } : {}), lists: listSummary });
@@ -310,11 +316,11 @@ async function runApply(ctx: ToolContext, scope: CallScope, args: Record<string,
   }
   ctx.snapshots.noteMutation();
   await logSteps(scope, res, { mode, lists: listSummary });
-  return {
+  return named({
     ...shapeResult(res, shapeOpts),
     changed: res.steps.length > 0,
     undo: "snapshot {action:'undo'} reverts this whole call"
-  };
+  });
 }
 
 /** One sketch record per step, all under this call's undo entry (no-op record when none). */

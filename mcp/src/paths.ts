@@ -1,4 +1,5 @@
 // File path policy for tools that read or write files.
+// Reads: absolute, else the first existing of <server cwd>/p, TUPAIA_OUT/p, <repo>/p.
 // Writes: relative paths resolve under TUPAIA_OUT. Allowed without opt-in: anything under
 // TUPAIA_OUT, or a non-source subfolder of the repo with an allowed extension (never the repo
 // root, src/, public/, mcp/, cloudflare/, docs/, dist/, tests/, node_modules/ or dot-folders,
@@ -105,10 +106,35 @@ export function resolveWritePath(cfg: Config, p: string, opts: WriteOptions = {}
   return abs;
 }
 
-/** Read paths resolve relative to the repo root. */
+/** The read rule, for tool descriptions and errors. */
+export const READ_RULE =
+  "absolute, or relative to the server's working directory (the project it was started in), then TUPAIA_OUT, then the repo root; the first that exists";
+
+/** Where a relative read path is looked for, in order. */
+export function readCandidates(cfg: Config, p: string): string[] {
+  if (path.isAbsolute(p)) return [path.resolve(p)];
+  const out: string[] = [];
+  for (const base of [process.cwd(), cfg.outDir, cfg.repoRoot]) {
+    const abs = path.resolve(base, p);
+    if (!out.includes(abs)) out.push(abs);
+  }
+  return out;
+}
+
+/**
+ * Read paths (load_map, apply specPath, set_heights/flow image.path, sketch onto.path): absolute,
+ * else the first existing of the server's cwd, TUPAIA_OUT and the repo root. Returns the absolute
+ * path that was found; every tool result names it.
+ */
 export function resolveReadPath(cfg: Config, p: string): string {
-  const abs = path.isAbsolute(p) ? path.resolve(p) : path.resolve(cfg.repoRoot, p);
-  if (!fs.existsSync(abs)) throw new ToolError("NOT_FOUND", `file not found: ${abs}`);
+  const cands = readCandidates(cfg, p);
+  const abs = cands.find(c => fs.existsSync(c));
+  if (!abs) {
+    throw new ToolError(
+      "NOT_FOUND",
+      cands.length > 1 ? `file not found: ${p} (looked in ${cands.join(", ")})` : `file not found: ${cands[0]}`
+    );
+  }
   if (!fs.statSync(abs).isFile()) throw new ToolError("BAD_ARGS", `${abs} is not a file`);
   return abs;
 }

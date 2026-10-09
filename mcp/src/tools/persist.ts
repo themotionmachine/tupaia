@@ -30,7 +30,7 @@ export function register(ctx: ToolContext): void {
     {
       title: "Load a map",
       description:
-        "Replace the page's map with a .map file from disk ({path}, relative paths resolve from the repo root; plain, base64 or gzip) or with the live shared map ({source:'shared'}: a read-only GET from Node, safe in local mode; records the shared version and who last saved it). Undoable (snapshot {action:'undo'}). Take a snapshot first if the current map matters. Fails with APP_ALERT when the app rejects the file (Invalid/Ancient/Newer file).",
+        "Replace the page's map with a .map file from disk ({path}: absolute, else the first that exists of the server's working directory, TUPAIA_OUT, the repo root; the result names it; plain, base64 or gzip) or with the live shared map ({source:'shared'}: a read-only GET from Node, safe in local mode; records the shared version and who last saved it). Undoable (snapshot {action:'undo'}). Take a snapshot first if the current map matters. Fails with APP_ALERT when the app rejects the file (Invalid/Ancient/Newer file).",
       inputSchema: z.object({
         path: z.string().min(1).optional(),
         source: z.enum(["shared"]).optional()
@@ -52,7 +52,7 @@ export function register(ctx: ToolContext): void {
           seed: (s.seed as string) ?? null,
           mapId: (s.mapId as number) ?? null
         });
-        return { ...brief(s), origin: ctx.provenanceView(), bytes: bytes.length, ms: Date.now() - t0 };
+        return { ...brief(s), path: abs, origin: ctx.provenanceView(), bytes: bytes.length, ms: Date.now() - t0 };
       }
       const { summary, bytes } = await loadShared(ctx, scope, "load_map");
       return { ...brief(summary), origin: ctx.provenanceView(), bytes, ms: Date.now() - t0 };

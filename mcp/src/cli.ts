@@ -40,6 +40,9 @@ const LOG_ROTATE_BYTES = 5 * 1024 * 1024;
 /** Input-file arguments: a relative path that exists from the caller's cwd is made absolute. */
 const INPUT_PATHS: Record<string, string[][]> = {
   load_map: [["path"]],
+  apply: [["specPath"]],
+  set_heights: [["image", "path"]],
+  flow: [["heights", "image", "path"]],
   sketch: [["onto", "path"]]
 };
 

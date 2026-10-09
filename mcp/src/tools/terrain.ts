@@ -14,7 +14,7 @@ import path from "node:path";
 import { z } from "zod";
 import type { ToolContext } from "../context.ts";
 import { registerReplayable } from "../ops.ts";
-import { resolveReadPath } from "../paths.ts";
+import { READ_RULE, resolveReadPath } from "../paths.ts";
 import { META_TEXT_HEAVY, ToolError, type WithImages } from "../result.ts";
 import { Place, TIMEOUTS, TimeoutMs } from "../schemas.ts";
 import { Redraw, runPhased } from "./edit.ts";
@@ -59,11 +59,7 @@ const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
 
 const ImageSource = z
   .object({
-    path: z
-      .string()
-      .min(1)
-      .optional()
-      .describe("Image file (png/jpeg/webp/gif/bmp); relative paths from the repo root"),
+    path: z.string().min(1).optional().describe(`Image file (png/jpeg/webp/gif/bmp): ${READ_RULE}`),
     dataUrl: z.string().optional().describe("data:image/...;base64,... instead of path"),
     invert: z.boolean().optional().describe("Dark = high"),
     range: z
@@ -119,6 +115,11 @@ function bridgeSource(ctx: ToolContext, a: HeightArgs): Record<string, unknown> 
     throw new ToolError("BAD_ARGS", "image.dataUrl must be data:image/<type>;base64,...");
   const { path: _p, dataUrl: _d, ...rest } = img;
   return { image: { ...rest, dataUrl } };
+}
+
+/** The absolute file an image source reads (results name it), or undefined. */
+function imagePathOf(ctx: ToolContext, a: HeightArgs | undefined): string | undefined {
+  return a?.image?.path ? resolveReadPath(ctx.config, a.image.path) : undefined;
 }
 
 /** The call as logged: big inputs (a dense array, an image) are described, not copied. */
@@ -240,7 +241,8 @@ export function register(ctx: ToolContext): void {
       const changes = out.changes as Record<string, { counts?: unknown }> | undefined;
       if (changes && typeof changes === "object")
         out.changes = Object.fromEntries(Object.entries(changes).map(([k, v]) => [k, v?.counts ?? v]));
-      return out;
+      const imagePath = imagePathOf(ctx, args);
+      return imagePath ? { ...out, imagePath } : out;
     }
   );
 
@@ -272,6 +274,8 @@ export function register(ctx: ToolContext): void {
       );
       const points = out.paths.map(p => p.points as number[][]);
       if (!args.detail) for (const p of out.paths) delete p.points;
+      const imagePath = imagePathOf(ctx, args.heights);
+      if (imagePath) out.imagePath = imagePath;
       if (!args.screenshot) return out;
       let shot: WithImages;
       let legend: string | undefined;
