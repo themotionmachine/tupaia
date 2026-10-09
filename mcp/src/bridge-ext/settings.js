@@ -414,7 +414,7 @@
         if (set) noContradiction(set);
         return names;
       },
-      get: () => null, // the lock state is a browser preference, not map state: never part of before/after
+      get: () => null, // a directive, not a value: never part of before/after (the locks in force: state())
       show: v => v,
       set: (_x, names) => names.forEach(act),
       // the locks in force (they travel in the .map text): apply compares a spec's lock/unlock list with them

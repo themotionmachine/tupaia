@@ -2,35 +2,92 @@
 
 An MCP server that drives the built Tupaia app (this repo's fork of Azgaar's Fantasy Map
 Generator) in headless Chromium, so a Claude session can look at and change a map precisely
-and check what it did: query entities, edit them in batches, paint cells, generate and
-regenerate, screenshot and compare, snapshot and undo, save and export, and, only when a
-human set it up, write the live shared map at map.activationlayer.org.
+and check what it did: query entities, edit them in batches, paint cells, import terrain,
+apply a declarative spec, lint, generate and regenerate, screenshot and compare, snapshot and
+undo, save and export, propose shared-map changes as sketches, and, only when a human set it
+up, write the live shared map at map.activationlayer.org.
 
 It is a separate Node package. Nothing here is imported by the app or shipped in `dist/`.
 
+- Every tool, field table, error code and recipe: `resources/cheatsheet.md` (served as
+  `tupaia://docs/cheatsheet.md`).
+- How an agent should work with it, the CLI, and the eval-to-tool table:
+  `.claude/skills/tupaia-dexterity/SKILL.md`.
+- The app's runtime globals (for `eval`): `docs/architecture/runtime_api.md`.
+
 ## How it works
 
-- `node mcp/src/server.ts` (Node 24+ type stripping; not tsx). stdout carries only JSON-RPC;
-  logs go to stderr.
-- Startup registers 21 tools and 3 resources and opens no browser and no network. The first
+- `node mcp/src/server.ts` (Node 24+ type stripping; not tsx). On stdio, stdout carries only
+  JSON-RPC and logs go to stderr. `--http` serves the same tools from a local daemon instead
+  (below).
+- Startup registers 28 tools and 3 resources and opens no browser and no network. The first
   tool call starts a loopback static server over `<repo>/dist`, launches Chromium
   (Playwright 1.60.0) and opens one page at `/?local`.
-- `src/bridge.js` and `src/bridge-mutations.js` are injected as classic scripts and define
-  `globalThis.__tupaia`; every tool goes through one `__tupaia.call(name, args)`.
+- Page side: `src/bridge.js` and `src/bridge-mutations.js` define `globalThis.__tupaia`; every
+  `src/bridge-ext/*.js` is injected after them in name order (apply, biomes, clear, compact,
+  labels, lint, regen-replay, regen, regrid, relief, rivers, routes, settings, terrain, tokens).
+  Extensions add FIELDS, types and FNS functions, and some wrap core ones (FNS.edit, regenerate,
+  display, summary, loadMap). Every tool goes through one `__tupaia.call(name, args)`.
+- Node side: `src/tools/*.ts` are imported in name order and register through `defineTools`;
+  `context.ts` (CallScope: one mutex, undo, sketch logging), `snapshots.ts` (undo/redo,
+  snapshots, provenance), `ops.ts` + `replay.ts` (sketch log and replay; later tools add replay
+  support with `registerReplayable`), `browser.ts` (Chromium, relaunch and restore),
+  `result.ts`, `paths.ts`, `shared-api.ts` (every request to the live origin), `http.ts` and
+  `cli.ts` (the daemon and `bin/tupaia`).
 - A route firewall answers every page-originated non-GET `/api` request with 403 in all
   modes and aborts every non-loopback host (analytics are stubbed, fonts are allowed unless
   `TUPAIA_OFFLINE=1`). So `eval` cannot write the live map; only `shared_save`,
-  `shared_restore` and `sketch_promote` can, from Node (`src/shared-api.ts`).
+  `shared_restore`, `sketch_promote` and sketch save/discard can, from Node.
 - Snapshots, the undo/redo history and the map's provenance live in Node memory and survive
   browser relaunches. A mutating call that times out marks the page dirty; the next call
   relaunches and restores the newest snapshot.
 
-Tools: session, map_info, find, inspect, screenshot, display, edit, add, paint_cells,
-generate_map, regenerate, snapshot, eval, load_map, save_map, export, shared_status,
-shared_save, shared_restore, sketch, sketch_promote. Resources: `tupaia://docs/cheatsheet.md` (every tool, refs,
-places, error codes, field tables, recipes), `tupaia://docs/runtime-api.md`,
-`tupaia://docs/data-model.md`. The operating skill for Claude is
-`.claude/skills/tupaia-dexterity/SKILL.md`.
+## Tools by family
+
+| family | tools | notes |
+| --- | --- | --- |
+| Session and reading | session, map_info, find, inspect, flow, lint, screenshot | read-only (screenshot `keepLayers` excepted); `format:'compact'`, `diff:'counts'`, `crop:'changed'` keep results small |
+| Entity edits | edit, add, paint_cells, display, apply | one undo entry per call; `dryRun`; replayable in sketches |
+| Terrain and grid | set_heights, regrid, regenerate (biomes, relief) | set_heights replays; regrid is blob-only in a sketch |
+| Bulk and cleanup | clear, compact | dependency-ordered cascades; id-stable stubs |
+| Generation | generate_map, regenerate | seeded; only biomes, provinces, emblems and relief replay |
+| History and escape hatch | snapshot, eval | eval replays verbatim and is marked unsafe |
+| Files | load_map, save_map, export | path policy under TUPAIA_OUT; `compact:true` on save |
+| Shared map | shared_status, shared_save, shared_restore, sketch, sketch_promote | the live-write gate below |
+
+What the newer tools and fields replaced (all one undo entry each, all dryRun-able):
+
+- `set_heights {grid|pack|image}` imports a heightmap and rebuilds coast, lakes, climate, rivers
+  and biomes, carrying burgs, routes, markers, regiments and lake/island names to the new cells
+  and keeping river identity by course; `flow` previews drainage on current or proposed heights.
+  App hook: `restoreRiskedData(opts)` in `public/modules/ui/heightmap-editor.js`.
+- `edit {type:'map'}` sets world settings (mapSize, latitude, temperatures, winds, precipitation,
+  units, ...) with locks that travel in the `.map` (`options.tupaiaLocks`) and an optional
+  `recalculate` (climate, biomes, rivers+biomes, climate+biomes).
+- Routes: freehand `add route {points, noPathfind:true}` (locked by default), route groups as
+  entities (`add/edit routeGroup`, find/inspect `routeGroup`, `counts.routeGroups`), `edit route
+  {points, group}`. `cells.routes` always equals what `Routes.buildLinks` would give.
+- Rivers: `edit river {mainStem | split | merge | reroute}`; find/inspect report `joinsAt` and
+  tributaries.
+- Biomes as entities (`find/inspect/add/edit biome`), `paint_cells feather`, and `regenerate
+  {parts:['biomes'], biomes:{noise, smooth, minRegion, seed, keepPainted, ...}}`. App fix: the
+  biome line's 4th field keeps icon density, icons and cost through save/load.
+- `regenerate {parts:['provinces','emblems'], provinces:{states, centres|count}, emblems:{...}}`
+  for named states only (hand-made states too).
+- `regenerate {parts:['relief'], relief:{density|matchIcons, perBiome, exclude, nearBurgs,
+  seed}}` and `edit map {set:{reliefOnLoad:true}}` (saves drop the icons, loads redraw them;
+  terraform-v3.map 4.75 -> 2.33 MB). App hooks: `src/renderers/relief-settings.ts` and friends.
+- `display {labels:{<group>:{minSize, maxSize, alwaysShow}}}` and `screenshot {labels:'all'}`.
+  App hook: `invokeActiveZooming` in `public/main.js` reads `data-min-size`, `data-max-size`,
+  `data-always-show`.
+- `clear` (bulk removal in dependency order), `edit remove` for provinces, cultures and religions,
+  forced burg removal (`force`, `newCapital`, `orphanRoutes`).
+- `compact` and `compact:true` on save_map/shared_save/sketch save/sketch_promote (removed
+  records become `{i, removed:true}` stubs; the shared v7 map: 697,400 B, about 15%, smaller).
+- `regrid {density}` changes the cell density and keeps the map id (shared lineage), names,
+  notes and labels. App hook: `Resample.process({keepId})`.
+- `apply` (declarative spec, `mode:'check'|'upsert'|'update'`, idempotent) and `lint` (23 checks
+  with ready fix calls).
 
 ## Run it
 
@@ -44,7 +101,7 @@ npm start                        # = node src/server.ts, speaks MCP on stdio
 The server refuses to start a browser without a CF_BUILD `dist/` and prints the build
 command.
 
-### Claude Code registration
+### Claude Code registration (stdio)
 
 `.mcp.json` at the repo root registers the local-mode server:
 
@@ -62,10 +119,13 @@ command.
 }
 ```
 
-Use `node` directly, never `npm run` (its banner goes to stdout and breaks the protocol).
+Use `node` directly, never `npm run` (its banner goes to stdout and breaks the protocol). New
+or changed MCP servers load only when Claude Code starts; to use the tools in a session that is
+already running, use the CLI below.
 
-A human who wants Claude to be able to write the live shared map adds a second entry by
-hand (it is deliberately not committed), then restarts Claude Code:
+A human who wants Claude to be able to write the live shared map adds a second entry by hand
+(it is deliberately not committed), then restarts Claude Code; remove it when the write is
+done:
 
 ```json
     "tupaia-live": {
@@ -77,7 +137,103 @@ hand (it is deliberately not committed), then restarts Claude Code:
     }
 ```
 
-Remove it again when the write is done.
+## Shared daemon (--http) and the tupaia CLI
+
+`--http` serves the same tools from one long-lived local daemon that a running session, its
+workflow subagents and shells all share: one browser, one page, one undo history, one sketch.
+Calls from every caller queue on one mutex; each call is atomic.
+
+```sh
+node mcp/src/server.ts --http [--port N | --prefer-port N]   # usually started by mcp/bin/tupaia
+```
+
+- MCP Streamable HTTP at `http://127.0.0.1:<port>/mcp` (2026-07-28 and stateless 2025-era
+  requests; GET returns 405).
+- JSON API (the CLI uses it): `POST /call {name, args?, timeoutMs?, caller?}` ->
+  `{isError, text[], images[]}` (images saved as `$TUPAIA_OUT/shots/call-*.jpg`); `GET /tools`,
+  `GET /health`, `POST /shutdown`, `POST /listen {port}`.
+- One daemon per `TUPAIA_OUT`. In that directory: `daemon.json` (0600: pid, port, ports, url,
+  mcpUrl, mode, token, closing?, ...), `daemon.port.json` (the port the next auto-start uses),
+  `daemon.log`, `maps/daemon-exit-*.map` (last 5) and `daemon.last.json`.
+- Security: 127.0.0.1 only; the Host header must name the port the connection arrived on; any
+  request with an `Origin` header gets 403; every route needs `Authorization: Bearer <token>`
+  (random per start). The bearer token is the trust boundary: anyone holding it can confirm
+  another caller's shared_save preview.
+- Mode works exactly as for stdio: live only from `TUPAIA_MODE=live` in the daemon's spawn
+  environment; nothing over HTTP switches to live; the live-write gate is unchanged.
+- A queued call whose caller disconnects or cancels is skipped; a started call runs to its end.
+- Stopping (`tupaia stop`, idle, or another daemon taking over the TUPAIA_OUT): queued calls
+  are refused (they never ran; `tupaia call` reruns them on a fresh daemon), the running call
+  finishes (up to 15 s), a changed page is saved to `maps/daemon-exit-<time>.map` and the next
+  start prints a `load_map` line for it.
+- Idle shutdown after `TUPAIA_HTTP_IDLE_MIN` (default 120) minutes with no call and no attached
+  MCP client (an open `subscriptions/listen` stream; Claude Code holds one per session).
+- `session` status shows `serving: http daemon ...`.
+
+### CLI: mcp/bin/tupaia
+
+```
+tupaia call <tool> [<json>|-]   # result text, then 'IMAGE: <path>' per image; a failed tool
+                                # prints 'ERROR CODE: message' and exits 1
+tupaia tools [<tool>] [--names] # list tools; with a name: its description and arguments
+tupaia help <tool>              # same as tupaia tools <tool>
+tupaia status | start | stop    # status exits 1 when not running (and says starting/stopping)
+tupaia headers                  # {"Authorization":"Bearer ..."} for Claude Code's headersHelper
+  --json  --timeout <ms>  --port <n>  --out <dir> (= TUPAIA_OUT)
+```
+
+- Use the absolute path `/Users/mgm1/Desktop/code/vespucci/mcp/bin/tupaia` (no package.json
+  `bin` entry).
+- `call`, `tools` and `headers` start a detached daemon when none serves this TUPAIA_OUT; it
+  gets the caller's environment. Concurrent first callers start exactly one.
+- The daemon's mode is fixed at its start. If the caller's `TUPAIA_MODE` differs, the CLI warns
+  and keeps the running daemon: `tupaia stop` first to change mode.
+- Paths: `load_map {path}` is taken from your cwd when the file exists there, else from the
+  repo root; `save_map` and `export` write relative paths under TUPAIA_OUT. Prefer absolute.
+- Large arguments (heights, cell lists) go through stdin: `tupaia call set_heights - < args.json`.
+  Plain-JSON args of 32 KB or more are sent to the page as one string (0.9 MB in about 80 ms).
+- Exit codes: 0 ok, 1 tool error (or status: not running), 2 usage or daemon error. An unusable
+  `--out` exits 2 (no fallback directory). Calls or starts slower than 15 s print progress on
+  stderr.
+
+Several sessions or agents: one TUPAIA_OUT per independent task, so their pages do not collide.
+Callers that pass the same `--out` share one page, undo history and sketch (one agent's undo
+undoes the newest change from any agent); give workflow subagents the exact command prefix and
+`TUPAIA_CALLER=<name>` to label their calls in daemon.log.
+
+### Registering the daemon for future Claude Code sessions
+
+Add an http entry next to the stdio `tupaia` entry (user scope or `--mcp-config`; its page is
+separate from the stdio server's page):
+
+```json
+"tupaia-shared": {
+  "type": "http",
+  "url": "http://127.0.0.1:7392/mcp",
+  "headersHelper": "TUPAIA_MODE=local /Users/mgm1/Desktop/code/vespucci/mcp/bin/tupaia headers",
+  "timeout": 300000
+}
+```
+
+or, once: `claude mcp add-json tupaia-shared '{"type":"http","url":"http://127.0.0.1:7392/mcp",
+"headersHelper":"/Users/mgm1/Desktop/code/vespucci/mcp/bin/tupaia headers"}'` (not run).
+
+- The token is random per daemon start, so use `headersHelper`, not a static header. Claude Code
+  reads credential-like env vars as empty in http `headers` and strips TOKEN/KEY/AUTH-named vars
+  from the helper's environment.
+- `tupaia headers` reads `CLAUDE_CODE_MCP_SERVER_URL` and makes the daemon for its TUPAIA_OUT
+  serve that port: it starts one there, or asks a daemon a CLI call started on another port to
+  also listen there (same page). From then on that port is that TUPAIA_OUT's port.
+- Without `TUPAIA_OUT` the daemon uses `<repo>/.tupaia-mcp-out`, so `tupaia call` without
+  `--out` shares the registered server's page.
+- Verified with Claude Code 2.1.293 (`claude -p --mcp-config`, type http, this helper with an
+  absolute path): it negotiates 2026-07-28 and holds a `subscriptions/listen` stream all
+  session, so the daemon does not idle out under it; it gives up on a helper after about 10 s
+  (`headers` prints the token within about 7 s, even while the daemon is still starting); it
+  does NOT reconnect after the daemon stops (later calls fail with ECONNREFUSED), so never
+  `tupaia stop` a daemon a session is using.
+- Not verified: whether `timeout` applies to http entries; a project `.mcp.json` helper with a
+  relative path; reconnecting an interactive session with /mcp.
 
 ## Environment
 
@@ -85,7 +241,7 @@ Remove it again when the write is done.
 | --- | --- | --- |
 | `TUPAIA_MODE` | `local` | `live` enables shared_save/shared_restore/sketch_promote and sketch save/discard. Only settable at spawn; `session {action:'set_mode', mode:'local'}` can drop live to local, never the reverse. |
 | `TUPAIA_LIVE_ORIGIN` | `https://map.activationlayer.org` | Origin for shared reads (and writes in live mode). `none` disables shared reads too. |
-| `TUPAIA_OUT` | `<repo>/.tupaia-mcp-out` | Screenshots, saves, exports, shared-save backups (gitignored). |
+| `TUPAIA_OUT` | `<repo>/.tupaia-mcp-out` | Screenshots, saves, exports, backups; under `--http` it also picks the daemon. |
 | `TUPAIA_DIST` | `<repo>/dist` | The built app. |
 | `TUPAIA_VIEWPORT` | `1280x720` | Page viewport. |
 | `TUPAIA_SNAPSHOTS` | `10` | Named snapshots kept. |
@@ -93,8 +249,17 @@ Remove it again when the write is done.
 | `TUPAIA_OFFLINE` | off | `1` stubs Google Fonts. |
 | `TUPAIA_HEADED` | off | `1` shows the browser window. |
 | `TUPAIA_DEBUG` | off | `1` logs page events to stderr. |
-| `TUPAIA_TEST_HOOKS` | off | `1` enables `session {action:'crash'}` (tests only). |
+| `TUPAIA_TEST_HOOKS` | off | `1` enables `session {action:'crash'}` and `sketch rebase {onto}` (tests only). |
 | `TUPAIA_BUILD_CACHE_MS` | `300000` | How long the deployed-build check is cached. |
+| `TUPAIA_HTTP_PORT` | CLI: this TUPAIA_OUT's last port, else any free port | Port for `--http` (also `--port N`); strict when set. |
+| `TUPAIA_HTTP_IDLE_MIN` | `120` | Daemon stops after this many idle minutes with no attached client (`0` = never). |
+| `TUPAIA_START_TIMEOUT_MS` | `90000` | How long the CLI waits for a daemon start (a timed-out start is killed). |
+| `TUPAIA_CALLER` | `pid N in <cwd>` | Your name in daemon.log. |
+| `TUPAIA_HEADERS_WAIT_MS` | `7000` | `tupaia headers` prints the token by then, even mid-start. |
+| `TUPAIA_CLI_HEARTBEAT_MS` | `15000` | First stderr progress line for a slow call or start. |
+| `TUPAIA_HTTP_TRACE` | off | Log every MCP request's method and protocol version. |
+
+`TUPAIA_HTTP_TOKEN` is internal: the CLI hands the daemon its token that way.
 
 ## The live-write gate
 
@@ -102,110 +267,107 @@ Writing the shared map is the one thing here that affects other people, so it ha
 independent locks:
 
 1. **Spawn-time mode.** Writes need `TUPAIA_MODE=live` in the server's environment, which only
-   a human edits. There is no runtime switch to live. In local mode `shared_save` and
-   `shared_restore` return MODE before doing anything.
+   a human edits. There is no runtime switch to live. In local mode `shared_save`,
+   `shared_restore` and `sketch_promote` return MODE before doing anything.
 2. **Preview and one-time token.** A call without `confirm` is a preview: what would be
    overwritten (version, who saved it, when, lock holder), lineage, stale, the build check,
    the exact request it would send, and a `token`. The confirmed call must pass
    `confirm:true` and that token. A token is valid for 10 minutes and one write, and only for
    the same live version, the same page map (body sha256) or restore target, and the same
-   override flags. `src/shared-api.ts` re-checks the mode and the token itself before any
-   PUT or POST, not only the tool layer.
-3. **Lineage.** If the page map is not derived from the shared map (it was generated, or
-   loaded from a file), the save is refused unless `replaceWithUnrelated:true`. `force` does
-   not override this. Lineage is bound to the app's map id (`mapId`, stamped on every generate
-   and load): if anything replaced the map without going through load_map/generate_map/
-   snapshot (an eval that calls `generate()`, a failed generate_map, a relaunch), the id no
-   longer matches and the map counts as unrelated.
-4. **Version and lock.** If the shared map moved on since the page map was loaded (STALE),
-   or someone holds the edit lock (LOCKED), the save is refused unless `force:true`.
-   `expectVersion` adds a hard condition. The PUT always carries `X-Map-Version` and never
-   `X-Map-Overwrite`, so the Worker's own guard still answers 409 on a race; that comes back
-   as CONFLICT with the Worker's body.
-5. **Build.** The deployed `versioning.js` VERSION is fetched (cached 5 minutes). If the local
-   app VERSION is newer, the save is blocked outright: `prepareMapData` stamps the local
-   VERSION into the file and live users would get "Newer file". An entry-chunk mismatch with
-   the same VERSION is a warning. When the builds cannot be compared (the deployed
-   `versioning.js` is unreachable or unreadable), the save is refused unless
-   `skipBuildCheck:true`, a separate flag the preview names on its own; `force` does not
-   imply it. `shared_status` runs the build check (GET `/versioning.js` and `/`) by default
-   only in live mode; in local mode it sends the single meta GET unless `build:true`.
-6. **Backups.** Before every write the current live blob is downloaded to
-   `TUPAIA_OUT/shared-saves/v<N>-live-<time>.map`, and for a save the outgoing body is
-   written next to it as `v<N>-outgoing-<time>.map`.
+   flags (`force`, `replaceWithUnrelated`, `skipBuildCheck`, `compact`). `src/shared-api.ts`
+   re-checks the mode and the token itself before any PUT or POST.
+3. **Lineage.** If the page map is not derived from the shared map (generated, or loaded from a
+   file), the save is refused unless `replaceWithUnrelated:true`; `force` does not override
+   this. Lineage is bound to the app's map id: anything that replaced the map outside
+   load_map/generate_map/snapshot (an eval that calls `generate()`, a failed generate_map) makes
+   it unrelated. `regrid` keeps the id (`Resample.process({keepId})`), so a regridded shared map
+   still saves as the same map.
+4. **Version and lock.** STALE (the shared map moved on since it was loaded) or LOCKED (someone
+   holds the edit lock) is refused unless `force:true`. `expectVersion` adds a hard condition.
+   The PUT always carries `X-Map-Version` and never `X-Map-Overwrite`, so the Worker's own guard
+   still answers 409 on a race (CONFLICT, with the Worker's body).
+5. **Build.** The deployed `versioning.js` VERSION is fetched (cached 5 minutes). A newer local
+   VERSION blocks the save outright (live users would get "Newer file"). A map with
+   `reliefOnLoad` is refused unless the deployed build is the local one or its entry chunk has
+   the relief load hook (an older client would show no relief). When the builds cannot be
+   compared, the save is refused unless `skipBuildCheck:true`; `force` does not imply it.
+   `shared_status` runs the build check by default only in live mode.
+6. **Backups.** Before every write the live blob is downloaded to
+   `TUPAIA_OUT/shared-saves/v<N>-live-<time>.map`, and for a save the outgoing body is written
+   next to it as `v<N>-outgoing-<time>.map`.
 
-`shared_restore` has the same mode, token, lock and backup steps; its confirmed call also
-needs `expectCurrent`, because the Worker has no version guard on restore. With
-`reload` (default) the restored map is loaded into the page.
-
-Every request to the live origin (method, URL, status) is listed in `session` status under
-`outwardRequests`.
+`shared_restore` has the same mode, token, lock and backup steps; its confirmed call also needs
+`expectCurrent`, because the Worker has no version guard on restore. With `reload` (default)
+the restored map is loaded into the page. Every request to the live origin (method, URL,
+status) is listed in `session` status under `outwardRequests`.
 
 ## Sketches (provisional changes)
 
 `sketch` records a proposed change to the shared map without writing it: base version N of
 the shared map plus an ops log (`src/ops.ts`). `start` needs a page map loaded with
-`load_map {source:'shared'}` and unedited. While a sketch records, every mutating tool call
-appends `{seq, tool, args, resolved, summary, at, digestBefore, digestAfter}`; `resolved` comes
-from the bridge's own apply result (ids, literal generated names, literal cell lists, the
-created entities' ids, the layer on/off lists, verbatim eval code, and for replay's checks the
-target's identity fields and the cell-graph fingerprint of a literal cell list). regenerate,
-generate_map, load_map, snapshot restore and a paint_cells height rebuild ('risk' or 'erase')
-are logged as non-replayable, which makes the sketch blob-only until they are undone; undo pops
-the op it undid and redo re-appends it.
+`load_map {source:'shared'}` and unedited. While a sketch records, every mutating call appends
+`{seq, tool, args, resolved, summary, at, digestBefore, digestAfter}`; `resolved` comes from the
+bridge's own apply result (ids, literal generated names, literal cell lists, created ids, layer
+on/off lists, verbatim eval code, target identity fields, cell-graph fingerprints). Undo pops
+the op it undid and redo re-appends it. `summary` writes markdown and like-for-like before/after
+screenshots under `TUPAIA_OUT/sketches/<slug>/`.
+
+### What replays
 
 `src/replay.ts` replays a log onto whatever map is in the page through the same bridge
-functions, rewriting the ids of entities the sketch created through an id map and checking
-each op first (missing or removed targets, fields both sides changed, a marker/route/zone id
-that now names another entity, a removal of an entity someone changed since, a literal cell
-list on a renumbered cell graph). Created ids are mapped positionally: an op only sees ids that
-earlier adds created. `summary` writes markdown and like-for-like before/after screenshots
-under `TUPAIA_OUT/sketches/<slug>/`.
-`rebase {onto:{path}}` (replay onto a map file) is a test hook (`TUPAIA_TEST_HOOKS=1`).
+functions, rewriting ids of entities the sketch created (positional id map) and checking each op
+first.
+
+| tool / part | logged as | replay rule |
+| --- | --- | --- |
+| edit, add, paint_cells, display | resolved form | missing/removed target, a field both sides changed, a reused marker/route/zone id, a removal of something changed since, literal cells on a renumbered graph: conflict |
+| edit river structure | literal cells and ids; mainStem `{ref, expect}` | course comparison; a mainStem whose result differs from `expect` is REFUSED |
+| edit map (settings, recalculate) | values, locks, derived-layer fingerprint | a recalculation whose derived layers changed on the target is a conflict; `skip` drops only both-changed fields |
+| paint_cells height `keep` / `risk` | literal cells (`risk` with the graph it produced) | deterministic; `erase` is blob-only |
+| set_heights | only the changed grid cells (deflated), digests, bbox | onto a target whose terrain changed since, its other heights are kept (note) |
+| apply | one add/edit/paint_cells record per step | as those tools |
+| clear | removed ids with fingerprints, capital/province-head successors | a removed id is REMOVED; changed, renumbered, reused or newly locked is CHANGED |
+| compact | stub list, repoint `[[province, from, to]]` | repoints only where still valid |
+| regenerate `biomes` / `provinces`,`emblems` / `relief` | literal outcome (`regenerate:biomes`, `regenerate:provinces-emblems`), relief settings + seed | a relief key someone else changed is a conflict |
+| eval | verbatim code (marked unsafe) | ids inside the code are not rewritten |
+| regenerate (any other part), generate_map, load_map, snapshot restore, shared_restore, regrid, paint_cells `erase`, screenshot `keepLayers`, a call that failed part-way | not replayable | the sketch is blob-only until the op is undone (undo past the start is permanent) |
+
+A blob-only sketch can be saved, viewed and promoted as is while the shared map is still at its
+base version, but not rebased. Read-only calls (and `display {labels:'list'}`, `apply` check,
+no-op calls) are not logged.
 
 ### Saving, viewing and promoting sketches
 
-A saved sketch is its own map on the Worker, `sketch-<slug>`: the page map as a blob (the
-Worker already accepts any id and keeps 20 versions of it) plus `ops.json` beside it
-(`GET|PUT /api/map/sketch-<slug>/ops`), holding `{schema:1, slug, base, note, blobOnly,
-blobOnlyReasons, blockers, author:'tupaia-mcp', created, updated, summaryMarkdown, baseCounts,
-blob:{id, version, bytes, sha256}, viewUrl, ops}`.
+A saved sketch is its own map on the Worker, `sketch-<slug>`: the page map as a blob (the Worker
+keeps 20 versions) plus `ops.json` beside it (`GET|PUT /api/map/sketch-<slug>/ops`, holding
+`{schema:1, slug, base, note, blobOnly, blobOnlyReasons, blockers, author:'tupaia-mcp', created,
+updated, summaryMarkdown, baseCounts, blob:{id, version, bytes, sha256}, viewUrl, ops}`).
 
 - `sketch {action:'save', confirm:true}` PUTs the blob (X-Map-Version = the sketch's own
   version, none on the first save) and then ops.json, and returns
-  `viewUrl = <origin>/?maplink=<encodeURIComponent(origin + '/api/map/sketch-<slug>')>`. The app
-  checks `?maplink` before its shared-map boot load, so the link opens the sketch, not the
-  shared map. A log whose ops.json would exceed the Worker's 2 MB limit is refused before the
-  blob goes up.
+  `viewUrl = <origin>/?maplink=<encodeURIComponent(origin + '/api/map/sketch-<slug>')>`, which
+  opens the sketch, not the shared map. An ops.json over the Worker's 2 MB limit is refused
+  before the blob goes up. `compact:true` saves a compacted blob.
 - `list` (read-only, also in local mode) shows the `sketch-*` maps with their ops.json headers;
-  `open {slug}` loads one into the page as the active sketch (origin kind `sketch`). ops.json
-  is not trusted: replayability, the unsafe mark and summaries are recomputed from each record.
-- `rebase` without `onto` replays the log onto the CURRENT shared map (a GET) and leaves the
-  result in the page with the shared origin at that version; it does not save.
+  `open {slug}` loads one as the active sketch. ops.json is not trusted: replayability, the
+  unsafe mark and summaries are recomputed from each record.
+- `rebase` replays the log onto the CURRENT shared map (a GET) and leaves the result in the page
+  with the shared origin at that version; it does not save. Verified in local mode against the
+  live v7 map (edit, freehand route, relief, compact: 4 of 4 applied).
 - `discard {slug, confirm:true}` DELETEs `sketch-<slug>` (blob, versions, ops.json).
-- `sketch_promote` refuses with "rebase first" until the active sketch's base version equals
-  the shared map's current version; then it runs `shared_save`'s own code path end to end
-  (preview, one-time token, confirm; lineage, lock, build, backups; one PUT with
-  X-Map-Version, never X-Map-Overwrite). `then:'discard'` deletes the sketch afterwards.
-- Plain `shared_save` refuses while a stopped rebase holds the page, and a confirmed
-  `shared_save` with an active sketch ends that sketch (its changes went live directly).
+- `sketch_promote` refuses "rebase first" until the sketch's base version equals the shared
+  map's current version; then it runs `shared_save`'s own code path (preview, token, confirm;
+  lineage, lock, build, backups; one PUT with X-Map-Version). `then:'discard'` deletes the
+  sketch afterwards.
+- Plain `shared_save` refuses (SKETCH) while a stopped rebase holds the page; a confirmed
+  `shared_save` with an active sketch ends that sketch.
 
-Sketch writes (blob PUT, ops PUT, DELETE) are re-checked inside `src/shared-api.ts`: the id
-must match `sketch-<slug>` (so `shared` can never be deleted or overwritten through them) and
-the server must be in its spawn-time live mode. Every request goes into `session`'s
-`outwardRequests`. They take no token, because they never touch the shared map.
-
-The two Worker routes they use (`GET|PUT /api/map/:id/ops`, `DELETE /api/map/:id`; the PUT
-and the DELETE only for `sketch-*` ids, 403 otherwise) are in
-`cloudflare/worker/src/index.ts` but are NOT deployed until Ryan deploys them. Until then,
-against the live site: `save` probes for them first (one GET of `/api/map/shared/ops`; a Worker
-without them answers its generic 404) and refuses before writing anything; `list` shows the
-sketches without headers; `open` answers NOT_FOUND (no ops.json); `discard` gets a 404.
-
-The app guard: a page booted from a sketch link (or one that loaded a file or generated a map)
-used to send a versionless PUT on "Save to shared map", get a 409 and offer an Overwrite
-button that sent `X-Map-Overwrite: true`. `src/io/cloud-cloudflare.ts` now asks first ("Replace
-the shared map v<N>?") and saves with that version, so a concurrent save still answers 409.
+Sketch writes are re-checked inside `src/shared-api.ts`: the id must match `sketch-<slug>` (so
+`shared` can never be deleted or overwritten through them) and the server must be in its
+spawn-time live mode. They take no token, because they never touch the shared map. The Worker
+routes they use (`GET|PUT /api/map/:id/ops`, `DELETE /api/map/:id`, PUT and DELETE only for
+`sketch-*`) are in `cloudflare/worker/src/index.ts`; until they are deployed, `save` probes for
+them first and refuses before writing anything.
 
 ## Test
 
@@ -213,36 +375,23 @@ the shared map v<N>?") and saves with that version, so a concurrent save still a
 cd mcp
 npm run typecheck
 npm run lint            # root biome over src/ and test/
-npm test                # node --test "test/**/*.test.ts"
+node --test --test-concurrency=3 "test/**/*.test.ts"
 ```
 
-- `test/bridge.test.ts`: pure unit tests of the bridge in `node:vm` (no browser).
-- `test/smoke.test.ts`: stdio end-to-end tests of every local tool against
-  `tests/fixtures/demo.map` (core, mutations, persistence blocks).
-- `test/sketch.test.ts`: a sketch of 9 ops on demo.map (renames incl. a generated name, a
-  recolour, a new burg, a route to it by its sketch id, a marker with a note, a painted circle,
-  a layer toggle), undo/redo inside it, the summary, and replays onto copies someone else
-  edited: ids shift and their edits survive; a removed target and a both-changed field are
-  conflicts (`stop` and `skip`); a regenerate makes it blob-only.
-- `test/sketch.test.ts` (network): in a live-mode server against the fake Worker: save →
-  list → the view link opened in a test-owned headless page loads the sketch (and its Save to
-  shared asks first) → open in a fresh local-mode server (save/discard/promote refused there)
-  → someone else saves v7 → sketch_promote refuses "rebase first" → rebase → promote preview,
-  token, confirm (one PUT with X-Map-Version 7, no overwrite) → `then:'discard'` DELETE; a
-  blob-only sketch refuses rebase but saves; never a DELETE of shared.
-- `test/ops.test.ts`: pure tests of the ops log, id rewriting and replay helpers.
-- `test/shared.test.ts`: the shared tools against `test/fake-worker.ts`, an in-process
-  `node:http` fake of `cloudflare/worker/src/index.ts` on 127.0.0.1. It covers local-mode
-  refusals and, in a live-mode server, preview, token, confirm (exactly one PUT with
-  X-Map-Version and no overwrite header), token reuse, STALE, force, a 409, LOCKED, the
-  build block, LINEAGE and restore. Also: `SharedApi` refuses sketch writes to any id not
-  starting with `sketch-` and outside live mode before sending anything, and the app's client
-  guard (a ?maplink page asks before replacing shared, Replace sends the named version, a
-  normal boot saves at once).
+- `test/bridge.test.ts`, `test/ops.test.ts`, `test/paths.test.ts`: pure unit tests.
+- `test/smoke.test.ts`: stdio end-to-end of every tool against `tests/fixtures/demo.map`; checks
+  every description is at most 2048 chars, the instructions too, and the exact tool list.
+- One file per feature: `terrain`, `regrid`, `clear`, `compact`, `apply`, `lint`, `settings`,
+  `routes`, `rivers`, `biomes`, `regen`, `relief`, `labels`, `tokens`, `http`; `fam-a/b/c` and
+  `integrate.test.ts` cross the features (one apply spec over biomes, settings with locks,
+  route groups and rivers; a sketch of 8 replayable records rebased onto someone else's v7).
+- `test/sketch.test.ts` and `test/shared.test.ts`: sketches and the shared tools against
+  `test/fake-worker.ts`, an in-process `node:http` fake of the Worker on 127.0.0.1.
 
 Tests never touch the live site: `test/helpers.ts` defaults `TUPAIA_LIVE_ORIGIN=none` and
 throws if any test points it at activationlayer.org. Never run the repo's Playwright e2e
-suite as part of this.
+suite as part of this. Known load flakes (pass when the file runs alone): smoke `aa`/`cc`
+timing, tokens `pad widens the shown box`.
 
 A write rehearsal against a real Worker: run `wrangler dev --local` with a scratch config and
 `--persist-to` a scratch directory (never the repo's `cloudflare/.wrangler`), then spawn the

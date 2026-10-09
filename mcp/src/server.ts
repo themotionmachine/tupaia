@@ -25,15 +25,14 @@ import { registerAll } from "./tools/registry.ts";
 }
 
 export const INSTRUCTIONS = `Tupaia MCP drives the Tupaia fantasy-map app (Azgaar's FMG fork) in headless Chromium.
-- Mode is local unless the server was spawned with TUPAIA_MODE=live; nothing here writes the live shared map (map.activationlayer.org) except shared_save/shared_restore, and only when the human explicitly asks in this conversation: preview first, then confirm with the preview token.
-- Start with session (status). The page boots a random map; use load_map {path} or {source:'shared'} (read-only) or generate_map {seed} to get the map you want.
-- Refs: an id or an exact name (case/diacritics folded). Fuzzy matches are never applied: on NOT_FOUND/AMBIGUOUS read the candidates and retry with an id. Id 0 = Neutrals/Wildlands/No religion; removed entities stay in arrays.
-- Places: {x,y} map px | {lat,lon} | {cell} | {entity:{type,ref}, at?} (at = fraction along a route/river). inspect {at:{screen:[px,py], shot}} maps a screenshot pixel to the map.
-- Loop: find/inspect -> snapshot {action:'take', label} before multi-step or risky changes -> batch mutations -> map_info (diff since the last snapshot or undo point) -> screenshot framed on what changed -> snapshot {action:'undo'} or {action:'restore'} if wrong. Every mutating call is undoable; snapshot {action:'list'} shows the history.
-- Screenshot after visual changes, not after pure reads (JPEG maxSide 1024 by default; the full PNG is saved to disk).
-- eval is the last resort: read tupaia://docs/runtime-api.md first, use bare globals (pack, notes, svg), pass redraw layers after mutating, readOnly:true for reads.
-- Results carry alerts (app dialogs, auto-dismissed), consoleErrors and notes: read them. After TIMEOUT or a relaunch note, call session and restore if needed.
-- To propose a shared-map change without writing it: load_map {source:'shared'} -> sketch start -> edits -> summary -> save (view link). Promote only on the human's yes: rebase, then sketch_promote.
+- Mode is local unless spawned with TUPAIA_MODE=live. Only shared_save, shared_restore and sketch_promote write the live shared map (map.activationlayer.org), and only when the human explicitly asks in this conversation: preview first, then confirm with the preview token.
+- Start with session. The page boots a random map: load_map {path} or {source:'shared'} (read-only), or generate_map {seed}.
+- Refs: an id or an exact name (case/diacritics folded), never fuzzy; on NOT_FOUND/AMBIGUOUS retry with an id from candidates. Places: {x,y} map px | {lat,lon} | {cell} | {entity:{type,ref}, at?}.
+- Loop: find/inspect -> snapshot take before risky steps -> batch mutation (dryRun for big ones) -> map_info {diff:'counts'} -> screenshot framed on the change (compare + crop:'changed') -> snapshot undo if wrong. Each mutating call is one undo entry.
+- Prefer tools over eval: set_heights + flow (terrain), edit map (world settings, locks, recalculate), apply (spec; mode:'check' first), clear (wipe a base), compact (removed-record bloat), regrid (cell density), lint (quality, ready fixes), regenerate biomes/provinces/emblems/relief, display {labels}. eval is the last resort: read tupaia://docs/runtime-api.md first.
+- Read cheaply: find/inspect format:'compact', edit/add rows:'ids'. Results carry alerts, consoleErrors and notes: read them. After TIMEOUT or a relaunch note, call session.
+- Propose a shared-map change as a sketch: load_map {source:'shared'} -> sketch start -> edits -> summary -> save (view link); on the human's yes: rebase, then sketch_promote. regrid, generate_map and most regenerate parts make it blob-only.
+- Over --http (session shows serving) every caller shares the page, undo and sketch: coordinate before undo/restore. No tools in this session? Use the CLI mcp/bin/tupaia.
 - Cheatsheet: tupaia://docs/cheatsheet.md. Data model: tupaia://docs/data-model.md.`;
 
 const config = loadConfig();
