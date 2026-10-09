@@ -2,7 +2,8 @@
 // the current map). Both take an auto-undo entry first.
 import { z } from "zod";
 import type { ToolContext } from "../context.ts";
-import { META_TEXT_HEAVY } from "../result.ts";
+import { planRegen, RegenEmblems, RegenProvinces, recordRegen } from "../regen.ts";
+import { META_TEXT_HEAVY, ToolError } from "../result.ts";
 import { TIMEOUTS, TimeoutMs } from "../schemas.ts";
 import { changesSinceUndo } from "./edit.ts";
 import { defineTools } from "./registry.ts";
@@ -106,10 +107,23 @@ export function register(ctx: ToolContext): void {
     {
       title: "Regenerate parts of the map",
       description:
-        "Re-run generator parts on the current map (heightmap and cells stay). parts run in dependency order regardless of the order given: rivers, population, cultures, burgs, states, provinces, routes, religions, emblems, military, markers, zones, ice, goods, markets, economy, production. Locked entities are kept where the app supports locks. Several parts turn their layer on (reported in layerChanges); restoreLayers:true turns them back. states reseeds the random stream, so it is not reproducible. One auto-undo entry.",
+        "Re-run generator parts on the current map (heightmap and cells stay). parts run in dependency order regardless of the order given: rivers, population, cultures, burgs, states, provinces, routes, religions, emblems, military, markers, zones, ice, goods, markets, economy, production. Locked entities are kept where the app supports locks. Several parts turn their layer on (reported in layerChanges); restoreLayers:true turns them back. states reseeds the random stream, so it is not reproducible. One auto-undo entry. " +
+        "provinces {states?, centres?:[{state, burg|at, name?, formName?, fullName?}], count?, ratio?, keepLocked?, lockedStates?, crossForeign?}: new provinces for those states only (default every unlocked state, by the generator's rules; centres: exactly those; count: N per state, of balanced area), also for hand-made states with few or no burgs. " +
+        "emblems {states?, provinces?, burgs?, shieldOnly?, keepLocked?, lockedStates?, stateCulture?}: new coats of arms with each culture's shield. " +
+        "Both turn no layer on, take dryRun:true (a preview), and replay in a sketch when they are the only parts.",
       inputSchema: z.object({
         parts: z.array(z.enum(REGEN_PARTS)).min(1),
         restoreLayers: z.boolean().optional().describe("Undo layer visibility changes made by the regenerators"),
+        provinces: RegenProvinces.optional().describe(
+          "Options for part provinces: only these states' provinces are replaced (other states keep theirs; one of theirs left with no cells is removed); locked provinces keep their cells"
+        ),
+        emblems: RegenEmblems.optional().describe(
+          "Options for part emblems: locked and custom emblems are kept (the notes name locked states skipped); a Wildlands burg or province takes its state's culture shield"
+        ),
+        dryRun: z
+          .boolean()
+          .optional()
+          .describe("parts provinces and/or emblems only: preview the outcome, change nothing"),
         timeoutMs: TimeoutMs
       }),
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
@@ -117,16 +131,28 @@ export function register(ctx: ToolContext): void {
       kind: "heavy"
     },
     async (args, scope) => {
+      // provinces/emblems options are checked in the page first (regen.ts): a bad one changes nothing
+      const { dryRun, ...rest } = args;
+      const plan = await planRegen(scope, rest, dryRun === true);
+      if (dryRun) {
+        if (!plan || args.parts.some(p => p !== "provinces" && p !== "emblems"))
+          throw new ToolError(
+            "BAD_ARGS",
+            "dryRun works with parts provinces and/or emblems only. Nothing was changed."
+          );
+        return { dryRun: true, ...plan, note: "dry run: nothing was changed" };
+      }
       await scope.pushUndo("regenerate", args);
       let out: Record<string, unknown>;
       try {
-        out = await scope.call<Record<string, unknown>>("regenerate", args, {
+        out = await scope.call<Record<string, unknown>>("regenerate", rest, {
           mutating: true,
           timeoutMs: args.timeoutMs ?? TIMEOUTS.heavy
         });
       } finally {
         ctx.snapshots.noteMutation();
       }
+      await recordRegen(scope, rest, out);
       const changes = await changesSinceUndo(ctx, scope);
       return {
         ...out,

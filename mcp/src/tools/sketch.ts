@@ -15,6 +15,7 @@ import {
   blobOnlyReasons,
   type EditResolved,
   type PaintResolved,
+  REPLAY_EXT,
   type Sketch,
   type SketchBase,
   sanitizeRecord
@@ -126,17 +127,22 @@ function baseLine(b: SketchBase): string {
 }
 
 /** The entity the sketch touched most (edits per field, adds, paints), best first. */
-export function changeRanking(sk: Sketch): Array<{ type: string; i: number | string; score: number }> {
-  const score = new Map<string, { type: string; i: number | string; score: number }>();
-  const bump = (type: string, i: unknown, n: number) => {
+export function changeRanking(
+  sk: Sketch
+): Array<{ type: string; i: number | string; score: number; layers?: string[] }> {
+  const score = new Map<string, { type: string; i: number | string; score: number; layers?: string[] }>();
+  const bump = (type: string, i: unknown, n: number, layers?: string[]) => {
     if (typeof i !== "number" && typeof i !== "string") return;
     const k = `${type}:${i}`;
     const cur = score.get(k) ?? { type, i, score: 0 };
     cur.score += n;
+    if (layers) cur.layers = layers; // the latest op's view
     score.set(k, cur);
   };
   for (const o of sk.ops) {
     if (!o.resolved || !o.replayable) continue;
+    // tools registered with a focus hook (e.g. regenerate:provinces-emblems) name their own
+    for (const f of REPLAY_EXT[o.tool]?.focus?.(o.resolved) ?? []) bump(f.type, f.i, f.score, f.layers);
     if (o.tool === "edit") {
       const e = o.resolved as EditResolved;
       if (e.type === "map") continue;
@@ -163,7 +169,13 @@ interface Box {
 async function framedTarget(
   scope: CallScope,
   sk: Sketch
-): Promise<{ type: string; i: number | string; name: string | null; bbox: [number, number, number, number] } | null> {
+): Promise<{
+  type: string;
+  i: number | string;
+  name: string | null;
+  bbox: [number, number, number, number];
+  layers?: string[];
+} | null> {
   for (const c of changeRanking(sk).slice(0, 6)) {
     const env = await scope.envelope<Box & { name?: string }>(
       "entityBox",
@@ -177,7 +189,8 @@ async function framedTarget(
       type: c.type,
       i: c.i,
       name: b.name ?? null,
-      bbox: [b.x0 - pad, b.y0 - pad, b.x1 + pad, b.y1 + pad]
+      bbox: [b.x0 - pad, b.y0 - pad, b.x1 + pad, b.y1 + pad],
+      ...(c.layers ? { layers: c.layers } : {})
     };
   }
   return null;
@@ -240,7 +253,7 @@ async function summaryShots(
 ): Promise<Record<string, string | null>> {
   const shots: Record<string, string | null> = {};
   const dir = path.join("sketches", sk.slug);
-  const on = target ? (LAYERS_FOR[target.type] ?? []) : [];
+  const on = target ? ((target.layers as LayerNameT[] | undefined) ?? LAYERS_FOR[target.type] ?? []) : [];
   const layers0 = await scope.call<string[]>("layersOn", {}, { noAlerts: true });
   const view0 = await scope.call<{ x: number; y: number; scale: number }>("getView", {}, { noAlerts: true });
   const pair = async (which: "before" | "after") => {

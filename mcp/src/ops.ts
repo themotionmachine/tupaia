@@ -37,6 +37,8 @@ export interface ReplaySpec {
   unreplayable?: (r: Resolved | null) => string | null;
   /** Entities the op created, per op, for the replay id map (like AddResolved.created). */
   created?: (r: Resolved) => CreatedRef[][];
+  /** Entities the sketch summary may frame its shots on (higher score first), with the layers that show the change. */
+  focus?: (r: Resolved) => Array<{ type: string; i: number | string; score: number; layers?: string[] }>;
   /** Default true: validate then apply with phase 'apply'. */
   phased?: boolean;
   /** Timeout class for replay (default 'edit'). */
