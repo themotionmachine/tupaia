@@ -1122,6 +1122,7 @@
     // so a reference to one of them is a pending dependency, not an error
     const pending = !apply && mode !== "update" ? new Map() : null;
     const claimed = new Map(); // "type:i" -> the entry that matched that entity first
+    const planned = []; // apply: {type, entries, ctxs, rows} per list, for the settle pass
     const noteOwners = new Map(); // note id -> the markers entry that gives that marker's note
 
     // map fields (edit type 'map', no ref)
@@ -1153,18 +1154,13 @@
         return f;
       });
       const seen = new Map();
+      const ctxs = [];
       const rows = entries.map((e, k) => {
         const f = keys[k];
         const nth = f !== null ? seen.get(f) || 0 : 0;
         if (f !== null) seen.set(f, nth + 1);
-        const r = planEntry(type, isObj(e) ? e : {}, {
-          mode,
-          tol,
-          pending,
-          clamp: !!a.clamp,
-          nth,
-          dups: f !== null ? count.get(f) : 1
-        });
+        ctxs[k] = { mode, tol, pending, clamp: !!a.clamp, nth, dups: f !== null ? count.get(f) : 1 };
+        const r = planEntry(type, isObj(e) ? e : {}, ctxs[k]);
         // two entries for one entity would fight over it on every apply
         if (r.entity && r.status !== "error") {
           const id = `${type}:${r.i}`;
@@ -1175,6 +1171,7 @@
         }
         return r;
       });
+      if (apply) planned.push({ type, entries, ctxs, rows });
       if (apply) {
         await runEdits(type, rows, S);
         await runCreates(type, rows, S);
@@ -1258,6 +1255,38 @@
         done.push({ at: pendingNotes[j].at, list: pendingNotes[j].list, type: "note", row: r });
       });
     }
+
+    // a later list can change what an earlier one set (a state's capital turns its burg's group
+    // into 'capital'): one more pass edits such fields back, so a single apply converges
+    if (apply)
+      for (const P of planned) {
+        const idx = [];
+        P.rows.forEach((r, k) => {
+          if (["created", "updated", "unchanged"].includes(r.status) && isObj(P.entries[k])) idx.push(k);
+        });
+        if (!idx.length) continue;
+        const again = idx.map(k => planEntry(P.type, P.entries[k], { ...P.ctxs[k], mode: "update", pending: null }));
+        const todo = again.filter(r => r.act === "update");
+        if (!todo.length) continue;
+        await runEdits(P.type, todo, S);
+        again.forEach((r2, j) => {
+          if (r2.act !== "update") return;
+          const r = P.rows[idx[j]];
+          if (r2.status === "error") {
+            r.status = "error";
+            r.error = r2.error;
+            return;
+          }
+          // created stays created (it now matches the spec); otherwise it was changed now
+          if (r.status !== "created") {
+            r.status = "updated";
+            r.diffs = [
+              ...(r.diffs || []).filter(d => !r2.diffs?.some(d2 => d2.field === d.field)),
+              ...(r2.diffs || [])
+            ];
+          }
+        });
+      }
 
     // read-only fields again at the end: later lists can change them (a state makes a burg its capital)
     if (apply)

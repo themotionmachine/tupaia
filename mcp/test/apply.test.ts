@@ -527,6 +527,15 @@ describe("tupaia-mcp apply", () => {
     assert.match(cf.error.message, /markers\[0\]/);
     assert.equal((await h.ok("apply", twice)).note, "nothing to change");
 
+    // a later list changes what an earlier one set (a capital's group): one apply still converges
+    const cap = {
+      burgs: [{ name: "Capton", x: pick.x[7].x, y: pick.x[7].y, group: "town" }],
+      states: [{ name: "Captonia", capital: "Capton", color: "#aa5500" }]
+    };
+    assert.deepEqual((await h.ok("apply", cap)).counts, { created: 2 });
+    const capAgain = await h.ok("apply", cap);
+    assert.equal(capAgain.note, "nothing to change", JSON.stringify(capAgain));
+
     // names come from the map as it is now, not as an earlier apply saw it
     assert.equal(((await h.ok("apply", { mode: "check", burgs: [{ name: "Specburg" }] })).counts as Obj).unchanged, 1);
     await h.ok("edit", { type: "burg", ops: [{ ref: { name: "Specburg" }, set: { name: "Specburg Renamed" } }] });
