@@ -9,9 +9,11 @@
 // digest of the heights it started from and the digest it ended at, so replaying it needs no
 // source, no fill and no image, and a replay onto a map whose terrain was edited since applies
 // only this op's cells (and says how many of them the target had changed too). The rebuild is a
-// deterministic function of (map seed, grid, heights, options, the map's entities): the app's own
-// steps reseed Math.random from the map seed (Features.markupGrid, Rivers.generate), and
-// everything else in the call runs on a PRNG seeded from the map seed and the heights digest.
+// deterministic function of (map seed, grid, heights, options, the map's entities). That comes
+// from the app itself: its rebuild steps reseed Math.random from the map seed
+// (Features.markupGrid, Rivers.generate). The call also seeds Math.random from the map seed and
+// the heights digest before it starts (so nothing before those reseeds depends on earlier calls)
+// and puts the caller's PRNG back afterwards.
 //
 // flow is read-only: it traces where water runs from a place the way Rivers.generate drains
 // (alterHeights, closed lakes, resolveDepressions, lake outlets, havens, lowest neighbour), on
@@ -862,8 +864,8 @@
     const graphBefore = T.cellGraph();
     const base = Uint8Array.from(cur);
     const heightsDigest = hashArray(target);
-    // deterministic rebuild: the app's PRNG is seeded from the map seed and the heights (the
-    // app's own rebuild steps reseed from the map seed), then put back as it was
+    // deterministic rebuild: the app's own steps reseed Math.random from the map seed; seed it
+    // here too (map seed + heights) for anything before them, and put the caller's PRNG back
     const prevRandom = Math.random;
     Math.random = aleaPRNG(`${seed}:heights:${heightsDigest}`);
     let carried;
@@ -904,6 +906,8 @@
           : `erosion cut river beds into ${info.rebuildChanged} land cells (kept: keepHeights is off)`
       );
     riverNotes(c, carried?.rivers);
+    if (carried?.portsLost)
+      c.notes.add(`${carried.portsLost} port burgs no longer stand by water; their port was cleared`);
     const out = {
       heightsDigest,
       ...plan,
