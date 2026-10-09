@@ -538,26 +538,28 @@ describe("trial fixes (browser)", () => {
     await reload();
   });
 
-  test("regrid: river gaps are filled and any left have a reroute fix; biomes stay unless redefined", async () => {
+  test("regrid: rivers traced again leave no gap or loop; biomes re-derived unless kept; a gap left by hand has a reroute fix", async () => {
     const r = await h.ok("regrid", { density: 5 }, 300_000);
-    const fixed = r.fixed as Obj;
-    assert.equal(typeof fixed?.riverGapCellsFilled, "number", JSON.stringify(r).slice(0, 800));
-    assert.match(JSON.stringify(r.warnings ?? r.notes), /biome/i, "a warning says the biomes are stale");
-    const lint = await h.ok("lint", { checks: ["river-gap"], limit: 5 });
-    const rows = ((lint.rows as Obj)["river-gap"] ?? []) as Obj[];
-    for (const row of rows) assert.ok(row.fix || row.hint || (lint.fixAll as Obj)?.["river-gap"], JSON.stringify(row));
-    const before = Number((lint.counts as Obj)["river-gap"] ?? 0);
-    const fix = (lint.fixAll as Obj)?.["river-gap"] ?? rows.find(r => r.fix)?.fix;
-    if (fix) {
-      assert.equal(fix.tool, "edit");
-      assert.equal(fix.args.type, "river");
-      await h.ok(fix.tool, fix.args);
-      const again = await h.ok("lint", { checks: ["river-gap"], limit: 0 });
-      assert.ok(Number((again.counts as Obj)["river-gap"] ?? 0) < before, "the reroute fix closes gaps");
-    }
+    assert.equal(typeof (r.rivers as Obj)?.retraced, "number", JSON.stringify(r).slice(0, 800));
+    assert.equal((r.biomes as Obj).mode, "redefine");
+    assert.doesNotMatch(JSON.stringify(r.warnings ?? []), /biomes were carried over/);
+    const lint = await h.ok("lint", { checks: ["river-gap", "river-loop"], limit: 5 });
+    assert.deepEqual(lint.counts, {}, JSON.stringify(lint.rows).slice(0, 600));
+    // a gap made by hand (a middle cell taken out) still gets the reroute fix
+    await h.ok("eval", {
+      code: `const r = pack.rivers.find(x => x.cells.length > 8 && x.cells.every(c => c >= 0 && pack.cells.h[c] >= 20));
+      r.cells.splice(4, 1); if (r.points) r.points.splice(4, 1); return r.i;`
+    });
+    const gap = await h.ok("lint", { checks: ["river-gap"], limit: 5 });
+    const rows = ((gap.rows as Obj)["river-gap"] ?? []) as Obj[];
+    assert.equal(rows.length, 1, JSON.stringify(gap));
+    assert.equal(rows[0].fix?.tool, "edit");
+    await h.ok(rows[0].fix.tool, rows[0].fix.args);
+    const again = await h.ok("lint", { checks: ["river-gap"], limit: 0 });
+    assert.deepEqual(again.counts, {}, "the reroute fix closes the gap");
     await reload();
-    const red = await h.ok("regrid", { density: 5, biomes: "redefine" }, 300_000);
-    assert.doesNotMatch(JSON.stringify(red.warnings ?? []), /biomes .*stale|redefine/i);
+    const kept = await h.ok("regrid", { density: 5, biomes: "keep" }, 300_000);
+    assert.match(JSON.stringify(kept.warnings ?? []), /biomes were carried over by position/);
     await reload();
   });
 

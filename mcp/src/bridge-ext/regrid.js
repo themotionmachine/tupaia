@@ -16,6 +16,10 @@
 //   land cell; burg.feature and burg.port (feature ids) are re-pointed at the new features;
 // - features: names, groups and heights come from the old feature of the same type that most
 //   of the new feature's cells came from (Resample takes any type from one cell);
+// - rivers: traced again as contiguous paths of new cells along their old lines (Resample maps
+//   their points one by one, leaving gaps and loops), with cells.r/fl/conf rebuilt from them;
+// - biomes: re-derived from the climate on the new cells, custom and painted ones carried
+//   (biomes:'redefine', default; Resample carries every cell's, the old cell edges showing);
 // - routes: points that ended at a burg follow the burg's new cell;
 // - zones: cells re-derived by nearest old cell (Resample unions discs, a rounder shape);
 // - notes, custom labels (and their text paths), rulers, custom emblems, ice (unless
@@ -86,16 +90,16 @@
 
   // How each .map line grows with the cell count (save.ts prepareMapData order): grid arrays
   // with the grid points, pack arrays with the pack cells, pack features and rivers by a power of
-  // the pack ratio. The svg (line 5) by drawn layer: the redraw makes area outlines grow about
-  // with ratio^0.6, heightmap contours ^0.73; rivers (re-anchored on their old control points),
-  // labels, markers, routes, burg icons and defs stay (measured on demo.map and terraform-v3.map,
+  // the pack ratio (rivers, traced again with a point per new cell, by its square root: cells
+  // along a line). The svg (line 5) by drawn layer: the redraw makes area outlines grow about
+  // with ratio^0.6, heightmap contours ^0.73; rivers, labels, markers, routes, burg icons and defs stay (measured on demo.map and terraform-v3.map,
   // 10K -> 50K and 30K -> 10K). Relief icons are
   // placed by area (a Poisson disc per cell), so a fresh draw grows only ^0.1-0.2 (terraform-v3 10K
   // <-> 30K, 50K); a saved relief layer can be far from what a redraw at the same density draws, so
   // the estimate starts from a fresh draw (freshLength).
   const GRID_LINES = [6, 7, 8, 9, 10, 11];
   const PACK_LINES = [16, 17, 18, 19, 20, 21, 22, 24, 25, 26, 27, 38, 40, 44];
-  const PACK_EXPONENT = { 12: 0.6 }; // features; rivers (32) keep their anchors, so stay
+  const PACK_EXPONENT = { 12: 0.6, 32: 0.5 }; // features; rivers
   const SVG_LINE = 5;
   const SVG_EXPONENT = { terrs: 0.73, terrain: 0.15, cells: 1 };
   for (const id of [
@@ -172,8 +176,9 @@
     if (!["keep", "regenerate"].includes(iceMode)) fail("BAD_ARGS", "ice is 'keep' or 'regenerate'");
     const relief = a.relief ?? "keep";
     if (!["keep", "redraw"].includes(relief)) fail("BAD_ARGS", "relief is 'keep' or 'redraw'");
-    const biomes = a.biomes ?? "keep";
-    if (!["keep", "redefine"].includes(biomes)) fail("BAD_ARGS", "biomes is 'keep' or 'redefine'");
+    const biomes = a.biomes ?? "redefine";
+    if (!["redefine", "climate", "keep"].includes(biomes))
+      fail("BAD_ARGS", "biomes is 'redefine' (default), 'climate' or 'keep'");
     if (a.density === undefined) fail("BAD_ARGS", "density is required (1-13 or 1000-100000)");
     const want = targetCells(a.density);
     const shape = gridShape(want);
@@ -1251,29 +1256,6 @@
   }
 
   /**
-   * Each river's anchors before the regrid: its control points, or its cell centers (what the
-   * renderer meanders). Resample stores the meandered line as the new control points, so every
-   * resample meanders the river again: it wiggles more and its points multiply (terraform-v3:
-   * the rivers data grew 60 -> 159 -> 270 KB over 10K -> 30K -> 10K).
-   */
-  let riverAnchors = null;
-  let riverGapCells = 0;
-  function saveRiverAnchors(rivers) {
-    riverAnchors = new Map();
-    for (const r of rivers || []) {
-      if (!r || !Array.isArray(r.cells) || r.cells.length < 2) continue;
-      try {
-        const pts =
-          typeof Rivers?.getRiverPoints === "function"
-            ? Rivers.getRiverPoints(r.cells, r.points ?? null)
-            : r.points || r.cells.map(c => pack.cells.p[c]);
-        if (pts?.length === r.cells.length)
-          riverAnchors.set(r.i, { cells: [...r.cells], points: pts.map(q => [q[0], q[1]]), length: r.length });
-      } catch {}
-    }
-  }
-
-  /**
    * Neighbour cells that join cell a to cell b (exclusive), walking greedily toward b's centre (on
    * a Delaunay graph the greedy walk reaches it); `avoid` cells are never stepped on. null when no
    * walk within maxSteps exists.
@@ -1304,69 +1286,522 @@
     return path;
   }
 
-  /**
-   * Fill the gaps of a river's cell list: consecutive cells that are not neighbours (a finer grid
-   * maps two old anchors to new cells further apart) get the neighbour cells between them, each
-   * with a point on the straight line between the two anchors (so the drawn line stays as it was).
-   * Returns the number of cells added; gaps it cannot bridge stay.
-   */
-  function fillRiverGaps(cells, points) {
+  // ---------------------------------------------------------------- rivers (re-traced)
+  //
+  // Resample maps each river's meandered line point-wise to the new cells: on a finer grid two
+  // consecutive points land in cells that are not neighbours (lint river-gap), on a coarser one
+  // the line revisits cells, and cells.r/cells.fl/cells.conf keep the old cells' values around
+  // the old course. Instead each river is traced again as a contiguous path of new-cell
+  // neighbours that follows its old line (its control points, or its cell centres): the line is
+  // sampled finely and a Viterbi pass picks, per sample, a cell among the nearby ones so that
+  // consecutive cells are neighbours and the cells stay as close to the line as possible (the
+  // cell holding each sample when that is contiguous). Water and other rivers' cells cost extra
+  // where the old river had none, so the path goes round them when it can. Then: loops cut out,
+  // the river ends where it ended (the sea or a lake, its parent at the confluence, or off the
+  // map edge), lake outlets start in their lake; a parent is traced before its tributaries. Each
+  // new cell gets one control point on the old line (the drawn river stays where it was), the
+  // old flux along the line (never falling downstream), and cells.r/cells.conf are rebuilt from
+  // the paths. Ids, names, types, parents and basins are kept; source, mouth, length, discharge
+  // and width are recomputed (widthFactor scaled as a generation at the new density scales it).
+
+  const STUCK = 25; // per-sample cost of a water or foreign river cell the old river did not have
+  const CLIMB = 0.3; // cost per height unit of a step uphill
+  let riverPlan = null;
+
+  /** On the old map (Resample.saveRiversData runs before the grid is rebuilt): what each river needs to be traced again. */
+  function captureRivers(rivers) {
     const C = pack.cells;
-    const on = new Set(cells.filter(c => c >= 0));
-    let added = 0;
-    for (let k = 0; k + 1 < cells.length; k++) {
-      const a = cells[k];
-      const b = cells[k + 1];
-      if (a < 0 || b < 0 || a === b || C.c[a].includes(b)) continue;
-      const avoid = new Set(on);
-      avoid.delete(b);
-      const mid = bridgeCells(a, b, avoid);
-      if (!mid?.length) continue;
-      const [x0, y0] = points[k];
-      const [x1, y1] = points[k + 1];
-      const pts = mid.map((_, j) => {
-        const t = (j + 1) / (mid.length + 1);
-        return [rn(x0 + (x1 - x0) * t, 2), rn(y0 + (y1 - y0) * t, 2)];
+    const list = (rivers || []).filter(r => isLive(r) && Array.isArray(r.cells) && r.cells.length >= 2);
+    const body = new Map(); // old cell -> rivers whose body (all but the last cell) has it
+    for (const r of list)
+      for (let k = 0; k < r.cells.length - 1; k++) {
+        const c = r.cells[k];
+        if (c < 0) continue;
+        const a = body.get(c);
+        if (a) a.push(r.i);
+        else body.set(c, [r.i]);
+      }
+    const plans = new Map();
+    for (const r of list) {
+      let pts;
+      try {
+        pts =
+          typeof Rivers?.getRiverPoints === "function"
+            ? Rivers.getRiverPoints(r.cells, r.points ?? null)
+            : r.points || r.cells.map(c => C.p[c]);
+      } catch {
+        continue;
+      }
+      if (pts?.length !== r.cells.length || pts.some(q => !q || !Number.isFinite(q[0]) || !Number.isFinite(q[1])))
+        continue;
+      const last = r.cells.at(-1);
+      let end = "land";
+      let joinTo = 0;
+      if (last === -1) end = "edge";
+      else if (C.h[last] < 20) end = "water";
+      else {
+        // the river it flows into: its parent when the parent has that cell (in its body, or as
+        // its own last cell: both join a third river there), else the river whose body has it
+        const parent = r.parent !== r.i ? list.find(x => x.i === r.parent) : null;
+        const owners = (body.get(last) || []).filter(x => x !== r.i);
+        joinTo = parent?.cells.includes(last) ? parent.i : (owners[0] ?? 0);
+        if (joinTo) end = "join";
+      }
+      const fl = r.cells.map((c, k) => (c >= 0 ? C.fl[c] : C.fl[r.cells[k - 1]] || 0));
+      plans.set(r.i, {
+        i: r.i,
+        pts: pts.map(q => [q[0], q[1]]),
+        fl,
+        water: r.cells.map(c => c >= 0 && C.h[c] < 20),
+        end,
+        joinTo,
+        parent: r.parent,
+        basin: r.basin
       });
-      cells.splice(k + 1, 0, ...mid);
-      points.splice(k + 1, 0, ...pts);
-      for (const c of mid) on.add(c);
-      added += mid.length;
+    }
+    // flux of the old land cells off the rivers (for new cells the old course no longer crosses)
+    const dry = [];
+    for (const i of C.i) if (C.h[i] >= 20 && !C.r[i]) dry.push([C.p[i][0], C.p[i][1], C.fl[i]]);
+    riverPlan = { plans, dry, spacing: grid.spacing, cellsDesired: grid.cellsDesired };
+  }
+
+  /** Cells within two rings of c (c first). */
+  function ring2(c, stamp, tick) {
+    const C = pack.cells;
+    const out = [c];
+    stamp[c] = tick;
+    for (let k = 0; k < out.length && k < 1 + C.c[c].length; k++)
+      for (const nb of C.c[out[k]])
+        if (stamp[nb] !== tick) {
+          stamp[nb] = tick;
+          out.push(nb);
+        }
+    return out;
+  }
+
+  /** Shortest walk (BFS over `pass` cells) from `from` to a cell that passes `goal`, within maxDepth steps; [] when none. */
+  function walkTo(from, goal, pass, maxDepth = 12) {
+    const C = pack.cells;
+    const prev = new Map([[from, -1]]);
+    let ring = [from];
+    for (let d = 0; d < maxDepth && ring.length; d++) {
+      const next = [];
+      for (const x of ring)
+        for (const y of C.c[x]) {
+          if (prev.has(y)) continue;
+          prev.set(y, x);
+          if (goal(y)) {
+            const path = [];
+            for (let p = y; p !== from; p = prev.get(p)) path.push(p);
+            return path.reverse();
+          }
+          if (pass(y)) next.push(y);
+        }
+      ring = next;
+    }
+    return [];
+  }
+
+  /**
+   * One river traced on the new cells: [{c, x, y, f}] from source to its end (a terminal cell
+   * last for 'water'/'join'; -1 last for 'edge'), or null when it is too short now.
+   * owner: river id per cell for the rivers traced so far.
+   */
+  function traceRiver(plan, owner, stamp, out) {
+    const C = pack.cells;
+    const { pts, fl, water } = plan;
+    const A = pts.length;
+    const sp = grid.spacing;
+    const step = Math.max(0.5, Math.min(sp, riverPlan.spacing) / 3);
+    const clampX = v => Math.min(graphWidth, Math.max(0, v));
+    const clampY = v => Math.min(graphHeight, Math.max(0, v));
+    // samples along the old line: [x, y, segment, flux]
+    const S = [];
+    for (let k = 0; k + 1 < A; k++) {
+      const [x0, y0] = pts[k];
+      const [x1, y1] = pts[k + 1];
+      const m = Math.max(1, Math.ceil(Math.hypot(x1 - x0, y1 - y0) / step));
+      for (let j = 0; j < m; j++)
+        S.push([clampX(x0 + ((x1 - x0) * j) / m), clampY(y0 + ((y1 - y0) * j) / m), k, fl[k]]);
+    }
+    S.push([clampX(pts[A - 1][0]), clampY(pts[A - 1][1]), A - 2, plan.end === "edge" ? fl[A - 2] : fl[A - 1]]);
+    const finalSeg = A - 2;
+    const sp2 = sp * sp;
+    const onJoin = c => !!out.joinCells?.has(c); // the cells of the river it flows into
+    const cost = (c, s) => {
+      const d = ((C.p[c][0] - s[0]) ** 2 + (C.p[c][1] - s[1]) ** 2) / sp2;
+      let pen = 0;
+      if (C.h[c] < 20 && !water[s[2]] && !water[s[2] + 1]) pen += STUCK;
+      const o = owner[c];
+      if (o && o !== plan.i && !(s[2] === finalSeg && onJoin(c))) pen += STUCK;
+      return d + pen;
+    };
+    // Viterbi over the samples: a cell may follow itself or a neighbour
+    const cands = [];
+    const back = [];
+    let prevCells = null;
+    let prevCost = null;
+    let prevIdx = null;
+    out.extended = 0;
+    for (let t = 0; t < S.length; t++) {
+      const s = S[t];
+      const c0 = findCell(s[0], s[1]);
+      if (c0 === undefined) return null;
+      const cs = ring2(c0, stamp, ++out.tick);
+      const cc = new Float64Array(cs.length);
+      const bk = new Int32Array(cs.length).fill(-1);
+      if (!prevCells) for (let j = 0; j < cs.length; j++) cc[j] = cost(cs[j], s);
+      else {
+        let any = false;
+        for (let j = 0; j < cs.length; j++) {
+          const v = cs[j];
+          let best = Infinity;
+          let bi = -1;
+          const u0 = prevIdx.get(v);
+          if (u0 !== undefined) {
+            best = prevCost[u0];
+            bi = u0;
+          }
+          for (const u of C.c[v]) {
+            const ui = prevIdx.get(u);
+            if (ui === undefined) continue;
+            // a step uphill costs (rivers run down: a cell on a ridge beside the line is avoided)
+            const up = C.h[v] >= 20 && C.h[u] >= 20 ? Math.max(0, C.h[v] - C.h[u]) * CLIMB : 0;
+            if (prevCost[ui] + up < best) {
+              best = prevCost[ui] + up;
+              bi = ui;
+            }
+          }
+          cc[j] = best + cost(v, s);
+          bk[j] = bi;
+          if (bi >= 0) any = true;
+        }
+        if (!any) {
+          // nothing within reach (a jump the samples cannot bridge): restart here; joined below
+          let mi = 0;
+          for (let u = 1; u < prevCost.length; u++) if (prevCost[u] < prevCost[mi]) mi = u;
+          for (let j = 0; j < cs.length; j++) {
+            cc[j] = prevCost[mi] + cost(cs[j], s);
+            bk[j] = mi;
+          }
+        }
+      }
+      cands.push(cs);
+      back.push(bk);
+      prevCells = cs;
+      prevCost = cc;
+      prevIdx = new Map(cs.map((c, j) => [c, j]));
+    }
+    let j = 0;
+    for (let u = 1; u < prevCost.length; u++) if (prevCost[u] < prevCost[j]) j = u;
+    const seq = new Int32Array(S.length);
+    for (let t = S.length - 1; t >= 0; t--) {
+      seq[t] = cands[t][j];
+      j = back[t][j];
+    }
+    // runs of one cell, each with its samples
+    let runs = [];
+    for (let t = 0; t < S.length; t++) {
+      const last = runs[runs.length - 1];
+      if (last && last.c === seq[t]) last.s.push(t);
+      else runs.push({ c: seq[t], s: [t] });
+    }
+    // a jump the Viterbi could not bridge (rare): the cells between, greedily
+    for (let k = 0; k + 1 < runs.length; k++) {
+      const a = runs[k].c;
+      const b = runs[k + 1].c;
+      if (C.c[a].includes(b)) continue;
+      const mid = bridgeCells(a, b, new Set()) || [];
+      runs.splice(k + 1, 0, ...mid.map(c => ({ c, s: [] })));
       k += mid.length;
     }
-    return added;
-  }
-  T.fillRiverGaps = fillRiverGaps;
-
-  /** After Resample.restoreRivers: each river follows its old anchors (one per new cell), as the rivers editor stores it. */
-  function reanchorRivers(projection) {
-    if (!riverAnchors) return 0;
-    const R = pack.cells.r;
-    let n = 0;
-    riverGapCells = 0;
-    for (const r of pack.rivers || []) {
-      const a = riverAnchors.get(r.i);
-      if (!a) continue;
-      const cells = [];
-      const points = [];
-      a.points.forEach((pt, k) => {
-        const [x, y] = projection(pt[0], pt[1]);
-        if (!(x >= 0 && x <= graphWidth && y >= 0 && y <= graphHeight) && a.cells[k] !== -1) return;
-        const c = a.cells[k] === -1 ? -1 : findCell(x, y);
-        if (cells.length && cells[cells.length - 1] === c) return;
-        cells.push(c);
-        points.push([rn(x, 2), rn(y, 2)]);
-      });
-      if (cells.filter(c => c >= 0).length < 2) continue; // too short now: keep Resample's line
-      // a finer grid puts anchors more than one new cell apart: join them through the cells between
-      riverGapCells += fillRiverGaps(cells, points);
-      for (const c of cells) if (c >= 0 && R && !R[c]) R[c] = r.i;
-      Object.assign(r, { cells, points, source: cells[0], mouth: cells.at(-2) ?? cells[0] });
-      if (typeof a.length === "number") r.length = a.length;
-      n++;
+    // loops cut out: back at a cell, the path goes on from its first visit
+    const at = new Map();
+    const path = [];
+    for (const r of runs) {
+      const k = at.get(r.c);
+      if (k !== undefined) {
+        for (const x of path.splice(k + 1)) at.delete(x.c);
+        continue;
+      }
+      at.set(r.c, path.length);
+      path.push(r);
     }
-    return n;
+    runs = path;
+    const isWater = c => C.h[c] < 20;
+    // the source: a lake outlet starts in its lake (one water cell), any other river on land
+    const firstLand = runs.findIndex(r => !isWater(r.c));
+    if (firstLand < 0) return null;
+    if (water[0]) {
+      runs = runs.slice(Math.max(0, firstLand - 1));
+      if (!isWater(runs[0].c)) {
+        const lake = C.c[runs[0].c].find(c => isWater(c) && !runs.some(r => r.c === c));
+        if (lake !== undefined) runs.unshift({ c: lake, s: [] });
+      }
+    } else runs = runs.slice(firstLand);
+    // the end
+    const free = c => !isWater(c) && (!owner[c] || owner[c] === plan.i);
+    // the walk to a river's end goes round other rivers, else (a short one) across them
+    const reach = goal => {
+      const from = runs[runs.length - 1].c;
+      const on = new Set(runs.map(r => r.c)); // never back over its own course
+      const ok = c => !on.has(c) && goal(c);
+      const ext = walkTo(from, ok, c => !on.has(c) && free(c));
+      return ext.length ? ext : walkTo(from, ok, c => !on.has(c) && !isWater(c), 6);
+    };
+    let end = plan.end;
+    let extended = 0;
+    if (end === "edge" && isWater(runs[runs.length - 1].c)) end = "water"; // the map edge is sea now
+    if (end === "water") {
+      let e = runs.length;
+      while (e > 0 && isWater(runs[e - 1].c)) e--;
+      if (e < runs.length) runs = runs.slice(0, e + 1);
+      else {
+        const ext = reach(isWater);
+        extended += ext.length;
+        runs.push(...ext.map(c => ({ c, s: [] })));
+      }
+    } else if (end === "join") {
+      let e = runs.findIndex(r => onJoin(r.c) && r.s.some(t => S[t][2] === finalSeg));
+      if (e < 0) e = runs.findIndex(r => onJoin(r.c));
+      if (e >= 0) runs = runs.slice(0, e + 1);
+      else {
+        const ext = reach(c => onJoin(c) && !isWater(c));
+        extended += ext.length;
+        runs.push(...ext.map(c => ({ c, s: [] })));
+      }
+    } else if (end === "edge" && !C.b[runs[runs.length - 1].c]) {
+      const ext = reach(c => !!C.b[c] && !isWater(c));
+      extended += ext.length;
+      runs.push(...ext.map(c => ({ c, s: [] })));
+    }
+    if (runs.length < 2 && end !== "edge") return null;
+    out.extended = extended;
+    // one control point per cell on the old line (its middle sample), the old flux along it
+    // (never falling downstream on land; a lake on the way resets it, as its outflow does)
+    let f = 0;
+    const course = runs.map(r => {
+      let x;
+      let y;
+      if (r.s.length) {
+        [x, y] = S[r.s[r.s.length >> 1]];
+        for (const t of r.s) f = Math.max(f, S[t][3]);
+      } else [x, y] = C.p[r.c];
+      const here = f;
+      if (isWater(r.c)) f = 0;
+      return { c: r.c, x: rn(x, 2), y: rn(y, 2), f: here };
+    });
+    if (end === "edge") {
+      const [ex, ey] = pts[A - 1];
+      course.push({ c: -1, x: rn(ex, 2), y: rn(ey, 2), f });
+    }
+    out.end = end;
+    return course;
   }
+
+  /**
+   * After Resample.restoreRivers (identity projection): every river traced again on the new
+   * cells, then cells.r, cells.conf and cells.fl rebuilt from the paths. Returns the counts.
+   */
+  function retraceRivers(report) {
+    const plan = riverPlan;
+    if (!plan) return;
+    const C = pack.cells;
+    const n = C.i.length;
+    const byId = new Map((pack.rivers || []).map(r => [r.i, r]));
+    // a river after the one it flows into
+    const order = [];
+    const seen = new Set();
+    const visit = id => {
+      if (seen.has(id)) return;
+      seen.add(id);
+      const p = plan.plans.get(id);
+      if (p?.joinTo && plan.plans.has(p.joinTo)) visit(p.joinTo);
+      order.push(id);
+    };
+    for (const id of [...plan.plans.keys()].sort((a, b) => a - b)) visit(id);
+    const owner = new Uint16Array(n);
+    const stamp = new Int32Array(n);
+    const traced = new Map(); // id -> {path, end}
+    const st = { retraced: 0, extended: 0, kept: 0 };
+    const io = { tick: 0 };
+    for (const id of order) {
+      const r = byId.get(id);
+      if (!r) continue;
+      const pl = plan.plans.get(id);
+      const into = pl.joinTo ? (traced.get(pl.joinTo)?.path.map(p => p.c) ?? byId.get(pl.joinTo)?.cells) : null;
+      io.joinCells = into ? new Set(into.filter(c => c >= 0)) : null;
+      const path = traceRiver(pl, owner, stamp, io);
+      if (!path) {
+        // too short to trace now (lowering the density): Resample's line, one point per cell
+        st.kept++;
+        const keep = r.cells.map((c, k) => k === 0 || c !== r.cells[k - 1]);
+        if (Array.isArray(r.points) && r.points.length === r.cells.length)
+          r.points = r.points.filter((_, k) => keep[k]);
+        r.cells = r.cells.filter((_, k) => keep[k]);
+        for (const c of r.cells.slice(0, -1)) if (c >= 0 && !owner[c]) owner[c] = id;
+        continue;
+      }
+      const term = io.end === "water" || io.end === "join" || io.end === "edge";
+      const bodyLen = term ? path.length - 1 : path.length;
+      for (let k = 0; k < bodyLen; k++) if (path[k].c >= 0 && !owner[path[k].c]) owner[path[k].c] = id;
+      traced.set(id, { path, end: io.end });
+      st.retraced++;
+      st.extended += io.extended ? 1 : 0;
+    }
+    // flux: the old flux along each new course; elsewhere on land the nearest old cell off the
+    // rivers (Resample copied the old river cells' flux to every new cell near the old course)
+    if (plan.dry.length) {
+      const untraced = new Set();
+      for (const r of byId.values()) if (!traced.has(r.i)) for (const c of r.cells) untraced.add(c);
+      const q = d3.quadtree(
+        plan.dry,
+        d => d[0],
+        d => d[1]
+      );
+      for (const i of C.i) if (C.h[i] >= 20 && !untraced.has(i)) C.fl[i] = q.find(C.p[i][0], C.p[i][1])?.[2] ?? C.fl[i];
+    }
+    C.r = new Uint16Array(n);
+    C.conf = new Uint8Array(n);
+    const ids = [...byId.keys()].sort((a, b) => a - b);
+    const terminals = [];
+    for (const id of ids) {
+      const r = byId.get(id);
+      const t = traced.get(id);
+      if (!t) {
+        for (const c of r.cells) if (c >= 0 && C.h[c] >= 20 && !C.r[c]) C.r[c] = id;
+        continue;
+      }
+      const { path, end } = t;
+      const term = end === "water" || end === "join" || end === "edge";
+      for (let k = 0; k < path.length; k++) {
+        const { c, f } = path[k];
+        if (c < 0 || C.h[c] < 20) continue;
+        if (term && k === path.length - 1) {
+          terminals.push({ c, id, pre: path[k - 1]?.c });
+          continue;
+        }
+        if (!C.r[c]) C.r[c] = id;
+        else C.conf[c] = Math.max(C.conf[c], 1);
+        C.fl[c] = Math.max(C.fl[c], Math.min(65535, Math.round(f)));
+      }
+      // a tributary's last point is its parent's point there, so the two lines meet
+      const joined = end === "join" ? traced.get(plan.plans.get(id).joinTo)?.path : null;
+      const meet = joined?.find(p => p.c === path[path.length - 1].c);
+      if (meet) Object.assign(path[path.length - 1], { x: meet.x, y: meet.y });
+      Object.assign(r, {
+        cells: path.map(p => p.c),
+        points: path.map(p => [p.x, p.y])
+      });
+    }
+    // confluences: the tributary's last cell is on the river it joins; conf as the generator sums the lesser inflows
+    for (const { c, id, pre } of terminals) {
+      if (!C.r[c]) C.r[c] = id;
+      else C.conf[c] = Math.min(255, C.conf[c] + Math.max(1, pre >= 0 ? C.fl[pre] : 1));
+    }
+    const scaleW = ((plan.cellsDesired || grid.cellsDesired) / grid.cellsDesired) ** 0.25;
+    for (const r of byId.values()) {
+      if (!traced.has(r.i)) continue;
+      r.source = r.cells[0];
+      r.mouth = r.cells.at(-2) ?? r.cells[0];
+      if (typeof r.widthFactor === "number") r.widthFactor = rn(r.widthFactor * scaleW, 2);
+      try {
+        const meandered = Rivers.addMeandering(r.cells, r.points);
+        r.length = Rivers.getApproximateLength(meandered.map(([x, y]) => [x, y]));
+        r.discharge = C.fl[r.mouth] || r.discharge;
+        r.width = Rivers.getWidth(
+          Rivers.getOffset({
+            flux: r.discharge,
+            pointIndex: meandered.length,
+            widthFactor: r.widthFactor,
+            startingWidth: r.sourceWidth
+          })
+        );
+      } catch {}
+    }
+    // parent and basin as they were (Resample re-derives them: a main river's parent 0 becomes its own id)
+    for (const r of byId.values()) {
+      const p = plan.plans.get(r.i);
+      if (!p) continue;
+      if (p.parent !== undefined) r.parent = p.parent;
+      if (p.basin !== undefined) r.basin = p.basin;
+    }
+    report.rivers = { retraced: st.retraced };
+    if (st.extended) report.rivers.extendedToTheirEnd = st.extended;
+    if (st.kept) report.rivers.tooShortKeptAsMapped = st.kept;
+  }
+
+  // ---------------------------------------------------------------- biomes (re-derived)
+
+  /**
+   * On the old map: each land cell's biome and why it would be kept by the biomes track's
+   * keepPainted rule (1 custom biome, 2 painted: differs from the biome its climate gives, 0 not
+   * kept). Biomes.define() is run on a copy to know the climate biome; the map is unchanged.
+   */
+  function captureBiomes() {
+    const C = pack.cells;
+    const saved = C.biome;
+    let derived;
+    try {
+      Biomes.define();
+      derived = C.biome;
+    } finally {
+      C.biome = saved;
+    }
+    const first = Biomes.getDefault().i.length;
+    const wet = []; // river cells
+    const dry = [];
+    for (const i of C.i)
+      if (C.h[i] >= 20) {
+        const b = saved[i];
+        (C.r[i] ? wet : dry).push([C.p[i][0], C.p[i][1], b, b >= first ? 1 : b !== derived[i] ? 2 : 0]);
+      }
+    return { wet, dry, spacing: grid.spacing, done: false };
+  }
+
+  /**
+   * On the new cells (rivers already traced): biomes from the new heights, temperature,
+   * precipitation and rivers (Biomes.define, as a recalculation does), except where the nearest
+   * old land cell had a custom biome ('redefine' and 'climate') or a painted one ('redefine'):
+   * those cells carry it. A river cell looks at the old river cells, any other cell at the old
+   * cells off the rivers: an old river cell's biome came from its river, and the new cells
+   * beside the (narrower) new course belong to the land around it, painted or not.
+   * Counts land cells by origin and how many differ from a plain carry-over.
+   */
+  function redefineBiomes(cap, mode, report) {
+    const C = pack.cells;
+    const carried = C.biome; // Resample's: the nearest old land cell's biome
+    Biomes.define();
+    const next = C.biome;
+    const tree = list =>
+      list.length
+        ? d3.quadtree(
+            list,
+            d => d[0],
+            d => d[1]
+          )
+        : null;
+    const qWet = tree(cap.wet);
+    const qDry = tree(cap.dry);
+    const qAll = tree([...cap.wet, ...cap.dry]);
+    const near = 2 * cap.spacing;
+    const keepWhy = mode === "climate" ? 1 : 2;
+    const out = { mode, redefined: 0, carriedCustom: 0, carriedPainted: 0, changed: 0 };
+    for (const i of C.i) {
+      if (C.h[i] < 20) continue;
+      const [x, y] = C.p[i];
+      const o = (C.r[i] ? qWet : qDry)?.find(x, y, near) ?? qAll?.find(x, y);
+      if (o?.[3] && o[3] <= keepWhy) {
+        next[i] = o[2];
+        if (o[3] === 1) out.carriedCustom++;
+        else out.carriedPainted++;
+      } else out.redefined++;
+      if (next[i] !== carried[i]) out.changed++;
+    }
+    cap.done = true;
+    report.biomes = out;
+  }
+
   let parentQ = null;
   /** Nearest old pack cell to (x, y) in old coordinates. */
   function parentCellAt(parentMap, x, y) {
@@ -1582,7 +2017,7 @@
   }
 
   /** Instance overrides on window.Resample for one process() call; returns the undo. */
-  function patchResample(P, report) {
+  function patchResample(P, report, biomeCap) {
     const R = Resample;
     for (const k of [
       "resamplePrimaryGridData",
@@ -1623,6 +2058,8 @@
       // treasuries); burg treasuries are a running total (each run adds to them), so they stay
       const origEconomy = R.restoreEconomy;
       own.restoreEconomy = function (parentMap, ...rest) {
+        // the economy reads the biomes (production), so they are re-derived first
+        if (biomeCap) redefineBiomes(biomeCap, P.biomes, report);
         collectAreaStats(); // state taxes read the state populations
         origEconomy.call(this, parentMap, ...rest);
         let kept = 0;
@@ -1639,13 +2076,13 @@
     if (typeof R.saveRiversData === "function" && typeof R.restoreRivers === "function") {
       const origSave = R.saveRiversData;
       own.saveRiversData = function (rivers) {
-        saveRiverAnchors(rivers);
+        captureRivers(rivers);
         return origSave.call(this, rivers);
       };
       const origRivers = R.restoreRivers;
       own.restoreRivers = function (riversData, projection, ...rest) {
         origRivers.call(this, riversData, projection, ...rest);
-        report.riversReanchored = reanchorRivers(projection);
+        retraceRivers(report);
       };
     }
     const origRoutes = R.restoreRoutes;
@@ -1666,7 +2103,7 @@
         else delete R[k];
       }
       parentQ = null;
-      riverAnchors = null;
+      riverPlan = null;
     };
   }
 
@@ -1716,7 +2153,8 @@
       spacing: { now: grid.spacing, after: P.shape.spacing },
       heights: P.heights,
       ice: P.iceMode,
-      relief: P.relief
+      relief: P.relief,
+      biomes: P.biomes
     };
     if (a.phase !== "apply") {
       if (!a.dryRun) return { phase: "validate", ...plan, warnings: P.warnings }; // apply follows
@@ -1740,9 +2178,10 @@
     const before = inventory();
     const keep = capture();
     const reliefEx = captureReliefExclusion();
+    const biomeCap = P.biomes === "keep" ? null : captureBiomes();
     if (typeof closeDialogs === "function") closeDialogs();
     setDensity(P.want);
-    const unpatch = patchResample(P, report);
+    const unpatch = patchResample(P, report, biomeCap);
     try {
       undraw();
       notes = keep.notes; // undraw() empties notes; process() carries them over from here
@@ -1753,6 +2192,7 @@
     } finally {
       unpatch();
     }
+    if (biomeCap && !biomeCap.done) redefineBiomes(biomeCap, P.biomes, report); // a build without restoreEconomy
     // before the redraw, so relief:'redraw' (and a reliefOnLoad map's next draw) leaves it out
     const reliefExclusion = remapReliefExclusion(reliefEx);
     // a map that draws its relief icons on load (reliefOnLoad, bridge-ext/relief.js) saves none:
@@ -1847,22 +2287,24 @@
       );
     if (cmp.wet.length)
       warnings.push(`${cmp.wet.length} marker(s) on land before now sit on water (the coast moved): ${names(cmp.wet)}`);
-    if (riverGapCells) fixed.riverGapCellsFilled = riverGapCells;
     if (after.feats.oceans > before.feats.oceans)
       warnings.push(
         `${after.feats.oceans - before.feats.oceans} new ocean feature(s) (${before.feats.oceans} -> ${after.feats.oceans}): heights interpolated next to the map edge or a coast dipped under 20; find {type:'feature', where:{type:'ocean'}} lists them, paint_cells height fills a sliver`
       );
-    // biomes move with the cells (each new cell takes its old cell's biome), not from the climate
-    let biomeNote;
-    if (P.biomes === "redefine" && T.settings?.recalculate) {
-      const r = await T.settings.recalculate("biomes", false, true);
-      biomeNote = `biomes re-derived from the climate on the new cells (${r.biomeCellsChanged ?? 0} cells changed; custom-biome cells kept, hand-painted standard-biome cells replaced)`;
-      regenerated.push(biomeNote);
-    } else {
+    if (report.rivers)
+      regenerated.push(
+        "rivers traced again as contiguous paths of new cells along their old lines (ids, names, parents and confluences kept; cells.r, flux, source, mouth, length and width recomputed)"
+      );
+    if (report.biomes)
+      regenerated.push(
+        `biomes re-derived from the climate on the new cells, except custom${P.biomes === "redefine" ? " and painted" : ""} biomes, carried by nearest old cell (counts in biomes)`
+      );
+    else {
+      // biomes move with the cells (each new cell takes its old cell's biome), not from the climate
       const stale = T.settings?.replacesReport?.("biomes")?.replaces?.biomeCellsEdited;
       if (stale)
         warnings.push(
-          `biomes were carried over by position, so ${stale} cell(s) differ from what the climate gives on the new cells (old cell edges show at the finer grid, and hand-painted cells count too): regrid {biomes:'redefine'} next time, or edit {type:'map', recalculate:'biomes', dryRun:true} then without dryRun (replaces hand-painted standard-biome cells; custom biomes kept)`
+          `biomes were carried over by position (biomes:'keep'), so ${stale} cell(s) differ from what the climate gives on the new cells (old cell edges show at the finer grid, and hand-painted cells count too): regrid {biomes:'redefine'} next time, or regenerate {parts:['biomes']} (keeps custom and painted cells)`
         );
     }
     if (report.newLakesNamed?.length)
@@ -1902,6 +2344,8 @@
       landPct: { before: before.landPct, after: after.landPct },
       heights,
       entities: cmp.entities,
+      ...(report.rivers ? { rivers: report.rivers } : {}),
+      biomes: report.biomes ?? { mode: "keep" },
       fixed,
       layers: {
         keptEmpty: layers.keptEmpty,

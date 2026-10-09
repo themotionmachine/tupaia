@@ -170,10 +170,12 @@ Token economy (results are counts first; ask for detail only when needed):
    `recalculate:'climate'` alone leaves rivers and biomes alone; without recalculate read
    `stale`. `flow` lengths use the current distance scale, so run it after this step to read
    them in the new units.
-7. More cells: `regrid {density:6, biomes:'redefine', dryRun:true}` (check `bytes.est`,
-   `atRisk`), then apply and screenshot the coast. River gaps are filled
-   (`fixed.riverGapCellsFilled`); `lint {checks:['river-gap']}` and its `fixAll` reroute any left.
-   Without `biomes:'redefine'` the old biome pattern stays (a warning gives the stale count).
+7. More cells: `regrid {density:6, dryRun:true}` (check `bytes.est`, `atRisk`), then apply and
+   screenshot the coast and a river mouth. Rivers are traced again as contiguous cell paths
+   along their old lines (ids, names, parents, confluences kept; `rivers.retraced`), so lint
+   river-gap/river-loop stay clean. Biomes are re-derived from the climate on the new cells,
+   custom and painted ones carried where they were (`biomes`: redefined, carriedCustom,
+   carriedPainted); `biomes:'climate'` carries custom only, `'keep'` the old pattern (warns).
 8. `lint` (markers on new water, route links), then `screenshot {full:true}`.
 
 **Wipe the random base and build from a spec.**
@@ -399,8 +401,8 @@ save, discarding a saved sketch, and promote need the live-mode server.
 - Freehand routes are locked; `regenerate routes` keeps them but renumbers every locked route
   (use `routeIds`). An edited generated route needs `lock:true` to survive.
 - After a risk rebuild (set_heights, paint_cells height risk) or regrid, run `lint`: markers can
-  sit on new water (route points are re-recorded to their cells: `carried.routePointsRepointed`),
-  and regrid can leave river cell lists with gaps (`river-gap`: its fixAll reroutes them).
+  sit on new water (route points are re-recorded to their cells: `carried.routePointsRepointed`).
+  A river cell list with gaps (`river-gap`, after an eval edit say) has a fixAll that reroutes it.
 - `paint_cells`: an unknown key in select/where/set is BAD_FIELD, never ignored; select has
   `buffer` (px) and `except` (another select). A feather narrower than one cell does nothing.
 - Biomes cannot be removed (repaint their cells). `clear` keeps locked entities (freehand routes)

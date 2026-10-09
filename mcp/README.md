@@ -106,7 +106,9 @@ What the newer tools and fields replaced (all one undo entry each, all dryRun-ab
 - `compact` and `compact:true` on save_map/shared_save/sketch save/sketch_promote (removed
   records become `{i, removed:true}` stubs; the shared v7 map: 697,400 B, about 15%, smaller).
 - `regrid {density}` changes the cell density and keeps the map id (shared lineage), names,
-  notes and labels. App hook: `Resample.process({keepId})`.
+  notes and labels; rivers are traced again as contiguous cell paths along their old lines and
+  biomes re-derived from the climate (custom and painted ones carried). App hook:
+  `Resample.process({keepId})`.
 - `apply` (declarative spec, `mode:'check'|'upsert'|'update'`, idempotent) and `lint` (23 checks
   with ready fix calls).
 
