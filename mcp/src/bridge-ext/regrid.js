@@ -61,7 +61,10 @@
     const n = Number(v);
     if (Number.isInteger(n) && n >= 1 && n <= 13) return DENSITY[n];
     if (Number.isInteger(n) && n >= 1000 && n <= 100000) return n;
-    return fail("BAD_ARGS", "density is the Options cells density: a slider position 1-13 or a points count 1000-100000");
+    return fail(
+      "BAD_ARGS",
+      "density is the Options cells density: a slider position 1-13 or a points count 1000-100000"
+    );
   }
 
   function sliderOf(cellsDesired) {
@@ -89,7 +92,23 @@
   const PACK_EXPONENT = { 12: 0.6, 32: 0.5 };
   const SVG_LINE = 5;
   const SVG_EXPONENT = { terrs: 0.73, terrain: 0.37, rivers: 0.4, cells: 1 };
-  for (const id of ["biomes", "regions", "provs", "cults", "relig", "borders", "ocean", "coastline", "lakes", "zones", "ice", "landmass", "temperature", "prec", "population"])
+  for (const id of [
+    "biomes",
+    "regions",
+    "provs",
+    "cults",
+    "relig",
+    "borders",
+    "ocean",
+    "coastline",
+    "lakes",
+    "zones",
+    "ice",
+    "landmass",
+    "temperature",
+    "prec",
+    "population"
+  ])
     SVG_EXPONENT[id] = 0.6;
 
   async function bytesEstimate(gridRatio, packRatio) {
@@ -146,7 +165,8 @@
       warnings.push(
         "lowering the density merges cells: burgs that end in one cell are moved to a free neighbour (or lost if there is none), and islands, lakes and zones smaller than a new cell can vanish"
       );
-    if (want > 50000) warnings.push("over 50K cells the app gets slow to draw and edit (the Options slider marks it red)");
+    if (want > 50000)
+      warnings.push("over 50K cells the app gets slow to draw and edit (the Options slider marks it red)");
     return { want, shape, heights, iceMode, gridNow, packNow, packEst, warnings };
   }
 
@@ -193,7 +213,8 @@
     inv.route = new Map();
     for (const r of pack.routes || []) if (isLive(r)) inv.route.set(r.i, { name: I.nameOf("route", r) });
     inv.marker = new Map();
-    for (const m of pack.markers || []) if (isLive(m)) inv.marker.set(m.i, { name: I.nameOf("marker", m), x: m.x, y: m.y });
+    for (const m of pack.markers || [])
+      if (isLive(m)) inv.marker.set(m.i, { name: I.nameOf("marker", m), x: m.x, y: m.y });
     inv.zone = new Map();
     for (const z of pack.zones || []) if (isLive(z)) inv.zone.set(z.i, { name: z.name, area: zoneArea(z) });
     inv.label = new Map();
@@ -600,7 +621,11 @@
     const nearestLand = g => qLand.find(...inverse(grid.points[g][0], grid.points[g][1]));
     const fields = AREA_FIELDS.filter(k => PC[k]);
     const areaAlive = fields.map(() => new Set());
-    const markAlive = s => fields.forEach((k, j) => areaAlive[j].add(PC[k][s]));
+    const markAlive = s => {
+      fields.forEach((k, j) => {
+        areaAlive[j].add(PC[k][s]);
+      });
+    };
     for (let g = 0; g < n; g++) {
       if (!cls[g]) continue;
       const s = nearestLand(g);
@@ -806,7 +831,8 @@
     grid.cells.h = new Uint8Array(n);
     for (let g = 0; g < n; g++) {
       if (cls[g]) {
-        const v = forcedH[g] >= 20 ? forcedH[g] : hLand[g] >= 0 ? Math.round(hLand[g]) : fallbackH[g] >= 20 ? fallbackH[g] : 20;
+        const v =
+          forcedH[g] >= 20 ? forcedH[g] : hLand[g] >= 0 ? Math.round(hLand[g]) : fallbackH[g] >= 20 ? fallbackH[g] : 20;
         grid.cells.h[g] = Math.min(100, Math.max(20, v));
       } else {
         const fb = fallbackH[g] >= 0 && fallbackH[g] < 20 ? fallbackH[g] : 18;
@@ -834,7 +860,20 @@
     }
     grid.cells.temp = temp;
     grid.cells.prec = prec;
-    report.heights = { method: "interpolate", samples: m, claimed, forced, keptAreas, rejoined: joined, dropped, separated, spurious, dams, carved, outsideHull: outside };
+    report.heights = {
+      method: "interpolate",
+      samples: m,
+      claimed,
+      forced,
+      keptAreas,
+      rejoined: joined,
+      dropped,
+      separated,
+      spurious,
+      dams,
+      carved,
+      outsideHull: outside
+    };
   }
 
   /** The cell within `maxDepth` rings of `start` that passes `ok` and is closest to (x, y), or -1. */
@@ -886,7 +925,7 @@
     const rehoused = [];
     const portsMoved = [];
     for (const pb of parentMap.pack.burgs) {
-      if (!pb || !pb.i || pb.removed) continue;
+      if (!pb?.i || pb.removed) continue;
       const b = pack.burgs[pb.i];
       if (!b) continue;
       const coastalPort = !!(pb.port && PH?.[pb.cell]);
@@ -1073,9 +1112,9 @@
     const owners = new Map();
     (parentMap.pack.zones || []).forEach((z, k) => {
       for (const c of z.cells || []) {
-        let a = owners.get(c);
-        if (!a) owners.set(c, (a = []));
-        a.push(k);
+        const a = owners.get(c);
+        if (a) a.push(k);
+        else owners.set(c, [k]);
       }
     });
     const lists = (parentMap.pack.zones || []).map(() => []);
@@ -1135,7 +1174,10 @@
       "restoreRoutes"
     ])
       if (typeof R[k] !== "function")
-        fail("PAGE_ERROR", `the app's Resample has no ${k}(); this bridge needs a matching build (CF_BUILD=1 npx vite build)`);
+        fail(
+          "PAGE_ERROR",
+          `the app's Resample has no ${k}(); this bridge needs a matching build (CF_BUILD=1 npx vite build)`
+        );
     const own = {};
     if (P.heights === "interpolate")
       own.resamplePrimaryGridData = parentMap => interpolateGrid(parentMap, IDENTITY, IDENTITY, report);
@@ -1221,7 +1263,10 @@
         const c = e.type === "iceberg" ? keep.icebergCenters.get(e.i) : null;
         return c ? { ...e, cellId: findGridCell(c[0], c[1]) } : e;
       });
-    } else regenerated.push(`ice (${generatedIce} pieces from the new temperatures; the old ${keep.ice.length} were dropped)`);
+    } else
+      regenerated.push(
+        `ice (${generatedIce} pieces from the new temperatures; the old ${keep.ice.length} were dropped)`
+      );
     // Resample removes a state/province/culture/religion that has no cells; one that had none
     // before (a folk religion absorbed by another, say) is the same entity still: put it back
     const lists = Object.fromEntries(AREA_LISTS().map(([type, list]) => [type, list]));
@@ -1274,11 +1319,17 @@
     if (report.portsWithoutWater?.length)
       warnings.push(`port burg(s) with no water next to them now: ${report.portsWithoutWater.slice(0, 10).join(", ")}`);
     if (report.newLakesNamed?.length)
-      regenerated.push(`${report.newLakesNamed.length} new lake(s) with no old counterpart, named: ${report.newLakesNamed.slice(0, 5).join(", ")}`);
+      regenerated.push(
+        `${report.newLakesNamed.length} new lake(s) with no old counterpart, named: ${report.newLakesNamed.slice(0, 5).join(", ")}`
+      );
     if (P.iceMode === "keep" && keep.ice.length)
-      warnings.push("ice was kept as drawn: glacier outlines follow the old cell edges (ice:'regenerate' redraws them)");
+      warnings.push(
+        "ice was kept as drawn: glacier outlines follow the old cell edges (ice:'regenerate' redraws them)"
+      );
     for (const [type, list] of Object.entries(cmp.lostAll))
-      warnings.push(`${list.length} ${type}(s) lost: ${list.slice(0, 10).join(", ")}${list.length > 10 ? ", ..." : ""}`);
+      warnings.push(
+        `${list.length} ${type}(s) lost: ${list.slice(0, 10).join(", ")}${list.length > 10 ? ", ..." : ""}`
+      );
     if (cmp.namedLost.length) warnings.push(`feature names lost: ${cmp.namedLost.slice(0, 10).join(", ")}`);
     const { prepareMapData } = await lazy.save();
     return {

@@ -21,6 +21,10 @@ import {
 
 type Obj = Record<string, any>;
 
+/** h.ok with a loosely typed body (these tests read nested fields). */
+const ok = (h: Harness, name: string, args: Obj = {}, timeoutMs?: number) =>
+  h.ok(name, args, timeoutMs) as Promise<Obj>;
+
 const LOCAL_ENTRY = /src="\/(index-[^"]+\.js)"/.exec(
   fs.readFileSync(path.join(REPO_ROOT, "dist", "index.html"), "utf8")
 )?.[1];
@@ -43,10 +47,10 @@ describe("regrid on demo.map (local)", () => {
 
   before(async () => {
     h = await startServer({ TUPAIA_UNDO_DEPTH: "10" });
-    await h.ok("load_map", { path: DEMO_MAP });
-    const l = await h.ok("add", { type: "label", items: [{ at: { x: 700, y: 400 }, text: "Regrid label" }] });
+    await ok(h, "load_map", { path: DEMO_MAP });
+    const l = await ok(h, "add", { type: "label", items: [{ at: { x: 700, y: 400 }, text: "Regrid label" }] });
     labelId = String((l.created as Obj[])[0].i);
-    before0 = (await h.ok("eval", { code: PAGE_STATE, readOnly: true })).value as Obj;
+    before0 = (await ok(h, "eval", { code: PAGE_STATE, readOnly: true })).value as Obj;
   });
 
   after(async () => {
@@ -54,7 +58,7 @@ describe("regrid on demo.map (local)", () => {
   });
 
   test("dryRun estimates cells and file size and changes nothing", async () => {
-    const r = await h.ok("regrid", { density: 20000, dryRun: true });
+    const r = await ok(h, "regrid", { density: 20000, dryRun: true });
     assert.equal(r.dryRun, true);
     assert.equal(r.cells.now, before0.cells);
     assert.ok(r.cells.est > 11000 && r.cells.est < 16000, `est ${r.cells.est}`);
@@ -63,9 +67,9 @@ describe("regrid on demo.map (local)", () => {
     assert.deepEqual(r.density, { now: 4, after: 5 });
     assert.ok(r.bytes.est > r.bytes.now, JSON.stringify(r.bytes));
     assert.ok(r.bytes.est < 64_000_000);
-    const now = (await h.ok("eval", { code: PAGE_STATE, readOnly: true })).value as Obj;
+    const now = (await ok(h, "eval", { code: PAGE_STATE, readOnly: true })).value as Obj;
     assert.equal(now.digest, before0.digest);
-    const slider = await h.ok("regrid", { density: 6, dryRun: true });
+    const slider = await ok(h, "regrid", { density: 6, dryRun: true });
     assert.equal(slider.cellsDesired.after, 30000);
   });
 
@@ -75,12 +79,12 @@ describe("regrid on demo.map (local)", () => {
     assert.match(errorBody(same).error.message, /already/);
     const odd = await h.call("regrid", { density: 500 });
     assert.equal(errorBody(odd).error.code, "BAD_ARGS");
-    const now = (await h.ok("eval", { code: PAGE_STATE, readOnly: true })).value as Obj;
+    const now = (await ok(h, "eval", { code: PAGE_STATE, readOnly: true })).value as Obj;
     assert.equal(now.digest, before0.digest);
   });
 
   test("apply 20K: same map id and seed, every entity kept, lakes and islands kept with their names", async () => {
-    applied = await h.ok("regrid", { density: 20000 }, 300_000);
+    applied = await ok(h, "regrid", { density: 20000 }, 300_000);
     assert.equal(applied.cells.before, before0.cells);
     assert.ok(applied.cells.after > 12000, JSON.stringify(applied.cells));
     assert.equal(applied.gridCells.after > 19000, true);
@@ -100,14 +104,14 @@ describe("regrid on demo.map (local)", () => {
     assert.ok(Array.isArray(applied.regenerated));
     assert.ok(!(applied.warnings as string[]).some(w => /predates/.test(w)), "the dist keeps the map id itself");
     assert.match(String(applied.lineage), /unchanged: origin 'file'/);
-    const now = (await h.ok("eval", { code: PAGE_STATE, readOnly: true })).value as Obj;
+    const now = (await ok(h, "eval", { code: PAGE_STATE, readOnly: true })).value as Obj;
     assert.equal(now.mapId, before0.mapId);
     assert.equal(now.seed, before0.seed);
     assert.equal(now.cells, applied.cells.after);
     assert.equal(now.notes, before0.notes);
     assert.equal(now.burgNames, before0.burgNames);
     // the label is still drawn on its path
-    const lab = await h.ok("eval", {
+    const lab = await ok(h, "eval", {
       code: `const t = document.getElementById(args.id); return t ? t.textContent : null;`,
       args: { id: labelId },
       readOnly: true
@@ -116,42 +120,42 @@ describe("regrid on demo.map (local)", () => {
   });
 
   test("details lists moved burgs; save and reload keep the new grid", async () => {
-    const saved = await h.ok("save_map", { path: "regrid-20k.map", overwrite: true });
-    await h.ok("load_map", { path: saved.path as string });
-    const now = (await h.ok("eval", { code: PAGE_STATE, readOnly: true })).value as Obj;
+    const saved = await ok(h, "save_map", { path: "regrid-20k.map", overwrite: true });
+    await ok(h, "load_map", { path: saved.path as string });
+    const now = (await ok(h, "eval", { code: PAGE_STATE, readOnly: true })).value as Obj;
     assert.equal(now.cells, applied.cells.after);
     assert.equal(now.burgNames, before0.burgNames);
     assert.equal(now.notes, before0.notes);
   });
 
   test("one undo entry returns to the previous grid", async () => {
-    await h.ok("load_map", { path: DEMO_MAP });
-    const start = (await h.ok("eval", { code: PAGE_STATE, readOnly: true })).value as Obj;
-    const r = await h.ok("regrid", { density: 5000, details: true }, 300_000);
+    await ok(h, "load_map", { path: DEMO_MAP });
+    const start = (await ok(h, "eval", { code: PAGE_STATE, readOnly: true })).value as Obj;
+    const r = await ok(h, "regrid", { density: 5000, details: true }, 300_000);
     assert.ok(r.cells.after < r.cells.before);
     assert.ok(Array.isArray(r.entities.burg.movedList), "details:true lists moved burgs");
     assert.ok((r.warnings as string[]).some(w => /lowering the density/.test(w)));
-    await h.ok("snapshot", { action: "undo" }, 240_000);
-    const back = (await h.ok("eval", { code: PAGE_STATE, readOnly: true })).value as Obj;
+    await ok(h, "snapshot", { action: "undo" }, 240_000);
+    const back = (await ok(h, "eval", { code: PAGE_STATE, readOnly: true })).value as Obj;
     assert.equal(back.cells, start.cells);
     assert.equal(back.grid, start.grid);
     assert.equal(back.digest, start.digest);
   });
 
   test("in a sketch it is logged as not replayable: blob-only with the reason; undo clears it", async () => {
-    await h.ok("load_map", { path: DEMO_MAP });
-    await h.ok("sketch", { action: "start", slug: "t-regrid" });
-    await h.ok("regrid", { density: 15000 }, 300_000);
-    const st = await h.ok("sketch", { action: "status" });
+    await ok(h, "load_map", { path: DEMO_MAP });
+    await ok(h, "sketch", { action: "start", slug: "t-regrid" });
+    await ok(h, "regrid", { density: 15000 }, 300_000);
+    const st = await ok(h, "sketch", { action: "status" });
     assert.equal(st.blobOnly, true);
     assert.match(JSON.stringify(st.blobOnlyReasons), /regrid rebuilt the cell grid/);
     const log = st.log as Obj[];
     assert.equal(log[log.length - 1].tool, "regrid");
     assert.equal(log[log.length - 1].replayable, false);
-    await h.ok("snapshot", { action: "undo" }, 240_000);
-    const st2 = await h.ok("sketch", { action: "status" });
+    await ok(h, "snapshot", { action: "undo" }, 240_000);
+    const st2 = await ok(h, "sketch", { action: "status" });
     assert.equal(st2.blobOnly, false);
-    await h.ok("sketch", { action: "stop" });
+    await ok(h, "sketch", { action: "stop" });
   });
 });
 
@@ -173,13 +177,13 @@ describe("regrid keeps the shared lineage (live mode, fake Worker)", () => {
 
   let cells = 0;
   test("a regrid of shared v3 in a sketch: lineage kept, shared_save preview shows no lineage warning", async () => {
-    const s = await h.ok("session", { action: "status" });
+    const s = await ok(h, "session", { action: "status" });
     assert.equal((s.map as Obj).origin.sharedVersion, 3);
-    await h.ok("sketch", { action: "start", slug: "denser" });
-    const r = await h.ok("regrid", { density: 20000 }, 300_000);
+    await ok(h, "sketch", { action: "start", slug: "denser" });
+    const r = await ok(h, "regrid", { density: 20000 }, 300_000);
     cells = r.cells.after;
     assert.match(String(r.lineage), /kept: still derived from the shared map v3/);
-    const p = await h.ok("shared_save", {});
+    const p = await ok(h, "shared_save", {});
     assert.equal(p.preview, true);
     assert.equal(p.lineage.related, true, JSON.stringify(p.lineage));
     assert.equal(p.refusalReason, undefined);
@@ -190,17 +194,17 @@ describe("regrid keeps the shared lineage (live mode, fake Worker)", () => {
   });
 
   test("sketch_promote: blob-only with the regrid reason; one PUT with X-Map-Version 3, no overwrite", async () => {
-    const st = await h.ok("sketch", { action: "status" });
+    const st = await ok(h, "sketch", { action: "status" });
     assert.equal(st.blobOnly, true);
     assert.match(JSON.stringify(st.blobOnlyReasons), /regrid rebuilt the cell grid/);
-    const p = await h.ok("sketch_promote", {});
+    const p = await ok(h, "sketch_promote", {});
     assert.equal(p.preview, true);
     assert.equal(p.wouldOverwrite.version, 3);
     assert.equal(p.lineage.related, true);
     assert.equal(p.refusalReason, undefined);
     assert.match(JSON.stringify(p.sketch), /blob-only sketch/);
     fake.clearLog();
-    const r = await h.ok("sketch_promote", { confirm: true, token: p.token });
+    const r = await ok(h, "sketch_promote", { confirm: true, token: p.token });
     assert.deepEqual(writes(), ["PUT /api/map/shared"]);
     const put = fake.writes()[0];
     assert.equal(put.headers["x-map-version"], "3");
@@ -208,8 +212,8 @@ describe("regrid keeps the shared lineage (live mode, fake Worker)", () => {
     assert.equal(r.saved.version, 4);
     assert.equal(fake.row.version, 4);
     // the shared map is now the denser one
-    await h.ok("load_map", { source: "shared" });
-    const n = await h.ok("eval", { code: "return pack.cells.i.length", readOnly: true });
+    await ok(h, "load_map", { source: "shared" });
+    const n = await ok(h, "eval", { code: "return pack.cells.i.length", readOnly: true });
     assert.equal(n.value, cells);
   });
 });
