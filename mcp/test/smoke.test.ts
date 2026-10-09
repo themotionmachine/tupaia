@@ -25,11 +25,13 @@ const ALL_TOOLS = [
   "map_info",
   "find",
   "inspect",
+  "flow",
   "screenshot",
   "display",
   "edit",
   "add",
   "paint_cells",
+  "set_heights",
   "generate_map",
   "regenerate",
   "snapshot",
@@ -1017,7 +1019,7 @@ describe("tupaia-mcp smoke (persistence)", () => {
     if (h && alive(h.pid)) await h.close();
   });
 
-  test("a. exactly the 21 tools; shared writes annotated destructive + open world", async () => {
+  test("a. exactly the ALL_TOOLS tools; shared writes annotated destructive + open world", async () => {
     const { tools } = await h.client.listTools();
     assert.deepEqual(tools.map(t => t.name).sort(), [...ALL_TOOLS].sort());
     for (const t of tools) assert.ok((t.description ?? "").length <= 2048, `${t.name} description too long`);
