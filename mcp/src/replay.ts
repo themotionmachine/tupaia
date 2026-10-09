@@ -16,6 +16,7 @@ import type { CallScope, ToolContext } from "./context.ts";
 import {
   type AddResolved,
   createdBy,
+  createdLists,
   type DisplayResolved,
   type EditResolved,
   type EvalResolved,
@@ -338,9 +339,8 @@ export async function replayOps(
       break;
     }
     const applied = op.tool === "eval" ? r : (takeResolved(out) ?? r);
-    if (op.tool === "add" || ext?.created) {
-      const made = (x: Resolved) => (ext?.created ? ext.created(x) : ((x as AddResolved).created ?? []));
-      const unpaired = pairCreated(res.idMap, made(r), made(applied));
+    if (op.tool === "add" || op.tool === "edit" || ext?.created) {
+      const unpaired = pairCreated(res.idMap, createdLists(op.tool, r), createdLists(op.tool, applied));
       if (unpaired.length)
         res.notes.push(
           `op ${op.seq}: the replay did not create a counterpart for ${unpaired.map(c => `${c.type} ${c.i}`).join(", ")}; ops that use them will conflict`

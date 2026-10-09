@@ -146,7 +146,9 @@
       case "religion":
         return x.culture ?? C.culture[x.center];
       case "river": {
-        const c = (x.cells || []).find(k => k >= 0);
+        // the generator names a river after its mouth's culture (Rivers.getName(mouth))
+        const land = k => Number.isInteger(k) && k >= 0 && C.h[k] >= 20;
+        const c = land(x.mouth) ? x.mouth : (x.cells || []).find(land);
         return c === undefined ? 0 : C.culture[c];
       }
       default:
@@ -202,6 +204,8 @@
 
   /** Replayable value of one checked edit/add field after it was applied to x. */
   function literalValue(key, f, v, x, input) {
+    // a field whose checked value is a plan (bridge-ext) gives its own literal form
+    if (f.literal) return clone(f.literal(v, x, input));
     if (f.isName) return clone(f.get(x));
     if (key === "move") return literalPlace(input, v);
     if (key === "port") return !!v.on;
@@ -897,7 +901,9 @@
     }
     const before = {};
     for (const { key, f } of p.fs) before[key] = clone(f.get(p.entity));
-    const cc = Object.assign(Object.create(c), { set: p.set });
+    // created: entities a field's set() made ({type, i, name?}), e.g. edit river {split}; the
+    // resolved op lists them so replay can map their ids (like add's created)
+    const cc = Object.assign(Object.create(c), { set: p.set, created: [] });
     for (const { f, v } of p.fs) f.set(p.entity, v, cc);
     const after = {};
     for (const { key, f } of p.fs) after[key] = clone(f.get(p.entity));
@@ -907,7 +913,12 @@
     const r = { name: p.name, set: lit, before, after };
     if (type !== "map") r.ref = p.i;
     if (p.ident) r.ident = p.ident;
-    return { index: p.index, i: p.i, name, before, after, _r: r };
+    const row = { index: p.index, i: p.i, name, before, after, _r: r };
+    if (cc.created.length) {
+      r.created = cc.created.map(x => ({ type: x.type, i: x.i }));
+      row.created = clone(cc.created);
+    }
+    return row;
   }
 
   async function runBatch(a, items, prepare, plan, apply, setup) {

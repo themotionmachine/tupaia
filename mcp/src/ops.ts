@@ -101,8 +101,12 @@ export interface EditResolved {
      * for a removal, that nobody changed it since.
      */
     ident?: Record<string, unknown> | null;
+    /** Entities the op created (edit river {split}), for the replay id map. */
+    created?: CreatedRef[];
   }>;
   redraw?: unknown;
+  /** Structural river edits: fingerprint of the cell graph their literal cell lists refer to. */
+  graph?: string;
 }
 
 export interface CreatedRef {
@@ -478,7 +482,8 @@ export function summarizeOp(tool: string, resolved: Resolved | null, out: Row | 
               ? `${k} ${q(o.before[k])} -> ${q(o.after[k])}`
               : `${k} ${q(o.set?.[k])}`
           );
-          return `${who}: ${fields.join(", ")}`;
+          const made = (o.created ?? []).map(c => `${c.type} ${c.i}`);
+          return `${who}: ${fields.join(", ")}${made.length ? ` (created ${made.join(", ")})` : ""}`;
         });
         return `Edited ${listOut(parts)}.`;
       }
@@ -552,14 +557,19 @@ export class Unmapped extends Error {
   }
 }
 
+/** Per item (add) or op (edit), the entities a resolved form says it created. */
+export function createdLists(tool: string, resolved: Resolved): CreatedRef[][] {
+  if (tool === "add") return (resolved as AddResolved).created ?? [];
+  if (tool === "edit") return ((resolved as EditResolved).ops ?? []).map(o => o.created ?? []);
+  const ext = REPLAY_EXT[tool];
+  return ext?.created ? ext.created(resolved) : [];
+}
+
 /** The entities one op created (as "type:id"). */
 export function createdBy(o: OpRecord): string[] {
   if (!o.resolved) return [];
-  const ext = REPLAY_EXT[o.tool];
-  const lists =
-    o.tool === "add" ? ((o.resolved as AddResolved).created ?? []) : ext?.created ? ext.created(o.resolved) : [];
   const out: string[] = [];
-  for (const list of lists) for (const c of list) out.push(`${c.type}:${c.i}`);
+  for (const list of createdLists(o.tool, o.resolved)) for (const c of list) out.push(`${c.type}:${c.i}`);
   return out;
 }
 
