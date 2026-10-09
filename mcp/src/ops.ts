@@ -468,6 +468,17 @@ function listOut(parts: string[], max = 3): string {
 
 type Row = Record<string, unknown>;
 
+/**
+ * Per entity type and edit field: a phrase for the sketch log built from the resolved op (its
+ * literal set value, before/after and created), for fields whose before/after values are opaque
+ * (edit river {mainStem, split, merge, reroute}). Return null to fall back to "field a -> b".
+ * Built from the resolved data only, so a stored record cannot inject free text.
+ */
+export const EDIT_FIELD_SUMMARIES: Record<
+  string,
+  Record<string, (o: EditResolved["ops"][number]) => string | null>
+> = {};
+
 /** One sentence for a recorded call, from the resolved form and the bridge's result rows. */
 export function summarizeOp(tool: string, resolved: Resolved | null, out: Row | null, args?: unknown): string {
   try {
@@ -477,11 +488,19 @@ export function summarizeOp(tool: string, resolved: Resolved | null, out: Row | 
         const parts = r.ops.map(o => {
           const who = r.type === "map" ? "the map" : `${r.type} ${o.name ? `${q(o.name)} ` : ""}(${o.ref})`;
           if (o.remove) return `removed ${who}`;
-          const fields = Object.keys(o.set ?? {}).map(k =>
-            o.before && o.after && k in o.before
+          const fields = Object.keys(o.set ?? {}).map(k => {
+            const say = EDIT_FIELD_SUMMARIES[r.type]?.[k];
+            let said: string | null = null;
+            try {
+              said = say ? say(o) : null;
+            } catch {
+              said = null;
+            }
+            if (said) return said;
+            return o.before && o.after && k in o.before
               ? `${k} ${q(o.before[k])} -> ${q(o.after[k])}`
-              : `${k} ${q(o.set?.[k])}`
-          );
+              : `${k} ${q(o.set?.[k])}`;
+          });
           const made = (o.created ?? []).map(c => `${c.type} ${c.i}`);
           return `${who}: ${fields.join(", ")}${made.length ? ` (created ${made.join(", ")})` : ""}`;
         });
@@ -662,6 +681,9 @@ export function rewriteField(rw: Rewriter, kind: string, v: unknown): unknown {
     case "@noteId":
       return typeof v === "string" ? rw.noteId(v) : v;
     default:
+      // a ref field's literal may carry the ref with a precondition: {ref, ...} (river mainStem)
+      if (v && typeof v === "object" && !Array.isArray(v) && "ref" in v)
+        return { ...(v as Record<string, unknown>), ref: rw.id(kind, (v as { ref: unknown }).ref) };
       return rw.id(kind, v);
   }
 }
