@@ -114,23 +114,39 @@
     }
   }
 
-  /** Lake outlets (where the river leaves the lake) and inlets (where it enters) of re-cut rivers. */
-  function reassignLakes(old, owner) {
+  /**
+   * Lake inlets and outlets of the re-cut rivers `rs` (and of the river ids `gone`), from their
+   * courses as Rivers.generate records them: a river is an inlet of a lake where its course
+   * enters the lake's water from outside, and the outlet where it leaves the lake (a river
+   * crossing a lake is both). Other rivers' entries keep their place.
+   */
+  function refreshLakes(rs, gone, out) {
+    const ids = new Set([...rs.map(r => r.i), ...gone]);
+    const inLake = (c, f) => isWaterCell(c) && pack.cells.f[c] === f;
     for (const f of pack.features || []) {
       if (!f || f.type !== "lake") continue;
-      const pos = (id, entering) => {
-        const list = old.get(id);
-        const hit = k => isWaterCell(list[k]) && pack.cells.f[list[k]] === f.i;
-        if (entering) {
-          for (let k = 0; k < list.length; k++) if (hit(k)) return k;
-          return list.length - 1;
+      const enters = new Set();
+      const exits = [];
+      for (const r of rs)
+        r.cells.forEach((c, k) => {
+          if (!inLake(c, f.i)) return;
+          if (k > 0 && !inLake(r.cells[k - 1], f.i)) enters.add(r.i);
+          if (k < r.cells.length - 1 && !inLake(r.cells[k + 1], f.i) && !exits.includes(r.i)) exits.push(r.i);
+        });
+      const had = Array.isArray(f.inlets) ? f.inlets : [];
+      if (had.some(id => ids.has(id)) || enters.size) {
+        const inlets = had.filter(id => !ids.has(id) || enters.has(id));
+        for (const id of enters) if (!inlets.includes(id)) inlets.push(id);
+        if (inlets.length) f.inlets = inlets;
+        else delete f.inlets;
+      }
+      if (ids.has(f.outlet) && !exits.includes(f.outlet)) {
+        if (exits.length) f.outlet = exits[0];
+        else {
+          out.add(`lake ${f.i} lost its outlet river ${f.outlet}`);
+          delete f.outlet;
         }
-        for (let k = list.length - 1; k >= 0; k--) if (hit(k)) return k;
-        return 0;
-      };
-      if (old.has(f.outlet)) f.outlet = owner(f.outlet, pos(f.outlet, false));
-      if (Array.isArray(f.inlets) && f.inlets.some(id => old.has(id)))
-        f.inlets = [...new Set(f.inlets.map(id => (old.has(id) ? owner(id, pos(id, true)) : id)))];
+      }
     }
   }
 
@@ -324,7 +340,7 @@
     // tributaries of the old upper course follow it to t's id; t's own tributaries now join m
     const owner = (id, k) => (id === m.i && k < plan.k ? t.i : m.i);
     reassignChildren(old, owner, new Set([m.i, t.i]), cc.notes);
-    reassignLakes(old, owner);
+    refreshLakes([m, t], [], cc.notes);
     reown(mOld.concat(tOld));
     restat(m);
     restat(t);
@@ -396,7 +412,7 @@
     const old = new Map([[x.i, xOld]]);
     const owner = (_id, k) => (k < s ? u.i : x.i);
     reassignChildren(old, owner, new Set([x.i, u.i]), cc.notes);
-    reassignLakes(old, owner);
+    refreshLakes([x, u], [], cc.notes);
     reown(xOld);
     restat(x);
     restat(u);
@@ -442,7 +458,7 @@
     document.getElementById(`river${u.i}`)?.remove();
     const old = new Map([[u.i, uOld]]);
     reassignChildren(old, () => p.i, new Set([u.i, p.i]), cc.notes);
-    reassignLakes(old, () => p.i);
+    refreshLakes([p], [u.i], cc.notes);
     reown(uOld);
     restat(p);
     cc.R.add("rivers");
@@ -700,10 +716,6 @@
         propagate(t.r, t.k, delivered, touched);
         markConf(lastOf(x.cells), delivered);
       }
-      if (t.kind === "water" && t.feature?.type === "lake") {
-        const f = t.feature;
-        f.inlets = [...new Set([...(Array.isArray(f.inlets) ? f.inlets : []), x.i])];
-      }
       x.parent = plan.parentAfter;
       setBasin(x, x.parent ? (riverOf(x.parent)?.basin ?? Rivers.getBasin(x.parent)) : x.i);
       followRole(x, wasRoot);
@@ -714,25 +726,16 @@
             : `${tag(x)} now reaches ${t.kind === "edge" ? "the map edge" : "the sea or a lake"} on its own (width factor ${x.widthFactor})`
         );
     }
-    // 5. lakes x no longer touches
-    const lakesOn = new Set(x.cells.filter(isWaterCell).map(c => C.f[c]));
-    for (const f of pack.features || []) {
-      if (!f || f.type !== "lake" || lakesOn.has(f.i)) continue;
-      if (Array.isArray(f.inlets) && f.inlets.includes(x.i)) {
-        f.inlets = f.inlets.filter(id => id !== x.i);
-        if (!f.inlets.length) delete f.inlets;
-      }
-      if (f.outlet === x.i) {
-        delete f.outlet;
-        cc.notes.add(`lake ${f.i} lost its outlet ${tag(x)}`);
-      }
-    }
+    // 5. lakes: x may enter a lake now (a new mouth) or no longer touch one
+    refreshLakes([x, ...carriers.map(o => o.y)], [], cc.notes);
     reown(
       xOld.concat(
         x.cells,
         plan.orphans.flatMap(o => [o.j, o.to])
       )
     );
+    // a new source gets the generator's source width for its flux
+    if (plan.mode === "upper") x.sourceWidth = Rivers.getSourceWidth(C.fl[x.cells[0]]);
     for (const r of touched) restat(r);
     cc.R.add("rivers");
     const added = x.cells.filter(c => isLandCell(c) && !posOld.has(c)).length;

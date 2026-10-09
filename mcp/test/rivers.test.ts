@@ -196,6 +196,24 @@ describe("tupaia-mcp river structure edits", () => {
     assert.equal((await rivers(6))[6].name, "Maracenda");
   });
 
+  test("a river crossing a lake: the part that crosses it becomes the lake's inlet and outlet", async () => {
+    // 72 Hungshun crosses lake 31 (cell 4259) and leaves the map; 32 Yengyuehoi ends in the lake
+    const lake = `const f = pack.features[31]; return [f.outlet, f.inlets];`;
+    assert.deepEqual((await h.ok("eval", { code: lake, readOnly: true })).value, [72, [32, 72]]);
+    const s = await edit([{ ref: 72, set: { split: { at: 4258, name: "Lake Reach" } } }]);
+    const u = ((s.applied as Obj[])[0].created as Obj[])[0].i;
+    assert.deepEqual((await h.ok("eval", { code: lake, readOnly: true })).value, [u, [32, u]]);
+    const r = await rivers(72, u, 32, 18);
+    assert.deepEqual(r[72].cells, [4258, 4257, -1]);
+    assert.deepEqual([r[32].parent, r[18].parent], [u, u], "tributaries above the cut follow the upper part");
+    assert.deepEqual(await invariants(), []);
+    await edit([{ ref: u, set: { merge: true } }]);
+    assert.deepEqual((await h.ok("eval", { code: lake, readOnly: true })).value, [72, [32, 72]]);
+    assert.deepEqual(await invariants(), []);
+    await undo();
+    await undo();
+  });
+
   test("refusals: merge mid-course, split at the source or far away, non-tributary, two changes to one river", async () => {
     let e = await refused([{ ref: 7, set: { merge: true } }]);
     assert.equal(e.code, "REFUSED");
