@@ -500,6 +500,55 @@
     };
   }
 
+  /**
+   * Small-region cleanup, in place on `next` (a biome per pack cell): connected land regions of
+   * one biome under minRegion cells join their most common neighbouring land biome. A region
+   * holding a cell for which stay(i) is true is left as it is; cells for which mute(i) is true
+   * cast no vote. Water is never touched. Regions are found on a snapshot, so the result does
+   * not depend on the scan order. Returns {merged: cells changed, regions: regions merged}.
+   * Shared with regrid (bridge-ext/regrid.js) through T.biomes.
+   */
+  function mergeSmallRegions(next, minRegion, stay, mute) {
+    if (!(minRegion > 1)) return { merged: 0, regions: 0 };
+    const C = pack.cells;
+    const h = C.h;
+    const n = C.i.length;
+    const snap = Uint8Array.from(next);
+    const comp = new Int32Array(n).fill(-1);
+    let id = 0;
+    let merged = 0;
+    let regions = 0;
+    for (let s = 0; s < n; s++) {
+      if (h[s] < 20 || comp[s] >= 0) continue;
+      const list = [s];
+      comp[s] = id;
+      for (let q = 0; q < list.length; q++)
+        for (const j of C.c[list[q]])
+          if (h[j] >= 20 && comp[j] < 0 && snap[j] === snap[s]) {
+            comp[j] = id;
+            list.push(j);
+          }
+      id++;
+      if (list.length >= minRegion || list.some(c => stay(c))) continue;
+      const votes = new Map();
+      for (const c of list)
+        for (const j of C.c[c])
+          if (h[j] >= 20 && snap[j] !== snap[s] && !mute(j)) votes.set(snap[j], (votes.get(snap[j]) || 0) + 1);
+      let best = -1;
+      let bestN = 0;
+      for (const [b, k] of votes)
+        if (k > bestN) {
+          best = b;
+          bestN = k;
+        }
+      if (best < 0) continue;
+      for (const c of list) next[c] = best;
+      merged += list.length;
+      regions++;
+    }
+    return { merged, regions };
+  }
+
   /** The new biome per pack cell (a copy; nothing is written). */
   function computeBiomes(o) {
     const K = climateKit();
@@ -561,41 +610,13 @@
       for (const [i, b] of upd) next[i] = b;
       smoothed += upd.length;
     }
-    let merged = 0;
-    if (o.minRegion > 1) {
-      // connected land regions of one biome under minRegion cells join their most common
-      // neighbouring biome; regions holding a kept, held or out-of-scope cell stay
-      const snap = Uint8Array.from(next);
-      const comp = new Int32Array(n).fill(-1);
-      let id = 0;
-      for (let s = 0; s < n; s++) {
-        if (h[s] < 20 || comp[s] >= 0) continue;
-        const list = [s];
-        comp[s] = id;
-        for (let q = 0; q < list.length; q++)
-          for (const j of C.c[list[q]])
-            if (h[j] >= 20 && comp[j] < 0 && snap[j] === snap[s]) {
-              comp[j] = id;
-              list.push(j);
-            }
-        id++;
-        if (list.length >= o.minRegion || list.some(c => !inScope(c) || held(c))) continue;
-        const votes = new Map();
-        for (const c of list)
-          for (const j of C.c[c])
-            if (h[j] >= 20 && snap[j] !== snap[s] && !kept[j]) votes.set(snap[j], (votes.get(snap[j]) || 0) + 1);
-        let best = -1;
-        let bestN = 0;
-        for (const [b, k] of votes)
-          if (k > bestN) {
-            best = b;
-            bestN = k;
-          }
-        if (best < 0) continue;
-        for (const c of list) next[c] = best;
-        merged += list.length;
-      }
-    }
+    // regions holding a kept, held or out-of-scope cell stay; kept cells do not vote
+    const { merged } = mergeSmallRegions(
+      next,
+      o.minRegion,
+      i => !inScope(i) || held(i),
+      i => kept[i] > 0
+    );
     return { next, keptBy, fromClimate, smoothed, merged };
   }
 
@@ -863,5 +884,5 @@
     return res;
   };
 
-  T.biomes = { seedOf, hash01, valueNoise, fbm, iconWeights, RELIEF_ICONS };
+  T.biomes = { seedOf, hash01, valueNoise, fbm, iconWeights, RELIEF_ICONS, mergeSmallRegions };
 })(globalThis);

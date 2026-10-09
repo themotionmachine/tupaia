@@ -25,7 +25,7 @@ only in a server a human spawned with `TUPAIA_MODE=live`, behind a preview and a
 | `apply {<lists>, map?, paint?, specPath?, mode?:'upsert'\|'update'\|'check', mapping?, ignore?, tolerance?, only?}` | bring the map in line with a spec by name (and paint its cells), or check it. Idempotent. |
 | `clear {types, where?, keep?, force?, orphanRoutes?, detail?, dryRun?}` | remove every entity of some types (wipe a random base), with each editor's cascade. |
 | `compact {types?, repointProvinces?, dryRun?, details?, limit?}` | shrink removed records to id-keeping stubs; drop their notes and SVG. |
-| `regrid {density, heights?, ice?, relief?, biomes?, details?, dryRun?}` | change the cell density and keep the map (id, names, notes, labels). |
+| `regrid {density, heights?, ice?, relief?, biomes?, minRegion?, carve?, details?, dryRun?}` | change the cell density and keep the map (id, names, notes, labels). |
 | `generate_map {seed, template?, cells?, states?, cultures?, width?, height?, ...}` | new map, deterministic for the same seed and options (`digest`), in any session. |
 | `regenerate {parts:[...], restoreLayers?, biomes?, provinces?, emblems?, relief?, dryRun?}` | partial regeneration; biomes/provinces/emblems/relief take options and replay in sketches. |
 | `snapshot {action:'take'\|'list'\|'drop'\|'restore'\|'undo'\|'redo', label?, index?, n?, saveTo?}` | named whole-map snapshots and the auto-undo/redo history. |
@@ -261,11 +261,17 @@ bytes.est and atRisk. Entities move by coordinates; read entities.*.lost, fixed,
 screenshot the coast. Lowering merges cells. Rivers are traced again as contiguous paths of
 new cells along their old lines (ids, names, parents and confluences kept; cells.r, flux,
 source, mouth, length and width recomputed; `rivers.retraced`), so lint river-gap/river-loop
-stay clean. Biomes (`biomes`, default 'redefine') are re-derived from the new heights, climate
-and rivers, but a cell whose nearest old cell had a custom or painted biome (off its climate:
-regenerate biomes' keepPainted) carries it; the result counts `redefined`, `carriedCustom`,
-`carriedPainted` and `changed`. 'climate' carries custom only; 'keep' copies every old cell's
-biome and warns with the stale count. A new ocean (water cut off at the edge) is a warning.
+stay clean. `carve` (default true) lowers a river's land cells that stand above the lowest land
+cell upstream (lowering the density, a new cell on the line can sit on a ridge) to that height,
+never below 20; only climbing cells change (`rivers.carved {rivers, cells, maxDrop,
+lakesLowered?}`), so river-uphill stays clean; `carve:false` keeps the interpolated heights and
+counts `rivers.climbing`. Biomes (`biomes`, default 'redefine') are re-derived from the new
+heights, climate and rivers, but a cell whose nearest old cell had a custom or painted biome
+(off its climate: regenerate biomes' keepPainted) carries it; the result counts `redefined`,
+`carriedCustom`, `carriedPainted` and `changed`; then one-biome land regions under `minRegion`
+cells (default 3, 0 = off; regenerate biomes' clean-up) join their most common neighbour, a
+region with a river or carried cell staying (`cleanup {minRegion, regions, cells}`). 'climate'
+carries custom only; 'keep' copies every old cell's biome and warns with the stale count. A new ocean (water cut off at the edge) is a warning.
 
 **clear**: types notes, labels, markers, zones, routes, rivers, burgs, provinces, states,
 religions, cultures, emblems (run in that dependency order). `where` per type

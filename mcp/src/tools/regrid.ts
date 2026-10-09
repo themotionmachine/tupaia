@@ -50,7 +50,7 @@ export function register(ctx: ToolContext): void {
     {
       title: "Change the cell density, keep the map",
       description:
-        "Rebuild the map at another cell density (points, as in Options > cells density) and keep it the same map: shared-map lineage (map id), names, notes and labels stay; burgs, markers, states, provinces, cultures, religions, routes, rivers and zones are moved by coordinates. density: slider position 1-13 (4 = 10K, 6 = 30K, 8 = 50K) or a points count 1000-100000. Uses the app's Transform resampler (full extent, scale 1) with fixes: heights 'interpolate' (default; a smooth coastline from the old surface, old lakes/islands kept) or 'nearest' (the app's own, keeps the old cells' staircase); burgs that share a new cell move to a free neighbour, a burg's cell joins its state, every area keeps a center inside it, small areas and zones keep a cell; ice and relief icons 'keep' (default: as drawn) or 'regenerate'/'redraw'. Recomputed: temperature, lakes/coast features (names carried over), economy flows (burg treasuries kept), territory statistics; rivers traced again as contiguous cell paths along their old lines (ids, names, confluences kept; result rivers); biomes re-derived from the climate, custom and painted ones carried where they were (result biomes; biomes:'climate'|'keep'); the other layers are redrawn from the data, but a layer that was on and undrawn stays undrawn (layers.keptEmpty) and big count changes are listed (layers.redrawn). Returns cells before/after, entities per type kept/moved/lost (lostNames; maxAreaChangeOf), feature lakes/islands/oceans, fixed (counts), warnings, the new file size and lineage; details:true lists moved burgs/markers, the largest area changes and a legend of the heights counters. dryRun:true (allowed with an editor open) estimates cells, file size and, when lowering, atRisk (burgs that will share a cell, lakes/islands smaller than a cell); it changes nothing. One auto-undo entry. In a sketch it is logged as not replayable (blob-only: no rebase; sketch_promote directly while the shared map is still at the sketch's base). Screenshot afterwards to check the coastline.",
+        "Rebuild the map at another cell density (points, as in Options > cells density) and keep it the same map: shared-map lineage (map id), names, notes and labels stay; burgs, markers, states, provinces, cultures, religions, routes, rivers and zones are moved by coordinates. density: slider position 1-13 (4 = 10K, 6 = 30K, 8 = 50K) or a points count 1000-100000. Uses the app's Transform resampler (full extent, scale 1) with fixes: heights 'interpolate' (default, smooth coast) or 'nearest' (blocky); burgs that share a new cell move to a free neighbour, a burg's cell joins its state, every area keeps a center inside it, small areas and zones keep a cell; ice and relief icons 'keep' (default: as drawn) or 'regenerate'/'redraw'. Recomputed: temperature, lakes/coast features (names carried over), economy flows (burg treasuries kept), territory statistics; rivers traced again as contiguous cell paths along their old lines (ids, names, confluences kept) and carved where they would climb (carve; result rivers.carved); biomes re-derived from the climate, custom and painted ones carried, speckles merged (minRegion; result biomes); the other layers are redrawn from the data, but a layer that was on and undrawn stays undrawn (layers.keptEmpty) and big count changes are listed (layers.redrawn). Returns cells before/after, entities per type kept/moved/lost (lostNames; maxAreaChangeOf), feature lakes/islands/oceans, fixed (counts), warnings, the new file size and lineage; details:true lists moved burgs/markers, the largest area changes and a legend of the heights counters. dryRun:true (allowed with an editor open) estimates cells, file size and, when lowering, atRisk (burgs that will share a cell, lakes/islands smaller than a cell); it changes nothing. One auto-undo entry. In a sketch it is logged as not replayable (blob-only: no rebase; sketch_promote directly while the shared map is still at the sketch's base). Screenshot afterwards to check the coastline.",
       inputSchema: z.object({
         density: z
           .number()
@@ -61,7 +61,9 @@ export function register(ctx: ToolContext): void {
         heights: z
           .enum(["interpolate", "nearest"])
           .optional()
-          .describe("interpolate (default): smooth coastline; nearest: copy the nearest old cell (blocky)"),
+          .describe(
+            "interpolate (default): a smooth coastline sampled from the old surface, old lakes and islands kept; nearest: the app's own, copy the nearest old cell (keeps the old cells' staircase)"
+          ),
         ice: z.enum(["keep", "regenerate"]).optional().describe("keep (default) the ice as drawn, or regenerate it"),
         relief: z
           .enum(["keep", "redraw"])
@@ -71,7 +73,22 @@ export function register(ctx: ToolContext): void {
           .enum(["redefine", "climate", "keep"])
           .optional()
           .describe(
-            "redefine (default): re-derive biomes from the new heights, temperature, precipitation and rivers (as recalculate:'biomes'), but a cell whose nearest old cell had a custom biome or a painted one (differs from its climate biome: regenerate biomes' keepPainted) carries it; result biomes {redefined, carriedCustom, carriedPainted, changed (vs a carry-over)}. climate: carry custom biomes only. keep: every new cell takes its old cell's biome (old cell edges show on a finer grid; a warning counts the cells off their climate)"
+            "redefine (default): re-derive biomes from the new heights, temperature, precipitation and rivers (as recalculate:'biomes'), but a cell whose nearest old cell had a custom biome or a painted one (differs from its climate biome: regenerate biomes' keepPainted) carries it; result biomes {redefined, carriedCustom, carriedPainted, cleanup, changed (vs a carry-over)}. climate: carry custom biomes only. keep: every new cell takes its old cell's biome (old cell edges show on a finer grid; a warning counts the cells off their climate)"
+          ),
+        minRegion: z
+          .number()
+          .int()
+          .min(0)
+          .max(1000)
+          .optional()
+          .describe(
+            "After the biomes are re-derived ('redefine'/'climate'): one-biome land regions under this many cells join their most common neighbouring biome (regenerate biomes' minRegion: single-cell speckles near climate thresholds); a region holding a carried custom/painted cell or a river cell stays, water is never touched. Default 3; 0 = off. Result biomes.cleanup {minRegion, regions, cells}"
+          ),
+        carve: z
+          .boolean()
+          .optional()
+          .describe(
+            "true (default): where a retraced river would climb (the new heights cross a ridge, mostly when lowering the density), lower its land cells to the lowest land height upstream of it on that river, so heights never rise downstream (water skipped, never below 20; a carved lake shore lowers its lake level). Only climbing cells change. Result rivers.carved {rivers, cells, maxDrop, lakesLowered?}. false: heights as interpolated; rivers.climbing counts the rivers that climb"
           ),
         details: z.boolean().optional().describe("Also list moved burgs and markers"),
         dryRun: z.boolean().optional().describe("Estimate cells and file size; change nothing"),
