@@ -1334,6 +1334,21 @@
   }
 
   function summary() {
+    const counts = {
+      states: liveList("state").length,
+      burgs: liveList("burg").length,
+      provinces: liveList("province").length,
+      cultures: liveList("culture").length,
+      religions: liveList("religion").length,
+      rivers: countLive(pack.rivers),
+      routes: countLive(pack.routes),
+      markers: countLive(pack.markers),
+      zones: countLive(pack.zones),
+      notes: typeof notes !== "undefined" && Array.isArray(notes) ? notes.length : 0,
+      labels: labelList().length
+    };
+    // types added by bridge-ext files count themselves (routeGroup -> routeGroups)
+    for (const [type, spec] of Object.entries(EXT)) if (spec.count) counts[`${type}s`] = spec.count();
     return {
       name: typeof mapName !== "undefined" && mapName ? mapName.value : null,
       seed: typeof seed !== "undefined" ? seed : null,
@@ -1341,19 +1356,7 @@
       graph: { w: graphWidth, h: graphHeight },
       cells: pack.cells.i.length,
       gridCells: grid?.cells ? grid.cells.i.length : null,
-      counts: {
-        states: liveList("state").length,
-        burgs: liveList("burg").length,
-        provinces: liveList("province").length,
-        cultures: liveList("culture").length,
-        religions: liveList("religion").length,
-        rivers: countLive(pack.rivers),
-        routes: countLive(pack.routes),
-        markers: countLive(pack.markers),
-        zones: countLive(pack.zones),
-        notes: typeof notes !== "undefined" && Array.isArray(notes) ? notes.length : 0,
-        labels: labelList().length
-      },
+      counts,
       features: featureCounts(),
       mapCoordinates: typeof mapCoordinates !== "undefined" ? mapCoordinates : null,
       view: typeof svgWidth !== "undefined" ? getView() : null,
@@ -2122,6 +2125,7 @@
    *   entity(x):       JSON-safe object for inspect (default: the row)
    *   relations(x):    inspect relations
    *   box(x):          {x0,y0,x1,y1,cx,cy} for frame/screenshot, or null
+   *   count():         number of rows; adds counts.<type>s to the map summary (map_info, load_map, sketch counts)
    * Editing and creating are registered separately (T.mutations.FIELDS / ADD / REMOVE / IDENT).
    */
   T.registerType = (type, spec) => {

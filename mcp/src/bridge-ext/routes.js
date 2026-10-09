@@ -136,7 +136,8 @@
       routes: routesIn(g.id).map(r => r.i)
     }),
     relations: g => ({ routeCount: g.routes, after: g.after, before: g.before }),
-    box: groupBox
+    box: groupBox,
+    count: () => groupEls().length
   });
 
   // ---------------------------------------------------------------- value checks
@@ -782,14 +783,6 @@
       }
     }
     return out;
-  };
-
-  // map_info and the sketch summary count route groups too
-  const coreSummary = T.fns.summary;
-  T.fns.summary = () => {
-    const s = coreSummary();
-    if (s?.counts) s.counts.routeGroups = groupEls().length;
-    return s;
   };
 
   // Regenerating routes keeps the locked routes but renumbers them 0..k-1 (the app's regenerateRoutes),
