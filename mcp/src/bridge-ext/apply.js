@@ -1309,7 +1309,15 @@
    */
   FNS.applySpec = async a => {
     if (!isObj(a)) fail("BAD_ARGS", "applySpec takes {mode, lists, map?, tolerance?, phase}");
-    if (a.phase !== "apply" || a.mode === "check") return runSpec(a);
+    // the map may have changed since the last call (another tool, a load): no stale index
+    nameIndexes.clear();
+    if (a.phase !== "apply" || a.mode === "check") {
+      try {
+        return await runSpec(a);
+      } finally {
+        nameIndexes.clear();
+      }
+    }
     // the steps' redraws are collected and run once at the end
     const realRedraw = T.redraw;
     const pending = [];
@@ -1322,6 +1330,7 @@
       res = await runSpec(a);
     } finally {
       T.redraw = realRedraw;
+      nameIndexes.clear();
     }
     reset();
     const rd = pending.length ? await realRedraw({ layers: pending }) : { redrawn: [], skippedHidden: [] };

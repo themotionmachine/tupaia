@@ -527,6 +527,13 @@ describe("tupaia-mcp apply", () => {
     assert.match(cf.error.message, /markers\[0\]/);
     assert.equal((await h.ok("apply", twice)).note, "nothing to change");
 
+    // names come from the map as it is now, not as an earlier apply saw it
+    assert.equal(((await h.ok("apply", { mode: "check", burgs: [{ name: "Specburg" }] })).counts as Obj).unchanged, 1);
+    await h.ok("edit", { type: "burg", ops: [{ ref: { name: "Specburg" }, set: { name: "Specburg Renamed" } }] });
+    const renamed = await h.ok("apply", { mode: "check", burgs: [{ name: "Specburg Renamed" }] });
+    assert.deepEqual(renamed.counts, { unchanged: 1 }, JSON.stringify(renamed));
+    await h.ok("snapshot", { action: "undo" });
+
     // a route through names nothing in the spec creates: an error in the preview, no undo entry
     const n1 = await undoCount();
     const g = await h.ok("apply", { routes: [{ name: "Ghost Road", through: ["Nowhere Atall", "Nowhere Either"] }] });
@@ -643,6 +650,20 @@ describe("tupaia-mcp apply", () => {
     st = await h.ok("sketch", { action: "status" });
     assert.equal((st.log as Obj[]).length, n);
 
+    // zone cells change through paint_cells, a label moves group through edit: both replay
+    const wider = { name: "Spec Zone", select: { circle: { at: pick.n2, radius: 45 } } };
+    const z = await h.ok("apply", {
+      mode: "update",
+      zones: [wider],
+      labels: [{ text: "Spec|Lands", group: "lbl_moved" }]
+    });
+    assert.deepEqual(z.counts, { updated: 2 }, JSON.stringify(z));
+    st = await h.ok("sketch", { action: "status" });
+    assert.deepEqual(
+      (st.log as Obj[]).slice(n).map(o => o.tool),
+      ["edit", "paint_cells"]
+    );
+
     const rb = await h.ok("sketch", { action: "rebase", onto: { path: other } }, 240_000);
     assert.equal(rb.completed, true, JSON.stringify(rb.conflicts));
     const idMap = rb.idMap as Record<string, Record<string, number>>;
@@ -672,7 +693,13 @@ describe("tupaia-mcp apply", () => {
     assert.equal(v.note, "First <b>new</b> burg", "the note follows the remapped burg id");
     assert.equal(v.capital, "Specburg");
     assert.equal(v.stateNote, "A state");
-    const chk = await h.ok("apply", { ...spec(), mode: "check" });
+    const base = spec();
+    const after: Obj = {
+      ...base,
+      zones: [{ type: "raid", color: "#A83A32", ...wider }],
+      labels: [{ ...base.labels[0], group: "lbl_moved" }]
+    };
+    const chk = await h.ok("apply", { ...after, mode: "check" });
     assert.deepEqual(chk.counts, { unchanged: 12 }, JSON.stringify(chk.rows));
   });
 });
