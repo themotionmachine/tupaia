@@ -147,7 +147,8 @@ export function changeRanking(sk: Sketch): Array<{ type: string; i: number | str
     } else if (o.tool === "paint_cells") {
       const p = o.resolved as PaintResolved;
       const n = 2 + Math.min(10, Math.floor(p.select.cells.length / 25));
-      for (const k of ["state", "province", "culture", "religion"]) if (k in p.set && p.set[k]) bump(k, p.set[k], n);
+      for (const k of ["state", "province", "culture", "religion", "biome"])
+        if (k in p.set && p.set[k]) bump(k, p.set[k], n);
     }
   }
   return [...score.values()].sort((a, b) => b.score - a.score);
@@ -193,7 +194,8 @@ const LAYERS_FOR: Record<string, LayerNameT[]> = {
   route: ["routes"],
   marker: ["markers"],
   zone: ["zones"],
-  label: ["labels"]
+  label: ["labels"],
+  biome: ["biomes"]
 };
 
 async function shoot(

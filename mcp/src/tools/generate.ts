@@ -2,13 +2,15 @@
 // the current map). Both take an auto-undo entry first.
 import { z } from "zod";
 import type { ToolContext } from "../context.ts";
-import { META_TEXT_HEAVY } from "../result.ts";
+import { META_TEXT_HEAVY, ToolError } from "../result.ts";
 import { TIMEOUTS, TimeoutMs } from "../schemas.ts";
+import { BiomesRegenOptions, recordBiomesRegen, validateBiomesRegen } from "./biomes.ts";
 import { changesSinceUndo } from "./edit.ts";
 import { defineTools } from "./registry.ts";
 
 export const REGEN_PARTS = [
   "rivers",
+  "biomes",
   "population",
   "cultures",
   "burgs",
@@ -106,10 +108,12 @@ export function register(ctx: ToolContext): void {
     {
       title: "Regenerate parts of the map",
       description:
-        "Re-run generator parts on the current map (heightmap and cells stay). parts run in dependency order regardless of the order given: rivers, population, cultures, burgs, states, provinces, routes, religions, emblems, military, markers, zones, ice, goods, markets, economy, production. Locked entities are kept where the app supports locks. Several parts turn their layer on (reported in layerChanges); restoreLayers:true turns them back. states reseeds the random stream, so it is not reproducible. One auto-undo entry.",
+        "Re-run generator parts on the current map (heightmap and cells stay). parts run in dependency order regardless of the order given: rivers, biomes, population, cultures, burgs, states, provinces, routes, religions, emblems, military, markers, zones, ice, goods, markets, economy, production. Locked entities are kept where the app supports locks. Several parts turn their layer on (reported in layerChanges); restoreLayers:true turns them back. states reseeds the random stream, so it is not reproducible. biomes re-derives biomes from temperature and moisture; biomes:{noise, scale, smooth, seed} adds deterministic edge noise (no straight 1° bands) and a boundary majority filter; cells holding a custom biome keep it (keepPainted, default true; keep:[biomes] keeps more); select limits the cells; from:'current' only smooths. Its result is in details.biomes (changed, net per biome, seed); parts:['biomes'] alone is replayable in a sketch (logged as the literal cells it changed) and takes dryRun. One auto-undo entry.",
       inputSchema: z.object({
         parts: z.array(z.enum(REGEN_PARTS)).min(1),
         restoreLayers: z.boolean().optional().describe("Undo layer visibility changes made by the regenerators"),
+        biomes: BiomesRegenOptions.optional(),
+        dryRun: z.boolean().optional().describe("parts:['biomes'] only: count what would change, change nothing"),
         timeoutMs: TimeoutMs
       }),
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
@@ -117,6 +121,12 @@ export function register(ctx: ToolContext): void {
       kind: "heavy"
     },
     async (args, scope) => {
+      const biomesPlan = await validateBiomesRegen(scope, args.parts, args.biomes);
+      if (args.dryRun) {
+        if (!biomesPlan || args.parts.length !== 1)
+          throw new ToolError("BAD_ARGS", "dryRun works with parts:['biomes'] only");
+        return { dryRun: true, details: { biomes: biomesPlan }, note: "dry run: nothing was changed" };
+      }
       await scope.pushUndo("regenerate", args);
       let out: Record<string, unknown>;
       try {
@@ -127,6 +137,7 @@ export function register(ctx: ToolContext): void {
       } finally {
         ctx.snapshots.noteMutation();
       }
+      await recordBiomesRegen(scope, args, args.parts, out);
       const changes = await changesSinceUndo(ctx, scope);
       return {
         ...out,
