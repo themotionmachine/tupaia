@@ -250,8 +250,10 @@ describe("tupaia-mcp map settings (edit map)", () => {
       left.some(g => g.includes("biomes")) && !left.some(g => g.includes("temperature,")),
       JSON.stringify(left)
     );
-    // deterministic: the same call again gives the same climate (the coastal rainfall RNG is seeded)
-    await edit({ temperatureEquator: 38 }, { recalculate: "climate" });
+    // deterministic: the same call again gives the same climate (the coastal rainfall RNG is seeded);
+    // ops [{lock: []}] is the "recalculate only" form
+    const only = await h.ok("edit", { type: "map", ops: [{ lock: [] }], recalculate: "climate" });
+    assert.deepEqual((only.recalculated as Obj).done, ["temperature", "precipitation"]);
     const s2 = await snap();
     assert.equal(s2.temp, s1.temp);
     assert.equal(s2.prec, s1.prec);
@@ -362,6 +364,69 @@ describe("tupaia-mcp map settings (edit map)", () => {
     const s = await settings();
     for (const [k, v] of Object.entries(want)) assert.deepEqual(s[k], v, `restored ${k}`);
     await h.ok("edit", { type: "map", ops: [{ unlock: ["all"] }] });
+  });
+
+  test("one edit does what the primordial-soup frame script did with eval (same inputs, options, locks, coordinates)", async () => {
+    // build/scripts/frame.js of the steward, trimmed to what it sets
+    const FRAME = `
+      const setv = (ids, v) => ids.forEach(id => { const e = document.getElementById(id); if (e) e.value = v; });
+      setv(["mapSizeInput", "mapSizeOutput"], 1.1);
+      setv(["latitudeInput", "latitudeOutput"], 38.8);
+      options.temperatureEquator = 30; setv(["temperatureEquatorInput", "temperatureEquatorOutput"], 30);
+      options.temperatureNorthPole = -28; setv(["temperatureNorthPoleInput", "temperatureNorthPoleOutput"], -28);
+      options.winds = [225, 45, 45, 315, 135, 315];
+      setv(["precInput", "precOutput"], 150);
+      distanceScale = 0.1; setv(["distanceScaleInput"], 0.1);
+      setv(["distanceUnitInput"], "mi"); setv(["heightUnit"], "m"); setv(["heightExponentInput"], 2);
+      ["mapSize","latitude","temperatureEquator","temperatureNorthPole","prec","distanceScale","distanceUnit","heightUnit","heightExponent"].forEach(lock);
+      store("winds", options.winds.join(",")); lock("winds");
+      calculateMapCoordinates(); calculateTemperatures();`;
+    const PROBE = `(() => { let t = 0; for (const v of grid.cells.temp) t += v;
+      const ls = {}; for (const k of ["mapSize","latitude","temperatureEquator","temperatureNorthPole","prec","distanceScale","distanceUnit","heightUnit","heightExponent","winds"]) ls[k] = localStorage.getItem(k);
+      const icons = {}; for (const k of ["mapSize","latitude","temperatureEquator","temperatureNorthPole","prec","distanceScale"]) icons[k] = document.getElementById("lock_" + k).dataset.locked;
+      return { t, ls, icons, mc: mapCoordinates, winds: options.winds, eq: options.temperatureEquator, np: options.temperatureNorthPole,
+        prec: precInput.value, ds: distanceScale, dsIn: distanceScaleInput.value, du: distanceUnitInput.value, hu: heightUnit.value,
+        he: heightExponentInput.value, ms: mapSizeOutput.value, lat: latitudeOutput.value }; })()`;
+    await h.ok("load_map", { path: "tests/fixtures/demo.map" });
+    await h.ok("edit", { type: "map", ops: [{ unlock: ["all"] }] });
+    await h.ok("eval", { code: FRAME });
+    const byEval = await evalRO(PROBE);
+    await h.ok("load_map", { path: "tests/fixtures/demo.map" });
+    await h.ok("edit", { type: "map", ops: [{ unlock: ["all"] }] });
+    await h.ok("edit", {
+      type: "map",
+      ops: [
+        {
+          set: {
+            mapSize: 1.1,
+            latitude: 38.8,
+            temperatureEquator: 30,
+            temperatureNorthPole: -28,
+            winds: [225, 45, 45, 315, 135, 315],
+            precipitation: 150,
+            distanceScale: 0.1,
+            distanceUnit: "mi",
+            heightUnit: "m",
+            heightExponent: 2
+          },
+          lock: [
+            "mapSize",
+            "latitude",
+            "temperatureEquator",
+            "temperatureNorthPole",
+            "precipitation",
+            "distanceScale",
+            "distanceUnit",
+            "heightUnit",
+            "heightExponent",
+            "winds"
+          ]
+        }
+      ],
+      recalculate: "climate"
+    });
+    const byEdit = await evalRO(PROBE);
+    assert.deepEqual(byEdit, byEval);
   });
 
   test("a '|' or line break in the map name or era is refused (it would make the saved file unloadable)", async () => {

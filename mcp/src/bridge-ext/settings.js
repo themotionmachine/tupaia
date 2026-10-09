@@ -28,6 +28,8 @@
     String(s)
       .toLowerCase()
       .replace(/[^a-z0-9]/g, "");
+  /** o[k] for an own property only (names come from callers: "constructor" is not a unit). */
+  const own = (o, k) => (Object.hasOwn(o, k) ? o[k] : undefined);
 
   // ---------------------------------------------------------------- value checks
 
@@ -47,7 +49,7 @@
     if (/[|\r\n]/.test(s))
       fail("BAD_ARGS", `${name} cannot contain '|' or line breaks (the .map file is '|' separated)`);
     if (s === "custom_name") fail("BAD_ARGS", `${name}: give the custom name itself, not 'custom_name'`);
-    return aliases[fold(s)] ?? s;
+    return own(aliases, fold(s)) ?? s;
   };
 
   const DISTANCE_UNITS = {
@@ -112,7 +114,7 @@
     if (typeof v !== "string" || !v.trim()) fail("BAD_ARGS", "temperatureScale must be a string");
     const opts = [...(byId("temperatureScale")?.options || [])].map(o => o.value);
     const s = v.trim();
-    const hit = opts.find(o => o === s) || TEMPERATURE_SCALES[fold(s)] || TEMPERATURE_SCALES[s.toLowerCase()];
+    const hit = opts.find(o => o === s) || own(TEMPERATURE_SCALES, fold(s)) || own(TEMPERATURE_SCALES, s.toLowerCase());
     if (!hit || (opts.length && !opts.includes(hit)))
       fail("BAD_ARGS", `temperatureScale must be one of ${opts.join(" ")}`, { details: opts });
     return hit;
@@ -275,14 +277,13 @@
   /** Setting names from a lock/unlock value (a name, a list, or 'all'); strict about unknown names. */
   function lockNames(field, v) {
     const list = typeof v === "string" ? [v] : v;
-    if (!Array.isArray(list) || !list.length)
-      fail("BAD_ARGS", `${field} is a list of setting names, or 'all'`, { details: NAMES });
+    if (!Array.isArray(list)) fail("BAD_ARGS", `${field} is a list of setting names, or 'all'`, { details: NAMES });
     const out = new Set();
     for (const raw of list) {
       if (typeof raw !== "string") fail("BAD_ARGS", `${field} entries are setting names`, { details: NAMES });
-      const n = ALIASES[raw] ?? raw;
+      const n = own(ALIASES, raw) ?? raw;
       if (n === "all") for (const x of NAMES) out.add(x);
-      else if (SETTINGS[n]) out.add(n);
+      else if (own(SETTINGS, n)) out.add(n);
       else fail("BAD_ARGS", `unknown setting '${raw}' in ${field}`, { details: NAMES });
     }
     return NAMES.filter(n => out.has(n));
@@ -298,7 +299,8 @@
           try {
             for (const n of lockNames(key, v)) (key === "lock" ? lockSet : unlockSet).add(n);
           } catch {}
-        } else if (SETTINGS[key] && isObj(v) && typeof v.lock === "boolean") (v.lock ? lockSet : unlockSet).add(key);
+        } else if (own(SETTINGS, key) && isObj(v) && typeof v.lock === "boolean")
+          (v.lock ? lockSet : unlockSet).add(key);
       }
     }
     return { lock: NAMES.filter(n => lockSet.has(n)), unlock: NAMES.filter(n => unlockSet.has(n)) };
@@ -408,7 +410,7 @@
     const out = {};
     if (mode === "none") {
       const layers = [...(temp ? ["temperature"] : []), ...(prec ? ["precipitation"] : [])];
-      out[layers.join(",")] = "edit map with recalculate 'climate' (set any setting to its current value)";
+      out[layers.join(",")] = "edit map with recalculate 'climate' (ops [{lock:[]}] changes no setting)";
     }
     if (mode !== "climate+biomes")
       out["rivers,lakes,biomes"] =
@@ -703,5 +705,5 @@
     return baseGenerate(a, meta);
   };
 
-  T.settings = { SETTINGS, NAMES, settingsNow, isLockedSetting };
+  T.settings = { SETTINGS, NAMES, settingsNow, isLockedSetting, recalculate };
 })(globalThis);
