@@ -196,7 +196,7 @@ export function register(ctx: ToolContext): void {
     {
       title: "Edit or remove entities",
       description:
-        "Batch-edit entities of ONE type: ops [{ref, set:{field: value}} | {ref, remove:true}]. All ops are validated first; if any is invalid nothing changes (unless continueOnError). One auto-undo entry covers the call; redraws are coalesced. dryRun:true returns before/after per op. Fields per type are in tupaia://docs/cheatsheet.md, e.g. burg {name, population (people), group, type, culture, port, lock, move:Place}; state {name, fullName, form, formName, color, capital:burgRef, culture, lock}; marker {type, icon, size, pinned, note:{name, legend}, move}; label {text, move}; map (no ref) {name, populationRate, urbanization, year, era}. name can be {generate:{base:<namesbase>}} | {generate:{culture:<ref>}} | {generate:{}} (own culture). A state's capital changes only through edit state {capital}. remove works for burg (not capitals or market centres), state, marker, route, river, zone, note, label; provinces, cultures and religions are REFUSED (repaint their cells with paint_cells instead).",
+        "Batch-edit entities of ONE type: ops [{ref, set:{field: value}} | {ref, remove:true}]. All ops are validated first; if any is invalid nothing changes (unless continueOnError). One auto-undo entry covers the call; redraws are coalesced. dryRun:true returns before/after per op. Fields per type are in tupaia://docs/cheatsheet.md, e.g. burg {name, population (people), group, type, culture, port, lock, move:Place}; state {name, fullName, form, formName, color, capital:burgRef, culture, lock}; marker {type, icon, size, pinned, note:{name, legend}, move}; label {text, move}; map (no ref) {name, populationRate, urbanization, year, era}. name can be {generate:{base:<namesbase>}} | {generate:{culture:<ref>}} | {generate:{}} (own culture). A state's capital changes only through edit state {capital}. remove works for burg, state, province, culture, religion, marker, route, river, zone, note, label (bulk: the clear tool). Removing a capital or a market centre is refused unless force:true: the state's capital then moves to newCapital (a burg of that state) or its most populous other burg (none if no burg is left), the market is removed, a province headed by the burg gets its first other burg. orphanRoutes:true also removes routes that served only the removed burg. A province's cells become province-less; a culture's or religion's cells, burgs and states fall back to 0 (Wildlands / No religion); a state's provinces go with it. Removing burgs or routes repairs the route links (pack.cells.routes).",
       inputSchema: z.object({
         type: z.enum(EDIT_TYPES),
         ops: z
@@ -204,7 +204,16 @@ export function register(ctx: ToolContext): void {
             z.object({
               ref: EntityRef.optional().describe("Entity ref (omit for type 'map')"),
               set: z.record(z.string(), z.unknown()).optional(),
-              remove: z.boolean().optional()
+              remove: z.boolean().optional(),
+              force: z
+                .boolean()
+                .optional()
+                .describe("burg remove: also remove a state capital or a market centre (dependants are reassigned)"),
+              newCapital: EntityRef.optional().describe("burg remove with force: the burg that becomes the capital"),
+              orphanRoutes: z
+                .boolean()
+                .optional()
+                .describe("burg remove: also remove routes that served only removed burgs")
             })
           )
           .min(1)

@@ -101,6 +101,10 @@ export interface EditResolved {
      * for a removal, that nobody changed it since.
      */
     ident?: Record<string, unknown> | null;
+    /** burg removal: forced (capital or market centre), the burg made capital, orphan routes too. */
+    force?: boolean;
+    newCapital?: number;
+    orphanRoutes?: boolean;
   }>;
   redraw?: unknown;
 }
@@ -472,7 +476,7 @@ export function summarizeOp(tool: string, resolved: Resolved | null, out: Row | 
         const r = resolved as EditResolved;
         const parts = r.ops.map(o => {
           const who = r.type === "map" ? "the map" : `${r.type} ${o.name ? `${q(o.name)} ` : ""}(${o.ref})`;
-          if (o.remove) return `removed ${who}`;
+          if (o.remove) return `removed ${who}${o.force ? " (forced)" : ""}`;
           const fields = Object.keys(o.set ?? {}).map(k =>
             o.before && o.after && k in o.before
               ? `${k} ${q(o.before[k])} -> ${q(o.after[k])}`
@@ -665,6 +669,7 @@ export function rewriteResolved(tool: string, resolved: Resolved, rw: Rewriter):
       const fields = EDIT_REF_FIELDS[e.type] ?? {};
       for (const o of e.ops) {
         if (o.ref !== undefined) o.ref = rw.id(e.type, o.ref) as number | string;
+        if (o.newCapital) o.newCapital = rw.id("burg", o.newCapital) as number;
         for (const [k, kind] of Object.entries(fields))
           if (o.set && k in o.set) o.set[k] = rewriteField(rw, kind, o.set[k]);
         // before/after hold the same fields as get() returns them (e.g. a capital burg id)

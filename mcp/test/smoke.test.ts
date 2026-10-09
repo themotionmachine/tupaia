@@ -41,7 +41,8 @@ const ALL_TOOLS = [
   "shared_save",
   "shared_restore",
   "sketch",
-  "sketch_promote"
+  "sketch_promote",
+  "clear"
 ];
 
 describe("tupaia-mcp smoke (core layer)", () => {
@@ -537,7 +538,7 @@ describe("tupaia-mcp smoke (mutations)", () => {
     assert.equal(await evalRO(`pack.burgs[${plain[8].i}].name`), "Deltaburg");
   });
 
-  test("removing a capital via edit is refused; province removal is refused", async () => {
+  test("removing a capital via edit is refused without force; feature removal is refused", async () => {
     const capital = await evalRO("pack.burgs.find(b => b && b.i && !b.removed && b.capital).i");
     const r = await h.call("edit", { type: "burg", ops: [{ ref: capital, remove: true }] });
     assert.equal(r.isError, true);
@@ -546,7 +547,7 @@ describe("tupaia-mcp smoke (mutations)", () => {
     assert.match(body.error.message, /capital/);
     const still = await evalRO(`!pack.burgs[${capital}].removed`);
     assert.equal(still, true);
-    const p = await h.call("edit", { type: "province", ops: [{ ref: 1, remove: true }] });
+    const p = await h.call("edit", { type: "feature", ops: [{ ref: 1, remove: true }] });
     assert.equal(errorBody(p).error.code, "REFUSED");
   });
 

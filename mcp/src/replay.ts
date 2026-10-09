@@ -83,7 +83,13 @@ export function bridgeArgs(tool: string, r: Resolved): Record<string, unknown> {
     case "edit": {
       const e = r as EditResolved;
       const ops = e.ops.map(o => {
-        if (o.remove) return { ref: o.ref, remove: true };
+        if (o.remove) {
+          const extra: Record<string, unknown> = {};
+          if (o.force) extra.force = true;
+          if (o.newCapital) extra.newCapital = o.newCapital;
+          if (o.orphanRoutes) extra.orphanRoutes = true;
+          return { ref: o.ref, remove: true, ...extra };
+        }
         return o.ref === undefined ? { set: o.set } : { ref: o.ref, set: o.set };
       });
       return withRedraw({ type: e.type, ops }, e.redraw);

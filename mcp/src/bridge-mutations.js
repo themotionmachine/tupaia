@@ -837,7 +837,8 @@
     if (op.remove) {
       if (op.set && Object.keys(op.set).length) fail("BAD_ARGS", "an op either sets fields or removes, not both");
       if (NO_REMOVE[type]) fail("REFUSED", NO_REMOVE[type]);
-      REMOVE[type].check?.(r.entity, c);
+      // check may return extra plan fields (e.g. a forced removal's cascade preview)
+      const info = REMOVE[type].check?.(r.entity, c, op);
       return {
         index,
         ref: op.ref,
@@ -845,6 +846,8 @@
         name: r.name,
         entity: r.entity,
         remove: true,
+        op,
+        info: isObj(info) ? info : null,
         ident: identOf(type, r.entity)
       };
     }
@@ -873,6 +876,7 @@
     if (p.ident) row.ident = p.ident;
     if (p.remove) {
       row.remove = true;
+      if (p.info) Object.assign(row, p.info);
       return row;
     }
     row.before = {};
@@ -886,13 +890,15 @@
 
   function applyEditOp(type, p, c) {
     if (p.remove) {
-      REMOVE[type].apply(p.entity, c);
+      // apply may return {row, resolved}: extra result fields and extra literal fields for the log
+      const extra = REMOVE[type].apply(p.entity, c, p.op, p.info);
       return {
         index: p.index,
         i: p.i,
         name: p.name,
         removed: true,
-        _r: { ref: p.i, name: p.name, remove: true, ident: p.ident ?? null }
+        ...(extra?.row || {}),
+        _r: { ref: p.i, name: p.name, remove: true, ident: p.ident ?? null, ...(extra?.resolved || {}) }
       };
     }
     const before = {};
@@ -2571,4 +2577,6 @@
   };
 
   T.mutations = { FIELDS, ADD, selectCells, nameSpec };
+  // removal hooks for bridge-ext/clear.js (province/culture/religion removal, forced burg removal)
+  Object.assign(T.mutations, { REMOVE, NO_REMOVE, identOf, batchContext, finishRedraw, stateInternals, errRow });
 })(globalThis);
