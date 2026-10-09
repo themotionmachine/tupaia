@@ -241,11 +241,14 @@ heights?:<same sources>, fill?}` traces drainage first (`end.type` sea/lake/rive
 
 **regrid**: density 1-13 (4 = 10K, 6 = 30K) or 1000-100000 points; dryRun gives cells.est,
 bytes.est and atRisk. Entities move by coordinates; read entities.*.lost, fixed, warnings, then
-screenshot the coast. Lowering merges cells. River courses are re-anchored and gaps between
-cells that are no longer neighbours filled (`fixed.riverGapCellsFilled`); lint river-gap rows left
-have a ready reroute `fix`/`fixAll`. Biomes stay as they were (cell by cell) unless
-`biomes:'redefine'` (recomputes from climate, hand-painted cells too); 'keep' warns with the stale
-count. A new ocean (water cut off at the edge) is a warning.
+screenshot the coast. Lowering merges cells. Rivers are traced again as contiguous paths of
+new cells along their old lines (ids, names, parents and confluences kept; cells.r, flux,
+source, mouth, length and width recomputed; `rivers.retraced`), so lint river-gap/river-loop
+stay clean. Biomes (`biomes`, default 'redefine') are re-derived from the new heights, climate
+and rivers, but a cell whose nearest old cell had a custom or painted biome (off its climate:
+regenerate biomes' keepPainted) carries it; the result counts `redefined`, `carriedCustom`,
+`carriedPainted` and `changed`. 'climate' carries custom only; 'keep' copies every old cell's
+biome and warns with the stale count. A new ocean (water cut off at the edge) is a warning.
 
 **clear**: types notes, labels, markers, zones, routes, rivers, burgs, provinces, states,
 religions, cultures, emblems (run in that dependency order). `where` per type

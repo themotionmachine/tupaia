@@ -74,6 +74,41 @@ describe("regrid in the sketch log (no browser)", () => {
   });
 });
 
+/**
+ * River structure: consecutive cells are neighbours (lint river-gap), no cell twice (river-loop),
+ * every cells.r cell is on its river, points aligned with cells; ids, names and parents; which
+ * tributaries end on a cell of their parent (a confluence).
+ */
+const RIVER_STATE = `const C = pack.cells;
+const live = pack.rivers.filter(r => r && !r.removed);
+const byId = new Map(live.map(r => [r.i, r]));
+const onParent = [];
+let gaps = 0, loops = 0, stale = 0, misaligned = 0;
+for (const r of live) {
+  const seen = new Set();
+  r.cells.forEach((c, k) => {
+    if (c < 0) return;
+    const p = r.cells[k - 1];
+    if (k && p >= 0 && !C.c[p].includes(c)) gaps++;
+    if (seen.has(c)) loops++;
+    seen.add(c);
+  });
+  if (r.points && r.points.length !== r.cells.length) misaligned++;
+  const par = byId.get(r.parent);
+  if (par && par.i !== r.i && par.cells.includes(r.cells.at(-1))) onParent.push(r.i);
+}
+for (const i of C.i) if (C.r[i] && !byId.get(C.r[i])?.cells.includes(i)) stale++;
+return { rivers: live.length, gaps, loops, stale, misaligned, onParent,
+  ids: live.map(r => r.i + ":" + r.name + ":" + r.parent).join("|") };`;
+
+/** Biome ids in a disc of land cells: {id: count}. */
+const BIOMES_IN = `const C = pack.cells, out = {};
+for (const i of C.i) {
+  if (C.h[i] < 20 || Math.hypot(C.p[i][0] - args.x, C.p[i][1] - args.y) > args.r) continue;
+  out[C.biome[i]] = (out[C.biome[i]] || 0) + 1;
+}
+return out;`;
+
 /** Data consistency the app's generators guarantee, checked in the page. */
 const CONSISTENCY = `const C = pack.cells, n = C.i.length;
 const live = x => x && x.i && !x.removed;
@@ -95,6 +130,7 @@ return { badCenters, burgsOffState, staleStates, wildProvinces, emptyZones };`;
 describe("regrid on demo.map (local)", () => {
   let h: Harness;
   let before0: Obj;
+  let rivers0: Obj;
   let applied: Obj;
   let labelId = "";
 
@@ -104,6 +140,7 @@ describe("regrid on demo.map (local)", () => {
     const l = await ok(h, "add", { type: "label", items: [{ at: { x: 700, y: 400 }, text: "Regrid label" }] });
     labelId = String((l.created as Obj[])[0].i);
     before0 = (await ok(h, "eval", { code: PAGE_STATE, readOnly: true })).value as Obj;
+    rivers0 = (await ok(h, "eval", { code: RIVER_STATE, readOnly: true })).value as Obj;
   });
 
   after(async () => {
@@ -192,13 +229,32 @@ describe("regrid on demo.map (local)", () => {
     assert.equal(now.notes, before0.notes);
     assert.equal(now.burgNames, before0.burgNames);
     assert.equal(now.relief, before0.relief, "relief icons are kept as drawn (relief:'keep' default)");
-    // rivers keep their anchors (Resample stored the meandered line, so every regrid multiplied points)
+    // rivers traced again: contiguous, no loops, cells.r on the courses, one point per cell (not
+    // Resample's meandered line, which multiplied the points at every regrid), the same ids,
+    // names and parents, and every tributary that met its parent still meets it
     assert.equal(now.riversAligned, true);
-    // (gap cells inserted on the finer grid, so river cells stay neighbours, add anchors of their own)
-    const filled = Number((applied.fixed as Obj | undefined)?.riverGapCellsFilled ?? 0);
+    assert.equal((applied.rivers as Obj).retraced, rivers0.rivers, JSON.stringify(applied.rivers));
+    const rv = (await ok(h, "eval", { code: RIVER_STATE, readOnly: true })).value as Obj;
+    assert.deepEqual(
+      { gaps: rv.gaps, loops: rv.loops, stale: rv.stale, misaligned: rv.misaligned },
+      { gaps: 0, loops: 0, stale: 0, misaligned: 0 }
+    );
+    assert.equal(rv.ids, rivers0.ids);
+    const parted = (rivers0.onParent as number[]).filter(i => !(rv.onParent as number[]).includes(i));
+    assert.deepEqual(parted, [], "confluences kept");
+    const growth = now.riverAnchors / before0.riverAnchors; // cells along a line: about sqrt(13122 / 7462)
+    assert.ok(growth > 1.1 && growth < 1.8, `${before0.riverAnchors} -> ${now.riverAnchors}`);
+    const rl = await ok(h, "lint", { checks: ["river-gap", "river-loop"] });
+    assert.deepEqual(rl.counts, {}, JSON.stringify(rl.rows).slice(0, 400));
+    // biomes re-derived from the climate on the new cells: the cells that still differ from the
+    // climate are only carried painted ones
+    const b = applied.biomes as Obj;
+    assert.equal(b.mode, "redefine");
+    assert.ok(b.redefined > 8000 && b.changed > 0, JSON.stringify(b));
+    const stale = await ok(h, "edit", { type: "map", recalculate: "biomes", dryRun: true });
     assert.ok(
-      now.riverAnchors <= before0.riverAnchors * 1.05 + filled && now.riverAnchors >= before0.riverAnchors * 0.9,
-      `${before0.riverAnchors} -> ${now.riverAnchors} (${filled} gap cells filled)`
+      (stale.replaces as Obj).biomeCellsEdited <= b.carriedPainted,
+      `${JSON.stringify(stale.replaces)} vs ${JSON.stringify(b)}`
     );
     // layers that were on but undrawn stay undrawn
     const undrawn = await ok(h, "eval", {
@@ -248,6 +304,62 @@ describe("regrid on demo.map (local)", () => {
     const c = (await ok(h, "eval", { code: CONSISTENCY, readOnly: true })).value as Obj;
     assert.deepEqual(c.emptyZones, []);
     assert.deepEqual(c.badCenters, []);
+    // rivers merge on the coarser grid but stay contiguous and loop-free
+    const rl = await ok(h, "lint", { checks: ["river-gap", "river-loop"] });
+    assert.deepEqual(rl.counts, {}, JSON.stringify(rl.rows).slice(0, 400));
+  });
+
+  test("biomes: custom and painted ones carried where they were painted, the rest from the climate; 'climate' and 'keep'", async () => {
+    await ok(h, "load_map", { path: DEMO_MAP });
+    await ok(h, "add", { type: "biome", items: [{ name: "Glass desert", base: "Hot desert" }] });
+    const A = { x: 900, y: 420, r: 60 };
+    const B = { x: 520, y: 330, r: 50 };
+    await ok(h, "paint_cells", {
+      select: { circle: { at: { x: A.x, y: A.y }, radius: A.r }, where: { land: true } },
+      set: { biome: "Glass desert" }
+    });
+    await ok(h, "paint_cells", {
+      select: { circle: { at: { x: B.x, y: B.y }, radius: B.r }, where: { land: true } },
+      set: { biome: "Glacier" }
+    });
+    const ids = (
+      await ok(h, "eval", {
+        code: `return { glass: biomesData.name.indexOf("Glass desert"), glacier: biomesData.name.indexOf("Glacier") }`,
+        readOnly: true
+      })
+    ).value as Obj;
+    // the share of land cells well inside a disc that hold the biome
+    const share = async (d: Obj, id: number) => {
+      const m = (await ok(h, "eval", { code: BIOMES_IN, args: { ...d, r: d.r * 0.7 }, readOnly: true })).value as Obj;
+      const all = Object.values(m).reduce((s: number, v) => s + (v as number), 0);
+      return (m[id] ?? 0) / all;
+    };
+    const r = await ok(h, "regrid", { density: 20000 }, 300_000);
+    const b = r.biomes as Obj;
+    assert.equal(b.mode, "redefine");
+    assert.ok(b.carriedCustom > 0 && b.carriedPainted > 0 && b.redefined > 0, JSON.stringify(b));
+    assert.match(JSON.stringify(r.regenerated), /biomes re-derived from the climate.*custom and painted/);
+    assert.ok((await share(A, ids.glass)) > 0.95, "the custom biome stays where it was painted");
+    assert.ok((await share(B, ids.glacier)) > 0.95, "the painted biome stays where it was painted");
+    const rc = await ok(h, "edit", { type: "map", recalculate: "biomes", dryRun: true });
+    assert.equal((rc.keeps as Obj).customBiomeCells, b.carriedCustom);
+    await ok(h, "snapshot", { action: "undo" }, 240_000);
+
+    // 'climate': the custom biome is carried, painted standard biomes are re-derived
+    const c = await ok(h, "regrid", { density: 20000, biomes: "climate" }, 300_000);
+    assert.equal((c.biomes as Obj).carriedPainted, 0, JSON.stringify(c.biomes));
+    assert.ok((c.biomes as Obj).carriedCustom > 0);
+    assert.ok((await share(A, ids.glass)) > 0.95);
+    assert.ok((await share(B, ids.glacier)) < 0.5, "painted glacier re-derived from the climate");
+    await ok(h, "snapshot", { action: "undo" }, 240_000);
+
+    // 'keep': every cell takes its old cell's biome, with the stale count as a warning
+    const k = await ok(h, "regrid", { density: 20000, biomes: "keep" }, 300_000);
+    assert.deepEqual(k.biomes, { mode: "keep" });
+    assert.match(JSON.stringify(k.warnings), /biomes were carried over by position \(biomes:'keep'\)/);
+    assert.ok((await share(B, ids.glacier)) > 0.95);
+    const bad = await h.call("regrid", { density: 30000, biomes: "paint" });
+    assert.equal(errorBody(bad).error.code, "BAD_ARGS");
   });
 
   test("one undo entry returns to the previous grid", async () => {
