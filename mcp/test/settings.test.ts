@@ -736,7 +736,7 @@ describe("tupaia-mcp map settings: lock handling, recalculation layers, climate 
     assert.ok(keys.some(k => k.includes("precipitation")));
     const w = await edit({ winds: [90, 90, 90, 90, 90, 90] });
     assert.ok(Object.keys(w.stale as Obj).some(k => k.includes("goods")));
-    const t = await edit({ temperatureEquator: 20 });
+    const t = await edit({ temperatureEquator: 31 });
     assert.ok(Object.keys(t.stale as Obj).some(k => k.includes("ice") && k.includes("goods")));
     const pop = await edit({ populationRate: 2 });
     assert.ok(Object.keys(pop.stale as Obj).includes("military"), JSON.stringify(pop.stale));
