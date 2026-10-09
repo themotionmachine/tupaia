@@ -300,6 +300,7 @@
   // c.rgInto: routes moved into a group) so that the checks see what the earlier ops will do.
   REMOVE.routeGroup = {
     takesForce: true,
+    takesMoveTo: true,
     check(g, c, op) {
       if (DEFAULT_GROUPS.includes(g.id))
         fail("REFUSED", `${g.id} is one of the app's built-in route groups and cannot be removed`);
@@ -315,7 +316,7 @@
       const total = held.length + moved;
       let to = null;
       if (total) {
-        if (!op?.force) {
+        if (!(op?.force ?? c?.args?.force)) {
           const names = held.slice(0, 3).map(r => I.nameOf("route", r));
           const what = held.length
             ? `${held.length} route(s) (${names.join(", ")}${held.length > 3 ? ", ..." : ""})${moved ? ` and ${moved} moved in by an earlier op of this call` : ""}`
@@ -341,7 +342,7 @@
       let to = null;
       if (held.length) {
         // never move routes without force (check guarantees it; this guards a changed page)
-        if (!op?.force)
+        if (!(op?.force ?? c?.args?.force))
           fail("REFUSED", `route group ${g.id} now holds ${held.length} route(s); pass force:true to move them`);
         to = fallbackGroup(g, op);
         for (const r of held) r.group = to;

@@ -98,7 +98,9 @@
       }
       if (!Object.keys(m).length) delete L[from];
     }
-    for (const r of pack.routes || []) {
+    // a missing link goes to the LAST route through the pair (Routes.buildLinks' rule, which
+    // bridge-ext/routes.js keeps on add, edit and remove), so walk the routes from the end
+    for (const r of [...(pack.routes || [])].reverse()) {
       for (const [a, b] of routePairs(r)) {
         for (const [x, y] of [
           [a, b],
@@ -530,6 +532,8 @@
   }
 
   REMOVE.burg = {
+    // lets force (with newCapital, orphanRoutes) past the core op guard in bridge-mutations.js
+    takesForce: true,
     check(b, c, op) {
       const o = op || {};
       checkOpKeys("burg", o, c);
@@ -879,6 +883,21 @@
       if (vals.every(v => typeof v === "boolean")) continue;
       refs[key] = vals.map(v => T.resolve(refType, v).i);
     }
+    // a route's group by id or display name, when the routes extension (bridge-ext/routes.js, loaded
+    // after this file) registers route groups; an unknown group is NOT_FOUND, not a silent zero match
+    if (type === "route" && filter.group !== undefined && REMOVE.routeGroup) {
+      const vals = Array.isArray(filter.group) ? filter.group : [filter.group];
+      refs.group = vals.map(v => {
+        if (typeof v !== "string" || !v.trim())
+          fail("BAD_ARGS", "where.routes.group must be a route group id or name (e.g. 'roads')");
+        try {
+          return T.resolve("routeGroup", v.trim()).i;
+        } catch (e) {
+          e.message = `where.routes.group: ${e.message}`;
+          throw e;
+        }
+      });
+    }
     return x => I.matchWhere(type, x, filter, refs);
   }
 
@@ -1193,7 +1212,29 @@
       out.push(`${sel0.unfiltered.join(", ")}: no where filter, so every one of them (not kept or locked) is cleared`);
     if (a.orphanRoutes && !sel0.pick.burg?.size && a.ids === undefined)
       out.push("orphanRoutes applies only when burgs are cleared; it removed nothing");
+    const emptied = emptiedRouteGroups(sel0.pick.route, sel0.orphans);
+    if (emptied.length)
+      out.push(
+        `route groups are kept, even when this clear empties them (${emptied.slice(0, 5).join(", ")}${emptied.length > 5 ? ", ..." : ""}); edit {type:'routeGroup', ops:[{ref, remove:true}]} removes one`
+      );
     return out;
+  }
+
+  /**
+   * Custom route groups (bridge-ext/routes.js) that hold routes now and none once the routes in
+   * `pick` and `orphans` are gone. clear keeps route groups deliberately: a group is a styled
+   * layer, not map data, and a rebuild usually refills it; edit routeGroup remove deletes one.
+   */
+  function emptiedRouteGroups(pick, orphans) {
+    if (!REMOVE.routeGroup || (!pick?.size && !orphans?.size)) return [];
+    const held = new Map();
+    const left = new Set();
+    for (const r of pack.routes || []) {
+      if (!r || typeof r.group !== "string") continue;
+      held.set(r.group, (held.get(r.group) || 0) + 1);
+      if (!pick?.has(r.i) && !orphans?.has(r.i)) left.add(r.group);
+    }
+    return [...held.keys()].filter(g => !left.has(g) && !["roads", "trails", "searoutes"].includes(g));
   }
 
   FNS.clear = async a => {

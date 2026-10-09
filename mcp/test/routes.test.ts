@@ -628,10 +628,13 @@ describe("tupaia-mcp routes (freehand routes, route groups)", () => {
         items: [{ points: burgPts(), noPathfind: true, group: "route-rm", name: "Mover" }]
       })
     )[0];
-    // force and moveTo belong to removing a routeGroup
-    const f1 = await fail("edit", { type: "burg", ops: [{ ref: pick.A.i, remove: true, force: true }] });
+    // moveTo belongs to removing a routeGroup; force to removing a routeGroup or (dx/clear) a burg
+    const f1 = await fail("edit", { type: "burg", ops: [{ ref: pick.A.i, remove: true, moveTo: "roads" }] });
     assert.equal(f1.code, "BAD_ARGS");
     assert.match(f1.message, /only to removing a routeGroup/);
+    const f1b = await fail("edit", { type: "state", ops: [{ ref: 1, remove: true, force: true }] });
+    assert.equal(f1b.code, "BAD_ARGS");
+    assert.match(f1b.message, /only to removing a burg or a routeGroup/);
     const f2 = await fail("edit", {
       type: "routeGroup",
       ops: [{ ref: "route-rm", set: { stroke: "#fff" }, force: true }]
@@ -1229,7 +1232,7 @@ describe("tupaia-mcp routes (freehand routes, route groups)", () => {
     assert.equal(recs[7].resolved.ops[0].force, true);
     assert.equal(recs[7].resolved.ops[0].moveTo, "route-moved");
     assert.match(String(recs[3].summary), /points 3 -> 2 \(.* -> .* px\)/);
-    assert.match(String(recs[7].summary), /removed routeGroup .*route-tunnels.* \(1 route moved to route-moved\)/);
+    assert.match(String(recs[7].summary), /[Rr]emoved routeGroup .*route-tunnels.* \(1 route moved to route-moved\)/);
     assert.match(String(recs[2].summary), /Sketch Tunnel/);
     assert.match(String(recs[2].summary), /along 3 places/);
   });
@@ -1398,7 +1401,7 @@ describe("tupaia-mcp routes (freehand routes, route groups)", () => {
       } as EditResolved,
       null
     );
-    assert.match(rm, /removed routeGroup "A" \(route-a\) \(3 routes moved to roads\)/);
+    assert.match(rm, /[Rr]emoved routeGroup "A" \(route-a\) \(3 routes moved to roads\)/);
     // draw-order anchors name neighbours: a group added next to this one is not a competing change
     const move = {
       type: "routeGroup",

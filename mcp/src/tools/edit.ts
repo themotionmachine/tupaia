@@ -239,7 +239,7 @@ export function register(ctx: ToolContext): void {
           )
           .min(1)
           .max(500),
-        force: z.boolean().optional().describe("type burg: force:true for every remove op"),
+        force: z.boolean().optional().describe("type burg or routeGroup: force:true for every remove op"),
         ...Common
       }),
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },

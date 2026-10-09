@@ -841,13 +841,11 @@
     if (op.remove) {
       if (op.set && Object.keys(op.set).length) fail("BAD_ARGS", "an op either sets fields or removes, not both");
       if (NO_REMOVE[type]) fail("REFUSED", NO_REMOVE[type]);
-      if ((op.force !== undefined || op.moveTo !== undefined) && !REMOVE[type].takesForce)
-        fail(
-          "BAD_ARGS",
-          op.moveTo !== undefined
-            ? `moveTo applies only to removing a routeGroup, not a ${type}`
-            : `force applies only to removing a burg or a routeGroup, not a ${type}`
-        );
+      // REMOVE[type].takesForce / takesMoveTo: the removal options a type's hooks understand
+      if (op.moveTo !== undefined && !REMOVE[type].takesMoveTo)
+        fail("BAD_ARGS", `moveTo applies only to removing a routeGroup, not a ${type}`);
+      if (op.force !== undefined && !REMOVE[type].takesForce)
+        fail("BAD_ARGS", `force applies only to removing a burg or a routeGroup, not a ${type}`);
       // check(entity, batch, op) may return plan info (shown by dryRun, e.g. a forced removal's
       // cascade preview); op carries force/moveTo/newCapital/orphanRoutes
       const info = REMOVE[type].check?.(r.entity, c, op);
