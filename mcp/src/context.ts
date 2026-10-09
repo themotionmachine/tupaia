@@ -66,6 +66,12 @@ export interface ShotRecord {
   imgW: number;
   imgH: number;
   layersOn: string[];
+  /**
+   * Set when the returned image is the changed-region crop of the PNG (screenshot crop:'changed'):
+   * the crop's box in PNG px, and for sideBySide the width of one half and where the right
+   * ("after") half starts, both in returned-image px. imgW/imgH are then the crop image's size.
+   */
+  crop?: { box: [number, number, number, number]; half?: { width: number; right: number } };
 }
 
 export class ShotStore {
@@ -249,6 +255,12 @@ export class ToolContext {
   readonly shared: SharedApi;
   /** The provisional sketch (ops log) being recorded, if any. */
   readonly sketches = new SketchStore();
+  /**
+   * What the newest edit/add/paint_cells call redrew (screenshot compares use it to explain a
+   * 'no change' result). `suppressed`: the caller passed redraw:false or [].
+   */
+  lastRedraw: { tool: string; at: number; redrawn: string[]; skippedHidden: string[]; suppressed: boolean } | null =
+    null;
   server!: McpServer;
   readonly toolNames: string[] = [];
 

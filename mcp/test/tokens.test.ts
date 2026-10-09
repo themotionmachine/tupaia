@@ -15,6 +15,8 @@ import {
   compactFind,
   compactInspect,
   countChanges,
+  cropScreenToMap,
+  plainText,
   pngPerMap,
   pngToMap
 } from "../src/compact.ts";
@@ -132,6 +134,55 @@ describe("compactFind (pure)", () => {
     assert.match(row, /…/);
   });
 
+  test("fields: lat/lon appear when named, a name-repeating fullName/note is dropped, requested strings are whole", () => {
+    const row = {
+      i: 5,
+      name: "Oom",
+      fullName: "Oom",
+      note: "Oom",
+      legend: `<p>${"long text ".repeat(30)}</p>`,
+      capital: false,
+      x: 10.2,
+      y: 20.7,
+      lat: 19.38123,
+      lon: -0.76123
+    };
+    const plain1 = compactFind({ type: "marker", total: 1, rows: [row] }).split("\n")[1];
+    assert.ok(!plain1.includes("lat=") && !plain1.includes("fullName") && !plain1.includes("note="), plain1);
+    assert.match(plain1, /legend="long text long text .*…\(\+\d+\)"/);
+    const named = compactFind({ type: "marker", total: 1, rows: [row] }, ["lat", "lon", "legend"]).split("\n")[1];
+    assert.match(named, /lat=19\.3812 lon=-0\.7612 at=\(10,21\)$/);
+    assert.ok(!named.includes("…") && named.length > 300, `${named.length}`);
+  });
+
+  test("a requested field no row shows is reported once, not silently dropped", () => {
+    const t = compactFind(
+      {
+        type: "burg",
+        total: 2,
+        rows: [
+          { i: 1, name: "A", capital: false, x: 1, y: 2 },
+          { i: 2, name: "B", x: 3, y: 4 }
+        ]
+      },
+      ["capital", "bogus", "x"]
+    );
+    assert.deepEqual(t.split("\n").slice(-2), [
+      "burg 2 B at=(3,4)",
+      "empty in every row (false, null, 0 or not a field): capital, bogus"
+    ]);
+    assert.ok(!compactFind({ type: "burg", total: 1, rows: [{ i: 1, name: "A", x: 1, y: 2 }] }).includes("empty in"));
+  });
+
+  test("plainText: tags dropped, entities decoded, a bare < stays", () => {
+    assert.equal(
+      plainText("<b>Capital</b> city,&nbsp;pop 30&#44;000. It&#x27;s &amp; <i>big</i>.<br>Next"),
+      "Capital city, pop 30,000. It's & big. Next"
+    );
+    assert.equal(plainText("a < b and c > d"), "a < b and c > d");
+    assert.equal(plainText("Oom"), "Oom");
+  });
+
   test("a third of the JSON size or better on a plain row set", () => {
     const json = JSON.stringify({ type: "burg", total: 753, offset: 0, returned: 3, matchedBy: null, rows });
     assert.ok(text.length < json.length * 0.6, `${text.length} vs ${json.length}`);
@@ -179,7 +230,8 @@ describe("compactInspect (pure)", () => {
     assert.equal(lines[0], "burg 1 Longong at=(216.85,585.12) lat=19.3447 lon=-43.4806 cell=4589");
     assert.ok(lines.includes("[entity]") && lines.includes("[relations]"));
     for (const l of lines.slice(1)) assert.ok(l.startsWith("[") || /^[A-Za-z.]+(=|$)/.test(l), `not key=value: ${l}`);
-    assert.ok(lines.includes("population=15.067")); // stored unit, no alias in inspect
+    assert.ok(lines.includes("pop=15067"), "people, named as in find"); // relations.people
+    assert.ok(!lines.some(l => l.startsWith("population=")), "the thousands figure is not repeated");
     assert.ok(lines.includes("coa={t1,division,shield}"));
     assert.ok(lines.includes("production=[40 items]"));
     assert.ok(lines.includes("diplomacy=[21 items]"));
@@ -187,6 +239,7 @@ describe("compactInspect (pure)", () => {
     assert.ok(!lines.some(l => l.startsWith("lock")), "false is left out");
     assert.ok(!lines.some(l => /^(cell|x|y|i|name)=/.test(l)), "header fields not repeated");
     assert.ok(lines.includes("state=1 (Lohia)"));
+    assert.equal(lines.filter(l => l.startsWith("state=")).length, 1, "a key [relations] restates is shown once");
     assert.ok(lines.includes("routes=[4,137]"));
     assert.ok(lines.includes("neighbors=[15 (Laupsland) relation=Suspicion]"));
     assert.ok(!t.includes('{"'), "no nested JSON");
@@ -197,11 +250,51 @@ describe("compactInspect (pure)", () => {
     const t = compactInspect(burg, ["population", "people", "state"]);
     assert.deepEqual(t.split("\n").slice(1), [
       "[entity]",
-      "state=1",
-      "population=15.067",
+      "population=15.067", // named, so kept; the state is in [relations] with its name
       "[relations]",
-      "state=1 (Lohia)",
-      "people=15067"
+      "pop=15067",
+      "state=1 (Lohia)"
+    ]);
+    assert.deepEqual(compactInspect(burg, ["pop"]).split("\n").slice(1), ["[relations]", "pop=15067"]);
+  });
+
+  test("a named field is not cut; HTML is reduced to text; unnamed long strings are cut with the count", () => {
+    const legend = `<b>Capital</b> city,&nbsp;pop 30,000. It&#x27;s <i>big</i>.<br>${"word ".repeat(60)}`;
+    const note = { kind: "entity", type: "note", i: "burg1", name: "Longong", entity: { id: "burg1", legend } };
+    const cut = compactInspect(note);
+    assert.match(cut, /legend="Capital city, pop 30,000\. It's big\. word word/);
+    assert.match(cut, /…\(\+\d+\)"$/, "says how much was left out");
+    assert.ok(!cut.includes("<b>") && !cut.includes("&#x27;"));
+    const whole = compactInspect(note, ["legend"]);
+    assert.ok(whole.length > legend.length * 0.8 - 100 && !whole.includes("…"), `${whole.length}`);
+    assert.ok(whole.trimEnd().endsWith('word"'));
+  });
+
+  test("a state: provinces/capital are in [relations] only; burgCount is not repeated next to burgs", () => {
+    const state = {
+      kind: "entity",
+      type: "state",
+      i: 3,
+      name: "Tetelilco",
+      entity: { capital: 3, provinces: [19, 20], burgs: 34, rural: 1017.021, cells: 199 },
+      relations: {
+        capital: { i: 3, name: "Tetzintza" },
+        provinces: [
+          { i: 19, name: "Tolololo" },
+          { i: 20, name: "Calco" }
+        ],
+        burgCount: 34,
+        rural: 1017021
+      }
+    };
+    assert.deepEqual(compactInspect(state).split("\n").slice(1), [
+      "[entity]",
+      "burgs=34",
+      "cells=199",
+      "[relations]",
+      "capital=3 (Tetzintza)",
+      "provinces=[19 (Tolololo), 20 (Calco)]",
+      "rural=1017021"
     ]);
   });
 
@@ -273,7 +366,10 @@ describe("changes helpers (pure)", () => {
         modified: [entry(1), entry(2), entry(3)]
       }
     };
-    assert.equal(compactChanges(small), small);
+    // the same entries; the empty lists are not repeated
+    assert.deepEqual(compactChanges(small), {
+      burg: { counts: small.burg.counts, modified: small.burg.modified }
+    });
     assert.equal(compactChanges(undefined), undefined);
     const edge = {
       burg: {
@@ -283,7 +379,11 @@ describe("changes helpers (pure)", () => {
         modified: Array.from({ length: CHANGES_FULL_MAX }, (_, k) => entry(k))
       }
     };
-    assert.equal(compactChanges(edge), edge, "exactly CHANGES_FULL_MAX entries stay whole");
+    assert.deepEqual(
+      compactChanges(edge),
+      { burg: { counts: edge.burg.counts, modified: edge.burg.modified } },
+      "exactly CHANGES_FULL_MAX entries stay whole"
+    );
   });
 
   test("compactChanges: large diffs keep exact counts, the first few entries and what is left", () => {
@@ -324,6 +424,48 @@ describe("crop maths (pure)", () => {
     assert.ok(Math.abs(a - b) < 1e-9);
     assert.equal(pngPerMap({ ...view, pngW: 2560, pngH: 1440 }), (view.scale * 2560) / 1280);
   });
+  test("cropScreenToMap: a pixel of the cropped image maps through the crop box", () => {
+    const rec = {
+      full: false,
+      pngW: 1280,
+      pngH: 720,
+      cssW: 1280,
+      cssH: 720,
+      graphWidth: 1680,
+      graphHeight: 849,
+      view: { x: view.x, y: view.y, scale: view.scale },
+      imgW: 200,
+      imgH: 100,
+      crop: { box: [400, 300, 600, 400] as [number, number, number, number] }
+    };
+    // the crop's top-left and bottom-right pixels are the box corners
+    assert.deepEqual(cropScreenToMap(0, 0, rec), pngToMap(400, 300, view));
+    assert.deepEqual(cropScreenToMap(200, 100, rec), pngToMap(600, 400, view));
+    assert.deepEqual(cropScreenToMap(100, 50, rec), pngToMap(500, 350, view));
+    // downscaled crop (image 100x50 for the same box): same map point for the same fraction
+    const small = { ...rec, imgW: 100, imgH: 50 };
+    assert.deepEqual(cropScreenToMap(50, 25, small), pngToMap(500, 350, view));
+  });
+
+  test("cropScreenToMap: sideBySide, both halves map to the same region; the gap clamps", () => {
+    const rec = {
+      full: false,
+      pngW: 1280,
+      pngH: 720,
+      cssW: 1280,
+      cssH: 720,
+      graphWidth: 1680,
+      graphHeight: 849,
+      view: { x: view.x, y: view.y, scale: view.scale },
+      imgW: 410,
+      imgH: 100,
+      crop: { box: [400, 300, 600, 400] as [number, number, number, number], half: { width: 200, right: 210 } }
+    };
+    assert.deepEqual(cropScreenToMap(100, 50, rec), pngToMap(500, 350, view));
+    assert.deepEqual(cropScreenToMap(210 + 100, 50, rec), pngToMap(500, 350, view), "the right half");
+    assert.deepEqual(cropScreenToMap(205, 50, rec), pngToMap(600, 350, view), "in the gap: the edge");
+  });
+
   test("full shots map linearly onto the graph", () => {
     const v = { ...view, full: true, pngW: 3360, pngH: 1698, cssW: 1680, cssH: 849 };
     assert.deepEqual(pngToMap(3360, 1698, v), [1680, 849]);
@@ -367,7 +509,7 @@ describe("changedBox / padBox (pure, in node:vm)", () => {
 
   test("identical frames: nothing changed, no box", () => {
     const r = box(frame(), frame());
-    assert.deepEqual(r, { changed: 0, significant: 0, speckle: 0, box: null });
+    assert.deepEqual(r, { changed: 0, significant: 0, speckle: 0, clusters: [], box: null });
   });
 
   test("a changed rectangle gives exactly its box (x1/y1 exclusive)", () => {
@@ -427,6 +569,37 @@ describe("changedBox / padBox (pure, in node:vm)", () => {
     assert.ok(r.speckle >= 24 * 8 - 40, `speckle ${r.speckle}`);
   });
 
+  test("a small solid change is a change: one icon-sized block (6x6) gives its box", () => {
+    const b = frame();
+    paint(b, 200, 150, 206, 156); // 36 px, below the 48 px floor but solid
+    const r = box(frame(), b);
+    assert.deepEqual(r.box, [200, 150, 206, 156]);
+    assert.equal(r.speckle, 0);
+    assert.equal(r.clusters.length, 1);
+  });
+
+  test("a sparse smear of the same pixel count is still noise", () => {
+    const b = frame();
+    for (let k = 0; k < 36; k++) paint(b, 20 + k * 10, 30 + ((k * 7) % 5) * 40, 21 + k * 10, 31 + ((k * 7) % 5) * 40);
+    const r = box(frame(), b);
+    assert.equal(r.box, null);
+    assert.equal(r.speckle, 36);
+  });
+
+  test("a smaller second change is in the box, and clusters list both, largest first", () => {
+    const b = frame();
+    paint(b, 20, 20, 140, 120); // 12000 px
+    paint(b, 300, 250, 330, 262); // 360 px, 3% of the first
+    const r = box(frame(), b);
+    assert.deepEqual(r.box, [20, 20, 330, 262]);
+    assert.deepEqual(
+      r.clusters.map((c: { px: number }) => c.px),
+      [12000, 360]
+    );
+    assert.deepEqual(r.clusters[1].box, [300, 250, 330, 262]);
+    assert.equal(r.speckle, 0);
+  });
+
   test("padBox: default pad, minimum size, clamped to the frame", () => {
     assert.deepEqual(plain(tk.padBox([100, 100, 300, 260], W, H)), [80, 80, 320, 280]); // pad = max(12, 10% of 200)
     assert.deepEqual(plain(tk.padBox([100, 100, 300, 260], W, H, 0)), [100, 100, 300, 260]);
@@ -457,6 +630,16 @@ describe("token savers over the server (demo.map)", () => {
   });
   after(async () => {
     if (h && alive(h.pid)) await h.close();
+  });
+
+  test("map_info right after load_map: the default diff is empty, not the old map against the new one", async () => {
+    const info = await h.ok("map_info", {});
+    assert.equal(info.changed, false);
+    assert.deepEqual(info.changes, {});
+    assert.match(String(info.since), /^load_map /);
+    // the explicit way to compare with the map that was in the page before
+    const counts = await h.ok("map_info", { since: "none", diff: "counts" });
+    assert.equal(counts.changes, undefined);
   });
 
   test("find format:compact: plain text, same rows, far fewer chars", async () => {
@@ -521,7 +704,8 @@ describe("token savers over the server (demo.map)", () => {
     assert.ok(t.startsWith("burg 1 Longong at="), t.slice(0, 80));
     assert.ok(t.includes("[entity]") && t.includes("[relations]"));
     assert.ok(t.includes("state=1 (Lohia)"));
-    assert.ok(/^people=\d+$/m.test(t));
+    assert.ok(/^pop=\d+$/m.test(t), "relations.people is pop, as in find");
+    assert.ok(!/^population=/m.test(t), "no second, thousands-based population");
     assert.ok(/^production=\[\d+ items\]$/m.test(t));
     assert.ok(!t.includes('{"'), "no nested JSON");
     assert.ok(t.length < JSON.stringify(j).length * 0.35, `${t.length} vs ${JSON.stringify(j).length}`);
@@ -537,7 +721,7 @@ describe("token savers over the server (demo.map)", () => {
     const t = textOf(
       await call("inspect", { entity: { type: "burg", ref: 1 }, format: "compact", fields: ["population", "people"] })
     );
-    assert.deepEqual(t.split("\n").slice(1), ["[entity]", "population=15.067", "[relations]", "people=15067"]);
+    assert.deepEqual(t.split("\n").slice(1), ["[entity]", "population=15.067", "[relations]", "pop=15067"]);
     const j = await json("inspect", { entity: { type: "burg", ref: 1 }, fields: ["population", "people"] });
     assert.deepEqual(Object.keys(j.entity), ["population"]);
     assert.deepEqual(Object.keys(j.relations), ["people"]);
@@ -556,6 +740,11 @@ describe("token savers over the server (demo.map)", () => {
     const counts = await h.ok("map_info", { since: "snapshot", diff: "counts" });
     assert.equal(counts.changed, true);
     assert.deepEqual(counts.changes, { burg: { added: 0, removed: 0, changed: 30 } });
+    // diff:'counts' is the diff only, not the overview around it
+    assert.deepEqual(Object.keys(counts).sort(), ["changed", "changes", "opsSince", "since"]);
+    assert.ok(JSON.stringify(counts).length < 400, `${JSON.stringify(counts).length} chars`);
+    const withOverview = await h.ok("map_info", { since: "snapshot", diff: "counts", overview: true });
+    assert.ok(withOverview.counts && withOverview.name !== undefined, "overview:true brings the overview back");
     const burg = (full.changes as { burg: { counts: { modified: number } } }).burg;
     assert.equal(burg.counts.modified, 30);
     assert.equal(counts.changesTruncated, undefined);
@@ -568,6 +757,26 @@ describe("token savers over the server (demo.map)", () => {
     // no baseline at all keeps the explanatory object
     const off = await h.ok("map_info", { since: "none", diff: "counts" });
     assert.equal(off.changes, undefined);
+  });
+
+  test("rows:'ids' answers with ids only and still applies the whole call", async () => {
+    const ops = [10, 11, 12, 13].map(i => ({ ref: i, set: { population: 4000 + i } }));
+    const lean = await h.ok("edit", { type: "burg", ops, rows: "ids" });
+    assert.equal(lean.applied, undefined);
+    assert.deepEqual(lean.appliedIds, [10, 11, 12, 13]);
+    const full = await h.ok("edit", { type: "burg", ops: ops.map(o => ({ ...o, set: { population: 5000 } })) });
+    assert.equal((full.applied as unknown[]).length, 4, "rows defaults to the full rows");
+    assert.ok(JSON.stringify(lean).length < JSON.stringify(full).length * 0.8);
+    const added = await h.ok("add", {
+      type: "marker",
+      items: [{ at: { x: 230, y: 570 } }, { at: { x: 190, y: 600 } }],
+      rows: "ids"
+    });
+    assert.equal(added.created, undefined);
+    assert.equal((added.createdIds as number[]).length, 2);
+    await h.ok("snapshot", { action: "undo" });
+    await h.ok("snapshot", { action: "undo" });
+    await h.ok("snapshot", { action: "undo" });
   });
 
   test("diff counts include cells; mutating tools: large changes compact, small ones whole", async () => {
@@ -641,10 +850,10 @@ describe("token savers over the server (demo.map)", () => {
       const body = JSON.parse(textOf(r));
       assert.match(body.shotId, /^s\d+$/);
       assert.match(body.note, /^nothing changed vs s\d+: /);
+      assert.equal(body.compare.changedPixels, 0, "the trade animation is hidden and the view is the rounded one");
       assert.ok(!body.note.includes("\n"));
       assert.equal(body.compare.with, base);
-      // (a shot is captured at the rounded view that view:/compare: replay, so the replay is exact; a
-      // few pixels can still move while the page animates, which the noise floor ignores)
+      // (a shot is captured at the rounded view that view:/compare: replay, so the replay is exact)
       assert.match(body.note, new RegExp(`^nothing changed vs ${base}: `));
       assert.ok(textOf(r).length < 300, `${textOf(r).length} chars`);
       // the shot was stored: it works as a baseline
@@ -744,6 +953,104 @@ describe("token savers over the server (demo.map)", () => {
       assert.ok(sx0 <= x0 && sy0 <= y0 && sx1 >= x1 && sy1 >= y1);
       assert.ok(Math.abs(x0 - sx0 - 10) < 2, `pad 10 map px on the left: ${c.shown} vs ${c.bbox}`);
       await h.ok("snapshot", { action: "undo" });
+    });
+
+    test("a framed shot still reports what it framed", async () => {
+      const r = await h.ok("screenshot", { target: { entity: { type: "burg", ref: 96 } } });
+      assert.match(String(r.target), /^burg 96/);
+      const b = await h.ok("screenshot", { target: { bbox: frame } });
+      assert.equal(b.target, "bbox");
+    });
+
+    test("a differently framed shot cannot be compared; the refusal burns no shot id", async () => {
+      const shotNo = async () =>
+        Number(String((await h.ok("screenshot", { compare: base, crop: "changed" })).shotId).slice(1));
+      const n1 = await shotNo();
+      for (const extra of [{ target: { bbox: [400, 300, 600, 400] } }, { zoom: 3 }, { full: true }]) {
+        const r = await h.call("screenshot", { compare: base, crop: "changed", ...extra });
+        assert.equal(r.isError, true, JSON.stringify(extra));
+        assert.equal(errorBody(r).error.code, "BAD_ARGS", JSON.stringify(extra));
+        assert.match(errorBody(r).error.message, /framed differently|full-map|viewport/);
+      }
+      assert.equal(await shotNo(), n1 + 1, "three refusals, no ids used");
+      // the same frame asked for again by target is the same view: fine
+      const same = await h.call("screenshot", { compare: base, target: { bbox: frame } });
+      assert.ok(!same.isError, textOf(same));
+    });
+
+    test("inspect {at:{screen, shot}} on a crop shot lands inside the shown region, for both layouts", async () => {
+      await h.ok("edit", { type: "burg", ops: [{ ref: 96, set: { name: "Zhongshan Cropped" } }] });
+      for (const sideBySide of [false, true]) {
+        const r = JSON.parse(textOf(await call("screenshot", { compare: base, crop: "changed", pad: 6, sideBySide })));
+        const [sx0, sy0, sx1, sy1] = r.compare.shown as number[];
+        // the middle of the after image (the right half with sideBySide) is the middle of `shown`
+        const px = Math.round(sideBySide ? r.width * 0.75 : r.width / 2);
+        const at = await h.ok("inspect", { at: { screen: [px, Math.round(r.height / 2)], shot: r.shotId } });
+        assert.ok(
+          Math.abs((at.x as number) - (sx0 + sx1) / 2) < (sx1 - sx0) / 20 + 1 &&
+            Math.abs((at.y as number) - (sy0 + sy1) / 2) < (sy1 - sy0) / 20 + 1,
+          `${sideBySide ? "sideBySide " : ""}(${at.x}, ${at.y}) vs centre of ${r.compare.shown}`
+        );
+        // and the top-left pixel is the top-left corner of the shown region
+        const tl = await h.ok("inspect", { at: { screen: [0, 0], shot: r.shotId } });
+        assert.ok(Math.abs((tl.x as number) - sx0) < 1.5 && Math.abs((tl.y as number) - sy0) < 1.5, `${tl.x},${tl.y}`);
+      }
+    });
+
+    test("two separate edits: one box over both, and the clusters say where each is", async () => {
+      await h.ok("edit", { type: "burg", ops: [{ ref: 1, set: { name: "Longong Far" } }] });
+      const r = JSON.parse(textOf(await call("screenshot", { compare: base, crop: "changed" })));
+      const c = r.compare as { bbox: number[]; clusters?: Array<{ bbox: number[]; pixels: number }> };
+      assert.ok(c.clusters && c.clusters.length >= 2, JSON.stringify(c));
+      const [bx0, by0, bx1, by1] = c.bbox;
+      for (const k of c.clusters ?? []) {
+        assert.ok(k.bbox[0] >= bx0 - 0.2 && k.bbox[1] >= by0 - 0.2 && k.bbox[2] <= bx1 + 0.2 && k.bbox[3] <= by1 + 0.2);
+        assert.ok(k.pixels >= 9);
+      }
+      const px = (c.clusters ?? []).map(k => k.pixels);
+      assert.deepEqual(
+        px,
+        [...px].sort((a, b) => b - a),
+        "largest first"
+      );
+      await h.ok("edit", { type: "burg", ops: [{ ref: 1, set: { name: "Longong" } }] });
+    });
+
+    test("after redraw:[] a compare that finds nothing says the mutation was not drawn", async () => {
+      await h.ok("display", { on: ["markers"] });
+      const b2 = (await h.ok("screenshot", { target: { bbox: frame } })).shotId as string;
+      // the markers layer is drawn by the redraw that redraw:[] leaves out
+      await h.ok("add", { type: "marker", items: [{ at: { x: 230, y: 570 } }], redraw: [] });
+      const r = JSON.parse(textOf(await call("screenshot", { compare: b2, crop: "changed" })));
+      assert.equal(r.compare.bbox, undefined, "nothing was drawn, so nothing changed on screen");
+      assert.match(r.note, /^nothing changed vs s\d+: /);
+      assert.match(r.note, /last mutation \(add marker\) ran with redraw:\[\]/);
+      const plain2 = JSON.parse(textOf(await call("screenshot", { compare: b2 })));
+      assert.match(plain2.compare.hint, /redraw:\[\]/);
+      // drawn this time: the hint is gone and the change shows
+      await h.ok("add", { type: "marker", items: [{ at: { x: 190, y: 600 } }] });
+      const shown = JSON.parse(textOf(await call("screenshot", { compare: b2, crop: "changed" })));
+      assert.ok(shown.compare.bbox, JSON.stringify(shown).slice(0, 300));
+      assert.equal(shown.note, undefined);
+      for (let k = 0; k < 3; k++) await h.ok("snapshot", { action: "undo" });
+    });
+
+    test("a mutation that only touched a hidden layer is named in the note", async () => {
+      await h.ok("display", { off: ["markers"] });
+      const b3 = (await h.ok("screenshot", { target: { bbox: frame } })).shotId as string;
+      await h.ok("add", { type: "marker", items: [{ at: { x: 230, y: 570 } }] });
+      const r = JSON.parse(textOf(await call("screenshot", { compare: b3, crop: "changed" })));
+      assert.match(r.note, /only touched hidden layers \(markers\)/);
+      for (let k = 0; k < 2; k++) await h.ok("snapshot", { action: "undo" });
+    });
+
+    test("a change that fills the frame says the crop saves little; a bbox on the frame edge says so", async () => {
+      const wide = (await h.ok("screenshot", { full: true })).shotId as string;
+      await h.ok("display", { only: ["heightmap"] });
+      const r = JSON.parse(textOf(await call("screenshot", { compare: wide, crop: "changed", full: true })));
+      await h.ok("snapshot", { action: "undo" });
+      assert.match(String(r.compare.spread), /^the shown region is \d+% of the frame, so the crop saves little/);
+      assert.ok(Array.isArray(r.compare.touchesEdge) && r.compare.touchesEdge.length > 0, JSON.stringify(r.compare));
     });
 
     test("plain compare is unchanged (diff image, diffFile, pixelHint)", async () => {

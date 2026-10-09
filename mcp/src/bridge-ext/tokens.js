@@ -41,24 +41,35 @@
   }
 
   // Changed pixels are counted per TILE x TILE block, and blocks within GAP blocks of each other
-  // form one cluster. A change needs at least one solid cluster (NOISE_MIN_PX pixels): what is
-  // left are lone pixels and small speckle (anti-aliasing flicker, a river stroke that drew a
-  // pixel differently), which is noise. The box then spans the clusters that are not tiny next
-  // to the largest one (at least MIN_CLUSTER_PX pixels and REL_FLOOR of the largest), so
-  // speckle around a real change cannot stretch it over the whole frame. Everything left out
-  // is reported as `speckle`.
+  // form one cluster. A cluster is a real change when it holds at least NOISE_MIN_PX pixels, or is
+  // a small SOLID blob (at least SOLID_MIN_PX pixels filling most of a box that is at least
+  // SOLID_MIN_SIDE wide and high: a single redrawn icon or cell at low zoom). What is left are
+  // lone pixels and sparse speckle (anti-aliasing flicker, a stroke that drew a pixel
+  // differently), which is noise and is reported as `speckle`. The box spans every real
+  // cluster, and the clusters themselves are returned (largest first) so a caller can tell
+  // one change from several far apart.
   const TILE_SHIFT = 2;
   const TILE = 1 << TILE_SHIFT;
   const GAP = 3;
-  const MIN_CLUSTER_PX = 6;
   const NOISE_MIN_PX = 48;
-  const REL_FLOOR = 0.15;
+  const SOLID_MIN_PX = 9;
+  const SOLID_MIN_SIDE = 3;
+  const SOLID_FILL = 0.6;
   const MIN_CROP = 128;
+  const MAX_CLUSTERS = 6;
+
+  const isRealCluster = c => {
+    if (c.px >= NOISE_MIN_PX) return true;
+    const w = c.x1 - c.x0;
+    const h = c.y1 - c.y0;
+    return c.px >= SOLID_MIN_PX && w >= SOLID_MIN_SIDE && h >= SOLID_MIN_SIDE && c.px >= w * h * SOLID_FILL;
+  };
 
   /**
    * Bounding box of the changed pixels of two RGBA buffers.
-   * Returns {changed, significant, speckle, box:[x0,y0,x1,y1]|null}; box is in pixels with
-   * x1/y1 exclusive, null when nothing changed or only noise did.
+   * Returns {changed, significant, speckle, clusters:[{px, box}], box:[x0,y0,x1,y1]|null}; boxes
+   * are in pixels with x1/y1 exclusive, null when nothing changed or only noise did. clusters
+   * holds the real change clusters, largest first.
    */
   function changedBox(da, db, w, h, thr) {
     const tw = Math.ceil(w / TILE);
@@ -85,7 +96,7 @@
         if (y > by1[t]) by1[t] = y;
       }
     }
-    if (!changed) return { changed, significant: 0, speckle: 0, box: null };
+    if (!changed) return { changed, significant: 0, speckle: 0, clusters: [], box: null };
     // clusters of non-empty tiles (flood fill with a GAP-tile reach)
     const seen = new Uint8Array(tw * th);
     const clusters = [];
@@ -124,24 +135,27 @@
       }
       clusters.push({ px, x0, y0, x1: x1 + 1, y1: y1 + 1 });
     }
-    let largest = 0;
-    for (const c of clusters) if (c.px > largest) largest = c.px;
-    if (largest < NOISE_MIN_PX) return { changed, significant: 0, speckle: changed, box: null };
-    const floor = Math.max(MIN_CLUSTER_PX, largest * REL_FLOOR);
+    const real = clusters.filter(isRealCluster).sort((p, q) => q.px - p.px);
+    if (!real.length) return { changed, significant: 0, speckle: changed, clusters: [], box: null };
     let significant = 0;
     let x0 = Infinity;
     let y0 = Infinity;
     let x1 = -1;
     let y1 = -1;
-    for (const c of clusters) {
-      if (c.px < floor) continue;
+    for (const c of real) {
       significant += c.px;
       if (c.x0 < x0) x0 = c.x0;
       if (c.y0 < y0) y0 = c.y0;
       if (c.x1 > x1) x1 = c.x1;
       if (c.y1 > y1) y1 = c.y1;
     }
-    return { changed, significant, speckle: changed - significant, box: [x0, y0, x1, y1] };
+    return {
+      changed,
+      significant,
+      speckle: changed - significant,
+      clusters: real.map(c => ({ px: c.px, box: [c.x0, c.y0, c.x1, c.y1] })),
+      box: [x0, y0, x1, y1]
+    };
   }
 
   /** Pad a box, keep it at least MIN_CROP wide/high where the frame allows, clamp to the frame. */
@@ -203,7 +217,9 @@
       total,
       changedPct: rn((r.changed / total) * 100, 3),
       speckle: r.speckle,
-      box: r.box
+      box: r.box,
+      clusterCount: r.clusters.length,
+      clusters: r.clusters.slice(0, MAX_CLUSTERS)
     };
     if (!r.box) return out;
     const cropBox = padBox(r.box, w, h, a.padPx);
@@ -232,9 +248,61 @@
       canvas = c2;
     }
     out.cropBox = cropBox;
+    out.sheet = { cw, ch, gap, scale: canvas.width / tw };
     out.crop = encodeCanvas(canvas, a.format || "jpeg", a.quality);
     return out;
   };
 
-  T.tokens = { changedBox, padBox };
+  // The trade layer animates wagons and ships along the trade routes with d3 transitions that run
+  // for minutes (a map load with the layer on starts them), so two shots of the same view differ
+  // by ~100 px of moving markers. They are hidden for the length of a capture. Other motion (d3
+  // transitions on the map, running Web Animations) is waited for instead.
+  const FREEZE_ID = "tupaia-shot-freeze";
+  const FREEZE_CSS = "#tradeAnimation{visibility:hidden!important}";
+
+  function activeMotion() {
+    let n = 0;
+    try {
+      for (const an of document.getAnimations()) if (an.playState === "running") n++;
+    } catch {
+      // getAnimations is not available: only d3 transitions count
+    }
+    const map = document.getElementById("map");
+    if (map) {
+      for (const el of map.querySelectorAll("*")) {
+        if (el.__transition && !el.closest("#tradeAnimation")) n++;
+      }
+    }
+    return n;
+  }
+
+  /**
+   * Hide the trade animation and wait (at most maxMs, default 1500) until nothing else on the page
+   * is still animating, so a shot taken right after an edit shows the finished drawing and two
+   * shots of the same view match. Returns {waitedMs, active}: active > 0 means the wait ran out.
+   * Pair with thaw.
+   */
+  FNS.freeze = async a => {
+    if (!document.getElementById(FREEZE_ID)) {
+      const st = document.createElement("style");
+      st.id = FREEZE_ID;
+      st.textContent = FREEZE_CSS;
+      document.head.appendChild(st);
+    }
+    const t0 = Date.now();
+    const end = t0 + (a?.maxMs ?? 1500);
+    let active = activeMotion();
+    while (active && Date.now() < end) {
+      await new Promise(r => setTimeout(r, 50));
+      active = activeMotion();
+    }
+    return { waitedMs: Date.now() - t0, active };
+  };
+
+  FNS.thaw = () => {
+    document.getElementById(FREEZE_ID)?.remove();
+    return { frozen: false };
+  };
+
+  T.tokens = { changedBox, padBox, activeMotion };
 })(globalThis);
