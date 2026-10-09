@@ -184,15 +184,19 @@ Token economy (results are counts first; ask for detail only when needed):
    'cultures'], dryRun:true}`: counts, cascade, what is kept and why (locked entities and `keep`
    stay unless `force`). Keep anchors with `keep:[{type:'burg', ref:'Name'}]`. Then without
    dryRun.
-2. `apply {specPath:'/abs/design/build-spec.json', mode:'check'}`: what upsert would do.
-3. `apply {specPath:'/abs/design/build-spec.json'}`: creates and edits; one undo entry.
-4. `apply {..., mode:'check'}` again until the counts show only `unchanged` plus the known
-   residuals: territory/biome/terrain paints (paint_cells), provinces (UNSUPPORTED: regenerate
-   provinces centres from the spec), rivers (matched, never created), free-standing notes without
-   an id, notes the spec repeats, a curved-path label (eval). `ignored` lists keys apply skips
-   (e.g. markers[].places); zone notes work (`zones[].note`).
+2. `apply {specPath:'/abs/design/build-spec.json', <mapping and paint below>, mode:'check'}`:
+   what upsert would do (paint rows count each entry's differing cells).
+3. The same without `mode`: creates, edits and paints; one undo entry.
+4. `regenerate {parts:['provinces'], provinces:{states:[...], centres:[{state, burg, name}]}}`
+   with one centre per `states[].provinces` entry (apply cannot create provinces).
+5. `apply {..., mode:'check'}` again: every row `unchanged` except what the spec cannot express,
+   each an error row saying why: rivers the spec names that the map lacks (UNSUPPORTED: name the
+   map's rivers with `edit river`), notes the spec gives twice (CONFLICT), a curved-path label.
+   A second upsert changes nothing.
 
-The builder's spec needs a mapping (verified in check mode on the shared v7 map):
+The builder's spec needs this mapping and paint list (verified on a wiped copy of shared v7:
+check, upsert, regenerate provinces, check gives 346 unchanged and 14 error rows: 12 rivers,
+2 duplicate notes; a second upsert changes nothing):
 
 ```
 mapping: {lists:{frame:'map', rivers_intended:'rivers'},
@@ -205,15 +209,47 @@ mapping: {lists:{frame:'map', rivers_intended:'rivers'},
             tunnels:'route-tunnels', 'tunnels-proposed':'route-tunnels_proposed',
             'Oom flyways':'route-oom_flyways', relics:'route-relics', journeys:'route-journeys',
             'deep past':'route-deep_past'}},
-          labels:{group:'lbl_{}'}}},
-tolerance:{legend:'contains'}, ignore:{states:['form']}
+          labels:{group:'lbl_{}'},
+          notes:{entity:{
+            'Map: The Five Valleys and the Spire Lands':{id:'mapNote', name:'The Five Valleys and the Spire Lands'},
+            'Not mapped':{id:'notMapped', name:'Not mapped'},
+            'Retired: Towers of the Oom (old map icon at 1202,535)':{id:'retiredTowersOfTheOom',
+              name:'Retired: Towers of the Oom (old map icon at 1202,535)'},
+            Takeet:{type:'state', name:'Takeet'}, Oom:{type:'state', name:'Oom'},
+            'The twenty-two great mountains':{type:'label', name:'Orena'},
+            Lowlanders:{type:'label', name:'The Lowlands'},
+            'Sea lanes (edge label)':{type:'label', name:'Sea lanes east|round the continent,|then south to the warm seas'}}}}},
+tolerance:{legend:'contains'}, ignore:{states:['form']},
+paint:[
+  {from:'biomes_paint'},
+  {from:'terrain_paint.Takeet', set:{culture:'Takeet', state:'Takeet'}},
+  {from:'terrain_paint.Somnean', set:{culture:'Somnean', state:'Somnean Realm'}},
+  {from:'terrain_paint.Oom', set:{culture:'Oom', state:'Oom'}},
+  {from:'cultures.Wainfolk.territory', set:{culture:'Wainfolk'}},
+  {from:'cultures.Lowlanders.territory', set:{culture:'Lowlanders'}},
+  {select:{any:[{entity:{type:'culture', ref:'Somnean'}}, {entity:{type:'culture', ref:'Takeet'}}]},
+   set:{religion:'Gallima'}},
+  {from:'religions.Soul in Stone.territory', set:{religion:'Soul in Stone'}},
+  {select:{entity:{type:'culture', ref:'Oom'}}, set:{religion:'Oom ways'}},
+  {select:{entity:{type:'culture', ref:'Wainfolk'}}, set:{religion:'Wainfolk hearth ways'}},
+  {select:{entity:{type:'culture', ref:'Lowlanders'}}, set:{religion:'Lowland fen rites'}}]
 ```
 
+- The paint list is the spec's territory: `terrain_paint` in its order (Takeet, then Somnean and
+  Oom over it), cultures then the same cells for states, religions by culture (their rules are
+  prose, so they are spelled out), and `biomes_paint` (its custom biomes are created from
+  `custom:true, base, color, habitability`). `feature_polygon` + `buffer_px` name shapes in
+  `terrain.features`; the buffer is exact (cells within buffer px of the polygon), as the builder's
+  sel.py drew it. `terrain_paint.burg_cells` is apply's own rule: each burgs entry's `state` is
+  painted on the burg's cell last. A territory no paint entry sets is listed in `notes`.
 - Custom route groups need a `routeGroups` list (`[{id:'route-tunnels', name:'tunnels',
   stroke:'#3d2b6b', ...}]`); `draw:'points'` routes are freehand.
 - Notes whose entity name is shared (Takeet, Oom: a state and a culture) need
-  `entity:{type, name}`; free-standing notes need an `id`. A marker's note text goes in
-  `note:{name, legend}` (a bare `legend` key is ignored).
+  `entity:{type, name}`, here through the `notes.entity` value table; a free-standing note is
+  `entity:{id, name}` (or `id`). Zone notes (`zones[].note`, id `zone<i>`) and markers' `places`
+  (joined into the legend as the builder wrote them) need nothing. Two duplicates stay CONFLICT
+  rows: Wainfolk (cultures[3].note and notes[10]) and Kaisma's road (routes[13].note and
+  notes[7]); the builder joined each pair into one legend.
 - apply matches rivers by name but never creates them; use `edit river` for structure.
 - `specPath`: absolute (a relative one: your cwd via the CLI, else the server's cwd, the out dir,
   the repo root; the result's `specPath` names the file read).
@@ -281,6 +317,8 @@ replaces it:
 | Burg labels hidden at full-map zoom | `display {labels:{...}}`, `screenshot {labels:'all'}` (check first: usually they show, just small) |
 | Relief icon density by hand | `regenerate {parts:['relief'], relief:{density\|matchIcons, perBiome, exclude, nearBurgs}}` |
 | Removed entities bloating the .map | `compact`, `compact:true` on saves; `edit map {reliefOnLoad:true}` |
+| Territory and biome cell lists by eval (sel.py: feature polygons + buffer_px, except), then paint_cells per culture/state/religion/biome (territory.py, paint_territory.py, paint_biomes.py) | `apply {specPath, paint:[{from:'terrain_paint.Somnean', set:{culture, state}}, {from:'biomes_paint'}, ...]}` (the mapping above); one-off: `paint_cells {select:{polygon, buffer, except}}` |
+| Composite marker legends, map/label notes by id (add_markers.py, add_notes.py) | `markers[].places` and `notes[].entity` through apply (the mapping above) |
 | Spec checks by hand (verify.js, placecheck.py, overlaps.py, rivcheck.py) | `apply {specPath, mode:'check'}`, `lint` |
 | Removing the random base entity by entity | `clear {types:[...]}` |
 | Its own HTTP bridge (tb.py, port 7391) | `tupaia call` (section 0) |

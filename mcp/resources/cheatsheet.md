@@ -22,7 +22,7 @@ only in a server a human spawned with `TUPAIA_MODE=live`, behind a preview and a
 | `add {type, items:[...], dryRun?, rows?, ...}` | create burgs, states, markers, routes, routeGroups, zones, labels, notes, cultures, religions, biomes. |
 | `paint_cells {select, set, feather?, dryRun?}` | assign state/province/culture/religion/biome/zone/height to cells. |
 | `set_heights {grid\|pack\|image, fill?, rebuild?, rivers?, erosion?, keepHeights?, biomes?, dryRun?}` | replace the heightmap; `risk` rebuilds coast, climate, rivers, biomes (entities carried over), `keep` is local. |
-| `apply {<lists>, map?, specPath?, mode?:'upsert'\|'update'\|'check', mapping?, ignore?, tolerance?, only?}` | bring the map in line with a spec by name, or check it. Idempotent. |
+| `apply {<lists>, map?, paint?, specPath?, mode?:'upsert'\|'update'\|'check', mapping?, ignore?, tolerance?, only?}` | bring the map in line with a spec by name (and paint its cells), or check it. Idempotent. |
 | `clear {types, where?, keep?, force?, orphanRoutes?, detail?, dryRun?}` | remove every entity of some types (wipe a random base), with each editor's cascade. |
 | `compact {types?, repointProvinces?, dryRun?, details?, limit?}` | shrink removed records to id-keeping stubs; drop their notes and SVG. |
 | `regrid {density, heights?, ice?, relief?, biomes?, details?, dryRun?}` | change the cell density and keep the map (id, names, notes, labels). |
@@ -125,8 +125,9 @@ directly (routes, labels, burg names); hidden layers are not redrawn (`skippedHi
 ### paint_cells
 
 `select`: union of `cells:[ids]`, `circle:{at, radius, unit?:'px'|'km'|'mi'}`,
-`polygon:[Place...]`, `entity:{type, ref}`; then `buffer` (map px, grows the shapes, negative
-shrinks), filtered by `where:{land, water, hMin, hMax, biome, state, province, culture, religion,
+`polygon:[Place...]`, `entity:{type, ref}`; then `buffer` (map px: a polygon or circle grows by
+every cell whose centre lies within that distance of it, the cells/entity part from its edge
+cells; negative shrinks), filtered by `where:{land, water, hMin, hMax, biome, state, province, culture, religion,
 feature, burg, river}`, minus `except:<another select>` ('polygon except circle', 'not Glacier':
 `except:{where:{biome:'Glacier'}}`). An unknown key in select, where, set or height is BAD_FIELD
 (`details {unknown, allowed}`), never ignored.
@@ -269,7 +270,8 @@ religions, cultures, emblems (run in that dependency order). `where` per type
 where keyed by type, an unlisted type is cleared entirely. `keep:[{type,ref}]` and `lock:true`
 entities stay unless `force` (freehand routes are locked by default; route groups are not
 removed: `edit {type:'routeGroup', remove}`). Never removes id 0. Emblems are hidden (coa.size 0),
-not deleted.
+not deleted. A removed entity's note goes with it (`cascade.notesDropped`), zones', cultures' and
+religions' too.
 
 **compact**: removed burgs/states/provinces/cultures/religions become `{i, removed:true}`
 (cultures keep base and center); no id changes. Records live data still points at stay whole:
@@ -285,15 +287,35 @@ Keyed by name (labels: text; notes: id | entity:{type,name} | entity:'Name' | na
 groups by id. Found: only differing fields edited; missing: created (`upsert`) or reported
 (`update`); `check` is read-only and previews exactly what upsert would do. Routes:
 `through:[names|[x,y]]` (pathfound) or `draw:'points'` (freehand). An entry's `note` (string or
-{name, legend}) becomes its note. Rivers are matched, never created. `mapping` {lists, keys,
-values} renames first; `ignore` {list:[keys]}; `tolerance` {px, number, fields, legend:'contains'}.
+{name, legend}) becomes its note (zones too: id `zone<i>`); `markers[].places` [{name, x, y,
+note}] join the marker's legend as `<br><b>Places:</b><ul><li><b>name</b> (x,y): note</li>...`.
+A notes entry `entity:{id, name?}` is a free-standing note (handy as a mapping value). Rivers are
+matched, never created. `mapping` {lists, keys, values} renames first; `ignore` {list:[keys]};
+`tolerance` {px, number, fields, legend:'contains'}.
 Rows: unchanged | updated | created | differs | missing | error with diffs {field, have, want};
 identical differs/error rows are grouped (count, at, keys). `created` lists every created entity
-(`<list>.note` its note). Keys apply cannot use come back in `ignored` (with `ignoredNote`), e.g.
-markers[].places; a blocked field is an error row. Provinces, rivers and features are never
-created (UNSUPPORTED, with how: regenerate provinces centres, add a river by reroute/split, paint
-cells). So a spec with territory paints, provinces, free-standing notes without an id, or a
-curved-path label (eval only) never checks as all unchanged: expect those residuals.
+(`<list>.note` its note). Keys apply cannot use come back in `ignored` (with `ignoredNote`); a
+blocked field is an error row. Provinces, rivers and features are never created (UNSUPPORTED,
+with how: regenerate provinces centres, add a river by reroute/split, paint cells).
+
+**apply paint** (territory, biomes, heights): `paint:[{select, set:{state|province|culture|
+religion|biome|height}}]`, or flat `{shape|select|from, where?, except?, culture:'X', ...}`.
+Entries apply in order and a later entry wins its cells; each entry paints only the cells it
+wins whose value differs (one paint_cells step per key, literal cells: replayable), skipping
+what paint_cells skips (water, state/province centres, capitals), so a second apply changes
+nothing. Check rows per entry: diffs `{field, want, cells, differ, have:{previous: n},
+overridden, skipped}`. select = paint_cells select plus `any:[selects]` (union), `selects:[...]`,
+`circle:[x,y,r]`, `polygon:[[x,y]]`, `feature_polygon(s)` + `buffer_px` (shapes named in the
+spec's `terrain.features` or `shapes`). `from:'terrain_paint.Somnean'` / `'cultures.Wainfolk.territory'`
+reads the entry out of the spec file; `from:'biomes_paint'` (a list) gives one entry per item, and
+a `custom:true` biome entry also defines its biome. height: `{value}` (land 20..100, keep) only;
+it re-derives the changed cells' biomes, except on cells a biome entry paints (either order).
+Selects that read a painted key (`where:{culture}`, `entity:{type:'culture'}`) see the earlier
+entries' paint in upsert, the current map in check. A burgs entry's `state` is painted on the
+burg's own cell after the paint list (a diff `via:'cell'`; a capital's cell is read-only). An
+entity's `territory` is never set directly: territories no paint entry sets are listed in
+`notes`. So a spec checks all unchanged except provinces (regenerate centres), rivers it names
+that the map lacks, notes the spec gives twice (CONFLICT) and curved-path labels (eval only).
 
 **lint checks**: label-offcanvas, label-overlap, label-orphan, marker-stacked, marker-cell-link,
 marker-in-water, burg-in-water, burg-shared-cell, burg-cell-link, capital-outside, province-empty,
@@ -496,9 +518,10 @@ time can be several times that, and stderr progress lines say whether the daemon
    lock:true}}}], recalculate:'climate+biomes', dryRun:true}` -> `lint` -> `screenshot {full:true}`.
 5. Build from a spec: `clear {types:['labels','markers','zones','routes','burgs','provinces',
    'states','religions','cultures'], dryRun:true}` (locked entities, e.g. freehand routes, are
-   kept unless `force`) -> without dryRun -> `apply {specPath:'/abs/spec.json',
-   mode:'check'}` -> `apply {specPath}` -> `apply {..., mode:'check'}` (expect unchanged plus the
-   residuals under apply: paints, provinces via regenerate, rivers, id-less notes).
+   kept unless `force`; clear drops the removed entities' notes) -> without dryRun -> `apply
+   {specPath:'/abs/spec.json', paint:[...], mode:'check'}` -> `apply {specPath, paint}` ->
+   `regenerate {parts:['provinces'], provinces:{states, centres}}` -> `apply {..., mode:'check'}`
+   (expect unchanged plus the residuals under apply paint).
 6. Quality pass: `lint {}` -> run each `fixAll`/`fix` call -> `lint {checks:[...]}` until clean;
    `ignore:[{check, type, id}]` for accepted findings.
 7. Smaller file: `compact {dryRun:true, details:true}` -> `compact {repointProvinces:true}` ->

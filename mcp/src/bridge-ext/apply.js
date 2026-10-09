@@ -14,6 +14,11 @@
 //
 // It also adds one edit field, FIELDS.label.group (move a label into another #labels group),
 // unless another extension defines it, so a spec's label group is settable like any field.
+//
+// The paint list ({select, set} entries, normalized by src/apply-spec.ts) paints cells in order
+// through FNS.paint, later entries winning their cells: each entry paints only the cells it
+// wins whose value differs (so a second apply changes nothing), one paint_cells step per key. A
+// burgs entry's state is applied last by painting the burg's own cell (the builder's burg_cells).
 (root => {
   const T = root.__tupaia;
   if (!T?.mutations) return;
@@ -71,7 +76,9 @@
     zone: ["select"],
     label: ["at"],
     culture: ["at", "expand"],
-    religion: ["at", "expand"]
+    religion: ["at", "expand"],
+    // a custom biome is a copy of its base biome; an existing one has no base to compare
+    biome: ["base"]
   };
 
   // Read-only keys an add would refuse: kept out of the item, compared once the entity exists.
@@ -453,20 +460,37 @@
 
   const READ_ONLY = {
     burg: {
-      state: (b, want) => {
+      // apply sets it by painting the burg's own cell (paint: {cell, state}), unless paint_cells
+      // would refuse that cell (a capital's, a state's centre)
+      state: (b, want, _tol, pending) => {
         let wantId = null;
+        let dep = null;
         // "", null, "Neutral(s)": no state
         if (want === null || (typeof want === "string" && /^(neutrals?)?$/i.test(want.trim()))) wantId = 0;
         else
           try {
             wantId = T.resolve("state", want).i;
-          } catch {}
+          } catch (e) {
+            dep = pendingDep(errOf(e), pending);
+          }
         const have = pack.states[b.state]?.name ?? "Neutrals";
-        if (wantId === null)
-          return fold(have) === fold(String(want))
-            ? { same: true }
-            : { same: false, have, want: `${want} (no such state)`, fix: "paint_cells" };
-        return wantId === b.state ? { same: true } : { same: false, have, want: String(want), fix: "paint_cells" };
+        if (wantId === null) {
+          if (fold(have) === fold(String(want))) return { same: true };
+          if (dep)
+            return { same: false, have, want: String(want), pending: `${dep} is created by this spec`, paint: true };
+          return { same: false, have, want: `${want} (no such state)`, fix: "paint_cells" };
+        }
+        if (wantId === b.state) return { same: true };
+        if (b.capital)
+          return {
+            same: false,
+            have,
+            want: String(want),
+            fix: "edit state {capital}: a capital's cell keeps its state"
+          };
+        if (b.cell === pack.states[b.state]?.center)
+          return { same: false, have, want: String(want), fix: "paint_cells: the burg's cell is its state's centre" };
+        return { same: false, have, want: String(want), paint: { cell: b.cell, state: wantId } };
       },
       capital: (b, want) =>
         !!b.capital === !!want
@@ -631,8 +655,9 @@
       if ((CREATE_ONLY[type] || []).includes(key)) continue;
       ignored.push(key);
     }
-    diffs.push(...readOnlyDiffs(type, x, ro, tol));
-    return { diffs, set, ignored, writeOnly, blocked, ro };
+    const rod = readOnlyDiffs(type, x, ro, tol, pending);
+    diffs.push(...rod.diffs);
+    return { diffs, set, ignored, writeOnly, blocked, ro, paints: rod.paints };
   }
 
   /**
@@ -664,17 +689,22 @@
     return { ...err, message: msg };
   }
 
-  function readOnlyDiffs(type, x, ro, tol) {
+  /** {diffs, paints}: paints are the cell paints apply makes for them (a burg's state). */
+  function readOnlyDiffs(type, x, ro, tol, pending) {
     const out = [];
+    const paints = [];
     for (const [key, want] of Object.entries(ro || {})) {
-      const r = READ_ONLY[type][key](x, want, tol);
+      const r = READ_ONLY[type][key](x, want, tol, pending);
       if (r && !r.same) {
-        const d = diffRow(type, key, r.have, r.want, { readOnly: true });
+        // a field apply sets by painting the entity's cell is a plain difference, not read-only
+        const d = diffRow(type, key, r.have, r.want, r.paint ? { via: "cell" } : { readOnly: true });
         if (r.fix) d.fix = r.fix;
+        if (r.pending) d.pending = r.pending;
         out.push(d);
+        if (r.paint) paints.push(key);
       }
     }
-    return out;
+    return { diffs: out, paints };
   }
 
   // ---------------------------------------------------------------- per-entry plan
@@ -707,7 +737,7 @@
     row.ignored.push(...cmp.ignored);
     row.ro = cmp.ro;
     if (cmp.diffs.length) row.diffs = cmp.diffs;
-    const fixable = Object.keys(cmp.set).length > 0 || !!row.zoneCells;
+    const fixable = Object.keys(cmp.set).length > 0 || !!row.zoneCells || cmp.paints?.length > 0;
     if (cmp.writeOnly?.length) row.writeOnly = cmp.writeOnly;
     if (cmp.blocked) {
       // check previews what upsert does: a field the page refuses is an error in both modes
@@ -875,10 +905,16 @@
       return { id: r.i, existing: r.entity };
     }
     if (typeof e.id === "string" && e.id) return { id: e.id };
+    // entity:{id, name?} is a free-standing note (a mapping value table can turn a title into it;
+    // name: its title when created)
+    if (isObj(e.entity) && e.entity.type === undefined && typeof e.entity.id === "string" && e.entity.id)
+      return { id: e.entity.id, title: typeof e.entity.name === "string" ? e.entity.name : undefined };
     if (isObj(e.entity)) {
       const t = e.entity.type;
       if (!NOTE_OWNER_TYPES.includes(t)) fail("BAD_ARGS", `notes attach to ${NOTE_OWNER_TYPES.join(", ")}, not ${t}`);
-      const ref = e.entity.ref ?? (e.entity.name !== undefined ? { name: e.entity.name } : undefined);
+      // a label's name is its text without the '|' line breaks
+      const nm = t === "label" && typeof e.entity.name === "string" ? e.entity.name.replace(/\|/g, "") : e.entity.name;
+      const ref = e.entity.ref ?? (nm !== undefined ? { name: nm } : undefined);
       const r = T.resolve(t, ref);
       return {
         id: t === "marker" ? `marker${r.i}` : NOTE_OWNER[t](r.entity),
@@ -965,7 +1001,7 @@
       row.status = "missing";
       return row;
     }
-    const nm = F.name ?? e._name ?? r.owner?.name ?? r.id;
+    const nm = F.name ?? e._name ?? r.title ?? r.owner?.name ?? r.id;
     row.name = nm;
     const item = { name: nm, legend: F.legend ?? "" };
     if (r.owner && NOTE_ENTITY_TYPES.includes(r.owner.type)) item.entity = { type: r.owner.type, ref: r.owner.i };
@@ -1130,6 +1166,304 @@
     collect(S, pout);
   }
 
+  // ---------------------------------------------------------------- paint list
+
+  const PAINTABLE = ["state", "province", "culture", "religion", "biome", "height"];
+  // where filters and entity selects that read a painted key
+  const WHERE_DEPS = {
+    land: "height",
+    water: "height",
+    hMin: "height",
+    hMax: "height",
+    feature: "height",
+    biome: "biome",
+    state: "state",
+    province: "province",
+    culture: "culture",
+    religion: "religion"
+  };
+
+  /** Cells of a paint select: paint_cells' selection plus any:[selects] (a union); except may hold any too. */
+  function paintCells(sel) {
+    if (!isObj(sel)) fail("BAD_ARGS", "a paint select is an object");
+    const { except, any, ...base } = sel;
+    let out;
+    if (any !== undefined) {
+      if (!Array.isArray(any) || !any.length) fail("BAD_ARGS", "any is a non-empty list of selects");
+      const extra = Object.keys(base).filter(k => k !== "where");
+      if (extra.length) fail("BAD_FIELD", `a select with any takes only where and except, not ${extra.join(", ")}`);
+      const u = new Set();
+      for (const s of any) for (const c of paintCells(s)) u.add(c);
+      out = [...u];
+      if (base.where !== undefined) out = M.selectCells({ cells: out, where: base.where });
+    } else out = M.selectCells(base);
+    if (except !== undefined && except !== null) {
+      const minus = new Set(paintCells(except));
+      out = out.filter(c => !minus.has(c));
+    }
+    return out.sort((a, b) => a - b);
+  }
+
+  function depsOf(sel, out = new Set()) {
+    if (!isObj(sel)) return out;
+    if (isObj(sel.where)) for (const k of Object.keys(sel.where)) if (WHERE_DEPS[k]) out.add(WHERE_DEPS[k]);
+    if (isObj(sel.entity) && PAINTABLE.includes(sel.entity.type)) out.add(sel.entity.type);
+    if (Array.isArray(sel.any)) for (const s of sel.any) depsOf(s, out);
+    if (sel.except) depsOf(sel.except, out);
+    return out;
+  }
+
+  /** {id, name} of what a paint entry sets `key` to, or {pending} (created by this spec). Throws. */
+  function paintTarget(key, v, pending) {
+    if (!PAINTABLE.includes(key))
+      fail(
+        "BAD_FIELD",
+        `a paint entry cannot set '${key}'; it sets ${PAINTABLE.join(", ")}${key === "zone" ? " (a zone's cells: its select in the zones list)" : ""}`
+      );
+    if (key === "height") {
+      const h = isObj(v) ? v : { value: v };
+      const extra = Object.keys(h).filter(k => !["value", "rebuild"].includes(k));
+      if (extra.length || (h.rebuild !== undefined && h.rebuild !== "keep"))
+        fail(
+          "BAD_ARGS",
+          "a paint entry sets height {value} (rebuild 'keep') only: delta and smooth change again on every apply, and a rebuild renumbers cells (use paint_cells)"
+        );
+      if (!Number.isInteger(h.value) || h.value < 20 || h.value > 100)
+        fail("BAD_ARGS", "height value is a land height 20..100 (keep never moves the coastline)");
+      return { id: h.value, name: String(h.value) };
+    }
+    try {
+      const r = T.resolve(key, v);
+      return { id: r.i, name: r.name };
+    } catch (e) {
+      const dep = pendingDep(errOf(e), pending);
+      if (dep) return { pending: dep };
+      throw e;
+    }
+  }
+
+  /** Why paint_cells would leave cell c as it is when painting `key` to `want`, or null. */
+  function paintSkip(key, c, want) {
+    const C = pack.cells;
+    if (C.h[c] < 20) return "water";
+    if (key === "state") {
+      if (c === pack.states[C.state[c]]?.center) return "stateCenter";
+      if (C.burg[c] && pack.burgs[C.burg[c]]?.capital) return "capital";
+    }
+    if (key === "province") {
+      if (!C.state[c] || C.state[c] !== pack.provinces[want]?.state) return "otherState";
+      const old = C.province[c];
+      if (old && c === pack.provinces[old]?.center) return "provinceCenter";
+    }
+    return null;
+  }
+
+  function valueName(key, id) {
+    if (key === "height") return String(id);
+    try {
+      const x = I.byId(key, id);
+      return (x && I.nameOf(key, x)) || `${key} ${id}`;
+    } catch {
+      return `${key} ${id}`;
+    }
+  }
+
+  /**
+   * The paint list: per entry, per key, the cells it wins (no later entry paints that key there)
+   * whose value differs, less the cells paint_cells leaves alone (water, a state's centre, a
+   * capital, a province's centre, another state's cells). check/validate count them; apply paints
+   * them entry by entry (FNS.paint, literal cells), so selects that read a painted key (where
+   * {culture}, entity {type:'culture'}) see the earlier entries' paint. Rows: one per entry.
+   */
+  async function runPaint(entries, ctx, S, apply) {
+    const rows = entries.map(e => ({
+      status: "unchanged",
+      act: "none",
+      ignored: Array.isArray(e?.ignored) ? [...e.ignored] : [],
+      key: e?.label ?? "paint"
+    }));
+    const P = [];
+    entries.forEach((e, k) => {
+      const r = rows[k];
+      if (!isObj(e)) {
+        r.status = "error";
+        r.error = { code: "BAD_ARGS", message: "a paint entry is an object" };
+        return;
+      }
+      if (e.error) {
+        r.status = "error";
+        r.error = e.error;
+        return;
+      }
+      try {
+        if (!isObj(e.set) || !Object.keys(e.set).length)
+          fail("BAD_ARGS", `a paint entry sets one or more of ${PAINTABLE.join(", ")}`);
+        const targets = {};
+        for (const [key, v] of Object.entries(e.set)) targets[key] = paintTarget(key, v, ctx.pending);
+        P[k] = { sel: e.select, deps: depsOf(e.select), targets, cells: null };
+      } catch (err) {
+        r.status = "error";
+        r.error = errOf(err);
+      }
+    });
+    const cellsOf = k => {
+      if (P[k].cells === null) P[k].cells = paintCells(P[k].sel);
+      return P[k].cells;
+    };
+    // a state paint re-fits provinces too
+    const invalidate = key => {
+      const hit = key === "state" ? ["state", "province"] : [key];
+      for (const p of P) if (p && hit.some(h => p.deps.has(h))) p.cells = null;
+    };
+    for (let k = 0; k < entries.length; k++) {
+      const p = P[k];
+      if (!p) continue;
+      const r = rows[k];
+      let cells;
+      try {
+        cells = cellsOf(k);
+      } catch (err) {
+        const dep = pendingDep(errOf(err), ctx.pending);
+        if (!dep) {
+          r.status = "error";
+          r.error = errOf(err);
+          continue;
+        }
+        r.diffs = [{ field: "select", pending: `${dep} is created by this spec` }];
+        if (ctx.mode === "check") r.status = "differs";
+        else {
+          r.act = "update";
+          r.status = "update";
+        }
+        continue;
+      }
+      const diffs = [];
+      for (const [key, t] of Object.entries(p.targets)) {
+        // cells a later entry paints, and (state) the cells of burgs whose entry gives a state:
+        // those are painted last (paintBurgCells), so the paint list leaves them
+        const later = new Set(ctx.last?.[key] || []);
+        for (let j = k + 1; j < entries.length; j++) {
+          if (!P[j]?.targets[key]) continue;
+          try {
+            for (const c of cellsOf(j)) later.add(c);
+          } catch {}
+        }
+        const d = { field: key, want: t.pending ?? t.name, cells: cells.length };
+        const over = later.size ? cells.filter(c => later.has(c)).length : 0;
+        if (over) d.overridden = over;
+        if (t.pending) {
+          d.pending = `${t.pending} is created by this spec`;
+          diffs.push(d);
+          continue;
+        }
+        const cur = key === "height" ? pack.cells.h : pack.cells[key];
+        const todo = [];
+        const skipped = {};
+        const from = {};
+        for (const c of cells) {
+          if (later.has(c) || cur[c] === t.id) continue;
+          const why = paintSkip(key, c, t.id);
+          if (why) {
+            skipped[why] = (skipped[why] || 0) + 1;
+            continue;
+          }
+          todo.push(c);
+          const nm = valueName(key, cur[c]);
+          from[nm] = (from[nm] || 0) + 1;
+        }
+        if (!todo.length) continue;
+        d.differ = todo.length;
+        const top = Object.entries(from).sort((a, b) => b[1] - a[1]);
+        d.have = Object.fromEntries(top.slice(0, 4));
+        if (top.length > 4) d.have["…"] = top.slice(4).reduce((n, x) => n + x[1], 0);
+        if (Object.keys(skipped).length) d.skipped = skipped;
+        diffs.push(d);
+        if (!apply) continue;
+        try {
+          // a height paint (rebuild 'keep') re-derives the changed cells' biomes from their new
+          // climate; cells a biome entry paints (before or after) keep theirs, so the order of a
+          // biome and a height entry on the same cells does not matter
+          const parts = [[todo]];
+          if (key === "height") {
+            const owned = new Set();
+            for (let j = 0; j < entries.length; j++) {
+              if (!P[j]?.targets.biome) continue;
+              try {
+                for (const c of cellsOf(j)) owned.add(c);
+              } catch {}
+            }
+            const mine = todo.filter(c => owned.has(c));
+            if (mine.length) parts.splice(0, 1, [todo.filter(c => !owned.has(c))], [mine, "keep"]);
+          }
+          let changed = 0;
+          for (const [list, biomes] of parts) {
+            if (!list.length) continue;
+            const set = key === "height" ? { value: t.id, rebuild: "keep", ...(biomes ? { biomes } : {}) } : t.id;
+            const out = await FNS.paint({ select: { cells: list }, set: { [key]: set }, phase: "apply" });
+            reset();
+            const st = stepOf("paint_cells", out);
+            if (st) S.steps.push(st);
+            collect(S, out);
+            const n = out?.set?.[key]?.changed;
+            changed = isNum(n) && isNum(changed) ? changed + n : undefined;
+          }
+          invalidate(key);
+          if (isNum(changed) && changed !== todo.length) d.painted = changed;
+        } catch (err) {
+          r.status = "error";
+          r.error = errOf(err);
+          break;
+        }
+      }
+      if (r.status === "error") {
+        if (diffs.length) r.diffs = diffs;
+        continue;
+      }
+      if (!diffs.length) continue;
+      r.diffs = diffs;
+      if (apply) r.status = "updated";
+      else if (ctx.mode === "check") r.status = "differs";
+      else {
+        r.act = "update";
+        r.status = "update";
+      }
+    }
+    return rows;
+  }
+
+  /** After every list: each burgs entry's state, painted on the burg's own cell (one paint per state). */
+  async function paintBurgCells(done, tol, S) {
+    const byState = new Map();
+    for (const d of done) {
+      if (d.type !== "burg" || d.row.ro?.state === undefined) continue;
+      const x = rowEntity("burg", d.row);
+      if (!x) continue;
+      const r = READ_ONLY.burg.state(x, d.row.ro.state, tol, null);
+      if (!isObj(r.paint)) continue;
+      if (!byState.has(r.paint.state)) byState.set(r.paint.state, []);
+      byState.get(r.paint.state).push({ cell: r.paint.cell, row: d.row });
+    }
+    for (const [sid, list] of byState) {
+      try {
+        const out = await FNS.paint({
+          select: { cells: [...new Set(list.map(l => l.cell))] },
+          set: { state: sid },
+          phase: "apply"
+        });
+        reset();
+        const st = stepOf("paint_cells", out);
+        if (st) S.steps.push(st);
+        collect(S, out);
+        for (const l of list) if (["unchanged", "differs", "update"].includes(l.row.status)) l.row.status = "updated";
+      } catch (e) {
+        for (const l of list) {
+          l.row.status = "error";
+          l.row.error = errOf(e);
+        }
+      }
+    }
+  }
+
   // ---------------------------------------------------------------- the spec
 
   function shapeRow(at, r) {
@@ -1197,6 +1531,19 @@
       if (type === "note") {
         // the notes lists wait until every entity exists (and come before the shorthand notes)
         listNotes.push(...entries.map((e, k) => ({ at: `${L.key}[${k}]`, list: L.key, e: isObj(e) ? e : {} })));
+        continue;
+      }
+      if (type === "paint") {
+        const last = { state: [] };
+        for (const d of done) {
+          if (d.type !== "burg" || d.row.ro?.state === undefined) continue;
+          const x = rowEntity("burg", d.row);
+          if (x && Number.isInteger(x.cell)) last.state.push(x.cell);
+        }
+        const rows = await runPaint(entries, { mode, pending, last }, S, apply);
+        rows.forEach((r, k) => {
+          done.push({ at: `${L.key}[${k}]`, list: L.key, type, row: r });
+        });
         continue;
       }
       if (!FIELDS[type] && !ADD[type]) {
@@ -1314,8 +1661,12 @@
       });
     }
 
+    // burg_cells: a burgs entry's state, painted on the burg's own cell after the paint list
+    if (apply) await paintBurgCells(done, tol, S);
+
     // a later list can change what an earlier one set (a state's capital turns its burg's group
-    // into 'capital'): one more pass edits such fields back, so a single apply converges
+    // into 'capital', a culture paint a burg's culture): one more pass edits such fields back, so
+    // a single apply converges
     if (apply)
       for (const P of planned) {
         const idx = [];
@@ -1353,9 +1704,11 @@
         if (!hasKeys(r.ro) || !READ_ONLY[d.type]) continue;
         const x = rowEntity(d.type, r);
         if (!x) continue;
-        const fresh = readOnlyDiffs(d.type, x, r.ro, tol);
-        const kept = (r.diffs || []).filter(df => !df.readOnly);
+        const fresh = readOnlyDiffs(d.type, x, r.ro, tol, null).diffs;
+        const kept = (r.diffs || []).filter(df => !df.readOnly && df.via !== "cell");
         r.diffs = [...kept, ...fresh];
+        // planned to change only by its cell, which the paint list already changed
+        if (r.status === "update") r.status = fresh.length ? "differs" : "updated";
         if (r.status === "unchanged" && fresh.length) r.status = "differs";
         else if (r.status === "differs" && !r.diffs.length) r.status = "unchanged";
       }

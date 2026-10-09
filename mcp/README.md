@@ -112,8 +112,10 @@ What the newer tools and fields replaced (all one undo entry each, all dryRun-ab
   notes and labels; rivers are traced again as contiguous cell paths along their old lines and
   biomes re-derived from the climate (custom and painted ones carried). App hook:
   `Resample.process({keepId})`.
-- `apply` (declarative spec, `mode:'check'|'upsert'|'update'`, idempotent) and `lint` (23 checks
-  with ready fix calls).
+- `apply` (declarative spec, `mode:'check'|'upsert'|'update'`, idempotent; its `paint` list
+  paints territory, biomes and heights in order, later entries winning, each entry only its
+  differing cells, logged as replayable paint_cells steps) and `lint` (23 checks with ready fix
+  calls).
 
 Behaviour worth knowing:
 
@@ -461,7 +463,8 @@ node --test --test-concurrency=3 "test/**/*.test.ts"
   function fn waits ms).
 - `test/smoke.test.ts`: stdio end-to-end of every tool against `tests/fixtures/demo.map`; checks
   every description is at most 2048 chars, the instructions too, and the exact tool list.
-- One file per feature: `terrain`, `regrid`, `clear`, `compact`, `apply`, `lint`, `settings`,
+- One file per feature: `terrain`, `regrid`, `clear`, `compact`, `apply`, `applypaint` (the paint
+  list, territory, places, burg cells), `lint`, `settings`,
   `routes`, `rivers`, `biomes`, `regen`, `relief`, `labels`, `tokens`, `http`; `fam-a/b/c` and
   `integrate.test.ts` cross the features (one apply spec over biomes, settings with locks,
   route groups and rivers; a sketch of 8 replayable records rebased onto someone else's v7).
