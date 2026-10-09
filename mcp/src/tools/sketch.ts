@@ -24,6 +24,7 @@ import { replayOps } from "../replay.ts";
 import { META_TEXT_HEAVY, ToolError } from "../result.ts";
 import { type LAYER_NAMES, TimeoutMs } from "../schemas.ts";
 import { sha256 } from "../shared-api.ts";
+import { CompactFlag, readMapData } from "./compact.ts";
 import { defineTools } from "./registry.ts";
 import { requireLive, sharedSave } from "./shared.ts";
 import { takeScreenshot } from "./view.ts";
@@ -550,7 +551,7 @@ export function refuseOversizeOps(header: Record<string, unknown>, sk: Sketch): 
 }
 
 /** save: PUT the page map to sketch-<slug> and its ops.json. Never touches `shared`. */
-async function save(ctx: ToolContext, scope: CallScope, args: { confirm?: boolean }) {
+async function save(ctx: ToolContext, scope: CallScope, args: { confirm?: boolean; compact?: boolean }) {
   requireLiveSketch(ctx, "save");
   const sk = needSketch(ctx);
   if (sk.base.kind !== "shared" || typeof sk.base.version !== "number")
@@ -565,11 +566,7 @@ async function save(ctx: ToolContext, scope: CallScope, args: { confirm?: boolea
     );
   const origin = ctx.shared.origin();
   const id = sketchId(sk.slug);
-  const data = await scope.call<{ text: string; customization: number; fileName: string | null }>(
-    "mapData",
-    {},
-    { noAlerts: true }
-  );
+  const data = await readMapData(scope, args.compact);
   if (data.customization)
     throw new ToolError(
       "REFUSED",
@@ -593,7 +590,8 @@ async function save(ctx: ToolContext, scope: CallScope, args: { confirm?: boolea
       blobOnly: reasons.length > 0,
       ...(reasons.length ? { blobOnlyReasons: reasons } : {}),
       viewUrl: url,
-      next: "Nothing was written. sketch {action:'save', confirm:true} writes the sketch (never the shared map)."
+      ...(data.compacted ? { compacted: data.compacted } : {}),
+      next: `Nothing was written. sketch {action:'save', confirm:true${args.compact ? ", compact:true" : ""}} writes the sketch (never the shared map).`
     };
   }
   if (!sk.summaryMarkdown || sk.summaryRev !== sk.rev) await summary(ctx, scope, { shots: false });
@@ -644,6 +642,7 @@ async function save(ctx: ToolContext, scope: CallScope, args: { confirm?: boolea
   sk.saved = { rev: sk.rev, version: put.version, at: now };
   return {
     saved: { id, version: put.version, bytes: body.length, updated_by: put.updated_by, opsBytes: opsSaved.bytes },
+    ...(data.compacted ? { compacted: data.compacted } : {}),
     viewUrl: url,
     sketch: ctx.sketches.view(sk),
     next: "Give the human the viewUrl (it opens the sketch, not the shared map) and the summary markdown. Promote only after they say yes: sketch {action:'rebase'} if the shared map moved, then sketch_promote."
@@ -804,7 +803,7 @@ async function discard(ctx: ToolContext, args: { slug?: string; confirm?: boolea
 async function promote(
   ctx: ToolContext,
   scope: CallScope,
-  args: { confirm?: boolean; token?: string; then?: "keep" | "discard" }
+  args: { confirm?: boolean; token?: string; then?: "keep" | "discard"; compact?: boolean }
 ): Promise<Record<string, unknown>> {
   requireLive(ctx);
   const sk = needSketch(ctx);
@@ -833,6 +832,7 @@ async function promote(
     confirm: args.confirm,
     token: args.token,
     expectVersion: base,
+    compact: args.compact,
     viaSketch: true
   });
   const sketchInfo = { slug: sk.slug, base, ops: sk.ops.length, then, ...(notes.length ? { notes } : {}) };
@@ -840,7 +840,7 @@ async function promote(
     if (typeof res.next === "string")
       res.next = res.next.replace(
         /shared_save \{confirm:true, token:'([^']+)'([^}]*)\}/,
-        `sketch_promote {confirm:true, token:'$1'${then === "discard" ? ", then:'discard'" : ""}}`
+        `sketch_promote {confirm:true, token:'$1'${then === "discard" ? ", then:'discard'" : ""}${args.compact ? ", compact:true" : ""}}`
       );
     return { ...res, sketch: sketchInfo };
   }
@@ -884,6 +884,7 @@ export const SketchInput = z.object({
     .optional()
     .describe("save/discard: true performs the write (live mode only); absent returns a preview"),
   full: z.boolean().optional().describe("status: include every op record with its resolved form (large)"),
+  compact: CompactFlag.describe("save: write a compacted copy of the page map (see compact); the page is not changed"),
   timeoutMs: TimeoutMs
 });
 
@@ -953,7 +954,8 @@ export function register(ctx: ToolContext): void {
         then: z
           .enum(["keep", "discard"])
           .optional()
-          .describe("After a confirmed promote: 'keep' (default) the saved sketch, or 'discard' it")
+          .describe("After a confirmed promote: 'keep' (default) the saved sketch, or 'discard' it"),
+        compact: CompactFlag
       }),
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
       kind: "heavy"

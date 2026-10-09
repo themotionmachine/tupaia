@@ -7,6 +7,7 @@ import { resolveReadPath, resolveWritePath } from "../paths.ts";
 import { ToolError } from "../result.ts";
 import { TimeoutMs } from "../schemas.ts";
 import { sha256 } from "../shared-api.ts";
+import { CompactFlag, readMapData } from "./compact.ts";
 import { defineTools } from "./registry.ts";
 import { pngSize } from "./view.ts";
 
@@ -62,22 +63,19 @@ export function register(ctx: ToolContext): void {
     {
       title: "Save the map to a .map file",
       description:
-        "Write the current map (the app's prepareMapData, same as File > Save) to a .map file on disk. Relative paths go under TUPAIA_OUT (default <repo>/.tupaia-mcp-out); a path in the repo is allowed outside source/config folders; anything else needs allowOutside:true and only when the human asked for that place. Replacing an existing file needs overwrite:true. tests/fixtures is always refused. Refused while an app editor is active (customization != 0). Returns {path, bytes, sha256}. This never touches the live shared map (that is shared_save).",
+        "Write the current map (the app's prepareMapData, same as File > Save) to a .map file on disk. Relative paths go under TUPAIA_OUT (default <repo>/.tupaia-mcp-out); a path in the repo is allowed outside source/config folders; anything else needs allowOutside:true and only when the human asked for that place. Replacing an existing file needs overwrite:true. tests/fixtures is always refused. Refused while an app editor is active (customization != 0). Returns {path, bytes, sha256}. compact:true writes a compacted copy (removed entities as stubs; see compact) and adds {compacted} with the bytes saved; the page is not changed. This never touches the live shared map (that is shared_save).",
       inputSchema: z.object({
         path: z.string().min(1).optional().describe("Target .map path (default TUPAIA_OUT/maps/<name>-<time>.map)"),
         overwrite: z.boolean().optional(),
-        allowOutside: z.boolean().optional()
+        allowOutside: z.boolean().optional(),
+        compact: CompactFlag
       }),
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
       kind: "heavy"
     },
     async (args, scope) => {
       const t0 = Date.now();
-      const data = await scope.call<{ text: string; customization: number; fileName: string | null }>(
-        "mapData",
-        {},
-        { noAlerts: true }
-      );
+      const data = await readMapData(scope, args.compact);
       if (data.customization) {
         throw new ToolError(
           "REFUSED",
@@ -92,7 +90,14 @@ export function register(ctx: ToolContext): void {
       });
       const buf = Buffer.from(data.text, "utf8");
       fs.writeFileSync(file, buf);
-      return { path: file, bytes: buf.length, sha256: sha256(buf), name: data.fileName, ms: Date.now() - t0 };
+      return {
+        path: file,
+        bytes: buf.length,
+        sha256: sha256(buf),
+        name: data.fileName,
+        ...(data.compacted ? { compacted: data.compacted } : {}),
+        ms: Date.now() - t0
+      };
     }
   );
 
