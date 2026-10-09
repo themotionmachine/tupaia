@@ -1,5 +1,6 @@
 import { lazy } from "@/lazy-loaders";
 import { calculateVoronoi, ensureEl, last, link, minmax, parseError, rn } from "@/utils";
+import { applyBiomeExtras } from "./biome-extras"; // tupaia-mcp: biome icon density/icons/cost
 
 export async function quickLoad(): Promise<void> {
   const blob = await ldb.get("lastMap");
@@ -336,6 +337,7 @@ async function parseLoadedData(data: string[], mapVersion: string | null): Promi
         biomesData.icons.push([]);
         biomesData.cost.push(50);
       }
+      applyBiomeExtras(biomesData, biomes, biomesData.i.length); // tupaia-mcp: 4th field, absent in older files
     }
     svg.remove();
     document.body.insertAdjacentHTML("afterbegin", data[5]);
