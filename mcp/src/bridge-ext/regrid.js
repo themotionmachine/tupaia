@@ -17,9 +17,12 @@
 // - features: names, groups and heights come from the old feature of the same type that most
 //   of the new feature's cells came from (Resample takes any type from one cell);
 // - rivers: traced again as contiguous paths of new cells along their old lines (Resample maps
-//   their points one by one, leaving gaps and loops), with cells.r/fl/conf rebuilt from them;
+//   their points one by one, leaving gaps and loops), with cells.r/fl/conf rebuilt from them,
+//   and carved (carve, default): a land cell where a river would climb is lowered to the
+//   lowest land height upstream of it on that river;
 // - biomes: re-derived from the climate on the new cells, custom and painted ones carried
-//   (biomes:'redefine', default; Resample carries every cell's, the old cell edges showing);
+//   (biomes:'redefine', default; Resample carries every cell's, the old cell edges showing),
+//   then one-biome regions under minRegion cells (default 3) merged into their neighbour;
 // - routes: points that ended at a burg follow the burg's new cell;
 // - zones: cells re-derived by nearest old cell (Resample unions discs, a rounder shape);
 // - notes, custom labels (and their text paths), rulers, custom emblems, ice (unless
@@ -62,6 +65,9 @@
   const HEIGHTS_LEGEND =
     "claimed: new points given their own old cell's land/water; forced: old features or areas with no point left that got one (keptAreas: of them, provinces/states/cultures/religions); rejoined: split features joined back (carved: points flipped for it); dropped: 1-2 point fragments removed; separated: points flipped so two old features do not merge; spurious: blobs with no old feature flipped; dams: land raised so a lake is not drained into the sea; outsideHull: points outside the old samples (nearest one used)";
   const WORKER_MAX_BYTES = 64 * 1024 * 1024;
+  // re-derived biomes: one-biome land regions under this many cells join their most common
+  // neighbour (single-cell speckles near climate thresholds); regrid {minRegion} sets it, 0 = off
+  const MIN_REGION = 3;
 
   function targetCells(v) {
     const n = Number(v);
@@ -179,6 +185,16 @@
     const biomes = a.biomes ?? "redefine";
     if (!["redefine", "climate", "keep"].includes(biomes))
       fail("BAD_ARGS", "biomes is 'redefine' (default), 'climate' or 'keep'");
+    const minRegion = a.minRegion ?? MIN_REGION;
+    if (!Number.isInteger(minRegion) || minRegion < 0 || minRegion > 1000)
+      fail("BAD_ARGS", "minRegion is a cell count (integer 0..1000; 0 = no clean-up)");
+    if (a.minRegion !== undefined && a.minRegion > 1 && biomes === "keep")
+      fail(
+        "BAD_ARGS",
+        "minRegion cleans up re-derived biomes; biomes:'keep' re-derives none (use 'redefine' or 'climate')"
+      );
+    if (a.carve !== undefined && typeof a.carve !== "boolean") fail("BAD_ARGS", "carve must be true or false");
+    const carve = a.carve ?? true;
     if (a.density === undefined) fail("BAD_ARGS", "density is required (1-13 or 1000-100000)");
     const want = targetCells(a.density);
     const shape = gridShape(want);
@@ -206,7 +222,20 @@
       );
     if (want > 50000)
       warnings.push("over 50K cells the app gets slow to draw and edit (the Options slider marks it red)");
-    return { want, shape, heights, iceMode, relief, biomes, gridNow, packNow, packEst, warnings };
+    return {
+      want,
+      shape,
+      heights,
+      iceMode,
+      relief,
+      biomes,
+      minRegion,
+      carve,
+      gridNow,
+      packNow,
+      packEst,
+      warnings
+    };
   }
 
   /**
@@ -1731,6 +1760,109 @@
     if (st.kept) report.rivers.tooShortKeptAsMapped = st.kept;
   }
 
+  // ---------------------------------------------------------------- river carving
+  //
+  // A retraced river follows its old line, but the new heights are sampled from the old surface
+  // at other points: lowering the density, a new cell on the line can take its height from a
+  // ridge beside it (the river climbs, lint river-uphill). Carving lowers each land cell of a
+  // river that stands above the lowest land cell upstream of it on that river to that height,
+  // so land heights never rise downstream; nothing else moves (water is skipped, as lint does;
+  // nothing goes below 20, so no land becomes water). A pack cell shares its height with its
+  // grid cell (and the coastline refinement cells of that grid cell), so they go down together;
+  // that and confluences (a tributary's last cell is on its parent) can make another river climb,
+  // so the passes repeat until none does. Heights only go down, so it ends.
+
+  /** The live rivers with a course (two cells or more). */
+  const riverCourses = () =>
+    (pack.rivers || []).filter(r => isLive(r) && Array.isArray(r.cells) && r.cells.length >= 2);
+
+  /** The rivers whose land heights rise downstream (any rise). */
+  function climbingRivers() {
+    const H = pack.cells.h;
+    const out = [];
+    for (const r of riverCourses()) {
+      let mn = Infinity;
+      for (const c of r.cells) {
+        if (!(c >= 0) || H[c] < 20) continue;
+        if (H[c] > mn) {
+          out.push(r.i);
+          break;
+        }
+        mn = Math.min(mn, H[c]);
+      }
+    }
+    return out;
+  }
+
+  /** Lower river cells so no river climbs; returns {rivers, cells, maxDrop, lowered: Map(pack cell -> old height)}. */
+  function carveRivers() {
+    const C = pack.cells;
+    const H = C.h;
+    const gh = grid.cells.h;
+    const siblings = new Map(); // grid cell -> its pack cells
+    for (const i of C.i) {
+      const g = C.g[i];
+      const a = siblings.get(g);
+      if (a) a.push(i);
+      else siblings.set(g, [i]);
+    }
+    const lowered = new Map();
+    const carvedRivers = new Set();
+    const lower = (c, v) => {
+      const g = C.g[c];
+      for (const s of siblings.get(g) || [c]) {
+        if (H[s] < 20 || H[s] <= v) continue;
+        if (!lowered.has(s)) lowered.set(s, H[s]);
+        H[s] = v;
+      }
+      if (gh[g] > v) gh[g] = v;
+    };
+    const rivers = riverCourses();
+    for (let pass = 0; pass < 50; pass++) {
+      let changed = false;
+      for (const r of rivers) {
+        let mn = Infinity;
+        for (const c of r.cells) {
+          if (!(c >= 0) || H[c] < 20) continue;
+          if (H[c] > mn) {
+            lower(c, Math.max(20, mn));
+            carvedRivers.add(r.i);
+            changed = true;
+          }
+          mn = Math.min(mn, H[c]);
+        }
+      }
+      if (!changed) break;
+    }
+    let maxDrop = 0;
+    for (const [c, h0] of lowered) maxDrop = Math.max(maxDrop, h0 - H[c]);
+    if (lowered.size && typeof calculateTemperatures === "function") {
+      // the lowered cells are warmer now (the biomes, re-derived next, read it)
+      const old = grid.cells.temp;
+      calculateTemperatures();
+      const fresh = grid.cells.temp;
+      grid.cells.temp = old;
+      for (const c of lowered.keys()) old[C.g[c]] = fresh[C.g[c]];
+    }
+    return { rivers: carvedRivers.size, cells: lowered.size, maxDrop, lowered };
+  }
+
+  /** After the features are restored: a lake whose shore was carved below its level follows it down. */
+  function lowerCarvedLakes(lowered) {
+    let n = 0;
+    for (const f of pack.features || []) {
+      if (!f || f.type !== "lake" || !Array.isArray(f.shoreline) || !f.shoreline.some(c => lowered.has(c))) continue;
+      try {
+        const lvl = Lakes.getHeight(f);
+        if (typeof f.height !== "number" || lvl < f.height) {
+          f.height = lvl;
+          n++;
+        }
+      } catch {}
+    }
+    return n;
+  }
+
   // ---------------------------------------------------------------- biomes (re-derived)
 
   /**
@@ -1766,9 +1898,13 @@
    * those cells carry it. A river cell looks at the old river cells, any other cell at the old
    * cells off the rivers: an old river cell's biome came from its river, and the new cells
    * beside the (narrower) new course belong to the land around it, painted or not.
+   * Then the small-region clean-up (regenerate biomes' minRegion, shared through T.biomes):
+   * re-derived one-biome regions under minRegion cells join their most common neighbour; a
+   * region holding a carried cell or a river cell stays, and carried cells cast no vote.
    * Counts land cells by origin and how many differ from a plain carry-over.
    */
-  function redefineBiomes(cap, mode, report) {
+  function redefineBiomes(cap, P, report) {
+    const mode = P.biomes;
     const C = pack.cells;
     const carried = C.biome; // Resample's: the nearest old land cell's biome
     Biomes.define();
@@ -1787,17 +1923,29 @@
     const near = 2 * cap.spacing;
     const keepWhy = mode === "climate" ? 1 : 2;
     const out = { mode, redefined: 0, carriedCustom: 0, carriedPainted: 0, changed: 0 };
+    const carry = new Uint8Array(C.i.length);
     for (const i of C.i) {
       if (C.h[i] < 20) continue;
       const [x, y] = C.p[i];
       const o = (C.r[i] ? qWet : qDry)?.find(x, y, near) ?? qAll?.find(x, y);
       if (o?.[3] && o[3] <= keepWhy) {
         next[i] = o[2];
+        carry[i] = 1;
         if (o[3] === 1) out.carriedCustom++;
         else out.carriedPainted++;
       } else out.redefined++;
-      if (next[i] !== carried[i]) out.changed++;
     }
+    const merge = T.biomes?.mergeSmallRegions;
+    if (P.minRegion > 1 && merge) {
+      const m = merge(
+        next,
+        P.minRegion,
+        i => carry[i] === 1 || C.r[i] > 0,
+        i => carry[i] === 1
+      );
+      out.cleanup = { minRegion: P.minRegion, regions: m.regions, cells: m.merged };
+    }
+    for (const i of C.i) if (C.h[i] >= 20 && next[i] !== carried[i]) out.changed++;
     cap.done = true;
     report.biomes = out;
   }
@@ -2059,7 +2207,7 @@
       const origEconomy = R.restoreEconomy;
       own.restoreEconomy = function (parentMap, ...rest) {
         // the economy reads the biomes (production), so they are re-derived first
-        if (biomeCap) redefineBiomes(biomeCap, P.biomes, report);
+        if (biomeCap) redefineBiomes(biomeCap, P, report);
         collectAreaStats(); // state taxes read the state populations
         origEconomy.call(this, parentMap, ...rest);
         let kept = 0;
@@ -2083,6 +2231,8 @@
       own.restoreRivers = function (riversData, projection, ...rest) {
         origRivers.call(this, riversData, projection, ...rest);
         retraceRivers(report);
+        // before the biomes are re-derived (restoreEconomy): they read the carved heights
+        if (P.carve && report.rivers) report.carve = carveRivers();
       };
     }
     const origRoutes = R.restoreRoutes;
@@ -2154,7 +2304,9 @@
       heights: P.heights,
       ice: P.iceMode,
       relief: P.relief,
-      biomes: P.biomes
+      biomes: P.biomes,
+      ...(P.biomes !== "keep" ? { minRegion: P.minRegion } : {}),
+      carve: P.carve
     };
     if (a.phase !== "apply") {
       if (!a.dryRun) return { phase: "validate", ...plan, warnings: P.warnings }; // apply follows
@@ -2192,7 +2344,8 @@
     } finally {
       unpatch();
     }
-    if (biomeCap && !biomeCap.done) redefineBiomes(biomeCap, P.biomes, report); // a build without restoreEconomy
+    if (biomeCap && !biomeCap.done) redefineBiomes(biomeCap, P, report); // a build without restoreEconomy
+    if (report.carve?.cells) report.carve.lakesLowered = lowerCarvedLakes(report.carve.lowered);
     // before the redraw, so relief:'redraw' (and a reliefOnLoad map's next draw) leaves it out
     const reliefExclusion = remapReliefExclusion(reliefEx);
     // a map that draws its relief icons on load (reliefOnLoad, bridge-ext/relief.js) saves none:
@@ -2291,13 +2444,31 @@
       warnings.push(
         `${after.feats.oceans - before.feats.oceans} new ocean feature(s) (${before.feats.oceans} -> ${after.feats.oceans}): heights interpolated next to the map edge or a coast dipped under 20; find {type:'feature', where:{type:'ocean'}} lists them, paint_cells height fills a sliver`
       );
-    if (report.rivers)
+    if (report.rivers) {
       regenerated.push(
         "rivers traced again as contiguous paths of new cells along their old lines (ids, names, parents and confluences kept; cells.r, flux, source, mouth, length and width recomputed)"
       );
+      const cv = report.carve;
+      if (cv) {
+        report.rivers.carved = { rivers: cv.rivers, cells: cv.cells, maxDrop: cv.maxDrop };
+        if (cv.lakesLowered) report.rivers.carved.lakesLowered = cv.lakesLowered;
+        if (cv.cells)
+          regenerated.push(
+            `${cv.cells} land cell(s) on ${cv.rivers} river(s) lowered (up to ${cv.maxDrop}) where the new heights made the river climb, so heights never rise downstream (none below 20; carve:false keeps them)`
+          );
+      } else {
+        const up = climbingRivers();
+        if (up.length) {
+          report.rivers.climbing = up.length;
+          warnings.push(
+            `${up.length} river(s) climb somewhere on the new heights (carve:false): lint {checks:['river-uphill']} lists the large climbs; regrid with carve (default) lowers them`
+          );
+        }
+      }
+    }
     if (report.biomes)
       regenerated.push(
-        `biomes re-derived from the climate on the new cells, except custom${P.biomes === "redefine" ? " and painted" : ""} biomes, carried by nearest old cell (counts in biomes)`
+        `biomes re-derived from the climate on the new cells, except custom${P.biomes === "redefine" ? " and painted" : ""} biomes, carried by nearest old cell${report.biomes.cleanup ? `; one-biome regions under ${P.minRegion} cells joined their most common neighbour (biomes.cleanup; minRegion:0 keeps them)` : ""} (counts in biomes)`
       );
     else {
       // biomes move with the cells (each new cell takes its old cell's biome), not from the climate

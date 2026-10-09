@@ -173,10 +173,13 @@ Token economy (results are counts first; ask for detail only when needed):
    them in the new units.
 7. More cells: `regrid {density:6, dryRun:true}` (check `bytes.est`, `atRisk`), then apply and
    screenshot the coast and a river mouth. Rivers are traced again as contiguous cell paths
-   along their old lines (ids, names, parents, confluences kept; `rivers.retraced`), so lint
-   river-gap/river-loop stay clean. Biomes are re-derived from the climate on the new cells,
-   custom and painted ones carried where they were (`biomes`: redefined, carriedCustom,
-   carriedPainted); `biomes:'climate'` carries custom only, `'keep'` the old pattern (warns).
+   along their old lines (ids, names, parents, confluences kept; `rivers.retraced`) and carved
+   where they would climb (`rivers.carved {rivers, cells, maxDrop}`; `carve:false` leaves the
+   interpolated heights), so lint river-gap/river-loop/river-uphill stay clean. Biomes are
+   re-derived from the climate on the new cells, custom and painted ones carried where they
+   were (`biomes`: redefined, carriedCustom, carriedPainted), then speckles under `minRegion`
+   cells (default 3, 0 = off) merged into their neighbour (`biomes.cleanup`; river and carried
+   cells stay); `biomes:'climate'` carries custom only, `'keep'` the old pattern (warns).
 8. `lint` (markers on new water, route links), then `screenshot {full:true}`.
 
 **Wipe the random base and build from a spec.**

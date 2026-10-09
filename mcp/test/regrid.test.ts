@@ -109,6 +109,44 @@ for (const i of C.i) {
 }
 return out;`;
 
+/**
+ * Land heights along each river (water skipped, as lint river-uphill does): how many cells stand
+ * above the lowest land cell upstream of them (any rise), the heights per pack cell, and pack
+ * cells whose height differs from their grid cell's.
+ */
+const HEIGHTS_STATE = `const C = pack.cells, H = C.h;
+let rising = 0;
+for (const r of pack.rivers) {
+  if (!r || r.removed || !r.cells) continue;
+  let mn = Infinity;
+  for (const c of r.cells) {
+    if (!(c >= 0) || H[c] < 20) continue;
+    if (H[c] > mn) rising++;
+    mn = Math.min(mn, H[c]);
+  }
+}
+let offGrid = 0;
+for (const i of C.i) if (H[i] !== grid.cells.h[C.g[i]]) offGrid++;
+return { rising, offGrid, h: Array.from(H) };`;
+
+/**
+ * One-biome land regions under 3 cells with no river cell (the speckles the clean-up merges,
+ * unless a carried custom/painted cell holds them).
+ */
+const SPECKLES = `const C = pack.cells, h = C.h, b = C.biome, n = C.i.length;
+const comp = new Int32Array(n).fill(-1);
+let small = 0;
+for (let s = 0; s < n; s++) {
+  if (h[s] < 20 || comp[s] >= 0) continue;
+  const list = [s];
+  comp[s] = 1;
+  for (let q = 0; q < list.length; q++)
+    for (const j of C.c[list[q]])
+      if (h[j] >= 20 && comp[j] < 0 && b[j] === b[s]) { comp[j] = 1; list.push(j); }
+  if (list.length < 3 && !list.some(c => C.r[c])) small++;
+}
+return small;`;
+
 /** Data consistency the app's generators guarantee, checked in the page. */
 const CONSISTENCY = `const C = pack.cells, n = C.i.length;
 const live = x => x && x.i && !x.removed;
@@ -159,8 +197,13 @@ describe("regrid on demo.map (local)", () => {
     assert.ok(r.bytes.est < 64_000_000);
     const now = (await ok(h, "eval", { code: PAGE_STATE, readOnly: true })).value as Obj;
     assert.equal(now.digest, before0.digest);
+    assert.equal(r.carve, true, "carving is on by default");
+    assert.equal(r.minRegion, 3, "the biome clean-up is on by default");
     const slider = await ok(h, "regrid", { density: 6, dryRun: true });
     assert.equal(slider.cellsDesired.after, 30000);
+    const kept = await ok(h, "regrid", { density: 6, dryRun: true, biomes: "keep", carve: false });
+    assert.equal(kept.minRegion, undefined, "no clean-up when biomes are carried over");
+    assert.equal(kept.carve, false);
   });
 
   test("a dry run works with an editor open; the real regrid is refused with the way out", async () => {
@@ -185,6 +228,11 @@ describe("regrid on demo.map (local)", () => {
     assert.match(errorBody(same).error.message, /already/);
     const odd = await h.call("regrid", { density: 500 });
     assert.equal(errorBody(odd).error.code, "BAD_ARGS");
+    const keepMerge = await h.call("regrid", { density: 20000, biomes: "keep", minRegion: 4 });
+    assert.equal(errorBody(keepMerge).error.code, "BAD_ARGS");
+    assert.match(errorBody(keepMerge).error.message, /re-derives none/);
+    const neg = await h.call("regrid", { density: 20000, minRegion: -1 });
+    assert.equal(errorBody(neg).error.code, "BAD_ARGS");
     const now = (await ok(h, "eval", { code: PAGE_STATE, readOnly: true })).value as Obj;
     assert.equal(now.digest, before0.digest);
   });
@@ -244,16 +292,23 @@ describe("regrid on demo.map (local)", () => {
     assert.deepEqual(parted, [], "confluences kept");
     const growth = now.riverAnchors / before0.riverAnchors; // cells along a line: about sqrt(13122 / 7462)
     assert.ok(growth > 1.1 && growth < 1.8, `${before0.riverAnchors} -> ${now.riverAnchors}`);
-    const rl = await ok(h, "lint", { checks: ["river-gap", "river-loop"] });
+    const rl = await ok(h, "lint", { checks: ["river-gap", "river-loop", "river-uphill"] });
     assert.deepEqual(rl.counts, {}, JSON.stringify(rl.rows).slice(0, 400));
+    // carved where a river would climb: no river rises downstream, pack and grid heights agree
+    const carved = (applied.rivers as Obj).carved as Obj;
+    assert.ok(carved && carved.cells > 0 && carved.maxDrop > 0, JSON.stringify(applied.rivers));
+    const hs = (await ok(h, "eval", { code: HEIGHTS_STATE, readOnly: true })).value as Obj;
+    assert.deepEqual({ rising: hs.rising, offGrid: hs.offGrid }, { rising: 0, offGrid: 0 });
     // biomes re-derived from the climate on the new cells: the cells that still differ from the
-    // climate are only carried painted ones
+    // climate are only carried painted ones (and the speckles the clean-up merged)
     const b = applied.biomes as Obj;
     assert.equal(b.mode, "redefine");
     assert.ok(b.redefined > 8000 && b.changed > 0, JSON.stringify(b));
+    assert.equal(b.cleanup.minRegion, 3);
+    assert.ok(b.cleanup.regions > 0 && b.cleanup.cells >= b.cleanup.regions, JSON.stringify(b.cleanup));
     const stale = await ok(h, "edit", { type: "map", recalculate: "biomes", dryRun: true });
     assert.ok(
-      (stale.replaces as Obj).biomeCellsEdited <= b.carriedPainted,
+      (stale.replaces as Obj).biomeCellsEdited <= b.carriedPainted + b.cleanup.cells,
       `${JSON.stringify(stale.replaces)} vs ${JSON.stringify(b)}`
     );
     // layers that were on but undrawn stay undrawn
@@ -304,9 +359,54 @@ describe("regrid on demo.map (local)", () => {
     const c = (await ok(h, "eval", { code: CONSISTENCY, readOnly: true })).value as Obj;
     assert.deepEqual(c.emptyZones, []);
     assert.deepEqual(c.badCenters, []);
-    // rivers merge on the coarser grid but stay contiguous and loop-free
-    const rl = await ok(h, "lint", { checks: ["river-gap", "river-loop"] });
+    // rivers merge on the coarser grid but stay contiguous, loop-free and (carved) never climb
+    const rl = await ok(h, "lint", { checks: ["river-gap", "river-loop", "river-uphill"] });
     assert.deepEqual(rl.counts, {}, JSON.stringify(rl.rows).slice(0, 400));
+  });
+
+  test("lowering to 2K: carving lowers only the cells where a river would climb; the biome clean-up merges speckles", async () => {
+    await ok(h, "load_map", { path: DEMO_MAP });
+    // off: heights as interpolated (rivers cross ridges), biomes with their speckles
+    const off = await ok(h, "regrid", { density: 2000, carve: false, minRegion: 0 }, 300_000);
+    assert.ok((off.rivers as Obj).climbing > 0, JSON.stringify(off.rivers));
+    assert.equal((off.rivers as Obj).carved, undefined);
+    assert.equal((off.biomes as Obj).cleanup, undefined);
+    assert.match(JSON.stringify(off.warnings), /river\(s\) climb somewhere on the new heights \(carve:false\)/);
+    const upOff = await ok(h, "lint", { checks: ["river-uphill"], limit: 0 });
+    assert.ok(upOff.counts["river-uphill"] > 0, "the interpolated heights make rivers climb at 2K");
+    const hOff = (await ok(h, "eval", { code: HEIGHTS_STATE, readOnly: true })).value as Obj;
+    const spOff = (await ok(h, "eval", { code: SPECKLES, readOnly: true })).value as number;
+    assert.ok(hOff.rising > 0);
+    await ok(h, "snapshot", { action: "undo" }, 240_000);
+
+    const on = await ok(h, "regrid", { density: 2000 }, 300_000);
+    const cv = (on.rivers as Obj).carved as Obj;
+    assert.ok(cv.rivers > 0 && cv.cells >= cv.rivers && cv.maxDrop > 0, JSON.stringify(cv));
+    assert.match(JSON.stringify(on.regenerated), /land cell\(s\) on \d+ river\(s\) lowered/);
+    const hOn = (await ok(h, "eval", { code: HEIGHTS_STATE, readOnly: true })).value as Obj;
+    assert.deepEqual({ rising: hOn.rising, offGrid: hOn.offGrid }, { rising: 0, offGrid: 0 });
+    // the same grid and heights but for the carved cells: only lowered, by at most maxDrop, never under 20
+    const a = hOff.h as number[];
+    const c = hOn.h as number[];
+    assert.equal(c.length, a.length);
+    let lowered = 0;
+    let maxDrop = 0;
+    for (let i = 0; i < a.length; i++) {
+      if (c[i] === a[i]) continue;
+      assert.ok(c[i] < a[i] && c[i] >= 20 && a[i] >= 20, `cell ${i}: ${a[i]} -> ${c[i]}`);
+      lowered++;
+      maxDrop = Math.max(maxDrop, a[i] - c[i]);
+    }
+    assert.equal(lowered, cv.cells);
+    assert.equal(maxDrop, cv.maxDrop);
+    const up = await ok(h, "lint", { checks: ["river-uphill", "river-gap", "river-loop"], limit: 0 });
+    assert.deepEqual(up.counts, {});
+    // fewer speckles; the ones left hold a carried custom/painted cell
+    const cl = (on.biomes as Obj).cleanup as Obj;
+    assert.ok(cl.regions > 0 && cl.cells > 0, JSON.stringify(on.biomes));
+    const spOn = (await ok(h, "eval", { code: SPECKLES, readOnly: true })).value as number;
+    assert.ok(spOn < spOff, `${spOff} -> ${spOn}`);
+    assert.ok(spOn <= (on.biomes as Obj).carriedPainted + (on.biomes as Obj).carriedCustom);
   });
 
   test("biomes: custom and painted ones carried where they were painted, the rest from the climate; 'climate' and 'keep'", async () => {
