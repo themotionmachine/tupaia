@@ -5,11 +5,14 @@
 //
 // - edit {remove:true} for province, culture and religion: ports of the editors' remove
 //   functions (cells fall back to 0, tombstones, emblems, DOM, origins).
+// - edit {remove:true} for state: a port of states-editor stateRemove that redraws through the
+//   batch (the app's own re-renders every state's emblem per removal, in the background).
 // - edit burg {remove:true, force:true, newCapital?, orphanRoutes?}: removes capitals and
 //   market centres too, moving what depends on the burg (state capital, province capital,
 //   its market, deals). Every burg removal keeps those dependants consistent.
-// - Route integrity: removing burgs or routes sweeps pack.cells.routes so every link names a
-//   live route on which the two cells are consecutive, and every consecutive pair has a link.
+// - Route integrity: removing burgs or routes sweeps pack.cells.routes (once per call) so every
+//   link names a live route on which the two cells are consecutive, and every consecutive pair
+//   has a link.
 // - FNS.clear: bulk removal by type in dependency order, honouring keep refs and locks.
 (root => {
   const T = root.__tupaia;
@@ -30,6 +33,8 @@
     if (o[k] === undefined) o[k] = make();
     return o[k];
   };
+  const dealCount = () => (Array.isArray(pack.deals) ? pack.deals.length : 0);
+  const noteCount = () => (typeof notes !== "undefined" && Array.isArray(notes) ? notes.length : 0);
 
   // ---------------------------------------------------------------- notes
 
@@ -107,6 +112,13 @@
       }
     }
     return { removed, added };
+  }
+
+  // an edit call repairs the links once, after all its ops (the FNS.edit wrapper below)
+  let batchSweep = null;
+  function linksChanged() {
+    if (batchSweep) batchSweep.on = true;
+    else sweepRouteLinks();
   }
 
   /** Remove a route like Routes.remove, without throwing on one-sided links; returns its note id. */
@@ -189,21 +201,38 @@
     const s = pack.states[b.state];
     const capitalOf = s?.i && !s.removed && s.capital === b.i ? s : null;
     const markets = (pack.markets || []).filter(m => m && m.centerBurgId === b.i).map(m => m.i);
-    const provinces = (pack.provinces || []).filter(p => alive(p) && p.i && p.burg === b.i).map(p => p.i);
-    return { capitalOf, markets, provinces };
+    const provs = (pack.provinces || []).filter(p => alive(p) && p.i && p.burg === b.i).map(p => p.i);
+    return { capitalOf, markets, provinces: provs };
+  }
+
+  const capitalRow = (s, next) => ({
+    state: s.i,
+    stateName: s.name ?? null,
+    to: next ? next.i : 0,
+    name: next ? next.name : null
+  });
+
+  /** The burg that takes over province pid: `want` when still valid, else the editor's rule. */
+  function provinceHead(pid, want, exclude) {
+    const next = want ? pack.burgs[want] : null;
+    if (next && alive(next) && !exclude.has(next.i) && pack.cells.province[next.cell] === pid) return next;
+    return provinceSuccessor(pack.provinces[pid], exclude);
   }
 
   /**
-   * Remove a burg and keep its dependants consistent. o: {exclude: Set of burg ids being removed
-   * in the same call (never chosen as successors), newCapital?: burg id}. Returns the cascade;
-   * out.markets lists the markets it centred, which the CALLER removes (removeMarkets, once).
+   * Remove a burg and keep its dependants consistent. o: {exclude: Set of burg ids removed in the
+   * same call (never successors), newCapital?: burg id, heads?: Map(province id -> burg id),
+   * statesGoing?: Set of state ids removed in the same call (their capital is not moved)}.
+   * Returns the cascade; out.markets lists the markets it centred, which the CALLER removes
+   * (removeMarkets, once).
    */
   function removeBurgFull(b, o) {
     const exclude = new Set(o.exclude || []);
     exclude.add(b.i);
     const out = {};
     const d = burgDependants(b);
-    if (d.capitalOf) {
+    if (d.capitalOf && o.statesGoing?.has(d.capitalOf.i)) d.capitalOf.capital = 0;
+    else if (d.capitalOf) {
       const s = d.capitalOf;
       let next = o.newCapital ? pack.burgs[o.newCapital] : null;
       if (!next || !alive(next) || next.state !== b.state || exclude.has(next.i)) next = capitalSuccessor(b, exclude);
@@ -213,16 +242,15 @@
         next.capital = 1;
         Burgs.changeGroup(next, null);
       } else s.capital = 0;
-      out.capital = { state: s.i, to: next ? next.i : 0, name: next ? next.name : null };
+      out.capital = capitalRow(s, next);
     }
     if (b.capital) b.capital = 0;
     if (d.markets.length) out.markets = d.markets;
     if (d.provinces.length) {
       out.provinces = d.provinces.map(pid => {
-        const p = pack.provinces[pid];
-        const next = provinceSuccessor(p, exclude);
-        p.burg = next ? next.i : 0;
-        return { province: pid, to: p.burg };
+        const next = provinceHead(pid, o.heads?.get(pid), exclude);
+        pack.provinces[pid].burg = next ? next.i : 0;
+        return { province: pid, to: next ? next.i : 0 };
       });
     }
     Burgs.remove(b.i);
@@ -237,6 +265,22 @@
       d => !((d.sellerType === "burg" && ids.has(d.seller)) || (d.buyerType === "burg" && ids.has(d.buyer)))
     );
     return before - pack.deals.length;
+  }
+
+  /** Deals a removal drops: a burg side among burgIds or a market side among marketIds. */
+  function dealsTouching(burgIds, marketIds) {
+    let n = 0;
+    const hit = (type, id) => (type === "burg" && burgIds.has(id)) || (type === "market" && marketIds.has(id));
+    for (const d of pack.deals || []) if (hit(d.sellerType, d.seller) || hit(d.buyerType, d.buyer)) n++;
+    return n;
+  }
+
+  /** Live burgs outside `removing` served by one of these markets (they move to other markets). */
+  function burgsInMarkets(marketIds, removing) {
+    if (!marketIds.size) return 0;
+    let n = 0;
+    for (const b of pack.burgs) if (alive(b) && b.i && !removing.has(b.i) && marketIds.has(b.market)) n++;
+    return n;
   }
 
   /**
@@ -270,30 +314,93 @@
     return moved;
   }
 
-  // ---------------------------------------------------------------- provinces, cultures, religions
+  // ---------------------------------------------------------------- provinces, states
 
-  /** provinces-editor.js removeProvince; returns the note id to drop. */
-  function removeProvinceData(p) {
+  /**
+   * provinces-editor.js removeProvince for several provinces (one pass over the cells); returns
+   * their note ids.
+   */
+  function removeProvincesData(list) {
+    const ids = new Set(list.map(p => p.i));
+    if (!ids.size) return [];
     const C = pack.cells;
-    for (let c = 0; c < C.province.length; c++) if (C.province[c] === p.i) C.province[c] = 0;
-    const s = pack.states[p.state];
-    if (Array.isArray(s?.provinces)) {
-      const k = s.provinces.indexOf(p.i);
-      if (k >= 0) s.provinces.splice(k, 1);
+    for (let c = 0; c < C.province.length; c++) if (ids.has(C.province[c])) C.province[c] = 0;
+    for (const p of list) {
+      const s = pack.states[p.state];
+      if (Array.isArray(s?.provinces)) {
+        const k = s.provinces.indexOf(p.i);
+        if (k >= 0) s.provinces.splice(k, 1);
+      }
+      if (typeof unfog === "function") unfog(`focusProvince${p.i}`);
+      document.getElementById(`provinceCOA${p.i}`)?.remove();
+      if (typeof emblems !== "undefined") sel(emblems, `#provinceEmblems > use[data-i='${p.i}']`);
+      pack.provinces[p.i] = { i: p.i, removed: true };
+      if (typeof provs !== "undefined") {
+        const g = provs.select("#provincesBody");
+        sel(g, `#province${p.i}`);
+        sel(g, `#province-gap${p.i}`);
+      }
     }
-    if (typeof unfog === "function") unfog(`focusProvince${p.i}`);
-    document.getElementById(`provinceCOA${p.i}`)?.remove();
-    if (typeof emblems !== "undefined") sel(emblems, `#provinceEmblems > use[data-i='${p.i}']`);
-    pack.provinces[p.i] = { i: p.i, removed: true };
-    if (typeof provs !== "undefined") {
-      const g = provs.select("#provincesBody");
-      sel(g, `#province${p.i}`);
-      sel(g, `#province-gap${p.i}`);
-    }
-    return `province${p.i}`;
+    return list.map(p => `province${p.i}`);
   }
 
-  /** cultures-editor.ts removeCulture: burgs, states and cells fall back to culture 0. */
+  /**
+   * states-editor.ts stateRemove for several states at once: cells and burgs fall back to
+   * Neutrals (a capital loses its flag), the state's provinces go (its own list and any province
+   * of the state missing from it), its emblem, label, regiments and neighbour links go, then a
+   * tombstone. Redraws are left to the caller (states, borders, provinces); the app's editor
+   * refresh is replaced by one statistics pass. Returns {provinces: count, noteIds}.
+   */
+  function removeStatesData(list) {
+    const ids = new Set(list.map(s => s.i));
+    const noteIds = [];
+    for (const s of list) {
+      if (typeof statesBody !== "undefined") {
+        sel(statesBody, `#state${s.i}`);
+        sel(statesBody, `#state-gap${s.i}`);
+      }
+      if (typeof statesHalo !== "undefined") sel(statesHalo, `#state-border${s.i}`);
+      if (typeof labels !== "undefined") sel(labels, `#stateLabel${s.i}`);
+      if (typeof defs !== "undefined") sel(defs, `#textPath_stateLabel${s.i}`);
+      if (typeof unfog === "function") unfog(`focusState${s.i}`);
+      document.getElementById(`stateCOA${s.i}`)?.remove();
+      if (typeof emblems !== "undefined") sel(emblems, `#stateEmblems > use[data-i='${s.i}']`);
+      for (const m of s.military || []) noteIds.push(`regiment${s.i}-${m.i}`);
+      if (typeof armies !== "undefined") sel(armies, `g#army${s.i}`);
+      noteIds.push(`stateLabel${s.i}`);
+    }
+    for (const b of pack.burgs) {
+      if (!b?.i || !ids.has(b.state)) continue;
+      b.state = 0;
+      if (b.capital) {
+        b.capital = 0;
+        if (!b.removed) Burgs.changeGroup(b, null);
+      }
+    }
+    const C = pack.cells;
+    for (let c = 0; c < C.state.length; c++) if (ids.has(C.state[c])) C.state[c] = 0;
+    const provIds = new Set();
+    for (const s of list) for (const p of s.provinces || []) provIds.add(p);
+    for (const p of pack.provinces) if (alive(p) && p.i && ids.has(p.state)) provIds.add(p.i);
+    const provList = [...provIds].map(i => pack.provinces[i]).filter(p => alive(p) && p.i);
+    noteIds.push(...removeProvincesData(provList));
+    for (const s of pack.states) {
+      if (!s.i || s.removed || !Array.isArray(s.neighbors)) continue;
+      s.neighbors = s.neighbors.filter(n => !ids.has(n));
+    }
+    for (const s of list) pack.states[s.i] = { i: s.i, removed: true };
+    if (typeof debug !== "undefined") debug.selectAll(".highlight").remove();
+    if (typeof States !== "undefined" && typeof States.collectStatistics === "function") States.collectStatistics();
+    return { provinces: provList.length, noteIds };
+  }
+
+  // ---------------------------------------------------------------- cultures, religions, rivers
+
+  /**
+   * cultures-editor.ts removeCulture: burgs, states and cells fall back to culture 0. Religions of
+   * the culture also fall back to 0 (the editor leaves them naming the removed culture).
+   * Returns the number of such religions.
+   */
   function removeCultureData(x) {
     const id = x.i;
     if (typeof cults !== "undefined") sel(cults, `#culture${id}`);
@@ -308,6 +415,13 @@
       o.origins = (o.origins ?? []).filter(v => v !== id);
       if (!o.origins.length) o.origins = [0];
     }
+    let n = 0;
+    for (const r of pack.religions || []) {
+      if (!r?.i || r.removed || r.culture !== id) continue;
+      r.culture = 0;
+      n++;
+    }
+    return n;
   }
 
   /** religions-editor.ts removeReligion: cells fall back to religion 0. */
@@ -348,11 +462,14 @@
   }
 
   const EMBLEM_OWNERS = ["burg", "state", "province"];
+  const hasEmblem = x => !!x.coa && x.coa.size !== 0;
 
-  /** Remove an entity's emblem (coa and its rendered elements). */
+  /**
+   * Hide an entity's emblem the emblem editor's way (size 0: the renderer skips it, the coat of
+   * arms stays for regeneration and the editors).
+   */
   function removeEmblem(type, x) {
-    delete x.coa;
-    document.getElementById(`${type}COA${x.i}`)?.remove();
+    x.coa.size = 0;
     if (typeof emblems !== "undefined") sel(emblems, `#${type}Emblems > use[data-i='${x.i}']`);
   }
 
@@ -376,21 +493,49 @@
     return s;
   }
 
-  const OP_KEYS = ["ref", "remove", "set", "force", "newCapital", "orphanRoutes"];
+  const OP_KEYS = ["ref", "remove", "set", "force", "newCapital", "orphanRoutes", "provinceHeads"];
+  const BURG_ONLY = ["force", "newCapital", "orphanRoutes", "provinceHeads"];
 
-  function checkOpKeys(type, op) {
+  function checkOpKeys(type, op, c) {
     const extra = Object.keys(op || {}).filter(k => !OP_KEYS.includes(k));
-    if (extra.length) fail("BAD_FIELD", `edit ops take no field '${extra[0]}'`, { details: OP_KEYS });
-    if (type !== "burg" && (op.force !== undefined || op.newCapital !== undefined || op.orphanRoutes !== undefined))
+    if (extra.length) fail("BAD_FIELD", `edit ops take no field '${extra[0]}'`, { details: OP_KEYS.slice(0, -1) });
+    if (type !== "burg" && (BURG_ONLY.some(k => op?.[k] !== undefined) || c?.args?.force !== undefined))
       fail("BAD_ARGS", "force, newCapital and orphanRoutes apply only to burg removal");
+  }
+
+  /** An op's force, or the call's (edit {force:true} applies to every op). */
+  const forceOf = (c, op) => !!(op?.force ?? c?.args?.force);
+
+  /** The recorded province heads of a replayed removal (sketch log), checked against the map. */
+  function recordedHeads(op, provIds, removing) {
+    const heads = new Map();
+    for (const h of Array.isArray(op.provinceHeads) ? op.provinceHeads : []) {
+      if (!isObj(h) || !provIds.includes(h.province)) continue;
+      const p = pack.provinces[h.province];
+      let nb;
+      try {
+        nb = T.resolve("burg", h.burg).entity;
+      } catch (e) {
+        e.message = `the sketch made burg ${h.burg} head of province ${p.name} (${p.i}): ${e.message}`;
+        throw e;
+      }
+      if (pack.cells.province[nb.cell] !== p.i || removing.has(nb.i))
+        fail(
+          "CHANGED",
+          `the sketch made ${nb.name} (${nb.i}) head of province ${p.name} (${p.i}), but it is ${removing.has(nb.i) ? "removed in this same call" : "no longer in that province"}`
+        );
+      heads.set(p.i, nb.i);
+    }
+    return heads;
   }
 
   REMOVE.burg = {
     check(b, c, op) {
       const o = op || {};
-      checkOpKeys("burg", o);
+      checkOpKeys("burg", o, c);
+      const force = forceOf(c, o);
       const d = burgDependants(b);
-      if (!o.force) {
+      if (!force) {
         if (d.capitalOf)
           fail(
             "REFUSED",
@@ -402,6 +547,7 @@
             `${b.name} (${b.i}) is a market centre; pass force:true to remove it together with its market`
           );
       }
+      const removing = new Set([...batchBurgRemovals(c), b.i]);
       const info = {};
       if (o.newCapital !== undefined && o.newCapital !== null) {
         if (!d.capitalOf)
@@ -410,65 +556,78 @@
         if (nb.i === b.i) fail("BAD_ARGS", "newCapital is the burg being removed");
         if (nb.state !== b.state)
           fail("REFUSED", `newCapital ${nb.name} (${nb.i}) is not in ${d.capitalOf.name}; pick a burg of that state`);
-        if (batchBurgRemovals(c).has(nb.i))
-          fail("REFUSED", `newCapital ${nb.name} (${nb.i}) is removed in this same call`);
-        info.newCapital = { i: nb.i, name: nb.name };
-      } else if (d.capitalOf) {
-        const nb = capitalSuccessor(b, new Set([...batchBurgRemovals(c), b.i]));
-        info.newCapital = nb ? { i: nb.i, name: nb.name } : null;
+        if (removing.has(nb.i)) fail("REFUSED", `newCapital ${nb.name} (${nb.i}) is removed in this same call`);
+        info.capital = capitalRow(d.capitalOf, nb);
+      } else if (d.capitalOf) info.capital = capitalRow(d.capitalOf, capitalSuccessor(b, removing));
+      if (d.markets.length) {
+        info.marketsRemoved = d.markets;
+        const moving = burgsInMarkets(new Set(d.markets), removing);
+        if (moving) info.burgsToOtherMarkets = moving;
       }
-      if (d.capitalOf) info.capitalOf = { i: d.capitalOf.i, name: d.capitalOf.name };
-      if (d.markets.length) info.markets = d.markets;
-      if (d.provinces.length) info.provinceCapitalOf = d.provinces;
+      if (d.provinces.length) {
+        const heads = recordedHeads(o, d.provinces, removing);
+        info.provinceCapitals = d.provinces.map(pid => {
+          const next = provinceHead(pid, heads.get(pid), removing);
+          return { province: pid, to: next ? next.i : 0 };
+        });
+      }
+      const deals = dealsTouching(new Set([b.i]), new Set(d.markets));
+      if (deals) info.dealsDropped = deals;
       const n = routesAtCell(b.cell);
       if (n) info.routesThrough = n;
       if (o.orphanRoutes) {
-        const removing = new Set([...batchBurgRemovals(c), b.i]);
-        info.orphanRoutes = orphanRoutes([b.i], removing).map(r => r.i);
+        const rs = orphanRoutes([b.i], removing);
+        info.routesRemoved = rs.filter(r => force || !r.lock).map(r => r.i);
+        const locked = rs.filter(r => r.lock && !force).map(r => r.i);
+        if (locked.length) info.routesKeptLocked = locked;
       }
       return Object.keys(info).length ? info : null;
     },
     apply(b, c, op, info) {
       const o = op || {};
-      const cascade = removeBurgFull(b, {
-        exclude: batchBurgRemovals(c),
-        newCapital: info?.newCapital?.i
-      });
+      const force = forceOf(c, o);
+      const deals0 = dealCount();
+      const heads = new Map((info?.provinceCapitals || []).map(x => [x.province, x.to]));
+      const cascade = removeBurgFull(b, { exclude: batchBurgRemovals(c), newCapital: info?.capital?.to, heads });
       const moved = cascade.markets ? removeMarkets(cascade.markets) : 0;
-      const deals = dropBurgDeals(new Set([b.i]));
+      dropBurgDeals(new Set([b.i]));
       const row = {};
       if (cascade.capital) row.capital = cascade.capital;
       if (cascade.markets) row.marketsRemoved = cascade.markets;
       if (moved) row.burgsToOtherMarkets = moved;
       if (cascade.provinces) row.provinceCapitals = cascade.provinces;
-      if (deals) row.dealsDropped = deals;
-      const noteIds = [];
+      if (deals0 - dealCount()) row.dealsDropped = deals0 - dealCount();
       if (o.orphanRoutes) {
-        const gone = orphanRoutes([b.i], new Set([b.i]));
-        for (const r of gone) noteIds.push(removeRouteData(r));
+        const rs = orphanRoutes([b.i], new Set([b.i]));
+        const gone = rs.filter(r => force || !r.lock);
+        dropNotes(gone.map(r => removeRouteData(r)));
         if (gone.length) row.routesRemoved = gone.map(r => r.i);
+        const locked = rs.filter(r => r.lock && !force).map(r => r.i);
+        if (locked.length) {
+          row.routesKeptLocked = locked;
+          c.notes.add("locked orphan routes are kept; force:true removes them too");
+        }
       } else if (routesAtCell(b.cell))
         c.notes.add(
           "routes through removed burgs are kept; orphanRoutes:true also removes the routes that served only removed burgs"
         );
-      dropNotes(noteIds);
-      const sw = sweepRouteLinks();
-      if (sw.removed || sw.added) row.routeLinksFixed = sw;
+      linksChanged();
       if (cascade.capital) c.R.add("stateLabels", [cascade.capital.state]);
       const resolved = {};
-      if (o.force) resolved.force = true;
+      if (force) resolved.force = true;
       if (cascade.capital?.to) resolved.newCapital = cascade.capital.to;
       if (o.orphanRoutes) resolved.orphanRoutes = true;
+      const kept = (cascade.provinces || []).filter(x => x.to).map(x => ({ province: x.province, burg: x.to }));
+      if (kept.length) resolved.provinceHeads = kept;
       return { row, resolved };
     }
   };
 
   REMOVE.route = {
-    apply(r, c) {
+    apply(r) {
       dropNotes([removeRouteData(r)]);
-      const sw = sweepRouteLinks();
-      void c;
-      return sw.removed || sw.added ? { row: { routeLinksFixed: sw } } : null;
+      linksChanged();
+      return null;
     }
   };
 
@@ -482,13 +641,12 @@
   };
 
   REMOVE.province = {
-    check(p, _c, op) {
-      checkOpKeys("province", op);
-      const n = I.cellsWhere("province", p.i).length;
-      return { cells: n };
+    check(p, c, op) {
+      checkOpKeys("province", op, c);
+      return { cells: I.cellsWhere("province", p.i).length };
     },
     apply(p, c) {
-      dropNotes([removeProvinceData(p)]);
+      dropNotes(removeProvincesData([p]));
       c.R.add("provinces");
       c.R.add("borders");
       return null;
@@ -496,25 +654,28 @@
   };
 
   REMOVE.culture = {
-    check(x, _c, op) {
-      checkOpKeys("culture", op);
+    check(x, c, op) {
+      checkOpKeys("culture", op, c);
       if (!x.i) fail("REFUSED", "Wildlands (culture 0) cannot be removed");
-      return {
+      const info = {
         cells: I.cellsWhere("culture", x.i).length,
         burgs: pack.burgs.filter(b => alive(b) && b.i && b.culture === x.i).length,
         states: pack.states.filter(s => alive(s) && s.i && s.culture === x.i).length
       };
+      const rel = pack.religions.filter(r => alive(r) && r.i && r.culture === x.i).length;
+      if (rel) info.religions = rel;
+      return info;
     },
     apply(x, c) {
-      removeCultureData(x);
+      const rel = removeCultureData(x);
       c.R.add("cultures");
-      return null;
+      return rel ? { row: { religions: rel } } : null;
     }
   };
 
   REMOVE.religion = {
-    check(x, _c, op) {
-      checkOpKeys("religion", op);
+    check(x, c, op) {
+      checkOpKeys("religion", op, c);
       if (!x.i) fail("REFUSED", "No religion (religion 0) cannot be removed");
       return { cells: I.cellsWhere("religion", x.i).length };
     },
@@ -530,18 +691,19 @@
     if (["burg", "province", "culture", "religion"].includes(type)) continue;
     const own = REMOVE[type].check;
     REMOVE[type].check = (x, c, op) => {
-      checkOpKeys(type, op);
+      checkOpKeys(type, op, c);
       return own ? own(x, c, op) : null;
     };
   }
 
-  // stateRemove takes the state's own province list; a province of the state missing from it goes too
-  const stateApply = REMOVE.state.apply;
-  REMOVE.state.apply = (st, c, op, info) => {
-    const out = stateApply(st, c, op, info);
-    const left = I.liveList("province").filter(p => p.state === st.i);
-    if (left.length) dropNotes(left.map(p => removeProvinceData(p)));
-    return out;
+  // a state goes through the stateRemove port: its provinces, label note and regiment notes too
+  REMOVE.state.apply = (st, c) => {
+    const res = removeStatesData([st]);
+    dropNotes(res.noteIds);
+    c.R.add("states");
+    c.R.add("borders");
+    c.R.add("provinces");
+    return res.provinces ? { row: { provincesRemoved: res.provinces } } : null;
   };
 
   // a label's note goes with it (as a burg's or a marker's does)
@@ -549,6 +711,25 @@
   REMOVE.label.apply = (l, c, op, info) => {
     const out = labelApply(l, c, op, info);
     dropNotes([l.id]);
+    return out;
+  };
+
+  // one route-link repair per edit call, after all its ops, reported once for the call
+  const editFn = FNS.edit;
+  FNS.edit = async a => {
+    if (a?.phase !== "apply") return editFn(a);
+    const mine = { on: false };
+    batchSweep = mine;
+    let out;
+    try {
+      out = await editFn(a);
+    } finally {
+      if (batchSweep === mine) batchSweep = null;
+    }
+    if (mine.on) {
+      const sw = sweepRouteLinks();
+      if (sw.removed || sw.added) out.routeLinksFixed = sw;
+    }
     return out;
   };
 
@@ -585,22 +766,32 @@
   };
   const MANY = Object.fromEntries(Object.entries(ONE).map(([k, v]) => [v, k]));
   const LOCKABLE = new Set(["burg", "state", "province", "culture", "religion", "route", "marker"]);
-  // ids of these get reused (max id + 1) or are strings: replay checks a fingerprint, not just the id
-  const FINGERPRINTED = new Set(["note", "label", "marker", "route", "zone", "river"]);
   const KEPT_ROWS = 10;
+  const NAME_SAMPLE = 3;
   const ZERO_KEPT = new Set(["state", "culture", "religion"]);
 
   const idOfX = (type, x) => (type === "emblem" ? x.key : type === "note" || type === "label" ? x.id : x.i);
 
+  /**
+   * What the replay of a clear compares, per entity: its main fields (edit's identity fields),
+   * so an id someone else reused, renumbered or changed since is a conflict, not a silent removal.
+   */
   function fingerprint(type, x) {
     if (type === "label") return hashStr(`${x.name ?? ""}|${x.group ?? ""}`);
-    return hashStr(JSON.stringify(M.identOf(type, x) ?? null));
+    if (type === "emblem") return hashStr(JSON.stringify(x.x.coa ?? null));
+    const ident = M.identOf(type, x) ?? null;
+    // a state takes its provinces with it: one added since is someone else's work
+    if (type === "state") {
+      const n = I.liveList("province").filter(p => p.state === x.i).length;
+      return hashStr(JSON.stringify({ ident, provinces: n }));
+    }
+    return hashStr(JSON.stringify(ident));
   }
 
   function emblemCandidates() {
     const out = [];
     for (const type of EMBLEM_OWNERS)
-      for (const x of I.liveList(type)) if (x.coa) out.push({ type, x, key: `${type}:${x.i}` });
+      for (const x of I.liveList(type)) if (hasEmblem(x)) out.push({ type, x, key: `${type}:${x.i}` });
     return out;
   }
 
@@ -630,7 +821,45 @@
     return out;
   }
 
-  function whereFilter(type, filter) {
+  // fields a filter may name although no entity carries them yet (optional flags)
+  const OPTIONAL_FIELDS = {
+    "*": ["i", "name", "lock"],
+    marker: ["pinned", "note", "size", "hidden"],
+    zone: ["hidden"],
+    river: ["parent", "basin"],
+    route: ["feature"],
+    label: ["text"]
+  };
+
+  /** Every where field must be one this type has (else it silently matches nothing). */
+  function checkWhereFields(type, filter, list) {
+    if (!list.length) return;
+    const sample = list.slice(0, 200);
+    const known = k =>
+      OPTIONAL_FIELDS["*"].includes(k) ||
+      (OPTIONAL_FIELDS[type] || []).includes(k) ||
+      sample.some(x => I.fieldValue(type, x, k) !== undefined);
+    const valid = () => {
+      const s = new Set([...OPTIONAL_FIELDS["*"], ...(OPTIONAL_FIELDS[type] || [])]);
+      for (const x of sample.slice(0, 20)) for (const k of Object.keys(x)) if (k !== "removed") s.add(k);
+      return [...s].slice(0, 40);
+    };
+    for (const key of Object.keys(filter)) {
+      const want = filter[key];
+      const mm = /^(.*)(Min|Max)$/.exec(key);
+      if (mm && !known(key) && known(mm[1])) {
+        if (typeof want !== "number" || !Number.isFinite(want))
+          fail("BAD_ARGS", `where.${MANY[type]}.${key} takes a number, not ${JSON.stringify(want)}`);
+        continue;
+      }
+      if (!known(key))
+        fail("BAD_ARGS", `where.${MANY[type]}: no ${type} has a field '${key}', so it would match nothing`, {
+          details: valid()
+        });
+    }
+  }
+
+  function whereFilter(type, filter, list) {
     if (!filter || !Object.keys(filter).length) return () => true;
     if (type === "emblem") {
       const extra = Object.keys(filter).filter(k => k !== "type");
@@ -641,6 +870,7 @@
         if (!EMBLEM_OWNERS.includes(t)) fail("BAD_ARGS", `emblem type must be one of ${EMBLEM_OWNERS.join(", ")}`);
       return e => want.includes(e.type);
     }
+    checkWhereFields(type, filter, list);
     const refs = {};
     for (const key of Object.keys(filter)) {
       const refType = I.REF_FIELDS[type]?.[key];
@@ -652,13 +882,26 @@
     return x => I.matchWhere(type, x, filter, refs);
   }
 
-  /** keep [{type, ref}] -> {type: Set(ids)} (emblems are kept with their owner). */
-  function parseKeep(keep) {
+  /**
+   * keep [{type, ref}] -> {type: Set(ids)}. A keep entry must be able to keep something: a type
+   * being cleared, a province when states are (it keeps its state), an emblem owner when emblems
+   * are, a route when orphan routes go.
+   */
+  function parseKeep(keep, want, orphans) {
     const out = {};
     if (keep === undefined || keep === null) return out;
     if (!Array.isArray(keep)) fail("BAD_ARGS", "keep is an array of {type, ref}");
+    const allowed = new Set(want);
+    if (want.includes("state")) allowed.add("province");
+    if (want.includes("emblem")) for (const t of EMBLEM_OWNERS) allowed.add(t);
+    if (orphans && want.includes("burg")) allowed.add("route");
     keep.forEach((k, n) => {
       if (!isObj(k) || typeof k.type !== "string") fail("BAD_ARGS", `keep[${n}] must be {type, ref}`);
+      if (!allowed.has(k.type))
+        fail(
+          "BAD_ARGS",
+          `keep[${n}]: '${k.type}' is not one of the types being cleared, so it would keep nothing (types: ${want.map(t => MANY[t]).join(", ")})`
+        );
       let r;
       try {
         r = T.resolve(k.type, k.ref);
@@ -676,10 +919,59 @@
     return I.nameOf(type, x);
   }
 
+  /** The capitals and province heads a replayed clear recorded, checked against the map. */
+  function recordedSuccessors(a, pick, errors) {
+    const caps = new Map();
+    const heads = new Map();
+    const C = pack.cells;
+    const check = (list, kind, fn) => {
+      for (const x of Array.isArray(list) ? list : []) {
+        try {
+          if (!isObj(x)) fail("BAD_ARGS", `${kind}: bad entry`);
+          fn(x);
+        } catch (e) {
+          errors.push(M.errRow(errors.length, { type: kind, id: x?.burg }, e));
+        }
+      }
+    };
+    const burgFor = (x, what) => {
+      try {
+        return T.resolve("burg", x.burg).entity;
+      } catch (e) {
+        e.message = `the sketch made burg ${x.burg} ${what}: ${e.message}`;
+        throw e;
+      }
+    };
+    check(a.capitals, "capital", x => {
+      const s = T.resolve("state", x.state).entity;
+      if (pick.state?.has(s.i)) return;
+      const nb = burgFor(x, `the capital of ${s.name} (${s.i})`);
+      if (nb.state !== s.i || pick.burg?.has(nb.i))
+        fail(
+          "CHANGED",
+          `the sketch made ${nb.name} (${nb.i}) the capital of ${s.name} (${s.i}), but it is ${pick.burg?.has(nb.i) ? "removed by this clear" : "no longer in that state"}`
+        );
+      caps.set(s.i, nb.i);
+    });
+    check(a.provinceHeads, "provinceHead", x => {
+      const p = T.resolve("province", x.province).entity;
+      if (pick.province?.has(p.i) || pick.state?.has(p.state)) return;
+      const nb = burgFor(x, `head of province ${p.name} (${p.i})`);
+      if (C.province[nb.cell] !== p.i || pick.burg?.has(nb.i))
+        fail(
+          "CHANGED",
+          `the sketch made ${nb.name} (${nb.i}) head of province ${p.name} (${p.i}), but it is ${pick.burg?.has(nb.i) ? "removed by this clear" : "no longer in that province"}`
+        );
+      heads.set(p.i, nb.i);
+    });
+    return { caps, heads };
+  }
+
   /**
    * Choose what a clear removes. Returns {pick: {type: Map(id -> entity)}, kept: {type: [{i,
-   * name, why}]}, orphans: Set(route ids), errors}. Literal mode (a.ids, used by replay): exactly
-   * those ids, each must be live (and match its fingerprint where one was recorded).
+   * name, why}]}, orphans: Set(route ids), errors, caps, heads, unfiltered}. Literal mode (a.ids,
+   * used by replay): exactly those ids, each must be live and match its recorded fingerprint, and
+   * the recorded capital and province-head successors must still be valid.
    */
   function selectClear(a) {
     const pick = {};
@@ -692,6 +984,14 @@
     if (a.ids !== undefined) {
       if (!isObj(a.ids)) fail("BAD_ARGS", "ids is {type: [ids]}");
       const fps = isObj(a.idents) ? a.idents : {};
+      const changed = (type, id, x, label) => {
+        const want = fps[type]?.[String(id)];
+        if (want !== undefined && fingerprint(type, x) !== want)
+          fail(
+            "CHANGED",
+            `${label} is not the entity the clear removed: someone changed it since (or its id was reused or renumbered)`
+          );
+      };
       for (const type of Object.keys(a.ids)) {
         if (!(type in MANY)) fail("BAD_ARGS", `ids: unknown type '${type}'`);
         const list = Array.isArray(a.ids[type]) ? a.ids[type] : [];
@@ -704,42 +1004,47 @@
               if (!EMBLEM_OWNERS.includes(owner)) fail("BAD_ARGS", `bad emblem id '${id}'`);
               const r = T.resolve(owner, Number(n));
               if (!r.i) fail("NOT_FOUND", `${owner} ${n} is a placeholder`);
-              if (!r.entity.coa) fail("NOT_FOUND", `${owner} ${r.name} (${r.i}) has no emblem`);
-              m.set(id, { type: owner, x: r.entity, key: id });
+              if (!hasEmblem(r.entity)) fail("NOT_FOUND", `${owner} ${r.name} (${r.i}) has no emblem`);
+              const e = { type: owner, x: r.entity, key: id };
+              changed(type, id, e, `the emblem of ${owner} '${r.name}' (${r.i})`);
+              m.set(id, e);
               continue;
             }
             const r = T.resolve(type, id);
             // Neutrals, Wildlands and No religion (markers, routes and zones do start at 0)
             if (r.i === 0 && ZERO_KEPT.has(type)) fail("REFUSED", `${type} 0 (${r.name}) cannot be cleared`);
-            const want = fps[type]?.[String(id)];
-            if (want !== undefined && FINGERPRINTED.has(type) && fingerprint(type, r.entity) !== want)
-              fail(
-                "CHANGED",
-                `${type} ${r.name ? `'${r.name}' ` : ""}(${id}) is not the entity the clear removed: its id was reused or someone changed it`
-              );
+            const label = `${type} ${r.name ? `'${r.name}' ` : ""}(${id})`;
+            // the clear kept locked entities (unless forced): a lock now is someone else's
+            if (LOCKABLE.has(type) && r.entity.lock && !a.force)
+              fail("CHANGED", `${label} was locked since by someone else; the clear would have kept it`);
+            changed(type, id, r.entity, label);
             m.set(r.i, r.entity);
           } catch (e) {
             errors.push(M.errRow(errors.length, { type, id }, e));
           }
         }
       }
-      return { pick, kept, orphans, errors };
+      const { caps, heads } = recordedSuccessors(a, pick, errors);
+      return { pick, kept, orphans, errors, caps, heads, unfiltered: [] };
     }
 
     const types = Array.isArray(a.types) ? a.types : [];
     if (!types.length) fail("BAD_ARGS", "types must be a non-empty array", { details: CLEAR_ORDER });
     for (const t of types) if (!(t in ONE)) fail("BAD_ARGS", `unknown type '${t}'`, { details: CLEAR_ORDER });
     const where = parseWhere(types, a.where);
-    const keep = parseKeep(a.keep);
     const force = !!a.force;
     const want = CLEAR_ORDER.filter(t => types.includes(t)).map(t => ONE[t]);
+    const keep = parseKeep(a.keep, want, !!a.orphanRoutes);
+    // with a where keyed by type, a type without a filter is cleared entirely: say so
+    const unfiltered = Object.keys(where).length ? want.filter(t => !where[t]).map(t => MANY[t]) : [];
 
     for (const type of want) {
       if (type === "emblem") continue; // after the owners are known
-      const match = whereFilter(type, where[type]);
+      const list = I.liveList(type);
+      const match = whereFilter(type, where[type], list);
       const m = new Map();
       pick[type] = m;
-      for (const x of I.liveList(type)) {
+      for (const x of list) {
         if (!match(x)) continue;
         const id = idOfX(type, x);
         if (keep[type]?.has(id)) keepRow(type, x, "keep");
@@ -755,6 +1060,7 @@
         const why = keep.province?.has(p.i) ? "kept" : p.lock && !force ? "locked" : null;
         if (!why) continue;
         const s = pick.state.get(p.state);
+        if (!s) continue;
         pick.state.delete(p.state);
         keepRow("state", s, `holds ${why} province ${p.name} (${p.i})`);
       }
@@ -785,7 +1091,7 @@
         else m.set(e.key, e);
       }
     }
-    return { pick, kept, orphans, errors };
+    return { pick, kept, orphans, errors, caps: new Map(), heads: new Map(), unfiltered };
   }
 
   function countsOf(pick) {
@@ -803,58 +1109,133 @@
     return out;
   }
 
-  /** Preview of the cascade (validate phase). */
-  function cascadePreview(pick) {
+  /** "3 matched, all kept (locked: 2, keep: 1)" when nothing is removed but something matched. */
+  function allKeptNote(kept) {
+    const why = {};
+    let n = 0;
+    for (const rows of Object.values(kept))
+      for (const r of rows) {
+        const k = r.why === "keep" || r.why === "locked" ? r.why : "holds a kept or locked province";
+        why[k] = (why[k] || 0) + 1;
+        n++;
+      }
+    if (!n) return null;
+    const parts = Object.entries(why).map(([k, v]) => `${k}: ${v}`);
+    return `${n} matched, all kept (${parts.join(", ")})${why.locked ? "; force:true also removes locked ones" : ""}; nothing was changed`;
+  }
+
+  /** Note ids a clear drops besides the notes it clears (entities' own notes). */
+  function predictedNotes(pick, orphans) {
+    const ids = new Set();
+    const add = (type, prefix) => {
+      for (const id of pick[type]?.keys() || []) ids.add(`${prefix}${id}`);
+    };
+    for (const id of pick.label?.keys() || []) ids.add(id);
+    add("marker", "marker");
+    add("route", "route");
+    add("river", "river");
+    add("burg", "burg");
+    add("province", "province");
+    for (const r of orphans) ids.add(`route${r}`);
+    for (const s of pick.state?.values() || []) {
+      ids.add(`stateLabel${s.i}`);
+      for (const m of s.military || []) ids.add(`regiment${s.i}-${m.i}`);
+      for (const p of pack.provinces) if (alive(p) && p.i && p.state === s.i) ids.add(`province${p.i}`);
+    }
+    for (const id of pick.note?.keys() || []) ids.delete(id);
+    let n = 0;
+    for (const x of typeof notes !== "undefined" && Array.isArray(notes) ? notes : []) if (ids.has(x?.id)) n++;
+    return n;
+  }
+
+  /** The cascade a clear will cause, in the shape the applied result reports it. */
+  function cascadePreview(pick, orphans, caps) {
     const out = {};
-    const burgs = pick.burg ? [...pick.burg.values()] : [];
-    if (burgs.length) {
-      let capitals = 0;
-      let markets = 0;
+    const burgList = pick.burg ? [...pick.burg.values()] : [];
+    if (burgList.length) {
+      const exclude = new Set(pick.burg.keys());
+      const capitals = [];
+      const markets = new Set();
       let provinceCapitals = 0;
-      for (const b of burgs) {
+      for (const b of burgList) {
         const d = burgDependants(b);
-        if (d.capitalOf && !pick.state?.has(d.capitalOf.i)) capitals++;
-        markets += d.markets.length;
+        if (d.capitalOf && !pick.state?.has(d.capitalOf.i)) {
+          const want = caps.get(d.capitalOf.i);
+          const next = want ? pack.burgs[want] : capitalSuccessor(b, exclude);
+          capitals.push(capitalRow(d.capitalOf, next));
+        }
+        for (const m of d.markets) markets.add(m);
         for (const pid of d.provinces)
           if (!pick.province?.has(pid) && !pick.state?.has(pack.provinces[pid]?.state)) provinceCapitals++;
       }
-      if (capitals) out.capitalsMoved = capitals;
-      if (markets) out.marketsRemoved = markets;
+      if (capitals.length) out.capitalsMoved = capitals.slice(0, KEPT_ROWS);
+      if (capitals.length > KEPT_ROWS) out.capitalsMovedTotal = capitals.length;
+      if (markets.size) out.marketsRemoved = markets.size;
+      const moving = burgsInMarkets(markets, exclude);
+      if (moving) out.burgsToOtherMarkets = moving;
       if (provinceCapitals) out.provinceCapitalsMoved = provinceCapitals;
+      const deals = dealsTouching(exclude, markets);
+      if (deals) out.dealsDropped = deals;
     }
     if (pick.state?.size) {
       const n = I.liveList("province").filter(p => pick.state.has(p.state) && !pick.province?.has(p.i)).length;
       if (n) out.provincesWithStates = n;
     }
+    if (orphans.size) out.orphanRoutes = orphans.size;
+    const notesN = predictedNotes(pick, orphans);
+    if (notesN) out.notesDropped = notesN;
+    return out;
+  }
+
+  function clearNotes(a, sel0) {
+    const out = [];
+    if (sel0.unfiltered.length)
+      out.push(`${sel0.unfiltered.join(", ")}: no where filter, so every one of them (not kept or locked) is cleared`);
+    if (a.orphanRoutes && !sel0.pick.burg?.size && a.ids === undefined)
+      out.push("orphanRoutes applies only when burgs are cleared; it removed nothing");
     return out;
   }
 
   FNS.clear = async a => {
-    const { pick, kept, orphans, errors } = selectClear(a);
+    const sel0 = selectClear(a);
+    const { pick, kept, orphans, errors, caps, heads } = sel0;
     const total = Object.values(pick).reduce((n, m) => n + m.size, 0);
     if (a.phase !== "apply") {
       const plan = { remove: countsOf(pick) };
-      if (orphans.size) plan.orphanRoutes = orphans.size;
       if (Object.keys(kept).length) plan.kept = keptView(kept, a.detail);
-      const cascade = cascadePreview(pick);
+      const cascade = cascadePreview(pick, orphans, caps);
       if (Object.keys(cascade).length) plan.cascade = cascade;
       if (a.detail) plan.ids = Object.fromEntries(Object.entries(pick).map(([t, m]) => [MANY[t], [...m.keys()]]));
+      const notesOut = clearNotes(a, sel0);
+      if (!total) {
+        const n = allKeptNote(kept);
+        if (n) notesOut.push(n);
+      }
+      if (notesOut.length) plan.notes = notesOut;
       return { phase: "validate", total, errors, plan };
     }
     if (errors.length) fail("BAD_ARGS", "validation failed", { details: errors });
 
     const c = M.batchContext(a);
+    for (const n of clearNotes(a, sel0)) c.notes.add(n);
     const removed = {};
     const cascade = {};
     const noteIds = [];
     const idents = {};
+    const names = {};
+    const deals0 = dealCount();
+    const notes0 = noteCount();
     const done = (type, id) => slot(removed, type, () => []).push(id);
     const bump = (k, n = 1) => {
       if (n) cascade[k] = (cascade[k] || 0) + n;
     };
-    for (const type of Object.keys(pick))
-      if (FINGERPRINTED.has(type))
-        for (const [id, x] of pick[type]) slot(idents, type, () => ({}))[String(id)] = fingerprint(type, x);
+    for (const type of Object.keys(pick)) {
+      for (const [id, x] of pick[type]) {
+        slot(idents, type, () => ({}))[String(id)] = fingerprint(type, x);
+        const list = slot(names, MANY[type], () => []);
+        if (list.length < NAME_SAMPLE) list.push(nameOfX(type, x));
+      }
+    }
 
     const each = (type, fn) => {
       const m = pick[type];
@@ -887,10 +1268,13 @@
     }
     each("zone", (_z, id) => document.getElementById(`zone${id}`)?.remove());
     each("route", r => noteIds.push(removeRouteData(r)));
-    if (orphans.size) cascade.orphanRoutes = orphans.size;
+    const orphanCount = a.ids !== undefined ? Number(a.orphanCount) || 0 : orphans.size;
+    if (orphanCount) cascade.orphanRoutes = orphanCount;
     if (pick.river?.size) noteIds.push(...removeRiversData(new Set(pick.river.keys())));
     each("river", () => {});
 
+    const capitalsLog = [];
+    const headsLog = [];
     if (pick.burg?.size) {
       const exclude = new Set(pick.burg.keys());
       const markets = [];
@@ -900,48 +1284,54 @@
         return !pick.province?.has(pid) && !pick.state?.has(p?.state);
       };
       each("burg", b => {
-        const out = removeBurgFull(b, { exclude });
-        if (out.capital && !pick.state?.has(out.capital.state)) capitals.push(out.capital);
+        const out = removeBurgFull(b, { exclude, newCapital: caps.get(b.state), heads, statesGoing: pick.state });
+        if (out.capital) {
+          capitals.push(out.capital);
+          if (out.capital.to) capitalsLog.push({ state: out.capital.state, burg: out.capital.to });
+        }
         if (out.markets) markets.push(...out.markets);
-        if (out.provinces) bump("provinceCapitalsMoved", out.provinces.filter(x => staying(x.province)).length);
+        for (const x of out.provinces || []) {
+          if (!staying(x.province)) continue;
+          bump("provinceCapitalsMoved");
+          if (x.to) headsLog.push({ province: x.province, burg: x.to });
+        }
       });
       if (capitals.length) cascade.capitalsMoved = capitals.slice(0, KEPT_ROWS);
       if (capitals.length > KEPT_ROWS) cascade.capitalsMovedTotal = capitals.length;
       bump("marketsRemoved", markets.length);
       bump("burgsToOtherMarkets", removeMarkets(markets));
-      bump("dealsDropped", dropBurgDeals(exclude));
+      dropBurgDeals(exclude);
       for (const s of capitals) c.R.add("stateLabels", [s.state]);
     }
 
-    each("province", p => noteIds.push(removeProvinceData(p)));
     if (pick.province?.size) {
+      each("province", () => {});
+      noteIds.push(...removeProvincesData([...pick.province.values()]));
       c.R.add("provinces");
       c.R.add("borders");
     }
 
     if (pick.state?.size) {
-      const x = await M.stateInternals();
-      each("state", s => {
-        const owned = I.liveList("province").filter(p => p.state === s.i).length;
-        bump("provincesWithStates", owned);
-        // stateRemove expects the emblem element; it exists only once the emblems layer was shown
-        const coaId = `stateCOA${s.i}`;
-        if (!document.getElementById(coaId)) defs.append("g").attr("id", coaId);
-        x.stateRemove(s.i);
-        // stateRemove takes the state's own province list; a province missing from it goes too
-        for (const p of I.liveList("province")) if (p.state === s.i) noteIds.push(removeProvinceData(p));
-      });
+      each("state", () => {});
+      const res = removeStatesData([...pick.state.values()]);
+      bump("provincesWithStates", res.provinces);
+      noteIds.push(...res.noteIds);
+      c.R.add("states");
+      c.R.add("borders");
+      c.R.add("provinces");
     }
 
     each("religion", x => removeReligionData(x));
     if (pick.religion?.size) c.R.add("religions");
-    each("culture", x => removeCultureData(x));
+    each("culture", x => bump("religionsToCulture0", removeCultureData(x)));
     if (pick.culture?.size) c.R.add("cultures");
 
     each("emblem", e => removeEmblem(e.type, e.x));
     if (pick.emblem?.size) c.R.add("emblems");
 
-    bump("notesDropped", dropNotes(noteIds));
+    dropNotes(noteIds);
+    bump("dealsDropped", deals0 - dealCount());
+    bump("notesDropped", notes0 - noteCount() - (pick.note?.size || 0));
     if (pick.burg?.size || pick.route?.size) {
       const sw = sweepRouteLinks();
       if (sw.removed || sw.added) cascade.routeLinksFixed = sw;
@@ -951,19 +1341,20 @@
 
     const resolved = { removed };
     if (Object.keys(idents).length) resolved.idents = idents;
+    if (capitalsLog.length) resolved.capitals = capitalsLog;
+    if (headsLog.length) resolved.provinceHeads = headsLog;
     // how many of removed.route were orphans (the log summary only; replay passes it back)
-    const orphanCount = a.ids !== undefined ? Number(a.orphanCount) || 0 : orphans.size;
     if (orphanCount) resolved.orphanRoutes = orphanCount;
-    if (a.orphanRoutes && !pick.burg?.size) c.notes.add("orphanRoutes applies only when burgs are cleared");
+    if (a.force) resolved.force = true;
     if (a.redraw !== undefined) resolved.redraw = a.redraw;
     const counts = {};
     for (const type of Object.keys(removed)) counts[MANY[type]] = removed[type].length;
-    const out = { resolved, removed: counts, total };
+    const out = { resolved, removed: counts, total, names };
     if (Object.keys(kept).length) out.kept = keptView(kept, a.detail);
     if (Object.keys(cascade).length) out.cascade = cascade;
     if (a.detail) out.ids = Object.fromEntries(Object.entries(removed).map(([t, v]) => [MANY[t], v]));
     return { ...out, ...rd, notes: [...c.notes] };
   };
 
-  T.removal = { sweepRouteLinks, orphanRoutes, removeBurgFull, removeRouteData };
+  T.removal = { sweepRouteLinks, orphanRoutes, removeBurgFull, removeRouteData, removeStatesData };
 })(globalThis);

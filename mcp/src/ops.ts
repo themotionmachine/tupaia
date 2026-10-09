@@ -105,6 +105,8 @@ export interface EditResolved {
     force?: boolean;
     newCapital?: number;
     orphanRoutes?: boolean;
+    /** burg removal: the burg that took over each province the removed burg headed. */
+    provinceHeads?: Array<{ province: number; burg: number }>;
   }>;
   redraw?: unknown;
 }
@@ -468,23 +470,49 @@ function listOut(parts: string[], max = 3): string {
 
 type Row = Record<string, unknown>;
 
+/** ' (forced; capital of Oom -> Kerfhold; 1 orphan route removed)' for a removal's result row. */
+function removalDetail(o: EditResolved["ops"][number], row: Row | undefined): string {
+  const parts: string[] = [];
+  if (o.force) parts.push("forced");
+  const cap = row?.capital as
+    | { state?: number; stateName?: string | null; to?: number; name?: string | null }
+    | undefined;
+  if (cap && typeof cap === "object")
+    parts.push(
+      `capital of ${cap.stateName ?? `state ${cap.state}`} -> ${cap.to ? (cap.name ?? `burg ${cap.to}`) : "none"}`
+    );
+  const markets = row?.marketsRemoved;
+  if (Array.isArray(markets) && markets.length) parts.push(`market ${markets.join(", ")} removed`);
+  const routes = row?.routesRemoved;
+  if (Array.isArray(routes) && routes.length)
+    parts.push(`${routes.length} orphan route${routes.length === 1 ? "" : "s"} removed`);
+  return parts.length ? ` (${parts.join("; ")})` : "";
+}
+
 /** One sentence for a recorded call, from the resolved form and the bridge's result rows. */
 export function summarizeOp(tool: string, resolved: Resolved | null, out: Row | null, args?: unknown): string {
   try {
     switch (tool) {
       case "edit": {
         const r = resolved as EditResolved;
-        const parts = r.ops.map(o => {
+        const rows = (out?.applied as Row[] | undefined) ?? [];
+        const edited: string[] = [];
+        const removed: string[] = [];
+        r.ops.forEach((o, k) => {
           const who = r.type === "map" ? "the map" : `${r.type} ${o.name ? `${q(o.name)} ` : ""}(${o.ref})`;
-          if (o.remove) return `removed ${who}${o.force ? " (forced)" : ""}`;
+          if (o.remove) {
+            removed.push(`${who}${removalDetail(o, rows[k])}`);
+            return;
+          }
           const fields = Object.keys(o.set ?? {}).map(k =>
             o.before && o.after && k in o.before
               ? `${k} ${q(o.before[k])} -> ${q(o.after[k])}`
               : `${k} ${q(o.set?.[k])}`
           );
-          return `${who}: ${fields.join(", ")}`;
+          edited.push(`${who}: ${fields.join(", ")}`);
         });
-        return `Edited ${listOut(parts)}.`;
+        if (!edited.length) return `Removed ${listOut(removed)}.`;
+        return `Edited ${listOut(edited)}${removed.length ? `; removed ${listOut(removed)}` : ""}.`;
       }
       case "add": {
         const r = resolved as AddResolved;
@@ -670,6 +698,11 @@ export function rewriteResolved(tool: string, resolved: Resolved, rw: Rewriter):
       for (const o of e.ops) {
         if (o.ref !== undefined) o.ref = rw.id(e.type, o.ref) as number | string;
         if (o.newCapital) o.newCapital = rw.id("burg", o.newCapital) as number;
+        if (o.provinceHeads)
+          o.provinceHeads = o.provinceHeads.map(x => ({
+            province: rw.id("province", x.province) as number,
+            burg: rw.id("burg", x.burg) as number
+          }));
         for (const [k, kind] of Object.entries(fields))
           if (o.set && k in o.set) o.set[k] = rewriteField(rw, kind, o.set[k]);
         // before/after hold the same fields as get() returns them (e.g. a capital burg id)

@@ -4,9 +4,73 @@
 // sketch log: literal ids replayed onto other copies (rebase {onto:{path}} test hook).
 import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
+import { type EditResolved, type Resolved, Rewriter, rewriteResolved, summarizeOp } from "../src/ops.ts";
+import { bridgeArgs } from "../src/replay.ts";
+import { rewriteClear, summarizeClear } from "../src/tools/clear.ts";
 import { alive, errorBody, type Harness, startServer } from "./helpers.ts";
 
 type Obj = Record<string, any>;
+
+describe("clear and removal: log forms (pure)", () => {
+  test("rewriteClear maps created ids, drops their fingerprints (emblems by owner) and maps successors", () => {
+    const rw = new Rewriter({ burg: { "900": 950 } }, new Set(["burg:900"]));
+    const r = rewriteClear(
+      {
+        removed: { burg: [5, 900], emblem: ["burg:900", "state:2"] },
+        idents: { burg: { "5": "a", "900": "b" }, emblem: { "burg:900": "c", "state:2": "d" } },
+        capitals: [{ state: 2, burg: 900 }],
+        provinceHeads: [{ province: 4, burg: 900 }],
+        force: true
+      } as unknown as Resolved,
+      rw
+    ) as unknown as Obj;
+    assert.deepEqual(r.removed, { burg: [5, 950], emblem: ["burg:950", "state:2"] });
+    assert.deepEqual(r.idents, { burg: { "5": "a" }, emblem: { "state:2": "d" } });
+    assert.deepEqual(r.capitals, [{ state: 2, burg: 950 }]);
+    assert.deepEqual(r.provinceHeads, [{ province: 4, burg: 950 }]);
+    assert.equal(r.force, true);
+  });
+
+  test("summaries name what was removed, the filter and the capitals that moved", () => {
+    const text = summarizeClear(
+      { removed: { burg: [1, 2, 3, 4], route: [7, 8] }, orphanRoutes: 2 } as unknown as Resolved,
+      {
+        names: { burgs: ["Hessigrove", "Obnoch", "Farcrest"] },
+        cascade: { capitalsMoved: [{ state: 3, stateName: "Oom", to: 0, name: null }] }
+      },
+      { where: { state: "Oom" }, force: true }
+    );
+    assert.equal(
+      text,
+      'Cleared 4 burgs (Hessigrove, Obnoch, Farcrest, ...) where {"state":"Oom"} (forced), with 2 orphan routes; capital of Oom -> none.'
+    );
+    const edit: EditResolved = {
+      type: "burg",
+      ops: [{ ref: 688, name: "Intersect", remove: true, force: true, newCapital: 46 }]
+    };
+    const out = {
+      applied: [{ capital: { state: 9, stateName: "Oom", to: 46, name: "Kerfhold" }, routesRemoved: [3] }]
+    };
+    assert.equal(
+      summarizeOp("edit", edit as unknown as Resolved, out),
+      'Removed burg "Intersect" (688) (forced; capital of Oom -> Kerfhold; 1 orphan route removed).'
+    );
+    const prov: EditResolved = { type: "province", ops: [{ ref: 175, name: "The Southerners", remove: true }] };
+    assert.equal(summarizeOp("edit", prov as unknown as Resolved, null), 'Removed province "The Southerners" (175).');
+  });
+
+  test("a replayed burg removal carries force, newCapital and the province heads, remapped", () => {
+    const rw = new Rewriter({ burg: { "900": 950 } }, new Set(["burg:900"]));
+    const edit = {
+      type: "burg",
+      ops: [{ ref: 3, remove: true, force: true, newCapital: 900, provinceHeads: [{ province: 4, burg: 900 }] }]
+    } as unknown as Resolved;
+    const args = bridgeArgs("edit", rewriteResolved("edit", edit, rw)) as Obj;
+    assert.deepEqual(args.ops, [
+      { ref: 3, remove: true, force: true, newCapital: 950, provinceHeads: [{ province: 4, burg: 950 }] }
+    ]);
+  });
+});
 
 const PICK_CODE = `
 const C = pack.cells;
@@ -52,6 +116,9 @@ const religion = pack.religions.filter(r => r.i && !r.removed).sort((a, b) => re
 const S2 = states.find(s => s.i !== S.i && s.i !== foreign.state && (byState.get(s.i) || []).length >= 3);
 const freeIn = s => [...C.i].find(c => C.state[c] === s && C.h[c] >= 20 && !C.burg[c] && C.c[c].every(k => !C.burg[k]));
 const lastMarker = pack.markers[pack.markers.length - 1];
+// a third state: a clear of its capital moves the capital to its most populous other burg
+const S3 = states.find(s => s.i !== S.i && s.i !== S2.i && s.i !== foreign.state && pack.burgs[s.capital] && !pack.burgs[s.capital].lock && (byState.get(s.i) || []).length >= 4);
+const S3rest = byState.get(S3.i).filter(b => b.i !== S3.capital).sort((a, b) => b.population - a.population || a.i - b.i);
 return {
   S: { i: S.i, name: S.name, burgs: byState.get(S.i).length },
   capital: { i: capital.i, name: capital.name }, successor: { i: successor.i, name: successor.name },
@@ -62,6 +129,7 @@ return {
   culture: { i: culture.i, name: culture.name }, religion: { i: religion.i, name: religion.name },
   S2: { i: S2.i, name: S2.name, burgs: byState.get(S2.i).length, free: freeIn(S2.i) },
   lastMarker: { i: lastMarker.i, cell: lastMarker.cell },
+  S3: { i: S3.i, capital: S3.capital, next: S3rest[0].i, rival: S3rest[1].i, rivalPop: S3rest[0].population + 1 },
   farCell: [...C.i].reverse().find(c => C.h[c] >= 20 && !C.burg[c] && C.state[c] !== S2.i && C.c[c].every(k => !C.burg[k]))
 };`;
 
@@ -120,10 +188,11 @@ describe("tupaia-mcp clear and removal", () => {
     const cv = await ev(
       `({ removed: pack.cultures[args.i].removed, burgs: pack.burgs.filter(b => b && b.culture === args.i).length,
           states: pack.states.filter(s => s.culture === args.i).length, cells: pack.cells.culture.filter(x => x === args.i).length,
-          origins: pack.cultures.filter(c => c.i && !c.removed && (c.origins || []).includes(args.i)).length })`,
+          origins: pack.cultures.filter(c => c.i && !c.removed && (c.origins || []).includes(args.i)).length,
+          religions: pack.religions.filter(r => r.i && !r.removed && r.culture === args.i).length })`,
       pick.culture
     );
-    assert.deepEqual(cv, { removed: true, burgs: 0, states: 0, cells: 0, origins: 0 });
+    assert.deepEqual(cv, { removed: true, burgs: 0, states: 0, cells: 0, origins: 0, religions: 0 });
 
     await h.ok("edit", { type: "religion", ops: [{ ref: pick.religion.i, remove: true }] });
     const rv = await ev(
@@ -162,13 +231,10 @@ describe("tupaia-mcp clear and removal", () => {
       ops: [{ ref: pick.capital.i, remove: true, force: true }],
       dryRun: true
     });
-    assert.equal((dry.plan as Obj[])[0].newCapital.i, pick.successor.i);
+    const capital = { state: pick.S.i, stateName: pick.S.name, to: pick.successor.i, name: pick.successor.name };
+    assert.deepEqual((dry.plan as Obj[])[0].capital, capital);
     const done = await h.ok("edit", { type: "burg", ops: [{ ref: pick.capital.i, remove: true, force: true }] });
-    assert.deepEqual((done.applied as Obj[])[0].capital, {
-      state: pick.S.i,
-      to: pick.successor.i,
-      name: pick.successor.name
-    });
+    assert.deepEqual((done.applied as Obj[])[0].capital, capital);
     const sv = await ev(
       `const s = pack.states[args.S.i]; const n = pack.burgs[args.successor.i];
        return { capital: s.capital, center: s.center === n.cell, flag: n.capital, gone: pack.burgs[args.capital.i].removed,
@@ -189,9 +255,18 @@ describe("tupaia-mcp clear and removal", () => {
   test("a forced market-centre removal removes its market, hands its burgs to other markets and drops its deals", async () => {
     const r = await h.call("edit", { type: "burg", ops: [{ ref: pick.mk.i, remove: true }] });
     assert.match(errorBody(r).error.message, /market centre/);
+    const dry = await h.ok("edit", {
+      type: "burg",
+      ops: [{ ref: pick.mk.i, remove: true, force: true }],
+      dryRun: true
+    });
+    const planned = (dry.plan as Obj[])[0];
     const done = await h.ok("edit", { type: "burg", ops: [{ ref: pick.mk.i, remove: true, force: true }] });
     const row = (done.applied as Obj[])[0];
     assert.deepEqual(row.marketsRemoved, [pick.mk.market]);
+    assert.deepEqual(planned.marketsRemoved, row.marketsRemoved);
+    assert.ok((row.dealsDropped ?? 0) >= pick.mk.marketDeals, JSON.stringify(row));
+    assert.equal(planned.dealsDropped, row.dealsDropped);
     const v = await ev(
       `({ market: pack.markets.some(m => m.i === args.market), centre: pack.markets.some(m => m.centerBurgId === args.i),
           stale: pack.burgs.filter(b => b && b.i && !b.removed && b.market === args.market).length,
@@ -231,7 +306,8 @@ describe("tupaia-mcp clear and removal", () => {
     assert.ok(broken.bad > 0, JSON.stringify(broken));
     const other = await ev(`pack.routes[0].i`);
     const rm = await h.ok("edit", { type: "route", ops: [{ ref: other, remove: true }] });
-    assert.ok((rm.applied as Obj[])[0].routeLinksFixed.removed >= broken.bad, JSON.stringify(rm.applied));
+    assert.ok((rm.routeLinksFixed as Obj).removed >= broken.bad, JSON.stringify(rm));
+    assert.equal((rm.applied as Obj[])[0].routeLinksFixed, undefined, "the repair is the call's, not the row's");
     assert.deepEqual(await ev(LINK_CHECK), { bad: 0, missing: 0, empty: 0 });
     assert.equal(
       await ev(`Object.values(pack.cells.routes).some(m => Object.values(m).includes(${victim.value}))`),
@@ -240,10 +316,125 @@ describe("tupaia-mcp clear and removal", () => {
     for (let k = 0; k < 3; k++) await h.ok("snapshot", { action: "undo" });
   });
 
+  test("orphanRoutes keeps locked routes unless forced; edit {force:true} applies to every op", async () => {
+    const locked = pick.Troutes[0];
+    await h.ok("edit", { type: "route", ops: [{ ref: locked, set: { lock: true } }] });
+    const dry = await h.ok("edit", {
+      type: "burg",
+      ops: [{ ref: pick.T, remove: true, orphanRoutes: true }],
+      dryRun: true
+    });
+    assert.deepEqual((dry.plan as Obj[])[0].routesKeptLocked, [locked]);
+    const done = await h.ok("edit", { type: "burg", ops: [{ ref: pick.T, remove: true, orphanRoutes: true }] });
+    const row = (done.applied as Obj[])[0];
+    assert.deepEqual(row.routesKeptLocked, [locked]);
+    assert.ok(!(row.routesRemoved ?? []).includes(locked));
+    assert.equal(await ev(`pack.routes.some(r => r.i === ${locked})`), true);
+    assert.match(JSON.stringify(done.notes), /force:true removes them/);
+    await h.ok("snapshot", { action: "undo" });
+    const forced = await h.ok("edit", {
+      type: "burg",
+      ops: [{ ref: pick.T, remove: true, orphanRoutes: true, force: true }]
+    });
+    assert.ok((forced.applied as Obj[])[0].routesRemoved.includes(locked));
+    await h.ok("snapshot", { action: "undo" });
+    await h.ok("snapshot", { action: "undo" }); // the lock
+
+    // one force for the whole call: a capital and a market centre together
+    const both = await h.ok("edit", {
+      type: "burg",
+      force: true,
+      ops: [
+        { ref: pick.capital.i, remove: true },
+        { ref: pick.mk.i, remove: true }
+      ]
+    });
+    assert.equal((both.applied as Obj[]).length, 2);
+    await h.ok("snapshot", { action: "undo" });
+    const notBurg = await h.call("edit", { type: "state", force: true, ops: [{ ref: pick.S.i, remove: true }] });
+    assert.equal(errorBody(notBurg).error.code, "BAD_ARGS");
+  });
+
+  test("removing a state drops its provinces with their notes and its label note (edit and clear)", async () => {
+    const provs = await ev(
+      `pack.provinces.filter(p => p && p.i && !p.removed && p.state === ${pick.S2.i}).map(p => p.i)`
+    );
+    assert.ok(provs.length > 0);
+    const ids = [`province${provs[0]}`, `stateLabel${pick.S2.i}`];
+    await h.ok("eval", {
+      code: "for (const id of args) notes.push({ id, name: 'Note ' + id, legend: '' }); return notes.length;",
+      args: ids
+    });
+    const left = `({ notes: notes.filter(n => args.ids.includes(n.id)).length,
+      provinces: pack.provinces.filter(p => p && p.i && !p.removed && args.provs.includes(p.i)).length,
+      cells: pack.cells.province.filter(x => args.provs.includes(x)).length })`;
+    const before = await ev(left, { ids, provs });
+    assert.equal(before.notes, 2);
+    const st = await h.ok("edit", { type: "state", ops: [{ ref: pick.S2.i, remove: true }] });
+    assert.equal((st.applied as Obj[])[0].provincesRemoved, provs.length);
+    assert.deepEqual(await ev(left, { ids, provs }), { notes: 0, provinces: 0, cells: 0 });
+    await h.ok("snapshot", { action: "undo" });
+    assert.deepEqual(await ev(left, { ids, provs }), before);
+    const cl = await h.ok("clear", { types: ["states"], where: { i: [pick.S2.i] } });
+    assert.equal((cl.cascade as Obj).provincesWithStates, provs.length);
+    assert.ok((cl.cascade as Obj).notesDropped >= 2, JSON.stringify(cl.cascade));
+    assert.deepEqual(await ev(left, { ids, provs }), { notes: 0, provinces: 0, cells: 0 });
+    // no state emblem renders keep running after the call (the app's editor refresh is not used)
+    const coas = await ev(`document.querySelectorAll("#coas [id^=stateCOA]").length`);
+    await new Promise(r => setTimeout(r, 1500));
+    assert.equal(await ev(`document.querySelectorAll("#coas [id^=stateCOA]").length`), coas);
+    await h.ok("snapshot", { action: "undo" });
+    await h.ok("snapshot", { action: "undo" }); // the notes
+  });
+
+  test("clear refuses filters and keeps that would do nothing, and says when everything matched was kept", async () => {
+    const bogus = await h.call("clear", { types: ["burgs"], where: { bogus: 1 } });
+    assert.equal(errorBody(bogus).error.code, "BAD_ARGS");
+    assert.match(errorBody(bogus).error.message, /no burg has a field 'bogus'/);
+    const nan = await h.call("clear", { types: ["burgs"], where: { populationMax: "abc" } });
+    assert.match(errorBody(nan).error.message, /takes a number/);
+    const keep = await h.call("clear", { types: ["burgs"], keep: [{ type: "state", ref: pick.S.i }] });
+    assert.equal(errorBody(keep).error.code, "BAD_ARGS");
+    assert.match(errorBody(keep).error.message, /keep\[0\]: 'state' is not one of the types being cleared/);
+
+    await h.ok("edit", { type: "burg", ops: [{ ref: pick.alt.i, set: { lock: true } }] });
+    const depth = await undoDepth();
+    const dry = await h.ok("clear", { types: ["burgs"], where: { i: [pick.alt.i] }, dryRun: true });
+    assert.equal(dry.dryRun, true);
+    assert.equal((dry.plan as Obj).kept.burgs.count, 1);
+    assert.match(String(dry.note), /1 matched, all kept \(locked: 1\); force:true/);
+    const real = await h.ok("clear", { types: ["burgs"], where: { i: [pick.alt.i] } });
+    assert.deepEqual(real.removed, {});
+    assert.match(String(real.note), /all kept/);
+    assert.equal(await undoDepth(), depth);
+    await h.ok("snapshot", { action: "undo" }); // the lock
+
+    const notes = await h.ok("clear", {
+      types: ["zones", "labels"],
+      where: { zones: { name: "No such zone" } },
+      orphanRoutes: true,
+      dryRun: true
+    });
+    const text = JSON.stringify(notes);
+    assert.match(text, /labels: no where filter/);
+    assert.match(text, /orphanRoutes applies only when burgs are cleared/);
+  });
+
+  test("hidden emblems keep their coat of arms: regenerating states after a clear works", async () => {
+    await h.ok("clear", { types: ["emblems"], where: { type: "burg" } });
+    const regen = await h.ok("regenerate", { parts: ["states"] }, 120_000);
+    assert.ok(regen, "regenerate states after clear emblems");
+    await h.ok("snapshot", { action: "undo" });
+    await h.ok("snapshot", { action: "undo" });
+    assert.equal(await ev(`pack.burgs.filter(b => b && b.i && !b.removed && b.coa && b.coa.size === 0).length`), 0);
+  });
+
   test("clear: plan, where per type, keep, locks, a kept province keeps its state, refusals", async () => {
     const dry = await h.ok("clear", { types: ["burgs"], where: { state: pick.S.name }, dryRun: true });
     assert.equal((dry.plan as Obj).remove.burgs, pick.S.burgs);
-    assert.equal((dry.plan as Obj).cascade.capitalsMoved, 1);
+    assert.deepEqual((dry.plan as Obj).cascade.capitalsMoved, [
+      { state: pick.S.i, stateName: pick.S.name, to: 0, name: null }
+    ]);
 
     const mixed = await h.call("clear", { types: ["burgs", "routes"], where: { state: pick.S.i } });
     assert.equal(errorBody(mixed).error.code, "BAD_ARGS");
@@ -284,7 +475,7 @@ describe("tupaia-mcp clear and removal", () => {
     // the capital went; the most populous remaining burg (the kept successor) took over
     assert.equal(await ev(`pack.states[${pick.S.i}].capital`), pick.successor.i);
     assert.deepEqual((r.cascade as Obj).capitalsMoved, [
-      { state: pick.S.i, to: pick.successor.i, name: pick.successor.name }
+      { state: pick.S.i, stateName: pick.S.name, to: pick.successor.i, name: pick.successor.name }
     ]);
     assert.ok(r.changes && typeof (r.changes as Obj).burg.removed === "number", "changes are counts only");
     await h.ok("snapshot", { action: "undo" });
@@ -337,9 +528,12 @@ describe("tupaia-mcp clear and removal", () => {
       keep: [{ type: "burg", ref: keepBurg }]
     });
     const ev2 = await ev(
-      `({ burgs: pack.burgs.filter(b => b && b.i && !b.removed && b.coa).map(b => b.i), states: pack.states.filter(s => s.i && !s.removed && s.coa).length })`
+      `({ shown: pack.burgs.filter(b => b && b.i && !b.removed && b.coa && b.coa.size !== 0).map(b => b.i),
+          noCoa: pack.burgs.filter(b => b && b.i && !b.removed && !b.coa).length,
+          states: pack.states.filter(s => s.i && !s.removed && s.coa && s.coa.size !== 0).length })`
     );
-    assert.deepEqual(ev2.burgs, [keepBurg]);
+    assert.deepEqual(ev2.shown, [keepBurg]);
+    assert.equal(ev2.noCoa, 0, "hidden the emblem editor's way: the coat of arms stays");
     assert.ok(ev2.states > 0, "state emblems stay");
     assert.equal((em.kept as Obj).emblems.items[0].i, `burg:${keepBurg}`);
     for (let k = 0; k < 5; k++) await h.ok("snapshot", { action: "undo" });
@@ -436,7 +630,7 @@ describe("tupaia-mcp clear and removal", () => {
   });
 
   describe("sketch log and replay", () => {
-    const files = { ok: "", burgGone: "", markerReused: "" };
+    const files = { ok: "", burgGone: "", markerReused: "", burgChanged: "", capitalRival: "" };
     let sketchBurg = 0;
 
     async function otherCopy(name: string, code: string): Promise<string> {
@@ -456,6 +650,16 @@ describe("tupaia-mcp clear and removal", () => {
         return ev(`pack.burgs.find(b => b && b.i && !b.removed && b.state === ${pick.S2.i} && !b.capital).i`);
       })();
       files.burgGone = await otherCopy("clear-other-burg", `Burgs.remove(${victim}); return ${victim};`);
+      // someone renames a burg the sketch's clear removes
+      files.burgChanged = await otherCopy(
+        "clear-other-renamed",
+        `const b = pack.burgs[${victim}]; b.name = "SomeoneElsesTown"; b.population = 99; return b.i;`
+      );
+      // someone makes another burg of S3 the most populous one: the replay keeps the sketch's successor
+      files.capitalRival = await otherCopy(
+        "clear-other-rival",
+        `pack.burgs[args.S3.rival].population = args.S3.rivalPop; return args.S3.rival;`
+      );
       files.markerReused = await otherCopy(
         "clear-other-marker",
         `const m = pack.markers.find(x => x.i === args.lastMarker.i); Markers.deleteMarker(m.i);
@@ -478,27 +682,38 @@ describe("tupaia-mcp clear and removal", () => {
       await h.ok("clear", { types: ["markers", "zones"] });
       const cl = await h.ok("clear", { types: ["burgs"], where: { state: pick.S2.i }, orphanRoutes: true });
       assert.equal((cl.removed as Obj).burgs, pick.S2.burgs + 1);
+      assert.equal(cl.names, undefined, "the sample names are for the log only");
+      const c3 = await h.ok("clear", { types: ["burgs"], where: { i: [pick.S3.capital] } });
+      assert.equal((c3.cascade as Obj).capitalsMoved[0].to, pick.S3.next);
 
       const full = await h.ok("sketch", { action: "status", full: true });
       const recs = full.records as Obj[];
       assert.deepEqual(
         recs.map(o => o.tool),
-        ["edit", "edit", "add", "clear", "clear"]
+        ["edit", "edit", "add", "clear", "clear", "clear"]
+      );
+      assert.deepEqual(recs[5].resolved.capitals, [{ state: pick.S3.i, burg: pick.S3.next }]);
+      assert.equal(
+        Object.keys(recs[4].resolved.idents.burg).length,
+        pick.S2.burgs + 1,
+        "every removed burg has a fingerprint"
       );
       assert.equal(full.blobOnly, false);
       const op1 = recs[0].resolved.ops[0];
       assert.equal(op1.force, true);
       assert.equal(op1.newCapital, pick.alt.i);
-      assert.match(recs[0].summary, /\(forced\)/);
+      assert.match(recs[0].summary, /^Removed burg ".*" \(\d+\) \(forced; capital of .* -> .*\)\.$/, recs[0].summary);
+      assert.equal(recs[1].summary, `Removed religion "${pick.religion.name}" (${pick.religion.i}).`);
       assert.equal(recs[1].resolved.ops[0].remove, true);
       assert.ok(recs[3].resolved.removed.marker.includes(pick.lastMarker.i));
       assert.ok(recs[3].resolved.idents.marker[String(pick.lastMarker.i)]);
       assert.ok(recs[4].resolved.removed.burg.includes(sketchBurg));
-      assert.match(recs[4].summary, /^Cleared \d+ burgs/, recs[4].summary);
+      assert.match(recs[4].summary, /^Cleared \d+ burgs \([^)]+, \.\.\.\) where /, recs[4].summary);
+      assert.match(recs[5].summary, /; capital of .* -> /, recs[5].summary);
 
       const r = await h.ok("sketch", { action: "rebase", onto: { path: files.ok } }, 240_000);
       assert.equal(r.completed, true, JSON.stringify(r.conflicts));
-      assert.deepEqual(r.applied, [1, 2, 3, 4, 5]);
+      assert.deepEqual(r.applied, [1, 2, 3, 4, 5, 6]);
       const mapped = (r.idMap as Obj).burg[String(sketchBurg)];
       assert.ok(mapped !== undefined && mapped !== sketchBurg, JSON.stringify(r.idMap));
       const v = await ev(
@@ -518,6 +733,18 @@ describe("tupaia-mcp clear and removal", () => {
         religion: 0
       });
       assert.deepEqual(await ev(LINK_CHECK), { bad: 0, missing: 0, empty: 0 });
+      assert.equal(await ev(`pack.states[${pick.S3.i}].capital`), pick.S3.next);
+    });
+
+    test("replay keeps the capital successor the sketch chose", async () => {
+      const r = await h.ok("sketch", { action: "rebase", onto: { path: files.capitalRival } }, 240_000);
+      assert.equal(r.completed, true, JSON.stringify(r.conflicts));
+      const v = await ev(
+        `({ capital: pack.states[args.i].capital, rivalPop: pack.burgs[args.rival].population, nextPop: pack.burgs[args.next].population })`,
+        pick.S3
+      );
+      assert.ok(v.rivalPop > v.nextPop, "the rival is now the most populous");
+      assert.equal(v.capital, pick.S3.next);
     });
 
     test("a cleared entity someone else removed is a conflict; a reused marker id is a conflict", async () => {
@@ -532,7 +759,14 @@ describe("tupaia-mcp clear and removal", () => {
       const c2 = (reused.conflicts as Obj[])[0];
       assert.equal(c2.seq, 4);
       assert.match(c2.reason, /CHANGED/);
-      assert.match(c2.reason, /id was reused or someone changed it/);
+      assert.match(c2.reason, /id was reused/);
+
+      // a burg someone renamed since: a conflict, as edit's removal reports it
+      const ren = await h.ok("sketch", { action: "rebase", onto: { path: files.burgChanged } }, 240_000);
+      assert.equal(ren.completed, false);
+      const c3 = (ren.conflicts as Obj[])[0];
+      assert.equal(c3.seq, 5);
+      assert.match(c3.reason, /CHANGED: .*'SomeoneElsesTown'.*someone changed it since/);
     });
   });
 });

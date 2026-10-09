@@ -196,7 +196,7 @@ export function register(ctx: ToolContext): void {
     {
       title: "Edit or remove entities",
       description:
-        "Batch-edit entities of ONE type: ops [{ref, set:{field: value}} | {ref, remove:true}]. All ops are validated first; if any is invalid nothing changes (unless continueOnError). One auto-undo entry covers the call; redraws are coalesced. dryRun:true returns before/after per op. Fields per type are in tupaia://docs/cheatsheet.md, e.g. burg {name, population (people), group, type, culture, port, lock, move:Place}; state {name, fullName, form, formName, color, capital:burgRef, culture, lock}; marker {type, icon, size, pinned, note:{name, legend}, move}; label {text, move}; map (no ref) {name, populationRate, urbanization, year, era}. name can be {generate:{base:<namesbase>}} | {generate:{culture:<ref>}} | {generate:{}} (own culture). A state's capital changes only through edit state {capital}. remove works for burg, state, province, culture, religion, marker, route, river, zone, note, label (bulk: the clear tool). Removing a capital or a market centre is refused unless force:true: the state's capital then moves to newCapital (a burg of that state) or its most populous other burg (none if no burg is left), the market is removed, a province headed by the burg gets its first other burg. orphanRoutes:true also removes routes that served only the removed burg. A province's cells become province-less; a culture's or religion's cells, burgs and states fall back to 0 (Wildlands / No religion); a state's provinces go with it. Removing burgs or routes repairs the route links (pack.cells.routes).",
+        "Batch-edit entities of ONE type: ops [{ref, set:{field: value}} | {ref, remove:true}]. All ops are validated first; if any is invalid nothing changes (unless continueOnError). One auto-undo entry covers the call; redraws are coalesced. dryRun:true returns before/after per op. Fields per type are in tupaia://docs/cheatsheet.md, e.g. burg {name, population (people), group, type, culture, port, lock, move:Place}; state {name, fullName, form, formName, color, capital:burgRef, culture, lock}; marker {type, icon, size, pinned, note:{name, legend}, move}; label {text, move}; map (no ref) {name, populationRate, urbanization, year, era}. name can be {generate:{base:<namesbase>}} | {generate:{culture:<ref>}} | {generate:{}} (own culture). A state's capital changes only through edit state {capital}. remove works for burg, state, province, culture, religion, marker, route, river, zone, note, label (as in the editors it ignores lock; bulk with locks honoured: the clear tool). A capital or a market centre is refused unless force:true (per op, or edit {force:true} for all ops): the capital moves to newCapital (a burg of that state) or the state's most populous other burg (none if no burg is left), the market is removed and its burgs join other markets, a province headed by the burg gets its first other burg. orphanRoutes:true also removes routes that served only removed burgs (locked ones only with force). A province's cells become province-less; a culture's cells, burgs, states and religions fall back to culture 0 (Wildlands); a religion's cells to No religion; a state's provinces go with it. Removing burgs or routes repairs the route links once per call (routeLinksFixed).",
       inputSchema: z.object({
         type: z.enum(EDIT_TYPES),
         ops: z
@@ -208,7 +208,9 @@ export function register(ctx: ToolContext): void {
               force: z
                 .boolean()
                 .optional()
-                .describe("burg remove: also remove a state capital or a market centre (dependants are reassigned)"),
+                .describe(
+                  "burg remove: also remove a state capital or a market centre (dependants are reassigned), and locked orphan routes"
+                ),
               newCapital: EntityRef.optional().describe("burg remove with force: the burg that becomes the capital"),
               orphanRoutes: z
                 .boolean()
@@ -218,6 +220,7 @@ export function register(ctx: ToolContext): void {
           )
           .min(1)
           .max(500),
+        force: z.boolean().optional().describe("type burg: force:true for every remove op"),
         ...Common
       }),
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
