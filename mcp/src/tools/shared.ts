@@ -18,6 +18,7 @@ import { ToolError } from "../result.ts";
 import { compareVersions, type GateFields, type SharedMeta, sha256 } from "../shared-api.ts";
 import { loadShared } from "./persist.ts";
 import { defineTools } from "./registry.ts";
+import { reliefOnLoadRefusal } from "./relief.ts";
 
 interface BuildCheck {
   local: string | null;
@@ -330,6 +331,8 @@ export async function sharedSave(
     });
   }
   if (build.verdict === "block") refusals.push({ code: "BUILD", message: build.message });
+  const relief = await reliefOnLoadRefusal(ctx, data.text, build, skipBuild); // track 'relief'
+  if (relief) refusals.push(relief);
   if (build.verdict === "unknown" && !skipBuild) {
     refusals.push({
       code: "BUILD",

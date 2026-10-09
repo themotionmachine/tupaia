@@ -46,6 +46,9 @@ export interface ReplaySpec {
 export const REPLAY_EXT: Record<string, ReplaySpec> = {};
 
 export function registerReplayable(tool: string, spec: ReplaySpec): void {
+  // two modules registering one tool would silently drop one spec's replays: combine them instead
+  if (REPLAY_EXT[tool] && REPLAY_EXT[tool] !== spec)
+    throw new Error(`registerReplayable: '${tool}' already has a replay spec; combine the two into one`);
   REPLAY_EXT[tool] = spec;
 }
 

@@ -18,7 +18,8 @@ function brief(s: Record<string, unknown>): Record<string, unknown> {
     graph: s.graph,
     cells: s.cells,
     counts: s.counts,
-    features: s.features
+    features: s.features,
+    relief: s.relief // track 'relief': icons and stored settings (bridge-ext/relief.js), when any
   };
 }
 
