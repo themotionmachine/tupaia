@@ -82,8 +82,13 @@ each), and `src/io/cloud-cloudflare.ts` uses them (with the existing `map:genera
 load that never completes cannot lend its version to the next load, and so `loadedVersion` only holds while the page still has the map it loaded from
 `shared`; when it does not (a `?maplink` sketch, a file, a new map), `saveSharedMap` shows
 "Replace the shared map v<N>?" and, on Replace, PUTs with `X-Map-Version: N` instead of the old
-versionless PUT whose 409 dialog offered an `X-Map-Overwrite` button. Re-check all three after
-an upstream rebase.
+versionless PUT whose 409 dialog offered an `X-Map-Overwrite` button. One save-format fix,
+also marked `// tupaia-mcp:`: upstream saves only `color|habitability|name` per biome, so every
+reload reset biome icon density, relief icons and movement cost to the defaults (custom biomes
+to 0, none and 50). `src/io/save.ts` appends a 4th `|` field to the biome line (JSON
+`{iconsDensity, icons, cost}`, from `src/io/biome-extras.ts`) and `src/io/load.ts` applies it when
+present; files without it load as before, and older clients read only the first three fields (a
+re-save by an older client drops the 4th). Re-check all four after an upstream rebase.
 
 ## Local smoke test (no Cloudflare account needed)
 

@@ -146,7 +146,18 @@ function isEmptyResolved(r: Resolved): boolean {
 }
 
 const EDIT_TYPES = [...ENTITY_TYPES.filter(t => t !== "namesbase"), "map"] as const;
-const ADD_TYPES = ["burg", "state", "marker", "route", "zone", "label", "note", "culture", "religion"] as const;
+const ADD_TYPES = [
+  "burg",
+  "state",
+  "marker",
+  "route",
+  "zone",
+  "label",
+  "note",
+  "culture",
+  "religion",
+  "biome"
+] as const;
 
 const Common = {
   dryRun: z.boolean().optional().describe("Validate and return the plan (before/after) without changing anything"),
@@ -158,7 +169,7 @@ const Common = {
   timeoutMs: TimeoutMs
 };
 
-const SelectSchema = z
+export const SelectSchema = z
   .object({
     cells: z.array(z.number().int().min(0)).optional().describe("Pack cell ids"),
     circle: z
@@ -196,7 +207,7 @@ export function register(ctx: ToolContext): void {
     {
       title: "Edit or remove entities",
       description:
-        "Batch-edit entities of ONE type: ops [{ref, set:{field: value}} | {ref, remove:true}]. All ops are validated first; if any is invalid nothing changes (unless continueOnError). One auto-undo entry covers the call; redraws are coalesced. dryRun:true returns before/after per op. Fields per type are in tupaia://docs/cheatsheet.md, e.g. burg {name, population (people), group, type, culture, port, lock, move:Place}; state {name, fullName, form, formName, color, capital:burgRef, culture, lock}; marker {type, icon, size, pinned, note:{name, legend}, move}; label {text, move}; map (no ref) {name, populationRate, urbanization, year, era}. name can be {generate:{base:<namesbase>}} | {generate:{culture:<ref>}} | {generate:{}} (own culture). A state's capital changes only through edit state {capital}. remove works for burg (not capitals or market centres), state, marker, route, river, zone, note, label; provinces, cultures and religions are REFUSED (repaint their cells with paint_cells instead).",
+        "Batch-edit entities of ONE type: ops [{ref, set:{field: value}} | {ref, remove:true}]. All ops are validated first; if any is invalid nothing changes (unless continueOnError). One auto-undo entry covers the call; redraws are coalesced. dryRun:true returns before/after per op. Fields per type are in tupaia://docs/cheatsheet.md, e.g. burg {name, population (people), group, type, culture, port, lock, move:Place}; state {name, fullName, form, formName, color, capital:burgRef, culture, lock}; marker {type, icon, size, pinned, note:{name, legend}, move}; label {text, move}; biome {name, color (any CSS colour, stored as #rrggbb), habitability 0-9999 (re-ranks that biome's cells), iconsDensity 0-500 (> 0 needs icons), icons {iconName: weight} | [iconName], cost 0-10000}; map (no ref) {name, populationRate, urbanization, year, era}. name can be {generate:{base:<namesbase>}} | {generate:{culture:<ref>}} | {generate:{}} (own culture). A state's capital changes only through edit state {capital}. remove works for burg (not capitals or market centres), state, marker, route, river, zone, note, label; provinces, cultures and religions are REFUSED (repaint their cells with paint_cells instead).",
       inputSchema: z.object({
         type: z.enum(EDIT_TYPES),
         ops: z
@@ -227,7 +238,7 @@ export function register(ctx: ToolContext): void {
     {
       title: "Add entities",
       description:
-        "Create entities of ONE type: items [...]. Validated first (nothing changes on an invalid item unless continueOnError); one auto-undo entry; dryRun:true returns the plan. Item shapes: burg {at:Place, name?, population?, group?, type?, culture?, port?}; state {capital: Place | {burg:ref}, name?, color?, culture?, form?, formName?, expand?} (expand:true re-expands all unlocked states and regenerates provinces); marker {at, type?, icon?, size?, pinned?, note?:{name, legend}}; route {through:[Place, Place, ...], group?:'roads'|'trails'|'searoutes', name?} (pathfinds; NO_PATH explains why, e.g. different landmasses); zone {name?, type?, color?, cells?|select?}; label {at, text, group?}; note {id | entity:{type,ref}, name, legend?}; culture {at, name?, color?, type?, base?, expansionism?, expand?}; religion {at, name?, color?, type?, form?, deity?, expansionism?, expand?}. name can be {generate:{base}|{culture}|{}}.",
+        "Create entities of ONE type: items [...]. Validated first (nothing changes on an invalid item unless continueOnError); one auto-undo entry; dryRun:true returns the plan. Item shapes: burg {at:Place, name?, population?, group?, type?, culture?, port?}; state {capital: Place | {burg:ref}, name?, color?, culture?, form?, formName?, expand?} (expand:true re-expands all unlocked states and regenerates provinces); marker {at, type?, icon?, size?, pinned?, note?:{name, legend}}; route {through:[Place, Place, ...], group?:'roads'|'trails'|'searoutes', name?} (pathfinds; NO_PATH explains why, e.g. different landmasses); zone {name?, type?, color?, cells?|select?}; label {at, text, group?}; note {id | entity:{type,ref}, name, legend?}; culture {at, name?, color?, type?, base?, expansionism?, expand?}; religion {at, name?, color?, type?, form?, deity?, expansionism?, expand?}; biome {name, base?:<biome to copy>, color?, habitability?, iconsDensity?, icons?, cost?} (appended as a new id; without base: habitability 50, iconsDensity 0, no icons, cost 50, random colour). name can be {generate:{base}|{culture}|{}}.",
       inputSchema: z.object({
         type: z.enum(ADD_TYPES),
         items: z.array(z.record(z.string(), z.unknown())).min(1).max(200),
@@ -249,7 +260,7 @@ export function register(ctx: ToolContext): void {
     {
       title: "Paint cells",
       description:
-        "Assign cells to a state/province/culture/religion/biome/zone, or change their height. select picks cells (union of cells, circle {at, radius, unit?}, polygon [Place...], entity {type,ref}; then filtered by where {land, water, hMin, hMax, biome, state, ...}). Painting skips water cells and never moves a state's or province's centre cell or a capital; provinces are re-fitted after state painting. height {value|delta|smooth, rebuild}: rebuild 'keep' (default) changes land heights only (20..100) and refuses any change that crosses height 20; 'risk' rebuilds the coastline, lakes, rivers and climate while keeping burgs, states and other data (cell ids change; erosion:true also re-runs river erosion); 'erase' regenerates every entity and needs confirmErase:true. Paint height in its own call. dryRun:true counts what would change. One auto-undo entry.",
+        "Assign cells to a state/province/culture/religion/biome/zone, or change their height. select picks cells (union of cells, circle {at, radius, unit?}, polygon [Place...], entity {type,ref}; then filtered by where {land, water, hMin, hMax, biome, state, ...}). Painting skips water cells and never moves a state's or province's centre cell or a capital; provinces are re-fitted after state painting. height {value|delta|smooth, rebuild}: rebuild 'keep' (default) changes land heights only (20..100) and refuses any change that crosses height 20; 'risk' rebuilds the coastline, lakes, rivers and climate while keeping burgs, states and other data (cell ids change; erosion:true also re-runs river erosion); 'erase' regenerates every entity and needs confirmErase:true. Paint height in its own call. feather {width, unit?:'px'|'cells', seed?} (with set:{biome} only) dithers the edge: cells within width/2 of the selection boundary are painted with a probability falling from 1 inside to 0 outside (blobby noise plus jitter, deterministic per seed), so biome edges fray instead of following the selection; the result reports feather {width px, seed, shape: cells selected, band: cells within width/2 of the boundary, addedOutside / droppedInside: band cells painted outside / left unpainted inside the selection, cells: painted}; the op is logged as the literal cells painted. dryRun:true counts what would change. One auto-undo entry.",
       inputSchema: z.object({
         select: SelectSchema,
         set: z.object({
@@ -274,6 +285,17 @@ export function register(ctx: ToolContext): void {
             })
             .optional()
         }),
+        feather: z
+          .strictObject({
+            width: z.number().positive().max(5000).describe("Width of the frayed band across the boundary"),
+            unit: z.enum(["px", "cells"]).optional().describe("px (default) or cells (mean cell spacing)"),
+            seed: z
+              .union([z.number().int(), z.string().min(1)])
+              .optional()
+              .describe("Dither seed (default: derived from the selection)")
+          })
+          .optional()
+          .describe("Soft-edged biome painting (set:{biome} only)"),
         dryRun: Common.dryRun,
         redraw: Redraw,
         timeoutMs: TimeoutMs

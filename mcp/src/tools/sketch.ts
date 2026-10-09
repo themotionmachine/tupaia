@@ -153,7 +153,8 @@ export function changeRanking(
     } else if (o.tool === "paint_cells") {
       const p = o.resolved as PaintResolved;
       const n = 2 + Math.min(10, Math.floor(p.select.cells.length / 25));
-      for (const k of ["state", "province", "culture", "religion"]) if (k in p.set && p.set[k]) bump(k, p.set[k], n);
+      for (const k of ["state", "province", "culture", "religion", "biome"])
+        if (k in p.set && p.set[k]) bump(k, p.set[k], n);
     }
   }
   return [...score.values()].sort((a, b) => b.score - a.score);
@@ -206,7 +207,8 @@ const LAYERS_FOR: Record<string, LayerNameT[]> = {
   route: ["routes"],
   marker: ["markers"],
   zone: ["zones"],
-  label: ["labels"]
+  label: ["labels"],
+  biome: ["biomes"]
 };
 
 async function shoot(
@@ -315,7 +317,10 @@ async function summaryShots(
 async function summary(ctx: ToolContext, scope: CallScope, args: { shots?: boolean }) {
   const sk = needSketch(ctx);
   const now = await scope.call<{ counts: Record<string, number> }>("summary", {}, { noAlerts: true });
-  const keys = [...new Set([...Object.keys(sk.baseCounts), ...Object.keys(now.counts)])];
+  // a count the base never recorded (a sketch started before it was counted) is left out
+  const keys = [...new Set([...Object.keys(sk.baseCounts), ...Object.keys(now.counts)])].filter(
+    k => sk.baseCounts[k] !== undefined
+  );
   const counts = keys.map(k => ({ k, base: sk.baseCounts[k] ?? 0, now: now.counts[k] ?? 0 }));
   const target = await framedTarget(scope, sk);
   const shots: Record<string, string | null> = args.shots !== false ? await summaryShots(ctx, scope, sk, target) : {};

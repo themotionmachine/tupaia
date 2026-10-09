@@ -686,7 +686,8 @@ export function rewriteResolved(tool: string, resolved: Resolved, rw: Rewriter):
     }
     case "paint_cells": {
       const p = r as unknown as PaintResolved;
-      for (const k of ["state", "province", "culture", "religion"]) if (k in p.set) p.set[k] = rw.id(k, p.set[k]);
+      for (const k of ["state", "province", "culture", "religion", "biome"])
+        if (k in p.set) p.set[k] = rw.id(k, p.set[k]);
       const z = p.set.zone as { ref: unknown; op?: string } | undefined;
       if (z) p.set.zone = { ...z, ref: rw.id("zone", z.ref) };
       return p;

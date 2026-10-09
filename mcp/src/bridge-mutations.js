@@ -208,7 +208,18 @@
     return clone(v);
   }
 
-  const TRACKED_TYPES = ["burg", "state", "province", "culture", "religion", "route", "marker", "zone", "label"];
+  const TRACKED_TYPES = [
+    "burg",
+    "state",
+    "province",
+    "culture",
+    "religion",
+    "route",
+    "marker",
+    "zone",
+    "label",
+    "biome"
+  ];
 
   /** Ids of every entity of the tracked types (to find what one add item created). */
   function idSnapshot() {
@@ -1643,7 +1654,8 @@
     culture: "culture",
     religion: "religion",
     feature: "f",
-    river: "r"
+    river: "r",
+    biome: "biome"
   };
   const CELL_WHERE = [
     "land",
@@ -2418,9 +2430,17 @@
 
   // ---------------------------------------------------------------- regenerate
 
+  // each runs with the regenerate args; an object it returns is reported under details[part]
   const REGEN = [
     ["rivers", () => regenerateRivers()],
-    ["population", () => recalculatePopulation()],
+    ["biomes", a => FNS.defineBiomes({ ...(a.biomes || {}), phase: "apply" })], // bridge-ext/biomes.js
+    [
+      "population",
+      () => {
+        recalculatePopulation();
+        States.collectStatistics(); // state rural/urban totals follow the new cell populations
+      }
+    ],
     ["cultures", () => regenerateCultures()],
     ["burgs", () => regenerateBurgs()],
     ["states", () => regenerateStates()],
@@ -2463,9 +2483,11 @@
     const before = FNS.layersOn();
     const ran = [];
     const notesOut = [];
+    const details = {};
     for (const [part, fn] of REGEN) {
       if (!parts.includes(part)) continue;
-      await fn();
+      const v = await fn(a);
+      if (isObj(v)) details[part] = v;
       ran.push(part);
       if (REGEN_NOTES[part]) notesOut.push(REGEN_NOTES[part]);
     }
@@ -2478,7 +2500,9 @@
       restored = true;
     }
     await T.settle();
-    return { ran, layerChanges: { turnedOn, turnedOff, restored }, layersOn: FNS.layersOn(), notes: notesOut };
+    const out = { ran, layerChanges: { turnedOn, turnedOff, restored }, layersOn: FNS.layersOn(), notes: notesOut };
+    if (Object.keys(details).length) out.details = details;
+    return out;
   };
 
   // ---------------------------------------------------------------- display

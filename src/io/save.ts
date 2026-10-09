@@ -1,6 +1,7 @@
 // Save the whole .map project to storage, machine or cloud
 import { lazy } from "@/lazy-loaders";
 import { ensureEl, link, parseError, rn } from "@/utils";
+import { serializeBiomeExtras } from "./biome-extras"; // tupaia-mcp: biome icon density/icons/cost
 
 type SaveMethod = "storage" | "machine" | "dropbox";
 
@@ -75,7 +76,10 @@ export function prepareMapData(): string {
     ensureEl<HTMLInputElement>("growthRate").value
   ].join("|");
   const coords = JSON.stringify(mapCoordinates);
-  const biomes = [biomesData.color, biomesData.habitability, biomesData.name].join("|");
+  // tupaia-mcp: 4th field keeps icon density, icons and cost per biome (older clients read 3)
+  const biomes = [biomesData.color, biomesData.habitability, biomesData.name, serializeBiomeExtras(biomesData)].join(
+    "|"
+  );
   const notesData = JSON.stringify(notes);
   const rulersString = rulers.toString();
   const fonts = JSON.stringify(getUsedFonts(svg.node()!));
