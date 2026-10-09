@@ -321,10 +321,19 @@ export class SketchStore {
       }
       const last = sk.ops[sk.ops.length - 1];
       if (last && last.undoId === e.id) {
-        sk.ops.pop();
-        sk.redo.push(last);
+        // one call can log several records under its one undo entry (apply): take them all out
+        const taken: OpRecord[] = [];
+        while (sk.ops.length && sk.ops[sk.ops.length - 1].undoId === e.id) {
+          const o = sk.ops.pop() as OpRecord;
+          sk.redo.push(o);
+          taken.push(o);
+        }
         sk.rev++;
-        notes.push(`sketch '${sk.slug}': op ${last.seq} (${last.tool}) removed from the log (redo restores it)`);
+        const what =
+          taken.length === 1
+            ? `op ${last.seq} (${last.tool})`
+            : `ops ${taken[taken.length - 1].seq}-${last.seq} (one ${e.op} call)`;
+        notes.push(`sketch '${sk.slug}': ${what} removed from the log (redo restores it)`);
         continue;
       }
       if (!sk.recording) {
@@ -346,11 +355,19 @@ export class SketchStore {
     pairs.forEach(({ from, to }, k) => {
       const top = sk.redo[sk.redo.length - 1];
       if (top && top.undoId === from) {
-        sk.redo.pop();
-        top.undoId = to;
-        sk.ops.push(top);
+        // every record of that call (oldest is on top of the redo list)
+        let n = 0;
+        while (sk.redo.length && sk.redo[sk.redo.length - 1].undoId === from) {
+          const o = sk.redo.pop() as OpRecord;
+          o.undoId = to;
+          sk.ops.push(o);
+          n++;
+        }
         sk.rev++;
-        notes.push(`sketch '${sk.slug}': op ${top.seq} (${top.tool}) is back in the log`);
+        const last = sk.ops[sk.ops.length - 1];
+        notes.push(
+          `sketch '${sk.slug}': ${n === 1 ? `op ${top.seq} (${top.tool}) is` : `ops ${top.seq}-${last.seq} are`} back in the log`
+        );
         return;
       }
       if (!sk.recording) {
@@ -372,7 +389,7 @@ export class SketchStore {
     const last = sk.ops[sk.ops.length - 1];
     if (kind === "undo" && poppedUndoId !== undefined) {
       if (last && last.undoId === poppedUndoId) {
-        sk.ops.pop();
+        while (sk.ops.length && sk.ops[sk.ops.length - 1].undoId === poppedUndoId) sk.ops.pop();
         sk.rev++;
         return;
       }
@@ -673,7 +690,9 @@ const NOTE_PREFIX: Array<[string, string]> = [
   ["marker", "marker"],
   ["burg", "burg"],
   ["route", "route"],
-  ["river", "river"]
+  ["river", "river"],
+  ["culture", "culture"],
+  ["religion", "religion"]
 ];
 
 export class Rewriter {
@@ -695,6 +714,8 @@ export class Rewriter {
   }
 
   noteId(id: string): string {
+    // a label's note shares the label's own id (label12), which is the label's id
+    if (/^label\d+$/.test(id)) return String(this.id("label", id));
     for (const [prefix, type] of NOTE_PREFIX) {
       const m = new RegExp(`^${prefix}(\\d+)$`).exec(id);
       if (m) return `${prefix}${this.id(type, Number(m[1]))}`;
