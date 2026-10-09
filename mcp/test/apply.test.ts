@@ -464,7 +464,13 @@ describe("tupaia-mcp apply", () => {
     });
     assert.equal(r.changed, true);
     assert.deepEqual(r.skipped, ["seed"]);
-    assert.deepEqual(r.ignored, { map: ["distanceScale"], cultures: ["territory"], labels: ["invented"] });
+    // distanceScale is a map field since the settings extension (dx/settings), so apply sets it
+    assert.deepEqual(r.ignored, { cultures: ["territory"], labels: ["invented"] });
+    assert.equal(
+      (await h.ok("eval", { readOnly: true, code: "return distanceScale" })).value,
+      0.1,
+      "the settings field takes the spec's distanceScale"
+    );
     assert.equal(rowAt(r, "map").status, "updated");
     const cap = rowAt(r, "burgs[1]");
     assert.equal(cap.status, "created");

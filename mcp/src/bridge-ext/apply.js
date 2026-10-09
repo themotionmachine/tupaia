@@ -76,7 +76,7 @@
   // split cuts again), so a spec cannot hold it.
   const WRITE_ONLY = { map: ["lock", "unlock"], river: ["mainStem", "split", "merge", "reroute"] };
   const WRITE_ONLY_WHY = {
-    map: "nothing to compare; a setting lock is a browser preference",
+    map: "nothing to compare without the settings extension, whose lock/unlock compare with the locks in force",
     river: "structural actions, not state: applying them again would repeat them"
   };
 
@@ -546,6 +546,28 @@
     for (const key of Object.keys(F)) {
       const want = F[key];
       const f = table[key];
+      if (f && typeof f.state === "function" && typeof f.check === "function") {
+        // a pseudo field with state of its own (map lock/unlock from bridge-ext/settings.js: the
+        // setting locks travel in the .map text): compare the names it resolves to with the state
+        let names;
+        try {
+          names = f.check(want, x, stubContext(F), F);
+        } catch (e) {
+          const err = errOf(e);
+          const d = diffRow(type, key, null, want);
+          d.error = `${err.code}: ${err.message}`;
+          diffs.push(d);
+          blocked = blocked || { field: key, ...err };
+          continue;
+        }
+        const now = clone(f.state(x)) || [];
+        const wantOn = key !== "unlock";
+        if ((names || []).some(n => now.includes(n) !== wantOn)) {
+          diffs.push(diffRow(type, key, now, names));
+          set[key] = want;
+        }
+        continue;
+      }
       if (f && (f.writeOnly || WRITE_ONLY[type]?.includes(key))) {
         writeOnly.push(key);
         continue;
@@ -577,8 +599,20 @@
           blocked = blocked || { field: key, ...err };
           continue;
         }
-        if (same(key, have, shown, tol)) continue;
+        // a {value, lock} spec value (bridge-ext/settings.js) also compares the setting's lock
+        const lockOff =
+          isObj(want) && typeof want.lock === "boolean" && typeof f.locked === "function" && !!f.locked() !== want.lock
+            ? diffRow(type, `${key}.lock`, !!f.locked(), want.lock)
+            : null;
+        if (same(key, have, shown, tol)) {
+          if (lockOff) {
+            diffs.push(lockOff);
+            set[key] = want;
+          }
+          continue;
+        }
         diffs.push(diffRow(type, key, have, shown, null, tol));
+        if (lockOff) diffs.push(lockOff);
         set[key] = want;
         continue;
       }

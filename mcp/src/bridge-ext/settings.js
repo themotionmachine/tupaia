@@ -399,7 +399,9 @@
         const wrapped = isWrapped(v);
         if (!wrapped || "value" in v) S.apply(wrapped ? v.value : v);
         if (wrapped && typeof v.lock === "boolean") (v.lock ? lockSetting : unlockSetting)(name);
-      }
+      },
+      // whether the setting is locked now (apply compares a {value, lock} spec value with it)
+      locked: () => isLockedSetting(name)
     };
   }
   for (const [key, act] of [
@@ -414,7 +416,9 @@
       },
       get: () => null, // the lock state is a browser preference, not map state: never part of before/after
       show: v => v,
-      set: (_x, names) => names.forEach(act)
+      set: (_x, names) => names.forEach(act),
+      // the locks in force (they travel in the .map text): apply compares a spec's lock/unlock list with them
+      state: () => lockedNames()
     };
   }
 
