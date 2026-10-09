@@ -1760,4 +1760,228 @@
       resolved
     };
   };
+
+  // ---------------------------------------------------------------- add province
+
+  // add {type:'province'}: one new province in a state, centred on a burg (its capital) or a
+  // land place (a burg there becomes the capital), as the provinces editor's 'add province', with
+  // the name, colour and emblem Provinces.generate gives. Its cells: the given cells (all land
+  // of the state; strict) or select (clipped to the state's land), else the cells of the state
+  // nearer (by elevation cost, as the centres spread above) to its centre than to the centre of
+  // any other unlocked province of the state: adding a centre to the state's partition. Other
+  // provinces' centres and capitals' cells are never taken; the provinces that lose cells are
+  // re-fitted (poles). Resolved: the literal province {state, centre, name, formName, fullName,
+  // color, cells, coa} (FNS.add records the cell graph its cells refer to).
+  const MUT = T.mutations;
+  const PROV_ADD_KEYS = ["state", "centre", "name", "formName", "fullName", "color", "cells", "select", "coa"];
+  const COLOR_RE = /^(#[0-9a-f]{3,8}|rgba?\(|hsla?\(|[a-z]+$)/i;
+
+  /** Cells another live province holds as its centre or its capital burg's cell. */
+  function heldCells() {
+    const out = new Map();
+    for (const p of pack.provinces) {
+      if (!live(p)) continue;
+      out.set(p.center, p);
+      const b = p.burg ? pack.burgs[p.burg] : null;
+      if (b && !b.removed && Number.isInteger(b.cell)) out.set(b.cell, p);
+    }
+    return out;
+  }
+
+  /** Cells of state sid that a new centre at `cell` wins from the state's unlocked provinces. */
+  function provinceGrowth(sid, cell) {
+    const C = pack.cells;
+    const NEW = pack.provinces.length;
+    const seeds = [{ center: cell, pid: NEW, offset: 0 }];
+    for (const p of pack.provinces)
+      if (live(p) && p.state === sid && !p.lock && p.center !== cell && C.state[p.center] === sid)
+        seeds.push({ center: p.center, pid: p.i, offset: 0 });
+    const owner = spreadOwners(sid, seeds, C.province, false);
+    const held = heldCells();
+    const out = [cell];
+    for (let x = 0; x < C.i.length; x++)
+      if (x !== cell && owner[x] === NEW && C.state[x] === sid && C.h[x] >= 20 && !held.has(x)) out.push(x);
+    return out;
+  }
+
+  const provWho = (burg, cell) => (burg ? `burg ${pack.burgs[burg].name} (${burg})` : `cell ${cell}`);
+
+  /** Explicit cells (strict: refused unless all fit) or a select (clipped) for a new province. */
+  function givenCells(q, strict, notes) {
+    const C = pack.cells;
+    const held = heldCells();
+    const list = [...new Set(q.given)];
+    if (strict) {
+      const notLand = list.filter(x => C.h[x] < 20 || C.state[x] !== q.sid);
+      if (notLand.length)
+        fail(
+          "REFUSED",
+          `${plural(notLand.length, "cell")} of cells ${notLand.length === 1 ? "is" : "are"} not land of ${stateName(q.sid)} (e.g. ${notLand.slice(0, 6).join(", ")}); a province's cells belong to its state (select clips to it)`
+        );
+      const taken = list.find(x => x !== q.cell && held.has(x));
+      if (taken !== undefined) {
+        const p = held.get(taken);
+        fail(
+          "REFUSED",
+          `cell ${taken} is the centre or capital cell of province ${p.name} (${p.i}); a new province never takes those`
+        );
+      }
+    }
+    const out = list.filter(x => x !== q.cell && C.h[x] >= 20 && C.state[x] === q.sid && !held.has(x));
+    const dropped = list.length - out.length - (list.includes(q.cell) ? 1 : 0);
+    if (dropped && notes)
+      notes.add(
+        `select: ${plural(dropped, "cell")} outside ${stateName(q.sid)}'s land or held by another province's centre or capital ${dropped === 1 ? "was" : "were"} left out`
+      );
+    return [q.cell, ...out];
+  }
+
+  if (MUT?.ADD)
+    MUT.ADD.province = {
+      literalCells: true,
+      check(item, c) {
+        for (const k of Object.keys(item))
+          if (!PROV_ADD_KEYS.includes(k))
+            fail("BAD_FIELD", `province items take no field '${k}'`, {
+              details: PROV_ADD_KEYS.filter(x => x !== "coa")
+            });
+        const C = pack.cells;
+        if (item.centre === undefined || item.centre === null)
+          fail("BAD_ARGS", "a province needs centre: {burg: ref} (its capital) | Place (a land cell of the state)");
+        let cell;
+        let burg = 0;
+        let p = null;
+        if (isObj(item.centre) && item.centre.burg !== undefined) {
+          const b = T.resolve("burg", item.centre.burg).entity;
+          cell = b.cell;
+          burg = b.i;
+        } else {
+          p = T.place(item.centre);
+          cell = p.cell;
+          if (C.h[cell] < 20) fail("BAD_PLACE", `centre cell ${cell} is water; a province centre must be land`);
+          burg = C.burg[cell] || 0; // a burg on the cell becomes the province's capital
+        }
+        const sid = item.state !== undefined && item.state !== null ? T.resolve("state", item.state).i : C.state[cell];
+        if (!live(pack.states[sid]))
+          fail(
+            "REFUSED",
+            `${provWho(burg, cell)} is in Neutrals (no state): provinces belong to states; give state, or paint the land to a state first`
+          );
+        if (C.state[cell] !== sid)
+          fail("REFUSED", `centre ${provWho(burg, cell)} is in ${stateName(C.state[cell])}, not ${stateName(sid)}`);
+        const other = heldCells().get(cell);
+        if (other)
+          fail(
+            "REFUSED",
+            `${provWho(burg, cell)} is already the ${other.center === cell ? "centre" : "capital"} of province ${other.name} (${other.i}); edit that province (name, capital) or pick another centre`
+          );
+        if (c.claimed.has(cell)) fail("REFUSED", `cell ${cell} is the centre of another item of this call`);
+        c.claimed.add(cell);
+        const q = { sid, cell, burg, p };
+        if (item.name !== undefined) q.name = MUT.nameSpec(item.name);
+        for (const f of ["formName", "fullName"])
+          if (item[f] !== undefined) {
+            if (typeof item[f] !== "string" || !item[f].trim()) fail("BAD_ARGS", `${f} must be a non-empty string`);
+            q[f] = item[f];
+          }
+        if (item.color !== undefined) {
+          if (typeof item.color !== "string" || !COLOR_RE.test(item.color.trim()))
+            fail("BAD_ARGS", "color must be a CSS colour such as #aa3322");
+          q.color = item.color.trim();
+        }
+        if (item.coa !== undefined) {
+          if (!isObj(item.coa)) fail("BAD_ARGS", "coa is an emblem object (as inspect shows it)");
+          q.coa = item.coa;
+        }
+        if (item.cells !== undefined && item.select !== undefined) fail("BAD_ARGS", "pass cells or select, not both");
+        if (item.cells !== undefined) {
+          q.given = MUT.selectCells({ cells: item.cells });
+          q.strict = true;
+          givenCells(q, true, null);
+        } else if (item.select !== undefined) q.given = MUT.selectCells(item.select);
+        return q;
+      },
+      plan: (q, row) =>
+        Object.assign(row, {
+          state: q.sid,
+          center: q.cell,
+          ...(q.burg ? { burg: q.burg } : {}),
+          cells: (q.given ? givenCells(q, false, null) : provinceGrowth(q.sid, q.cell)).length
+        }),
+      apply(q, c, item) {
+        const C = pack.cells;
+        const s = pack.states[q.sid];
+        // an earlier item of this call may have taken the centre since the check
+        const other = heldCells().get(q.cell);
+        if (other)
+          fail(
+            "REFUSED",
+            `${provWho(q.burg, q.cell)} is now the centre or capital of province ${other.name} (${other.i})`
+          );
+        const list = q.given ? givenCells(q, !!q.strict, c.notes) : provinceGrowth(q.sid, q.cell);
+        const id = pack.provinces.length;
+        const b = q.burg ? pack.burgs[q.burg] : null;
+        const culture = b ? burgCulture(b) : cellCulture(q.cell);
+        let name;
+        if (q.name?.text) name = q.name.text;
+        else if (q.name?.gen) name = MUT.generateName("province", { center: q.cell }, q.name.gen, c.used("province"));
+        else name = b ? b.name : generatedName(culture);
+        // as the editor: the form of the province the centre was in, else 'Province'
+        const was = pack.provinces[C.province[q.cell]];
+        const formName = q.formName ?? (live(was) && was.formName ? was.formName : "Province");
+        const fullName = q.fullName ?? `${name} ${formName}`;
+        const color = q.color ?? getMixedColor(s.color);
+        const sh = { stateCulture: false, fallback: 0 };
+        let coa;
+        if (q.coa) coa = clone(q.coa);
+        else if (b) coa = burgProvinceCoa(b, s.i, q.cell, name, sh);
+        else coa = placeProvinceCoa(s, q.cell, sh);
+        const prov = { i: id, state: s.i, center: q.cell, burg: q.burg, name, formName, fullName, color, coa };
+        pack.provinces.push(prov);
+        if (!Array.isArray(s.provinces)) s.provinces = [];
+        s.provinces.push(id);
+        const lost = new Map();
+        for (const x of list) {
+          const from = C.province[x];
+          if (from && from !== id) lost.set(from, (lost.get(from) || 0) + 1);
+          C.province[x] = id;
+        }
+        const poles = getPolesOfInaccessibility(pack, cell => C.province[cell]);
+        for (const pid of [id, ...lost.keys()]) {
+          const x = pack.provinces[pid];
+          if (live(x)) x.pole = poles[pid] || [C.p[x.center][0], C.p[x.center][1]];
+        }
+        T.resetMemo?.();
+        if (lost.size)
+          c.notes.add(
+            `a new province took cells from ${[...lost]
+              .slice(0, 4)
+              .map(([pid, n]) => `${pack.provinces[pid].name} (${pid}) ${n}`)
+              .join(", ")}${lost.size > 4 ? ", ..." : ""}`
+          );
+        if (sh.fallback)
+          c.notes.add("a new emblem took the state's culture shield (the centre is Wildlands, culture 0)");
+        for (const l of ["provinces", "borders", "emblems"]) c.R.add(l);
+        const byBurg = isObj(item.centre) && item.centre.burg !== undefined;
+        const lit = {
+          state: s.i,
+          centre: byBurg ? { burg: q.burg } : MUT.literalPlace(item.centre, q.p),
+          name,
+          formName,
+          fullName,
+          color,
+          cells: list.slice().sort((x, y) => x - y),
+          coa: clone(coa)
+        };
+        return {
+          i: id,
+          name,
+          state: s.i,
+          cells: list.length,
+          ...(q.burg ? { burg: q.burg } : { center: q.cell }),
+          ...(lost.size ? { from: [...lost.keys()] } : {}),
+          _r: lit
+        };
+      }
+    };
 })(globalThis);

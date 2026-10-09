@@ -92,7 +92,11 @@ What the newer tools and fields replaced (all one undo entry each, all dryRun-ab
   entities (`add/edit routeGroup`, find/inspect `routeGroup`, `counts.routeGroups`), `edit route
   {points, group}`. `cells.routes` always equals what `Routes.buildLinks` would give.
 - Rivers: `edit river {mainStem | split | merge | reroute | end | joinAt}` (a reroute that
-  changes nothing is a no-op success); find/inspect report `joinsAt` and tributaries.
+  changes nothing is a no-op success); find/inspect report `joinsAt` and tributaries. `add river
+  {points|cells, name, type, parent}` lays a new course (joined along land, extended to water or
+  its parent; `cells.r/fl/conf`, discharge, width and length as rivers.js computes them).
+- `add province {state, centre:{burg}|Place, name, cells|select}` makes a province like the
+  provinces editor (grown over the state's nearer cells by default; shield, label, borders).
 - Biomes as entities (`find/inspect/add/edit biome`), `paint_cells feather`, and `regenerate
   {parts:['biomes'], biomes:{noise, smooth, minRegion, seed, keepPainted, ...}}`. App fix: the
   biome line's 4th field keeps icon density, icons and cost through save/load.
@@ -114,8 +118,9 @@ What the newer tools and fields replaced (all one undo entry each, all dryRun-ab
   `Resample.process({keepId})`.
 - `apply` (declarative spec, `mode:'check'|'upsert'|'update'`, idempotent; its `paint` list
   paints territory, biomes and heights in order, later entries winning, each entry only its
-  differing cells, logged as replayable paint_cells steps) and `lint` (23 checks with ready fix
-  calls).
+  differing cells, logged as replayable paint_cells steps; it creates provinces around their
+  capital after the paint and rivers along their from/via/to points) and `lint` (23 checks with
+  ready fix calls).
 
 Behaviour worth knowing:
 
@@ -464,7 +469,8 @@ node --test --test-concurrency=3 "test/**/*.test.ts"
 - `test/smoke.test.ts`: stdio end-to-end of every tool against `tests/fixtures/demo.map`; checks
   every description is at most 2048 chars, the instructions too, and the exact tool list.
 - One file per feature: `terrain`, `regrid`, `clear`, `compact`, `apply`, `applypaint` (the paint
-  list, territory, places, burg cells), `lint`, `settings`,
+  list, territory, places, burg cells), `addprov` (add province/river, apply creating them),
+  `lint`, `settings`,
   `routes`, `rivers`, `biomes`, `regen`, `relief`, `labels`, `tokens`, `http`; `fam-a/b/c` and
   `integrate.test.ts` cross the features (one apply spec over biomes, settings with locks,
   route groups and rivers; a sketch of 8 replayable records rebased onto someone else's v7).

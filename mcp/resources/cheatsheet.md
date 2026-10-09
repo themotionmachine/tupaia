@@ -19,7 +19,7 @@ only in a server a human spawned with `TUPAIA_MODE=live`, behind a preview and a
 | `lint {checks?, types?, bbox?\|near+radius, minSeverity?, ignore?, limit?, ...}` | read-only quality check; rows carry ready `fix` calls, some checks a `fixAll`. |
 | `display {on?, off?, only?, layersPreset?, stylePreset?, styleRules?, labels?}` | persistent layers, style and label visibility (undoable). |
 | `edit {type, ops:[{ref, set}\|{ref, remove:true}], force?, recalculate?, dryRun?, rows?, ...}` | change or remove many entities of one type; type `map` = map fields and world settings. |
-| `add {type, items:[...], dryRun?, rows?, ...}` | create burgs, states, markers, routes, routeGroups, zones, labels, notes, cultures, religions, biomes. |
+| `add {type, items:[...], dryRun?, rows?, ...}` | create burgs, states, provinces, markers, routes, routeGroups, zones, labels, notes, cultures, religions, rivers, biomes. |
 | `paint_cells {select, set, feather?, dryRun?}` | assign state/province/culture/religion/biome/zone/height to cells. |
 | `set_heights {grid\|pack\|image, fill?, rebuild?, rivers?, erosion?, keepHeights?, biomes?, dryRun?}` | replace the heightmap; `risk` rebuilds coast, climate, rivers, biomes (entities carried over), `keep` is local. |
 | `apply {<lists>, map?, paint?, specPath?, mode?:'upsert'\|'update'\|'check', mapping?, ignore?, tolerance?, only?}` | bring the map in line with a spec by name (and paint its cells), or check it. Idempotent. |
@@ -121,6 +121,8 @@ directly (routes, labels, burg names); hidden layers are not redrawn (`skippedHi
 | note | `{id:'burg12' \| entity:{type,ref}, name, legend?}` (entity types incl. zone: id `zone3`); fails if it exists (edit it) |
 | culture / religion | `{at (land), name?, color?, type?, base?/shield?/form?/deity?, expansionism?, expand?}` (a culture gets a shield: the default culture's, a same-base culture's, else random) |
 | biome | `{name, base?:<biome to copy>, color?, habitability?, iconsDensity?, icons?, cost?}` (no base: 50, 0, none, 50) |
+| province | `{centre: {burg: ref} \| Place, state?, name?, formName?, fullName?, color?, cells? \| select?}`: centre burg = capital (a Place holding a burg makes it the capital); state defaults to the centre's; never another province's centre or capital cell. `cells` must all be land of the state, `select` is clipped to it; neither: the state's cells nearer (elevation cost) its centre than any other unlocked province's centre, taken from those provinces (row `from`). Name: the capital's, else generated; formName: the form of the province the centre was in, else Province; colour and emblem as the generator |
+| river | `{points: [Place...] \| cells: [...], name?, type?, parent?: ref}`: `cells` is a literal contiguous course, source first, ending in water, on another river (on `parent`'s when given) or `-1` after a border cell. `points` are joined by the cheapest land path (uphill costs more) avoiding water and other rivers; the last may be off the map or `'edge'` (runs off the nearest edge); a last place on plain land is extended to the nearest water or river (`parent`'s course when given), with a note. 3+ cells. Flux, discharge, width, confluence and downstream discharge as the river edits compute them; name and type default to the generator's. Add main rivers before their tributaries |
 
 ### paint_cells
 
@@ -289,14 +291,16 @@ groups by id. Found: only differing fields edited; missing: created (`upsert`) o
 `through:[names|[x,y]]` (pathfound) or `draw:'points'` (freehand). An entry's `note` (string or
 {name, legend}) becomes its note (zones too: id `zone<i>`); `markers[].places` [{name, x, y,
 note}] join the marker's legend as `<br><b>Places:</b><ul><li><b>name</b> (x,y): note</li>...`.
-A notes entry `entity:{id, name?}` is a free-standing note (handy as a mapping value). Rivers are
-matched, never created. `mapping` {lists, keys, values} renames first; `ignore` {list:[keys]};
-`tolerance` {px, number, fields, legend:'contains'}.
+A notes entry `entity:{id, name?}` is a free-standing note (handy as a mapping value). A missing
+province is created around `capital` (a burg; or `centre`, `at`/x,y) in `state` (states[].provinces
+get their state) after the paint list, a missing river along `points` / `cells` (rivers_intended
+`from, via, to` become points); an entry without them is an error row saying what it needs.
+`mapping` {lists, keys, values} renames first; `ignore` {list:[keys]}; `tolerance` {px, number,
+fields, legend:'contains'}.
 Rows: unchanged | updated | created | differs | missing | error with diffs {field, have, want};
 identical differs/error rows are grouped (count, at, keys). `created` lists every created entity
 (`<list>.note` its note). Keys apply cannot use come back in `ignored` (with `ignoredNote`); a
-blocked field is an error row. Provinces, rivers and features are never created (UNSUPPORTED,
-with how: regenerate provinces centres, add a river by reroute/split, paint cells).
+blocked field is an error row. Features are never created (UNSUPPORTED, with how: paint cells).
 
 **apply paint** (territory, biomes, heights): `paint:[{select, set:{state|province|culture|
 religion|biome|height}}]`, or flat `{shape|select|from, where?, except?, culture:'X', ...}`.
@@ -314,8 +318,8 @@ Selects that read a painted key (`where:{culture}`, `entity:{type:'culture'}`) s
 entries' paint in upsert, the current map in check. A burgs entry's `state` is painted on the
 burg's own cell after the paint list (a diff `via:'cell'`; a capital's cell is read-only). An
 entity's `territory` is never set directly: territories no paint entry sets are listed in
-`notes`. So a spec checks all unchanged except provinces (regenerate centres), rivers it names
-that the map lacks, notes the spec gives twice (CONFLICT) and curved-path labels (eval only).
+`notes`. So a spec checks all unchanged after an upsert except entries without enough to create
+them, notes the spec gives twice (CONFLICT) and curved-path labels (eval only).
 
 **lint checks**: label-offcanvas, label-overlap, label-orphan, marker-stacked, marker-cell-link,
 marker-in-water, burg-in-water, burg-shared-cell, burg-cell-link, capital-outside, province-empty,

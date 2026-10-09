@@ -836,7 +836,9 @@ export const ADD_REF_FIELDS: Record<string, Record<string, string>> = {
   label: { at: "@place" },
   note: { entity: "@entity", id: "@noteId" },
   culture: { at: "@place" },
-  religion: { at: "@place" }
+  religion: { at: "@place" },
+  province: { state: "state", centre: "@capital" },
+  river: { parent: "river", points: "@places" }
 };
 
 export function rewriteField(rw: Rewriter, kind: string, v: unknown): unknown {

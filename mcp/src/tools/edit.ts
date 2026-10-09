@@ -193,7 +193,9 @@ const ADD_TYPES = [
   "note",
   "culture",
   "religion",
-  "biome"
+  "biome",
+  "province",
+  "river"
 ] as const;
 
 const Common = {
@@ -360,7 +362,7 @@ export function register(ctx: ToolContext): void {
     {
       title: "Add entities",
       description:
-        "Create entities of ONE type: items [...]. Validated first (nothing changes on an invalid item unless continueOnError); one auto-undo entry; dryRun:true returns the plan. Item shapes: burg {at:Place, name?, population?, group?, type?, culture?, port?}; state {capital: Place | {burg:ref}, name?, color?, culture?, form?, formName?, expand?} (expand:true re-expands all unlocked states and regenerates provinces); marker {at, type?, icon?, size?, pinned?, note?:{name, legend}}; route {through:[Place, Place, ...], group?:'roads'|'trails'|'searoutes'|<custom group>, name?} (pathfinds; NO_PATH explains why, e.g. different landmasses) or {points:[Place...], noPathfind:true, group?, name?, lock?} (freehand: exactly those points, see items); routeGroup {id:'route-...', name?, stroke?, width?, dash?, linecap?, opacity?, after?|before?} (a new group under #routes; usable as group by add/edit route); zone {name?, type?, color?, cells?|select?}; label {at, text, group?}; note {id | entity:{type,ref}, name, legend?}; culture {at, name?, color?, type?, base?, expansionism?, expand?}; religion {at, name?, color?, type?, form?, deity?, expansionism?, expand?}; biome {name, base?:<biome to copy>, color?, habitability?, iconsDensity?, icons?, cost?} (appended as a new id; defaults: see items). name can be {generate:{base}|{culture}|{}}.",
+        "Create entities of ONE type: items [...]. Validated first (nothing changes on an invalid item unless continueOnError); one auto-undo entry; dryRun:true returns the plan. Item shapes: burg {at:Place, name?, population?, group?, type?, culture?, port?}; state {capital: Place | {burg:ref}, name?, color?, culture?, form?, formName?, expand?} (expand:true re-expands all unlocked states and regenerates provinces); marker {at, type?, icon?, size?, pinned?, note?:{name, legend}}; route {through:[Place, Place, ...], group?:'roads'|'trails'|'searoutes'|<custom group>, name?} (pathfinds; NO_PATH explains why, e.g. different landmasses) or {points:[Place...], noPathfind:true, group?, name?, lock?} (freehand: exactly those points, see items); routeGroup {id:'route-...', name?, stroke?, width?, dash?, linecap?, opacity?, after?|before?} (a new group under #routes; usable as group by add/edit route); zone {name?, type?, color?, cells?|select?}; label {at, text, group?}; note {id | entity:{type,ref}, name, legend?}; culture {at, name?, color?, type?, base?, expansionism?, expand?}; religion {at, name?, color?, type?, form?, deity?, expansionism?, expand?}; biome {name, base?:<biome to copy>, color?, habitability?, iconsDensity?, icons?, cost?} (appended as a new id; defaults: see items); province {centre:{burg:ref} | Place, state?, name?, formName?, fullName?, color?, cells?|select?} (cells default: those of the state nearer its centre than other provinces' centres); river {points:[Place...] | cells:[...], name?, type?, parent?:ref} (a course ending in water, on a river or off the edge; see items). name can be {generate:{base}|{culture}|{}}.",
       inputSchema: z.object({
         type: z.enum(ADD_TYPES),
         items: z
@@ -368,7 +370,7 @@ export function register(ctx: ToolContext): void {
           .min(1)
           .max(200)
           .describe(
-            "Items of the one type. Freehand route {points, noPathfind:true}: exactly those points, may cross water, locked by default so regenerating routes keeps it; a point may be [x, y, cell] to pin its cell; one cell-to-cell link per consecutive pair, the last route through a pair owns it. routeGroup: drawn last unless after/before. biome without base: habitability 50, iconsDensity 0, no icons, cost 50, random colour"
+            "Items of the one type. Freehand route {points, noPathfind:true}: exactly those points, may cross water, locked by default so regenerating routes keeps it; a point may be [x, y, cell] to pin its cell; one cell-to-cell link per consecutive pair, the last route through a pair owns it. routeGroup: drawn last unless after/before. biome without base: habitability 50, iconsDensity 0, no icons, cost 50, random colour. province: centre {burg} is its capital (a Place with a burg makes that burg the capital); state defaults to the centre's; never takes another province's centre or capital cell; cells must all be land of the state (select is clipped to it); without either it takes the state's cells nearer (by elevation cost) its centre than any other unlocked province's centre; name defaults to the capital's (else generated), formName to the form of the province the centre was in, colour and emblem as the generator. river: cells is a literal contiguous course (source first) ending in a water cell, on another river's course (a confluence; on parent's when given) or -1 after a border cell; points are joined by the cheapest land path (uphill costs more) that avoids water and other rivers, the last may be off the map or 'edge' (runs off the nearest edge), and a last place on plain land is extended to the nearest water or river (parent's course when given), noted; at least 3 cells. Flux, discharge, width, the confluence and downstream discharge follow; name defaults to the generator's (mouth culture), type to the generator's. List main rivers before their tributaries"
           ),
         ...Common
       }),

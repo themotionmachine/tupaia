@@ -1728,8 +1728,9 @@
     if (!h) fail("BAD_TYPE", `add does not handle '${type}'`, { details: Object.keys(ADD) });
     const items = Array.isArray(a.items) ? a.items : [];
     if (!items.length) fail("BAD_ARGS", "items must be a non-empty array");
-    // zone items keep literal cell lists: record the graph they refer to
-    const graph = type === "zone" && a.phase === "apply" ? (T.cellGraph?.() ?? null) : null;
+    // zone items (and types whose handler says literalCells: province, river) keep literal cell
+    // lists: record the graph they refer to
+    const graph = (type === "zone" || h.literalCells) && a.phase === "apply" ? (T.cellGraph?.() ?? null) : null;
     const out = await runBatch(
       a,
       items,
@@ -3370,7 +3371,9 @@
     TRACKED_TYPES,
     selectCells,
     nameSpec,
+    generateName,
     literalPlace,
+    landPlace,
     // shared with bridge-ext (terrain): the heightmap rebuild helpers and the batch plumbing
     batchContext,
     finishRedraw,
