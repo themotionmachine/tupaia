@@ -40,6 +40,7 @@ This is a reference for scripting a running Tupaia page, for example from the pl
 | `?width=&height=` | `public/modules/ui/options.js:535` (`applyStoredOptions`) | Overrides the stored map size. |
 | `?options=default` | `options.js:598` | Forces `randomizeOptions`. |
 | **Ready (first map)** | `main.js:1308-1314` | `showStatistics` sets `mapId = Date.now()` and `window.mapId`, pushes `mapHistory`, then dispatches `map:generated` with `{seed, mapId}`. |
+| `map:loading` / `map:loaded` / `map:resampled` | `src/io/load.ts:127, 820`, `src/generators/resample.ts:476` | Tupaia additions: a load starts / a load succeeded / a density-only resample kept the map id (instead of `map:generated`). See §10. |
 
 **Ready recipe [R].**
 
@@ -284,11 +285,11 @@ The low-level draw calls are `drawBurgIcon(b)`, `removeBurgIcon(id)`, `drawBurgL
 | Line | Contents |
 |---|---|
 | 0 | params `VERSION\|license\|date\|seed\|w\|h\|mapId` |
-| 1 | settings |
+| 1 | settings (includes the `options` JSON; the MCP stores setting locks there as `tupaiaLocks`, see §10) |
 | 2 | coords |
-| 3 | biomes |
+| 3 | biomes: `color\|habitability\|name`, plus a 4th field `{iconsDensity, icons, cost}` in Tupaia (§10) |
 | 4 | notes |
-| 5 | SVG |
+| 5 | SVG (carries `#terrain` relief settings and label-group visibility attributes, §10) |
 | 6 | grid |
 | 7-11 | grid cells |
 | 12 | features |
@@ -387,3 +388,56 @@ The low-level draw calls are `drawBurgIcon(b)`, `removeBurgIcon(id)`, `drawBurgL
 23. **Shared map: `loadedVersion` is never reset** on regenerate or local load. A later `saveSharedMap()` sends the stale version and can **silently overwrite the shared map with an unrelated map**. Also, `cloudflare.save()` always overwrites, `restoreSharedMap` has no confirmation, and a null `loadedVersion` produces a 409 dialog.
 24. **`customization !== 0`** blocks `saveMap` and `saveSharedMap`. `regenerateMap` resets it to 0. Close editors (`closeDialogs()`) before saving.
 25. **Docs drift:** `data_model.md:394` documents `notes[].i`, but the code uses `id`.
+
+## 10. Tupaia additions to the app runtime (for the MCP server)
+
+Small hooks the fork adds, each marked `// tupaia-mcp:` and listed in `cloudflare/README.md`'s
+fork-surface paragraph. Without the attributes or options below, every one behaves as upstream,
+and old `.map` files load unchanged. The MCP tools set all of these; set them by `eval` only when
+no tool covers the change.
+
+- **Relief settings** (`src/renderers/relief-settings.ts`, read by `draw-relief-icons.ts` on every
+  draw). Map-level attributes of `#terrain`, so they ride in the saved SVG:
+  - `data-seed` (deterministic draw, one stream per cell), `data-scale` (multiplier on the style
+    density; the icon count goes with its square, down to 0), `data-biomes` (`"biomeId:k,..."`),
+    `data-min-height`, `data-near-burgs` (px), `data-exclude` (`"<gridKey>:<ranges>[;<g.e>,...]"`,
+    ignored on another grid).
+  - `data-regenerate`: `prepareMapData` (`src/io/save.ts:100`) empties `#terrain` in the saved
+    copy, so every save drops the icons, and `restoreReliefOnLoad()` (called from
+    `src/io/load.ts:810`) draws them again after a load. Manual relief-editor edits are lost on
+    such a map (the editor warns).
+  - `window.ReliefSettings` = `{attrs, gridKey, packCellKey, encodeRanges, parseExclusion, clear}`;
+    `generate()` (`public/main.js:692`) calls `ReliefSettings.clear()`, so a new map starts as
+    upstream. MCP: `regenerate {parts:['relief'], relief:{...}}`, `edit map {set:{reliefOnLoad}}`.
+- **Biome extras** (`src/io/biome-extras.ts`). The `.map` biome line (line 3) gets a 4th `|` field,
+  JSON `{iconsDensity:[], icons:[[]], cost:[]}`, written by `save.ts` and applied by `load.ts:341`
+  when present. Upstream keeps only `color|habitability|name`, so custom biomes lost their icon
+  density, icons and cost on reload. An older client ignores the field and drops it on re-save.
+- **Label visibility attributes** (`invokeActiveZooming`, `public/main.js:566` and `:584`). A
+  `#labels` or `#emblems` group may carry `data-min-size` (replaces the lower bound: 6 for labels,
+  25 for emblems), `data-max-size` (replaces 60 / 300) and `data-always-show` (`1`: skip both).
+  They are SVG attributes, so they save with the map. `createLabelGroups`
+  (`src/renderers/draw-burg-labels.ts:87`) keeps a new burg group, which copies the `town` style,
+  from inheriting them. MCP: `display {labels:{...}}`.
+- **Resample keepId** (`src/generators/resample.ts:24, 469`). `Resample.process({projection,
+  inverse, scale, keepId})`: with `keepId` and scale 1 the map keeps its `mapId` and fires
+  `map:resampled` `{seed, mapId, cells}` instead of `showStatistics()` (a new id and
+  `map:generated`), so a shared map stays the same map. The MCP `regrid` passes it; the Transform
+  tool passes it only for a density-only change (no shift, rotation, zoom, mirror or canvas
+  resize; `transform-tool.js` `isDensityOnly`). Submap never does.
+- **Setting locks in the file** (`options.tupaiaLocks`; MCP only, no app change). The app's
+  `lock(id)` keeps a value in localStorage, which never reached the `.map`. Whenever the MCP takes
+  the map text (save_map, snapshots, undo points, shared_save) `mcp/src/bridge-ext/settings.js`
+  first writes the names of the locked world settings into the global `options` object as
+  `tupaiaLocks: [...]`, so they land in the options JSON on the settings line; the MCP's load
+  (load_map, undo, restore, relaunch) applies them. The stock app reads the options object back
+  whole and ignores the key (a File > Save carries whatever value the object last held); a file
+  without it leaves the page's locks alone. MCP: `edit {type:'map', ops:[{set:{...},
+  lock:[names]|'all'}]}`.
+- **Other hooks**: `window.__tupaiaInternals = {adjustProvinces, stateRemove}` (set when the states
+  editor module loads); `editHeightmap({tupaiaExport:true})` returns `{restoreKeptData,
+  restoreRiskedData, regenerateErasedData}` without opening the editor, and
+  `restoreRiskedData({erosion, regenerateRivers, redefineBiomes, afterRivers})` is what
+  `set_heights` drives; `focusOn` ignores a `?burg=` id whose record is a compacted stub
+  `{i, removed:true}`; `map:loading`/`map:loaded` (`load.ts`) let `cloud-cloudflare.ts` know
+  whether the page still holds the map it loaded from `shared`.

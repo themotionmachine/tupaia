@@ -70,8 +70,9 @@ Client fork surface is just that one file, two buttons in `src/index.html`
 The MCP server lives in `mcp/` with its own `package.json` and `node_modules`; nothing
 in it is imported by the app or shipped in `dist/`. Its other repo-level files are
 `.mcp.json` (registers the local-mode `tupaia` server), `.claude/skills/tupaia-dexterity/`
-and `docs/architecture/runtime_api.md`. Inside the app it adds two small export hooks and one
-client guard, each marked `// tupaia-mcp:`:
+and `docs/architecture/runtime_api.md` (its §10 lists the runtime additions). Inside the app it
+adds the hooks below, each marked `// tupaia-mcp:` (`grep -rn "tupaia-mcp" src public` lists
+them all). First, two small export hooks and one client guard:
 `src/controllers/states-editor.ts` puts the module-private `adjustProvinces` and
 `stateRemove` on `window.__tupaiaInternals` when the states editor module loads, and
 `public/modules/ui/heightmap-editor.js` returns its rebuild closures (`restoreKeptData`,
