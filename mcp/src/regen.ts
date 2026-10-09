@@ -72,7 +72,7 @@ export const RegenProvinces = z
       .boolean()
       .optional()
       .describe(
-        "centres/count: the spread may travel through other states' land to reach parts of the state (default false: those go to the nearest province, reported as fallback)"
+        "centres/count: the spread may travel through other states' land, so parts of the state behind it go to the nearest centre over land (default false: inside the state and along its coast only; cells it cannot reach go to the nearest province, reported as fallback)"
       )
   })
   .strict();
