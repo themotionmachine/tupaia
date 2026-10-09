@@ -55,6 +55,8 @@
   const LAKE_KEYS = ["temp", "flux", "evaporation", "inlets", "outlet", "closed"];
   const AREA_FIELDS = ["province", "state", "culture", "religion"];
   const BREACH_HEIGHT = 22; // openNearSeaLakes' LIMIT
+  const HEIGHTS_LEGEND =
+    "claimed: new points given their own old cell's land/water; forced: old features or areas with no point left that got one (keptAreas: of them, provinces/states/cultures/religions); rejoined: split features joined back (carved: points flipped for it); dropped: 1-2 point fragments removed; separated: points flipped so two old features do not merge; spurious: blobs with no old feature flipped; dams: land raised so a lake is not drained into the sea; outsideHull: points outside the old samples (nearest one used)";
   const WORKER_MAX_BYTES = 64 * 1024 * 1024;
 
   function targetCells(v) {
@@ -134,8 +136,12 @@
   function prepare(a) {
     if (typeof Resample === "undefined" || typeof Resample.process !== "function")
       fail("PAGE_ERROR", "the app's Resample is missing; rebuild dist (CF_BUILD=1 npx vite build)");
-    if (typeof customization !== "undefined" && customization)
-      fail("REFUSED", `an editor is active (customization=${customization}); close it first`);
+    // a dry run changes nothing, so an open editor only blocks a real regrid (its validate and apply)
+    if ((a.phase === "apply" || !a.dryRun) && typeof customization !== "undefined" && customization)
+      fail(
+        "REFUSED",
+        `an editor is active (customization=${customization}); close it first (eval: closeDialogs(); customization = 0)`
+      );
     const heights = a.heights ?? "interpolate";
     if (!["interpolate", "nearest"].includes(heights)) fail("BAD_ARGS", "heights is 'interpolate' or 'nearest'");
     const iceMode = a.ice ?? "keep";
@@ -168,6 +174,30 @@
     if (want > 50000)
       warnings.push("over 50K cells the app gets slow to draw and edit (the Options slider marks it red)");
     return { want, shape, heights, iceMode, gridNow, packNow, packEst, warnings };
+  }
+
+  /**
+   * Lowering the density: about how many burgs will share a new cell (moved to a free neighbour,
+   * lost if none) and how many lakes and islands are smaller than one new cell (kept as one cell
+   * by 'interpolate' where there is room; 'nearest' can lose them).
+   */
+  function lowerRisk(spacing) {
+    const buckets = new Map();
+    for (const b of pack.burgs) {
+      if (!isLive(b) || !b.i) continue;
+      const k = `${Math.floor(b.x / spacing)},${Math.floor(b.y / spacing)}`;
+      buckets.set(k, (buckets.get(k) || 0) + 1);
+    }
+    let sharing = 0;
+    for (const n of buckets.values()) if (n > 1) sharing += n - 1;
+    const cellArea = spacing * spacing;
+    const small = { lakes: 0, islands: 0 };
+    for (const f of pack.features || []) {
+      if (!f || typeof f !== "object" || !(f.area < cellArea)) continue;
+      if (f.type === "lake") small.lakes++;
+      else if (f.type === "island") small.islands++;
+    }
+    return { burgsSharingACell: sharing, smallerThanACell: small };
   }
 
   // ---------------------------------------------------------------- inventory (before/after)
@@ -214,7 +244,8 @@
     for (const r of pack.routes || []) if (isLive(r)) inv.route.set(r.i, { name: I.nameOf("route", r) });
     inv.marker = new Map();
     for (const m of pack.markers || [])
-      if (isLive(m)) inv.marker.set(m.i, { name: I.nameOf("marker", m), x: m.x, y: m.y });
+      if (isLive(m))
+        inv.marker.set(m.i, { name: I.nameOf("marker", m), x: m.x, y: m.y, land: pack.cells.h[m.cell] >= 20 });
     inv.zone = new Map();
     for (const z of pack.zones || []) if (isLive(z)) inv.zone.set(z.i, { name: z.name, area: zoneArea(z) });
     inv.label = new Map();
@@ -228,11 +259,12 @@
       total += C.area[i];
       if (C.h[i] >= 20) land += C.area[i];
     }
-    const feats = { lakes: 0, islands: 0, named: new Set() };
+    const feats = { lakes: 0, islands: 0, oceans: 0, named: new Set() };
     for (const f of pack.features || []) {
       if (!f || typeof f !== "object") continue;
       if (f.type === "lake") feats.lakes++;
       if (f.type === "island") feats.islands++;
+      if (f.type === "ocean") feats.oceans++;
       if (f.name) feats.named.add(`${f.type}: ${f.name}`);
     }
     return {
@@ -254,35 +286,49 @@
   function compare(b, a, details) {
     const out = {};
     const lostAll = {};
+    const wet = []; // markers that were on land and whose cell is water now (the coast moved)
     for (const type of [...POINT_TYPES, ...AREA_TYPES, ...OTHER_TYPES]) {
       const B = b.inv[type];
       const A = a.inv[type];
       const row = { kept: 0, lost: 0 };
       const lost = [];
       const moved = [];
+      const areaChanges = [];
       let maxMove = 0;
-      let maxArea = 0;
       for (const [id, x] of B) {
         const y = A.get(id);
-        if (!y) {
+        // an area that had territory and has none now is lost too (its object may remain)
+        if (!y || (AREA_TYPES.includes(type) && x.area > 0 && !(y.area > 0))) {
           row.lost++;
           lost.push(`${x.name ?? type} (${id})`);
           continue;
         }
         row.kept++;
+        if (type === "marker" && x.land && y.land === false) wet.push(`${x.name ?? "marker"} (${id})`);
         if (POINT_TYPES.includes(type)) {
           const d = Math.hypot((y.x ?? 0) - (x.x ?? 0), (y.y ?? 0) - (x.y ?? 0));
           if (d > 0.5) moved.push({ name: x.name, i: id, px: rn(d, 1) });
           maxMove = Math.max(maxMove, d);
         }
-        if (AREA_TYPES.includes(type) && x.area > 0) maxArea = Math.max(maxArea, Math.abs(y.area - x.area) / x.area);
+        if (AREA_TYPES.includes(type) && x.area > 0)
+          areaChanges.push({ name: `${x.name ?? type} (${id})`, pct: rn((100 * (y.area - x.area)) / x.area, 1) });
       }
       if (POINT_TYPES.includes(type)) {
         row.moved = moved.length;
         row.maxMovePx = rn(maxMove, 1);
-        if (details && moved.length) row.movedList = moved.sort((p, q) => q.px - p.px).slice(0, 50);
+        if (details && moved.length) {
+          row.movedList = moved.sort((p, q) => q.px - p.px).slice(0, 50);
+          if (moved.length > 50) row.movedMore = moved.length - 50;
+        }
       }
-      if (AREA_TYPES.includes(type)) row.maxAreaChangePct = rn(100 * maxArea, 1);
+      if (AREA_TYPES.includes(type)) {
+        areaChanges.sort((p, q) => Math.abs(q.pct) - Math.abs(p.pct));
+        const top = areaChanges[0];
+        row.maxAreaChangePct = top ? Math.abs(top.pct) : 0;
+        if (top?.pct) row.maxAreaChangeOf = top.name;
+        // signed % change of the areas that changed most (area = territory on the new grid)
+        if (details && areaChanges.length) row.largestAreaChanges = areaChanges.slice(0, 5);
+      }
       if (lost.length) {
         row.lostNames = lost.slice(0, 50);
         lostAll[type] = lost;
@@ -293,10 +339,12 @@
     out.feature = {
       lakes: { before: b.feats.lakes, after: a.feats.lakes },
       islands: { before: b.feats.islands, after: a.feats.islands },
+      oceans: { before: b.feats.oceans, after: a.feats.oceans },
       named: { before: b.feats.named.size, after: a.feats.named.size }
     };
     if (namedLost.length) out.feature.namesLost = namedLost.slice(0, 50);
-    return { entities: out, lostAll, namedLost };
+    if (wet.length) out.marker.nowOnWater = wet.length;
+    return { entities: out, lostAll, namedLost, wet };
   }
 
   /** Notes whose entity did not survive (the note itself is kept). */
@@ -342,6 +390,8 @@
     }
     return {
       empty,
+      layers: layerCounts(),
+      textPathIds: new Set([...(document.getElementById("textPaths")?.children || [])].map(e => e.id)),
       notes: Array.isArray(notes) ? notes : [],
       labelNodes,
       emblemDefs,
@@ -352,6 +402,65 @@
       view: T.getView(),
       density: { value: pointsInput.value, cells: pointsInput.dataset.cells }
     };
+  }
+
+  // the svg leaves main.js undraw() removes (and the per-item groups it removes in these layers)
+  const LEAVES = "path, circle, polygon, line, text, use, image";
+  const ITEM_GROUPS = new Set(["zones", "armies", "ruler"]);
+  // geography: what the redraw shows there is the new data (a new lake or coast is real)
+  const DATA_LAYERS = new Set(["ocean", "lakes", "landmass", "coastline"]);
+
+  /** Layer groups (#viewbox children and their child groups) and how many elements each draws. */
+  function layerCounts() {
+    const out = new Map();
+    for (const g of document.getElementById("viewbox")?.children || []) {
+      if (g.tagName !== "g" || !g.id) continue;
+      out.set(g.id, { el: g, n: g.querySelectorAll(LEAVES).length, parent: null });
+      for (const c of g.children)
+        if (c.tagName === "g" && c.id && !out.has(c.id))
+          out.set(c.id, { el: c, n: c.querySelectorAll(LEAVES).length, parent: g.id });
+    }
+    return out;
+  }
+
+  /**
+   * A layer that is on but was not drawn before (an empty group: the saved svg never had it, say
+   * province fills or state labels) would show up after the full redraw although nothing about
+   * it changed; it is emptied again so the map looks as before (the data is all there: toggling
+   * the layer draws it). Returns the ids kept empty and the layers whose drawn element count
+   * changed a lot (a redraw at the new density: relief icons, contours).
+   */
+  function keepLayerLook(before, textPathIds, iceMode) {
+    const now = layerCounts();
+    const keptEmpty = [];
+    for (const [id, b] of before) {
+      if (b.n || DATA_LAYERS.has(id) || DATA_LAYERS.has(b.parent)) continue;
+      if (b.parent && before.get(b.parent)?.n === 0) continue; // its parent is kept empty
+      if ((id === "ice" || b.parent === "ice") && iceMode === "regenerate") continue;
+      const a = now.get(id);
+      if (!a?.n) continue;
+      for (const el of a.el.querySelectorAll(LEAVES)) el.remove();
+      if (ITEM_GROUPS.has(id)) for (const el of a.el.querySelectorAll(":scope > g")) el.remove();
+      keptEmpty.push(id);
+    }
+    if (keptEmpty.length) {
+      // text paths the emptied labels drew, which nothing uses now
+      const used = new Set();
+      for (const tp of document.querySelectorAll("textPath")) {
+        const href = tp.getAttribute("href") || tp.getAttribute("xlink:href") || "";
+        if (href.startsWith("#")) used.add(href.slice(1));
+      }
+      for (const el of [...(document.getElementById("textPaths")?.children || [])])
+        if (el.id && !textPathIds.has(el.id) && !used.has(el.id)) el.remove();
+    }
+    const changed = {};
+    const after = layerCounts();
+    for (const [id, b] of before) {
+      if (b.parent || keptEmpty.includes(id)) continue;
+      const n = after.get(id)?.n ?? 0;
+      if (Math.abs(n - b.n) > Math.max(20, 0.25 * b.n)) changed[id] = `${b.n} -> ${n}`;
+    }
+    return { keptEmpty, changed };
   }
 
   function restoreLabels(saved) {
@@ -960,6 +1069,156 @@
     report.portsMovedToCoast = portsMoved;
   }
 
+  /**
+   * After fixBurgs: a burg of a state whose new cell carries another state (the border moved a
+   * little) takes its cell for its state, as generation leaves it (cells.state[burg.cell] is the
+   * burg's state), with the province of its state around it. Never the last cell of an area.
+   */
+  function claimBurgCells(parentMap, report) {
+    const C = pack.cells;
+    const PS = parentMap.pack.states || [];
+    const PP = parentMap.pack.provinces || [];
+    const tally = field => {
+      const m = new Map();
+      for (const i of C.i) m.set(C[field][i], (m.get(C[field][i]) || 0) + 1);
+      return m;
+    };
+    const states = tally("state");
+    const provinces = C.province ? tally("province") : new Map();
+    const capitalOf = new Map();
+    for (const p of PP) if (isLive(p) && p.i && p.burg) capitalOf.set(p.burg, p);
+    const claimed = [];
+    const neutral = [];
+    for (const b of pack.burgs) {
+      if (!isLive(b) || !b.i || !(b.cell >= 0)) continue;
+      const s = b.state || 0;
+      const was = C.state[b.cell];
+      if (was === s) continue;
+      if (!s) {
+        neutral.push(`${b.name} (${b.i})`);
+        continue;
+      }
+      if (!isLive(PS[s])) continue;
+      const wasP = C.province ? C.province[b.cell] : 0;
+      if ((was && states.get(was) <= 1) || (wasP && provinces.get(wasP) <= 1)) continue;
+      let prov = 0;
+      const cap = capitalOf.get(b.i);
+      if (cap && cap.state === s) prov = cap.i;
+      else if (C.province) {
+        const votes = new Map();
+        for (const nb of C.c[b.cell])
+          if (C.state[nb] === s && C.province[nb]) votes.set(C.province[nb], (votes.get(C.province[nb]) || 0) + 1);
+        let best = 0;
+        for (const [k, v] of votes) if (!prov || v > best) [prov, best] = [k, v];
+      }
+      states.set(was, states.get(was) - 1);
+      states.set(s, (states.get(s) || 0) + 1);
+      C.state[b.cell] = s;
+      if (C.province) {
+        provinces.set(wasP, provinces.get(wasP) - 1);
+        provinces.set(prov, (provinces.get(prov) || 0) + 1);
+        C.province[b.cell] = prov;
+      }
+      claimed.push(`${b.name} (${b.i})`);
+    }
+    report.burgCellsClaimed = claimed;
+    report.neutralBurgsInStates = neutral;
+  }
+
+  const CENTER_FIELDS = [
+    ["state", "states"],
+    ["province", "provinces"],
+    ["culture", "cultures"],
+    ["religion", "religions"]
+  ];
+
+  /**
+   * After Resample.restoreProvinces (all four area types restored): every live state, province,
+   * culture and religion gets a center inside its own territory. Resample leaves a province with
+   * no capital burg (burg 0) without one (it reads pack.burgs[0].cell), and a center found by
+   * coordinates can fall just outside after the borders moved. A state or province keeps its
+   * capital's cell when that is inside; otherwise the cell of its own nearest to the old center.
+   */
+  function recenter(parentMap, report) {
+    const C = pack.cells;
+    const PC = parentMap.pack.cells;
+    const n = C.i.length;
+    const moved = [];
+    for (const [field, list] of CENTER_FIELDS) {
+      const arr = C[field];
+      if (!arr || !Array.isArray(pack[list])) continue;
+      let byId = null; // id -> its cells, built on first need
+      for (const e of pack[list]) {
+        if (!isLive(e) || !e.i) continue;
+        const inside = c => Number.isInteger(c) && c >= 0 && c < n && arr[c] === e.i;
+        const capId = field === "state" ? e.capital : field === "province" ? e.burg : 0;
+        const cap = capId ? pack.burgs[capId] : null;
+        if (isLive(cap) && inside(cap.cell)) {
+          e.center = cap.cell;
+          continue;
+        }
+        if (inside(e.center)) continue;
+        const old = parentMap.pack[list]?.[e.i]?.center;
+        const at = PC.p[old] || (Array.isArray(e.pole) ? e.pole : null);
+        let cell = -1;
+        if (at) cell = nearestCellWhere(findCell(at[0], at[1]), at[0], at[1], inside, 6);
+        if (cell < 0) {
+          if (!byId) {
+            byId = new Map();
+            for (const i of C.i) {
+              const a = byId.get(arr[i]);
+              if (a) a.push(i);
+              else byId.set(arr[i], [i]);
+            }
+          }
+          const own = byId.get(e.i) || [];
+          let bd = Infinity;
+          for (const c of own) {
+            const d = at ? (C.p[c][0] - at[0]) ** 2 + (C.p[c][1] - at[1]) ** 2 : 0;
+            if (d < bd) {
+              bd = d;
+              cell = c;
+            }
+          }
+        }
+        if (cell < 0) continue; // no territory: restored later from its old position
+        e.center = cell;
+        moved.push(`${field} ${e.name ?? ""} (${e.i})`);
+      }
+    }
+    report.centersMoved = moved;
+  }
+
+  /** Recount the territory statistics the editors and find/inspect read (cells, area, people). */
+  function collectAreaStats() {
+    const C = pack.cells;
+    if (typeof States?.collectStatistics === "function") States.collectStatistics();
+    for (const [field, list] of CENTER_FIELDS.slice(1)) {
+      const items = pack[list];
+      const arr = C[field];
+      if (!Array.isArray(items) || !arr) continue;
+      const stats = new Map();
+      for (const i of C.i) {
+        if (C.h[i] < 20) continue;
+        let t = stats.get(arr[i]);
+        if (!t) {
+          t = { cells: 0, area: 0, rural: 0, urban: 0 };
+          stats.set(arr[i], t);
+        }
+        t.cells++;
+        t.area += C.area[i];
+        t.rural += C.pop[i];
+        if (C.burg[i]) t.urban += pack.burgs[C.burg[i]]?.population || 0;
+      }
+      for (const e of items) {
+        if (!e || typeof e !== "object" || e.removed) continue;
+        const t = stats.get(e.i) || { cells: 0, area: 0, rural: 0, urban: 0 };
+        // only the fields the app keeps on this object (provinces carry no cell count)
+        for (const k of ["cells", "area", "rural", "urban"]) if (typeof e[k] === "number") e[k] = t[k];
+      }
+    }
+  }
+
   let parentQ = null;
   /** Nearest old pack cell to (x, y) in old coordinates. */
   function parentCellAt(parentMap, x, y) {
@@ -1107,7 +1366,7 @@
   }
 
   /** Zone cells by nearest old cell (Resample unions discs around the old cell centres). */
-  function zonesByNearest(parentMap, inverse) {
+  function zonesByNearest(parentMap, projection, inverse, report) {
     const C = pack.cells;
     const owners = new Map();
     (parentMap.pack.zones || []).forEach((z, k) => {
@@ -1123,6 +1382,18 @@
       const ks = owners.get(parentCellAt(parentMap, x, y));
       if (ks) for (const k of ks) lists[k].push(i);
     }
+    // a zone smaller than a new cell (no new cell has one of its old cells nearest) keeps the new
+    // cells nearest to its old cells instead of vanishing
+    const PC = parentMap.pack.cells;
+    const rescued = [];
+    (parentMap.pack.zones || []).forEach((z, k) => {
+      if (lists[k].length || !z || z.removed) return;
+      const old = (z.cells || []).filter(c => c >= 0 && PC.p[c]);
+      if (!old.length) return;
+      lists[k] = [...new Set(old.map(c => findCell(...projection(PC.p[c][0], PC.p[c][1]))))].filter(c => c >= 0);
+      if (lists[k].length) rescued.push(`zone ${z.name ?? ""} (${z.i})`);
+    });
+    if (rescued.length) report.areasRescued = [...(report.areasRescued || []), ...rescued];
     pack.zones = (parentMap.pack.zones || []).map((z, k) => ({ ...z, cells: lists[k] }));
   }
 
@@ -1190,14 +1461,40 @@
     own.restoreBurgs = function (parentMap, projection, sc) {
       origBurgs.call(this, parentMap, projection, sc);
       fixBurgs(parentMap, report);
+      claimBurgCells(parentMap, report);
     };
+    if (typeof R.restoreProvinces === "function") {
+      const origProvinces = R.restoreProvinces;
+      own.restoreProvinces = function (parentMap, ...rest) {
+        origProvinces.call(this, parentMap, ...rest);
+        recenter(parentMap, report);
+      };
+    }
+    if (typeof R.restoreEconomy === "function") {
+      // the economy runs once more on the new cells (deals, production, market stock, state
+      // treasuries); burg treasuries are a running total (each run adds to them), so they stay
+      const origEconomy = R.restoreEconomy;
+      own.restoreEconomy = function (parentMap, ...rest) {
+        collectAreaStats(); // state taxes read the state populations
+        origEconomy.call(this, parentMap, ...rest);
+        let kept = 0;
+        for (const pb of parentMap.pack.burgs || []) {
+          const b = pb?.i ? pack.burgs[pb.i] : null;
+          if (!isLive(b)) continue;
+          if (pb.treasury === undefined) delete b.treasury;
+          else b.treasury = pb.treasury;
+          kept++;
+        }
+        report.treasuriesKept = kept;
+      };
+    }
     const origRoutes = R.restoreRoutes;
     own.restoreRoutes = function (parentMap, projection) {
       origRoutes.call(this, parentMap, projection);
       report.routeEndsFixed = fixRouteEnds(parentMap);
     };
     own.restoreFeatureDetails = parentMap => featureDetails(parentMap, IDENTITY, report);
-    own.restoreZones = parentMap => zonesByNearest(parentMap, IDENTITY);
+    own.restoreZones = parentMap => zonesByNearest(parentMap, IDENTITY, IDENTITY, report);
     const saved = {};
     for (const k of Object.keys(own)) {
       if (Object.hasOwn(R, k)) saved[k] = R[k];
@@ -1231,7 +1528,14 @@
         P.warnings.push(
           `about ${rn(bytes.est / 1e6, 1)} MB: over the shared map's 64 MB limit, so it could not be saved there`
         );
-      return { phase: "validate", ...plan, bytes, warnings: P.warnings };
+      const atRisk = P.shape.points < P.gridNow ? lowerRisk(P.shape.spacing) : undefined;
+      return {
+        phase: "validate",
+        ...plan,
+        bytes: { ...bytes, note: "approximate (layer growth measured on two maps); now = what the page would save" },
+        ...(atRisk ? { atRisk } : {}),
+        warnings: P.warnings
+      };
     }
 
     const t0 = performance.now();
@@ -1244,7 +1548,7 @@
     try {
       undraw();
       notes = keep.notes; // undraw() empties notes; process() carries them over from here
-      Resample.process({ projection: IDENTITY, inverse: IDENTITY, scale: 1 });
+      Resample.process({ projection: IDENTITY, inverse: IDENTITY, scale: 1, keepId: true });
     } catch (e) {
       resetDensity(keep.density);
       throw e;
@@ -1254,8 +1558,8 @@
     const regenerated = [
       "lakes and coastline features (re-detected from the new heights)",
       "temperature (recomputed from latitude and height)",
-      "economy deals (regenerateEconomy)",
-      "ocean layers and relief icons (redrawn)"
+      "economy (regenerateEconomy on the new cells: burg product and production, deals, market stock and state treasuries are recomputed; burg treasuries are kept)",
+      "every drawn layer, from the data (relief icons and contours follow the cell count; see layers)"
     ];
     const generatedIce = (pack.ice || []).length;
     if (P.iceMode === "keep") {
@@ -1282,8 +1586,10 @@
       rulers = new Rulers();
       rulers.fromString(keep.rulers);
     }
+    collectAreaStats();
     drawLayers();
     const labelsRestored = restoreLabels(keep.labelNodes);
+    const layers = keepLayerLook(keep.layers, keep.textPathIds, P.iceMode);
     const emblemHost = document.getElementById("defs-emblems");
     if (emblemHost) for (const n of keep.emblemDefs) if (!document.getElementById(n.id)) emblemHost.appendChild(n);
     const warnings = [...P.warnings];
@@ -1304,33 +1610,57 @@
     cmp.entities.label.restored = labelsRestored.labels;
     if (labelsRestored.stateLabels) cmp.entities.label.stateLabelsKept = labelsRestored.stateLabels;
     cmp.entities.ice = { before: before.ice, after: after.ice, mode: P.iceMode };
+    const names = (list, k = 10) =>
+      `${list.slice(0, k).join(", ")}${list.length > k ? ` (+${list.length - k} more)` : ""}`;
     if (report.burgsRehoused?.length)
       warnings.push(
-        `${report.burgsRehoused.length} burg(s) shared a new cell with another and were moved to the nearest free land cell: ${report.burgsRehoused.slice(0, 10).join(", ")}`
+        `${report.burgsRehoused.length} burg(s) shared a new cell with another and were moved to the nearest free land cell: ${names(report.burgsRehoused)}`
       );
     if (report.portsMovedToCoast?.length)
       warnings.push(
-        `${report.portsMovedToCoast.length} port(s) ended inland and were moved to the nearest free coastal cell: ${report.portsMovedToCoast.slice(0, 10).join(", ")}`
+        `${report.portsMovedToCoast.length} port(s) ended inland and were moved to the nearest free coastal cell: ${names(report.portsMovedToCoast)}`
       );
     if (report.areasRescued?.length)
       warnings.push(
-        `${report.areasRescued.length} area(s) fell between the new cells and were given the cell nearest their old centre: ${report.areasRescued.slice(0, 10).join(", ")}`
+        `${report.areasRescued.length} area(s) fell between the new cells and were given the cells nearest their old ones: ${names(report.areasRescued)}`
       );
     if (report.portsWithoutWater?.length)
-      warnings.push(`port burg(s) with no water next to them now: ${report.portsWithoutWater.slice(0, 10).join(", ")}`);
+      warnings.push(`port burg(s) with no water next to them now: ${names(report.portsWithoutWater)}`);
+    if (report.neutralBurgsInStates?.length)
+      warnings.push(
+        `${report.neutralBurgsInStates.length} burg(s) of no state now sit on a state's cell: ${names(report.neutralBurgsInStates)}`
+      );
+    if (cmp.wet.length)
+      warnings.push(`${cmp.wet.length} marker(s) on land before now sit on water (the coast moved): ${names(cmp.wet)}`);
     if (report.newLakesNamed?.length)
       regenerated.push(
-        `${report.newLakesNamed.length} new lake(s) with no old counterpart, named: ${report.newLakesNamed.slice(0, 5).join(", ")}`
+        `${report.newLakesNamed.length} new lake(s) with no old counterpart, named: ${names(report.newLakesNamed, 5)}`
       );
     if (P.iceMode === "keep" && keep.ice.length)
       warnings.push(
         "ice was kept as drawn: glacier outlines follow the old cell edges (ice:'regenerate' redraws them)"
       );
-    for (const [type, list] of Object.entries(cmp.lostAll))
+    // the names are in entities.<type>.lostNames and entities.feature.namesLost
+    const lostCounts = Object.entries(cmp.lostAll).map(([type, list]) => `${list.length} ${type}`);
+    if (lostCounts.length) warnings.push(`lost: ${lostCounts.join(", ")} (names in entities.*.lostNames)`);
+    if (cmp.namedLost.length)
+      warnings.push(`${cmp.namedLost.length} feature name(s) lost (entities.feature.namesLost)`);
+    if (layers.keptEmpty.length)
       warnings.push(
-        `${list.length} ${type}(s) lost: ${list.slice(0, 10).join(", ")}${list.length > 10 ? ", ..." : ""}`
+        `layer(s) on but not drawn before were kept undrawn so the map looks the same: ${layers.keptEmpty.join(", ")} (toggling the layer draws it)`
       );
-    if (cmp.namedLost.length) warnings.push(`feature names lost: ${cmp.namedLost.slice(0, 10).join(", ")}`);
+    const fixed = {};
+    for (const [k, v] of [
+      ["burgsRehoused", report.burgsRehoused],
+      ["portsMovedToCoast", report.portsMovedToCoast],
+      ["areasRescued", report.areasRescued],
+      ["burgCellsClaimed", report.burgCellsClaimed],
+      ["centersMoved", report.centersMoved]
+    ])
+      if (v?.length) fixed[k] = a.details ? v.slice(0, 50) : v.length;
+    if (report.routeEndsFixed) fixed.routeEndsFixed = report.routeEndsFixed;
+    const heights = report.heights ?? { method: "nearest" };
+    if (a.details && report.heights) heights.legend = HEIGHTS_LEGEND;
     const { prepareMapData } = await lazy.save();
     return {
       cells: { before: before.cells, after: after.cells },
@@ -1338,8 +1668,13 @@
       cellsDesired: { before: before.cellsDesired, after: after.cellsDesired },
       density: plan.density,
       landPct: { before: before.landPct, after: after.landPct },
-      heights: report.heights ?? { method: "nearest" },
+      heights,
       entities: cmp.entities,
+      fixed,
+      layers: {
+        keptEmpty: layers.keptEmpty,
+        ...(Object.keys(layers.changed).length ? { redrawn: layers.changed } : {})
+      },
       regenerated,
       warnings,
       bytes: prepareMapData().length,

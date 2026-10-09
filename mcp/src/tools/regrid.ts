@@ -10,8 +10,25 @@ import { TIMEOUT_CAP_MS, TIMEOUTS, TimeoutMs } from "../schemas.ts";
 import { defineTools } from "./registry.ts";
 
 export const REGRID_REASON =
-  "regrid rebuilt the cell grid at a new density (every cell id changed; entities were moved by coordinates), so it and later literal cell lists cannot be replayed; the sketch is promoted as the page map";
+  "regrid rebuilt the cell grid (every cell id changed), so the log cannot be replayed; the page map is promoted as is";
 NOT_REPLAYABLE.regrid = REGRID_REASON;
+
+/** The Options "cells density" slider: position -> points (same table as the bridge). */
+const SLIDER_POINTS: Record<number, number> = {
+  1: 1000,
+  2: 2000,
+  3: 5000,
+  4: 10000,
+  5: 20000,
+  6: 30000,
+  7: 40000,
+  8: 50000,
+  9: 60000,
+  10: 70000,
+  11: 80000,
+  12: 90000,
+  13: 100000
+};
 
 interface Plan {
   cells: { now: number; est: number };
@@ -33,7 +50,7 @@ export function register(ctx: ToolContext): void {
     {
       title: "Change the cell density, keep the map",
       description:
-        "Rebuild the map at another cell density (points, as in Options > cells density) and keep it the same map: shared-map lineage, ids, names, notes and labels stay; burgs, markers, states, provinces, cultures, religions, routes, rivers and zones are moved by coordinates. density: slider position 1-13 (4 = 10K, 6 = 30K, 8 = 50K) or a points count 1000-100000. Uses the app's Transform resampler (full extent, scale 1) with fixes: heights 'interpolate' (default; a smooth coastline from the old surface) or 'nearest' (the app's own, keeps the old cells' staircase); burgs that share a new cell move to a free neighbour; ice 'keep' (default) or 'regenerate'. Regenerated: temperature, lakes/coast features (names carried over), relief icons, ocean layers, economy deals; every layer is redrawn from the data. Returns cells before/after, per type kept/moved/lost with the names of anything lost, warnings and the new file size; details:true lists moved burgs and markers. dryRun:true estimates cells and file size without changing anything. One auto-undo entry. In a sketch it is logged as not replayable (blob-only; sketch_promote still works). Screenshot afterwards to check the coastline.",
+        "Rebuild the map at another cell density (points, as in Options > cells density) and keep it the same map: shared-map lineage (map id), names, notes and labels stay; burgs, markers, states, provinces, cultures, religions, routes, rivers and zones are moved by coordinates. density: slider position 1-13 (4 = 10K, 6 = 30K, 8 = 50K) or a points count 1000-100000. Uses the app's Transform resampler (full extent, scale 1) with fixes: heights 'interpolate' (default; a smooth coastline from the old surface, old lakes/islands kept) or 'nearest' (the app's own, keeps the old cells' staircase); burgs that share a new cell move to a free neighbour, a burg's cell joins its state, every area keeps a center inside it, small areas and zones keep a cell; ice 'keep' (default) or 'regenerate'. Recomputed: temperature, lakes/coast features (names carried over), economy flows (burg treasuries kept), territory statistics; layers are redrawn from the data, but a layer that was on and undrawn stays undrawn (layers.keptEmpty) and big count changes are listed (layers.redrawn, e.g. relief icons). Returns cells before/after, entities per type kept/moved/lost (lostNames; maxAreaChangeOf), feature lakes/islands/oceans, fixed (counts), warnings, the new file size and lineage; details:true lists moved burgs/markers, the largest area changes and a legend of the heights counters. dryRun:true (allowed with an editor open) estimates cells, file size and, when lowering, atRisk (burgs that will share a cell, lakes/islands smaller than a cell); it changes nothing. One auto-undo entry. In a sketch it is logged as not replayable (blob-only: no rebase; sketch_promote directly while the shared map is still at the sketch's base). Screenshot afterwards to check the coastline.",
       inputSchema: z.object({
         density: z
           .number()
@@ -57,8 +74,13 @@ export function register(ctx: ToolContext): void {
     async (args, scope) => {
       const { dryRun, timeoutMs: given, ...bridgeArgs } = args;
       // big grids take longer: rebuild, redraw and the before/after inventory
-      const timeoutMs = given ?? (args.density > 50000 ? TIMEOUT_CAP_MS : TIMEOUTS.heavy);
-      const plan = await scope.call<Plan>("regrid", { ...bridgeArgs, phase: "validate" }, { timeoutMs });
+      const points = args.density <= 13 ? (SLIDER_POINTS[args.density] ?? 0) : args.density;
+      const timeoutMs = given ?? (points > 50000 ? TIMEOUT_CAP_MS : TIMEOUTS.heavy);
+      const plan = await scope.call<Plan>(
+        "regrid",
+        { ...bridgeArgs, dryRun: !!dryRun, phase: "validate" },
+        { timeoutMs }
+      );
       const { phase: _phase, ...planBody } = plan;
       if (dryRun) return { dryRun: true, ...planBody, note: "dry run: nothing was changed" };
 

@@ -6,6 +6,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { after, before, describe, test } from "node:test";
+import { blobOnlyReasons, SketchStore } from "../src/ops.ts";
+import { REGRID_REASON } from "../src/tools/regrid.ts";
 import { FakeWorker } from "./fake-worker.ts";
 import {
   alive,
@@ -38,6 +40,54 @@ const PAGE_STATE = `return {
   notes: notes.length,
   burgNames: pack.burgs.filter(b => b.i && !b.removed).map(b => b.name).join("|")
 };`;
+
+describe("regrid in the sketch log (no browser)", () => {
+  test("several regrids give one blob-only reason line, not one per op", () => {
+    const s = new SketchStore();
+    s.begin({
+      slug: "x",
+      note: null,
+      base: { kind: "shared", version: 3, at: "t" } as never,
+      baseText: "",
+      baseCounts: {}
+    });
+    const op = (undoId: number) => ({
+      tool: "regrid",
+      args: {},
+      resolved: null,
+      summary: "Regridded",
+      at: "t",
+      digestBefore: null,
+      digestAfter: null,
+      replayable: false,
+      reason: REGRID_REASON,
+      undoId
+    });
+    s.append(op(1));
+    s.append(op(2));
+    const reasons = blobOnlyReasons(s.current as never);
+    assert.equal(reasons.length, 1);
+    assert.match(reasons[0], /^ops 1, 2 \(regrid\): regrid rebuilt the cell grid/);
+  });
+});
+
+/** Data consistency the app's generators guarantee, checked in the page. */
+const CONSISTENCY = `const C = pack.cells, n = C.i.length;
+const live = x => x && x.i && !x.removed;
+const badCenters = [];
+for (const [field, list] of [["state", "states"], ["province", "provinces"], ["culture", "cultures"], ["religion", "religions"]])
+  for (const e of pack[list]) {
+    if (!live(e)) continue;
+    const has = C.i.some(i => C[field][i] === e.i);
+    if (!has) continue;
+    if (!Number.isInteger(e.center) || e.center < 0 || e.center >= n || C[field][e.center] !== e.i)
+      badCenters.push(field + " " + e.i + " " + e.center);
+  }
+const burgsOffState = pack.burgs.filter(b => live(b) && b.state && C.state[b.cell] !== b.state).map(b => b.name);
+const staleStates = pack.states.filter(s => live(s) && s.cells !== C.i.filter(i => C.h[i] >= 20 && C.state[i] === s.i).length).map(s => s.name);
+const wildProvinces = pack.provinces.filter(p => live(p) && !p.burg).length;
+const emptyZones = pack.zones.filter(z => z && !z.removed && !(z.cells || []).length).map(z => z.name);
+return { badCenters, burgsOffState, staleStates, wildProvinces, emptyZones };`;
 
 describe("regrid on demo.map (local)", () => {
   let h: Harness;
@@ -73,6 +123,22 @@ describe("regrid on demo.map (local)", () => {
     assert.equal(slider.cellsDesired.after, 30000);
   });
 
+  test("a dry run works with an editor open; the real regrid is refused with the way out", async () => {
+    await ok(h, "eval", { code: "customization = 1; return 1" });
+    try {
+      const r = await ok(h, "regrid", { density: 20000, dryRun: true });
+      assert.equal(r.dryRun, true);
+      assert.match(String(r.bytes.note), /approximate/);
+      const real = await h.call("regrid", { density: 20000 });
+      assert.equal(errorBody(real).error.code, "REFUSED");
+      assert.match(errorBody(real).error.message, /closeDialogs\(\); customization = 0/);
+    } finally {
+      await ok(h, "eval", { code: "customization = 0; return 0" });
+    }
+    const st = await ok(h, "snapshot", { action: "list" });
+    assert.ok(!JSON.stringify(st).includes('"regrid"'), "a refused regrid leaves no undo entry");
+  });
+
   test("bad densities are refused before anything changes", async () => {
     const same = await h.call("regrid", { density: 4 });
     assert.equal(errorBody(same).error.code, "BAD_ARGS");
@@ -99,6 +165,18 @@ describe("regrid on demo.map (local)", () => {
     assert.deepEqual(e.feature.islands, { before: 32, after: 32 });
     assert.equal(e.feature.named.after, e.feature.named.before);
     assert.equal(e.feature.namesLost, undefined);
+    assert.equal(typeof e.feature.oceans.after, "number");
+    assert.equal(typeof e.province.maxAreaChangeOf, "string", "the province that changed most is named");
+    assert.ok(Array.isArray(applied.layers.keptEmpty));
+    assert.ok(!(applied.warnings as string[]).some(w => /lost: /.test(w)), JSON.stringify(applied.warnings));
+    // every area has a center inside it (13 wild provinces have no capital burg), every state
+    // burg sits on its state's cell, and the state statistics are recounted
+    const c = (await ok(h, "eval", { code: CONSISTENCY, readOnly: true })).value as Obj;
+    assert.ok(c.wildProvinces >= 13, JSON.stringify(c));
+    assert.deepEqual(c.badCenters, []);
+    assert.deepEqual(c.burgsOffState, []);
+    assert.deepEqual(c.staleStates, []);
+    assert.deepEqual(c.emptyZones, []);
     assert.ok(Math.abs(applied.landPct.after - applied.landPct.before) < 1, JSON.stringify(applied.landPct));
     assert.equal(applied.heights.method, "interpolate");
     assert.ok(Array.isArray(applied.regenerated));
@@ -119,13 +197,35 @@ describe("regrid on demo.map (local)", () => {
     assert.match(String(lab.value), /Regrid label/);
   });
 
-  test("details lists moved burgs; save and reload keep the new grid", async () => {
+  test("save and reload keep the new grid and every province center", async () => {
     const saved = await ok(h, "save_map", { path: "regrid-20k.map", overwrite: true });
     await ok(h, "load_map", { path: saved.path as string });
     const now = (await ok(h, "eval", { code: PAGE_STATE, readOnly: true })).value as Obj;
     assert.equal(now.cells, applied.cells.after);
     assert.equal(now.burgNames, before0.burgNames);
     assert.equal(now.notes, before0.notes);
+    const c = (await ok(h, "eval", { code: CONSISTENCY, readOnly: true })).value as Obj;
+    assert.deepEqual(c.badCenters, [], "centers (wild provinces included) survive save and load");
+  });
+
+  test("lowering to 2K: dryRun names the risk; zones keep a cell; losses are named once", async () => {
+    await ok(h, "load_map", { path: DEMO_MAP });
+    const dry = await ok(h, "regrid", { density: 2, dryRun: true });
+    assert.ok(dry.atRisk.burgsSharingACell > 0, JSON.stringify(dry.atRisk));
+    assert.equal(typeof dry.atRisk.smallerThanACell.lakes, "number");
+    const r = await ok(h, "regrid", { density: 2, details: true }, 300_000);
+    const e = r.entities as Obj;
+    assert.equal(e.zone.lost, 0, JSON.stringify(e.zone));
+    assert.ok(e.burg.lost > 0 && e.burg.lostNames.length === Math.min(50, e.burg.lost));
+    const w = (r.warnings as string[]).join("\n");
+    assert.match(w, /lost: \d+ burg/);
+    assert.ok(!w.includes(e.burg.lostNames[0]), "lost names are in entities, not repeated in warnings");
+    assert.ok(Array.isArray(e.province.largestAreaChanges));
+    assert.match(String(r.heights.legend), /claimed: /);
+    if (e.burg.moved > 50) assert.equal(e.burg.movedMore, e.burg.moved - 50);
+    const c = (await ok(h, "eval", { code: CONSISTENCY, readOnly: true })).value as Obj;
+    assert.deepEqual(c.emptyZones, []);
+    assert.deepEqual(c.badCenters, []);
   });
 
   test("one undo entry returns to the previous grid", async () => {
@@ -190,6 +290,10 @@ describe("regrid keeps the shared lineage (live mode, fake Worker)", () => {
     assert.equal(p.stale, false);
     assert.equal(typeof p.token, "string");
     assert.ok(!(p.overrides ?? []).some((o: string) => /unrelated/.test(o)));
+    // a blob-only sketch is not rebased: the refusal says to promote directly
+    const rb = await h.call("sketch", { action: "rebase" });
+    assert.equal(errorBody(rb).error.code, "REFUSED");
+    assert.match(errorBody(rb).error.message, /still at v3 .*sketch_promote it directly/);
     assert.deepEqual(writes(), []);
   });
 
@@ -224,40 +328,58 @@ describe("app client guard after the app's own Transform (density change)", () =
   const puts = () => fake.writes().filter(r => r.method === "PUT");
   const save = (page: import("playwright").Page) =>
     page.evaluate(() => (globalThis as any).lazy.sharedMap().then((m: any) => m.saveSharedMap()));
-  /** Transform tool: Options density slider 5 (20K), Transform; resolves on map:resampled. */
-  const transform = (page: import("playwright").Page) =>
+  /**
+   * Transform tool: density slider 5 (20K), optionally a zoom (scale input step; 15 is about 4x),
+   * then Transform; resolves on map:resampled (same map) or map:generated (a new map). The
+   * Transform resizes the canvas to Options > canvas size (the window size by default, 1280x720
+   * here, smaller than the map): `fitCanvas` sets that option to the map's size first, as for a
+   * pure density change; without it the Transform crops the map.
+   */
+  const transform = (page: import("playwright").Page, zoomStep = 0, fitCanvas = true) =>
     page.evaluate(
-      () =>
+      ([zoom, fit]) =>
         new Promise<Obj>((resolve, reject) => {
           const w = globalThis as any;
+          if (fit) {
+            (document.getElementById("mapWidthInput") as HTMLInputElement).value = String(w.graphWidth);
+            (document.getElementById("mapHeightInput") as HTMLInputElement).value = String(w.graphHeight);
+          }
           const before = { mapId: w.mapId, notes: w.notes.length, cells: w.pack.cells.i.length };
           let generated = false;
-          w.addEventListener("map:generated", () => {
-            generated = true;
-          });
+          const done = () =>
+            setTimeout(
+              () =>
+                resolve({
+                  before,
+                  after: { mapId: w.mapId, notes: w.notes.length, cells: w.pack.cells.i.length },
+                  generated
+                }),
+              200
+            );
           w.addEventListener(
-            "map:resampled",
-            () =>
-              setTimeout(
-                () =>
-                  resolve({
-                    before,
-                    after: { mapId: w.mapId, notes: w.notes.length, cells: w.pack.cells.i.length },
-                    generated
-                  }),
-                200
-              ),
+            "map:generated",
+            () => {
+              generated = true;
+              done();
+            },
             { once: true }
           );
-          setTimeout(() => reject(new Error("no map:resampled within 120 s")), 120_000);
+          w.addEventListener("map:resampled", done, { once: true });
+          setTimeout(() => reject(new Error("no map:resampled or map:generated within 120 s")), 120_000);
           w.openTransformTool().then(() => {
             (document.getElementById("transformPointsInput") as HTMLInputElement).value = "5";
+            if (zoom) {
+              const scale = document.getElementById("transformScaleInput") as HTMLInputElement;
+              scale.value = String(zoom);
+              scale.dispatchEvent(new Event("input", { bubbles: true }));
+            }
             const buttons = Array.from(document.querySelectorAll(".ui-dialog-buttonset button")) as HTMLElement[];
             const go = buttons.find(b => b.innerText.trim() === "Transform" && b.offsetParent !== null);
             if (!go) reject(new Error("no Transform button"));
             else go.click();
           });
-        })
+        }),
+      [zoomStep, fitCanvas] as const
     );
 
   before(async () => {
@@ -290,6 +412,28 @@ describe("app client guard after the app's own Transform (density change)", () =
       await v.close();
     }
   });
+
+  for (const [what, zoom, fit] of [
+    ["a zoom", 15, true],
+    ["a canvas resize (Options canvas size differs from the map)", 0, false]
+  ] as const)
+    test(`Transform with ${what} crops the map: a new map, so Save asks 'Replace the shared map?' first`, async () => {
+      fake.clearLog();
+      const v = await openViewer(`${origin}/`);
+      try {
+        await viewerLoads(v.page, 1);
+        const t = await transform(v.page, zoom, fit);
+        assert.equal(t.generated, true, "a cropping transform is a new map (map:generated)");
+        assert.notEqual(t.after.mapId, t.before.mapId);
+        await save(v.page);
+        await v.page.waitForSelector(".ui-dialog:visible", { timeout: 30_000 });
+        const d = await viewerDialog(v.page);
+        assert.equal(d?.title, "Replace the shared map?");
+        assert.deepEqual(puts(), [], "nothing sent before the human confirms");
+      } finally {
+        await v.close();
+      }
+    });
 
   test("someone saved in between: the save answers 409 'Shared map changed' and overwrites nothing", async () => {
     fake.clearLog();

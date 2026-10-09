@@ -213,7 +213,18 @@ export interface Sketch {
 
 export function blobOnlyReasons(sk: Sketch): string[] {
   const out = [...sk.blockers];
-  for (const o of sk.ops) if (!o.replayable) out.push(`op ${o.seq} (${o.tool}): ${o.reason ?? "not replayable"}`);
+  // one line per distinct reason ("ops 3, 5 (regrid): ..."), not one per op
+  const groups = new Map<string, { tool: string; reason: string; seqs: number[] }>();
+  for (const o of sk.ops) {
+    if (o.replayable) continue;
+    const reason = o.reason ?? "not replayable";
+    const key = `${o.tool}\u0000${reason}`;
+    const g = groups.get(key);
+    if (g) g.seqs.push(o.seq);
+    else groups.set(key, { tool: o.tool, reason, seqs: [o.seq] });
+  }
+  for (const g of groups.values())
+    out.push(`${g.seqs.length > 1 ? "ops" : "op"} ${g.seqs.join(", ")} (${g.tool}): ${g.reason}`);
   return out;
 }
 
