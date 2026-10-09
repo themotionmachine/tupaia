@@ -470,11 +470,6 @@
     });
     if (pts.every(p => p.x === pts[0].x && p.y === pts[0].y))
       fail("BAD_ARGS", `all ${what} are the same spot; a route needs a length`);
-    if (pts.every(p => p.cell === pts[0].cell))
-      fail(
-        "BAD_ARGS",
-        `all ${what} fall into cell ${pts[0].cell}; a route links cells, so this one would connect nothing. Use points in at least two cells`
-      );
     return pts;
   }
 
@@ -608,6 +603,8 @@
       const lit = v.map((input, k) => literalPoint(input, pts[k]));
       const triples = toPoints(pts);
       checkedPts.set(lit, triples);
+      if (!pairsOf(triples).size)
+        c.notes.add(`route ${r.i}: all points fall into cell ${triples[0][2]}, so the route links no cells`);
       if (describePoints(r.points).h === describePoints(triples).h)
         c.notes.add(`route ${r.i}: the points are the same as before; nothing changes`);
       // a generated route becomes hand-drawn, but regenerating routes replaces unlocked routes
@@ -653,8 +650,11 @@
       else if (c.claimed.has(`routeName:${name}`)) warn.push(`'${name}' is used twice in this call`);
       c.claimed.add(`routeName:${name}`);
     }
-    for (const n of warn) c.notes.add(n);
     const pts = toPoints(places);
+    // legitimate (a short decorative line), but nothing is connected: say so
+    if (!pairsOf(pts).size)
+      warn.push(`all points fall into cell ${pts[0][2]}: the route is drawn, but it links no cells`);
+    for (const n of warn) c.notes.add(n);
     // freehand routes are locked by default so that regenerating routes keeps them
     return {
       freehand: true,

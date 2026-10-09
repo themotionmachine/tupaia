@@ -945,7 +945,7 @@ describe("tupaia-mcp routes (freehand routes, route groups)", () => {
     await undo(2);
   });
 
-  test("freehand add: dry-run rows carry the name and notes; points in one cell are refused", async () => {
+  test("freehand add: dry-run rows carry the name and notes; points in one cell link nothing and say so", async () => {
     const dry = await h.ok("add", {
       type: "route",
       items: [{ points: burgPts(), noPathfind: true, name: "Short Tunnel", group: "route-plain" }],
@@ -954,18 +954,23 @@ describe("tupaia-mcp routes (freehand routes, route groups)", () => {
     const row = (dry.plan as Obj[])[0];
     assert.equal(row.name, "Short Tunnel");
     assert.match(String(row.notes), /named 'Short Tunnel' already exists/);
+    // points that all fall into one cell are allowed (a short decorative line) with a note: nothing is linked
     const C = pick.landCell;
-    const e = await fail("add", {
+    const one = await h.ok("add", {
       type: "route",
       items: [
         {
           points: [{ x: C.x, y: C.y }, { x: C.x + 0.2, y: C.y + 0.1 }, { cell: C.cell }],
-          noPathfind: true
+          noPathfind: true,
+          group: "route-plain"
         }
       ]
     });
-    assert.equal(e.code, "BAD_ARGS");
-    assert.match(e.message, /fall into cell/);
+    assert.equal(created(one)[0].links, 0);
+    assert.match(JSON.stringify(one.notes), /links no cells/);
+    assert.deepEqual(await linksOf(created(one)[0].i), []);
+    assert.equal(await rebuildDiff(), 0);
+    await undo();
     const twice = await h.ok("add", {
       type: "route",
       items: [
