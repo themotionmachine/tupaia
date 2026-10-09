@@ -366,7 +366,12 @@ describe("tupaia-mcp --http daemon", () => {
 
     const tools = await raw(d.st.port, { path: "/tools", headers: auth(d.st) });
     assert.equal(tools.status, 200);
-    assert.equal(tools.json.tools.length, 21);
+    // the same tools the daemon lists over MCP (the count grows as tool modules are added)
+    const viaMcp = await httpClient(d.st, "legacy");
+    clients.push(viaMcp);
+    const mcpNames = (await viaMcp.listTools()).tools.map(t => t.name).sort();
+    assert.deepEqual(tools.json.tools.map((t: { name: string }) => t.name).sort(), mcpNames);
+    assert.ok(mcpNames.length >= 21, `${mcpNames.length} tools`);
     const find = tools.json.tools.find((t: { name: string }) => t.name === "find");
     assert.equal(find.inputSchema.type, "object");
     assert.ok(find.inputSchema.properties.type, "input schema has properties");
@@ -374,7 +379,7 @@ describe("tupaia-mcp --http daemon", () => {
     const h = (await raw(d.st.port, { headers: auth(d.st) })).json;
     assert.equal(h.pid, d.child.pid);
     assert.equal(h.browser, "ready");
-    assert.equal(h.tools, 21);
+    assert.equal(h.tools, mcpNames.length, "/health counts the same tools");
     assert.equal(h.idleMin, 120);
   });
 
@@ -489,9 +494,13 @@ describe("tupaia-mcp --http daemon", () => {
 
     const names = await cli(["tools", "--names"], env);
     assert.equal(names.code, 0);
-    assert.equal(names.stdout.trim().split("\n").length, 21);
+    const listed = (await raw(d.st.port, { path: "/tools", headers: auth(d.st) })).json.tools.map(
+      (t: { name: string }) => t.name
+    );
+    assert.ok(listed.length >= 21, `${listed.length} tools`);
+    assert.deepEqual(names.stdout.trim().split("\n").sort(), [...listed].sort());
     const namesJson = await cli(["tools", "--names", "--json"], env);
-    assert.equal(JSON.parse(namesJson.stdout).length, 21);
+    assert.deepEqual([...JSON.parse(namesJson.stdout)].sort(), [...listed].sort());
     const one = await cli(["tools", "screenshot"], env);
     assert.equal(one.code, 0, one.stderr);
     assert.match(one.stdout, /^screenshot \(/);

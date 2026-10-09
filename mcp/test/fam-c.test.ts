@@ -2,9 +2,13 @@
 // where two tracks touch the same tool or the same diff. Own servers on tests/fixtures/demo.map in
 // local mode; never the live site.
 import assert from "node:assert/strict";
+import { type ChildProcess, spawn } from "node:child_process";
+import fs from "node:fs";
 import { after, before, describe, test } from "node:test";
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { compactChanges, countChanges } from "../src/compact.ts";
-import { alive, type Harness, startServer, textOf } from "./helpers.ts";
+import { type DaemonState, readState } from "../src/daemon-state.ts";
+import { alive, type Harness, MCP_ROOT, SERVER, safeEnv, startServer, textOf, waitFor } from "./helpers.ts";
 
 type Obj = Record<string, any>;
 
@@ -167,5 +171,95 @@ describe("fam-c: screenshot, map_info and edit across tracks", () => {
     await h.ok("map_info", { since: "none" }); // sets the checkpoint
     const c = await h.ok("map_info", { since: "checkpoint", diff: "counts" });
     assert.equal(c.changed, false, JSON.stringify(c));
+  });
+});
+
+describe("fam-c: the --http daemon serves this family's tools like stdio", () => {
+  let child: ChildProcess | null = null;
+  let st: DaemonState | null = null;
+  let stdio: Harness | null = null;
+  let client: Client | null = null;
+
+  before(async () => {
+    const env = safeEnv();
+    const c = spawn(process.execPath, [SERVER, "--http"], { env, cwd: MCP_ROOT, stdio: ["ignore", "pipe", "pipe"] });
+    child = c;
+    const log: string[] = [];
+    c.stdout?.on("data", d => log.push(String(d)));
+    c.stderr?.on("data", d => log.push(String(d)));
+    await waitFor(() => readState(env.TUPAIA_OUT)?.pid === c.pid || c.exitCode !== null, 90_000);
+    st = readState(env.TUPAIA_OUT);
+    if (!st || st.pid !== c.pid) throw new Error(`the daemon did not start: ${log.join("")}`);
+    const transport = new StreamableHTTPClientTransport(new URL(`${st.url}/mcp`), {
+      requestInit: { headers: { Authorization: `Bearer ${st.token}` } }
+    });
+    client = new Client({ name: "fam-c-test", version: "0.0.0" }, { versionNegotiation: { mode: "legacy" } });
+    await client.connect(transport);
+  });
+
+  after(async () => {
+    await client?.close().catch(() => {});
+    if (stdio && alive(stdio.pid)) await stdio.close();
+    if (child && child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGTERM");
+      await waitFor(() => child?.exitCode !== null || child?.signalCode !== null, 30_000);
+    }
+  });
+
+  const call = async (name: string, args: Record<string, unknown>) => {
+    const s = st as DaemonState;
+    const r = await fetch(`${s.url}/call`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${s.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ name, args })
+    });
+    assert.equal(r.status, 200);
+    return (await r.json()) as { isError: boolean; text: string[]; images: string[] };
+  };
+
+  test("the MCP listing over HTTP equals stdio's, with lint, display labels, edit map and screenshot crop", async () => {
+    stdio = await startServer();
+    const viaStdio = (await stdio.client.listTools()).tools;
+    const viaHttp = (await (client as Client).listTools()).tools;
+    const shape = (ts: Array<Record<string, unknown>>) =>
+      ts
+        .map(t => ({ name: t.name, description: t.description, inputSchema: t.inputSchema }))
+        .sort((a, b) => String(a.name).localeCompare(String(b.name)));
+    assert.deepEqual(shape(viaHttp), shape(viaStdio));
+    const by = new Map(viaHttp.map(t => [t.name, t]));
+    assert.ok(by.has("lint"), "lint is registered per session");
+    const props = (n: string) => (by.get(n)?.inputSchema as { properties: Obj }).properties;
+    assert.ok(props("display").labels, "display labels (labels track)");
+    assert.ok(props("screenshot").crop && props("screenshot").labels, "screenshot crop + labels (tokens, labels)");
+    assert.ok(props("edit").recalculate && props("edit").rows, "edit recalculate + rows (settings, tokens)");
+    assert.ok(props("find").format, "find format (tokens)");
+    for (const t of viaHttp) assert.ok((t.description ?? "").length <= 2048, `${t.name} description too long`);
+    await stdio.close();
+  });
+
+  test("/call runs compact text results, lint, and a crop compare whose PNG args go to the page as one string", async () => {
+    const load = await call("load_map", { path: "tests/fixtures/demo.map" });
+    assert.equal(load.isError, false, load.text.join("\n"));
+    const compact = await call("find", { type: "burg", limit: 3, format: "compact" });
+    assert.equal(compact.isError, false, compact.text.join("\n"));
+    assert.match(compact.text[0], /^burg: 3 of \d+/);
+    const lint = await call("lint", { checks: ["burg-cell-link"], limit: 0 });
+    assert.equal(lint.isError, false, lint.text.join("\n"));
+    assert.ok("totals" in JSON.parse(lint.text.at(-1) as string));
+    // demo.map draws no burg labels until something redraws them
+    await call("eval", { code: "1", readOnly: true, redraw: ["labels"] });
+    const base = await call("screenshot", {});
+    const baseBody = JSON.parse(base.text.at(-1) as string);
+    const baseId = baseBody.shotId as string;
+    // the compare sends both PNGs to the page as base64: far over the 32 KB one-string threshold
+    assert.ok(fs.statSync(baseBody.file).size > 32 * 1024, "premise: the PNG args take the jsonArgs path");
+    await call("display", { labels: { "*": { alwaysShow: true } } });
+    const cmp = await call("screenshot", { compare: baseId, crop: "changed" });
+    assert.equal(cmp.isError, false, cmp.text.join("\n"));
+    const body = JSON.parse(cmp.text.at(-1) as string);
+    assert.equal(body.compare.with, baseId);
+    assert.equal(cmp.images.length, 1, `the labels shown by the override are a change: ${cmp.text.join("\n")}`);
+    const list = await call("display", { labels: "list" });
+    assert.equal(list.isError, false, list.text.join("\n"));
   });
 });
