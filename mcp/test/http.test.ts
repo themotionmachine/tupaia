@@ -475,6 +475,17 @@ describe("tupaia CLI daemon lifecycle", () => {
       assert.ok(fs.readFileSync(path.join(env.TUPAIA_OUT, "daemon.log"), "utf8").includes("ready: http"));
       const again = await cli(["call", "session"], env);
       assert.doesNotMatch(again.stderr, /starting one/);
+      // Claude Code's headersHelper gets the registered URL; the port must match the daemon's
+      const helper = await cli(["headers"], { ...env, CLAUDE_CODE_MCP_SERVER_URL: `http://127.0.0.1:${port}/mcp` });
+      assert.equal(helper.code, 0, helper.stderr);
+      assert.deepEqual(JSON.parse(helper.stdout), { Authorization: `Bearer ${st.token}` });
+      const wrong = await cli(["headers"], { ...env, CLAUDE_CODE_MCP_SERVER_URL: `http://127.0.0.1:${port + 1}/mcp` });
+      assert.equal(wrong.code, 2);
+      assert.equal(wrong.stdout, "");
+      assert.match(
+        wrong.stderr,
+        new RegExp(`listens on port ${port}, but this server is registered at port ${port + 1}`)
+      );
     } finally {
       const s = await cli(["stop"], env);
       assert.equal(s.code, 0, s.stderr);

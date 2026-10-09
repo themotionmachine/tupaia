@@ -160,6 +160,17 @@ function jsonSchemaOf(schema: unknown): Record<string, unknown> {
   }
 }
 
+/** A 2026-07-28 `subscriptions/listen` request (a long-lived SSE stream of change notifications). */
+function isListenRequest(body: Buffer | undefined): boolean {
+  if (!body?.length || body.length > 65_536) return false;
+  try {
+    const m = JSON.parse(body.toString("utf8")) as { method?: unknown };
+    return !!m && typeof m === "object" && m.method === "subscriptions/listen";
+  } catch {
+    return false;
+  }
+}
+
 function extOf(mime: string): string {
   if (/png/i.test(mime)) return "png";
   if (/webp/i.test(mime)) return "webp";
@@ -201,10 +212,12 @@ export async function startHttpDaemon(o: HttpOptions): Promise<HttpDaemon> {
   const startedAt = new Date().toISOString();
   let toolsCache: unknown[] | null = null;
 
-  const begin = (res: http.ServerResponse) => {
-    active++;
+  /** Count a request; `busy` ones (calls, not long-lived notification streams) hold off idle shutdown. */
+  const begin = (res: http.ServerResponse, busy = true) => {
     requests++;
     lastActivity = Date.now();
+    if (!busy) return;
+    active++;
     res.once("close", () => {
       active--;
       lastActivity = Date.now();
@@ -263,14 +276,19 @@ export async function startHttpDaemon(o: HttpOptions): Promise<HttpDaemon> {
   };
 
   const handleMcp = async (req: http.IncomingMessage, res: http.ServerResponse) => {
-    begin(res);
     const method = (req.method ?? "GET").toUpperCase();
     let body: Buffer | undefined;
     if (method !== "GET" && method !== "HEAD") {
       const b = await readBody(req, BODY_MAX);
-      if (b === null) return sendJson(res, 413, { error: `body over ${BODY_MAX} bytes` });
+      if (b === null) {
+        begin(res);
+        return sendJson(res, 413, { error: `body over ${BODY_MAX} bytes` });
+      }
       body = b;
     }
+    // A connected client may hold a notification stream open for hours; that is not activity
+    // (idle shutdown still applies, and a stop does not wait for it).
+    begin(res, method !== "GET" && !isListenRequest(body));
     const headers = new Headers();
     for (let i = 0; i + 1 < req.rawHeaders.length; i += 2) headers.append(req.rawHeaders[i], req.rawHeaders[i + 1]);
     const request = new Request(`http://127.0.0.1:${port}${req.url ?? "/mcp"}`, {

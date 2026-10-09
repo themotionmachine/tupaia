@@ -396,6 +396,10 @@ async function cmdHeaders(cfg: Config, opts: Opts): Promise<number> {
     }
   }
   const f = await ensureDaemon(cfg, opts);
+  if (opts.port && Number(opts.port) && Number(opts.port) !== f.st.port)
+    throw new CliError(
+      `the daemon for ${cfg.outDir} listens on port ${f.st.port}, but this server is registered at port ${opts.port}: stop it (tupaia stop) or give the registration its own TUPAIA_OUT`
+    );
   out(JSON.stringify({ Authorization: `Bearer ${f.st.token}` }));
   return 0;
 }
