@@ -631,12 +631,13 @@
   // ---------------------------------------------------------------- per-entry plan
 
   /**
-   * The key of an entry: {ref} (explicit, must exist), {ref, byId} (its `id`; an extension type
-   * such as a route group may then create it) or {name} (labels: text).
+   * The key of an entry: {ref} (explicit, must exist), {ref, byId} (the `id` of an extension
+   * type such as a route group, which may then create it) or {name} (labels: text). A core
+   * type's `id` is not a key (a spec may number its entries its own way): ref is.
    */
   function keyOf(type, e) {
     if (e.ref !== undefined) return { ref: e.ref };
-    if ((typeof e.id === "string" && e.id.trim()) || Number.isInteger(e.id)) return { ref: e.id, byId: true };
+    if (!CORE_TYPES.includes(type) && typeof e.id === "string" && e.id.trim()) return { ref: e.id, byId: true };
     const name = type === "label" ? e.text : e.name;
     if (typeof name === "string" && name.trim()) return { name };
     return null;
