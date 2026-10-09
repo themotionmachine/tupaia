@@ -87,10 +87,12 @@ an upstream rebase.
 
 One more hook, in `public/main.js` `invokeActiveZooming` (two `// tupaia-mcp:` blocks, labels
 and emblems): a label or emblem group may carry `data-min-size` (replaces the lower bound of the
-automatic hiding, 6 for labels and 25 for emblems) and `data-always-show` (`1` skips the lower
-and upper bound). The MCP `display {labels}` writes them on the SVG groups, so they ride in the
-`.map` file; a group without them behaves exactly as upstream, and an older client ignores them.
-Re-check after an upstream rebase.
+automatic hiding, 6 for labels and 25 for emblems), `data-max-size` (replaces the upper bound, 60
+and 300) and `data-always-show` (`1` skips both bounds). The MCP `display {labels}` writes them on
+the SVG groups, so they ride in the `.map` file; a group without them behaves exactly as upstream,
+and an older client ignores them. A matching small filter in `src/renderers/draw-burg-labels.ts`
+`createLabelGroups` keeps a new burg group, which copies the `town` style, from inheriting them.
+Re-check both after an upstream rebase.
 
 ## Local smoke test (no Cloudflare account needed)
 

@@ -47,8 +47,15 @@ export const ScreenshotInput = z.object({
     .min(0.1)
     .max(20)
     .optional()
-    .describe("Absolute zoom (scale) 1-20; default fits the target (8 for points)"),
-  full: z.boolean().optional().describe("Whole map rasterised at graph size x scale (ignores target/zoom)"),
+    .describe(
+      "Absolute zoom (scale) 0.1-20, raised to the full-map fit when lower (view.scale in the result is the zoom used); default fits the target (8 for points)"
+    ),
+  full: z
+    .boolean()
+    .optional()
+    .describe(
+      "Whole map rasterised at graph size x scale (ignores target/zoom); labels are sized and hidden for the full-map zoom, whatever the camera was"
+    ),
   view: z.string().optional().describe("Reuse the exact view of an earlier shot: 'last' or a shotId"),
   layers: z.object({ on: z.array(LayerName).optional(), off: z.array(LayerName).optional() }).optional(),
   keepLayers: z
@@ -59,7 +66,7 @@ export const ScreenshotInput = z.object({
     .enum(["all"])
     .optional()
     .describe(
-      "'all': show every label for this shot only, including the ones the zoom rule hides (turns the labels layer on if it is off); nothing is kept and there is no undo entry"
+      "'all': show every text label for this shot only, including the ones the zoom rule hides (not emblems; turns the labels layer on if it is off); nothing is kept and there is no undo entry"
     ),
   hideUi: z.boolean().optional().describe("Hide UI overlays and dialogs (default true)"),
   format: z.enum(["jpeg", "png"]).optional().describe("Returned image format (default jpeg)"),
@@ -84,6 +91,9 @@ export const ScreenshotInput = z.object({
     .describe("Per-channel difference that counts as changed (default 32)")
 });
 
+/** Servers whose last labels:'all' shot could not clean up (the temporary <style> may still be in the page). */
+const labelsShotDirty = new WeakSet<ToolContext>();
+
 export async function takeScreenshot(
   ctx: ToolContext,
   scope: CallScope,
@@ -99,6 +109,13 @@ export async function takeScreenshot(
   if (args.labels === "all" && args.layers?.off?.includes("labels"))
     throw new ToolError("BAD_ARGS", "labels:'all' needs the labels layer on, but layers.off lists 'labels'");
 
+  if (labelsShotDirty.has(ctx)) {
+    // an earlier labels:'all' shot failed to clean up: drop its style tag before this shot sees it
+    await scope.call("labelsShot", { on: false }).then(
+      () => labelsShotDirty.delete(ctx),
+      () => {}
+    );
+  }
   let labelsShot: { layerTurnedOn: boolean } | null = null;
   let labelsRevealed: number | undefined;
   let layerChange: { changed: unknown[]; previous: { on: string[]; off: string[] } } | null = null;
@@ -114,7 +131,10 @@ export async function takeScreenshot(
       if (args.keepLayers)
         await scope.record("display", args, { on: args.layers.on ?? [], off: args.layers.off ?? [] });
     }
-    if (args.labels === "all") labelsShot = await scope.call<{ layerTurnedOn: boolean }>("labelsShot", { on: true });
+    if (args.labels === "all") {
+      labelsShotDirty.add(ctx);
+      labelsShot = await scope.call<{ layerTurnedOn: boolean }>("labelsShot", { on: true });
+    }
     if (full) {
       const r = await scope.call<Encoded>("rasterize", { scale, format: "png" }, { noAlerts: true });
       png = Buffer.from(r.b64, "base64");
@@ -153,6 +173,11 @@ export async function takeScreenshot(
         .call<{ revealed: number }>("labelsShot", { on: false, restoreLayer: labelsShot.layerTurnedOn })
         .catch(() => null);
       labelsRevealed = r?.revealed;
+      if (r) labelsShotDirty.delete(ctx);
+      else
+        scope.notes.push(
+          "labels:'all' could not be undone in the page (its temporary style may remain); the next screenshot retries, or reload the page"
+        );
     }
     if (layerChange && !args.keepLayers) {
       const prev = layerChange.previous;
@@ -255,7 +280,7 @@ export function register(ctx: ToolContext): void {
     {
       title: "Screenshot the map",
       description:
-        "See the map. Frames target {entity:{type,ref}} | {bbox:[x0,y0,x1,y1]} | {at:Place} at an optional zoom (1-20; default fits the target, 8 for a point), or reuses an earlier shot's exact view (view:'last'|shotId), or keeps the current view. full:true rasterises the whole map instead. layers:{on,off} apply only for this shot (keepLayers:true keeps them). labels:'all' shows every label for this shot only, including the ones the zoom rule hides at full-map zoom (display {labels} changes that for good). Returns a JPEG (maxSide 1024 by default) plus {shotId, file (full-resolution PNG), view, mapBboxShown}. compare:shotId diffs against that shot at the same view and returns the diff image (red = changed) with changedPct. Take one after any visual change, framed on what changed; skip it after pure reads.",
+        "See the map. Frames target {entity:{type,ref}} | {bbox:[x0,y0,x1,y1]} | {at:Place} at an optional zoom (0.1-20, not below the full-map fit; default fits the target, 8 for a point), or reuses an earlier shot's exact view (view:'last'|shotId), or keeps the current view. full:true rasterises the whole map instead. layers:{on,off} apply only for this shot (keepLayers:true keeps them). labels:'all' shows every text label for this shot only, including the ones the zoom rule hides at full-map zoom (display {labels} changes that for good). full:true sizes labels for the full-map zoom whatever the camera was. Returns a JPEG (maxSide 1024 by default) plus {shotId, file (full-resolution PNG), view, mapBboxShown}. compare:shotId diffs against that shot at the same view and returns the diff image (red = changed) with changedPct. Take one after any visual change, framed on what changed; skip it after pure reads.",
       inputSchema: ScreenshotInput,
       annotations: { readOnlyHint: true, openWorldHint: false },
       kind: "view"
