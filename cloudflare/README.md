@@ -124,6 +124,15 @@ map ("Replace the shared map?"). `public/modules/ui/transform-tool.js` computes 
 `notes` across its `undraw()` so Resample carries them over (it dropped them). Re-check all of these
 after an upstream rebase.
 
+Two load-time data integrity repairs in `src/io/load.ts` (marked `// tupaia-mcp:`) now call
+`src/io/load-repairs.ts`, each with an upstream bug fixed: cells of an invalid or removed culture
+are reset to culture 0 (upstream reset their province instead, leaving the bad culture and
+wiping valid provinces), and the state capital checks set `state.capital` to the burg they promote
+for a capital-less state, or keep, of several capitals the one `state.capital` names (upstream
+promoted a burg without updating `state.capital`, and always kept the first). Only maps with those
+inconsistencies load differently; old clients load every file as before. Re-check both after an
+upstream rebase (the blocks moved out of `load.ts`).
+
 One more one-line guard: `focusOn` in `public/main.js` ignores a `?burg=` id whose record
 is a stub left by the MCP `compact` tool (`{i, removed:true}`, no coordinates) instead of
 zooming to NaN; re-check it after a rebase too.
