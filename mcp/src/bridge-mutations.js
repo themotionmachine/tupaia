@@ -2221,6 +2221,8 @@
     if (P.height) set.height = clone(P.height);
     const resolved = { select: { cells: P.cells.slice() }, set };
     if (graph) resolved.graph = graph;
+    // a risk rebuild is deterministic (the app reseeds from the map seed): replay checks its graph
+    if (P.height?.rebuild === "risk") resolved.graphAfter = T.cellGraph?.() ?? null;
     if (a.redraw !== undefined) resolved.redraw = a.redraw;
     return { cells: P.cells.length, set: out, resolved, ...rd, notes: [...c.notes] };
   };

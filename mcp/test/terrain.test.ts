@@ -378,42 +378,71 @@ describe("set_heights and flow on demo.map", () => {
       await h.ok("load_map", { path: files.base });
     });
 
-    test("set_heights is logged replayably with the final heights; rebase onto the same base gives the same cell graph", async () => {
+    test("set_heights, a risk paint and a keep import replay onto the same base to the same cells and heights", async () => {
       await h.ok("sketch", { action: "start", slug: "t-terrain" });
       const r = await h.ok("set_heights", { grid: next, fill: true }, 240_000);
       assert.equal(r.cellsRenumbered, true);
       graphAfter = await graph();
-      // a literal cell list on the new graph
+      // op 2: a literal cell list on the new graph
       const st = await ev("return pack.states.find(s => s.i && !s.removed).i");
       await h.ok("paint_cells", {
         select: { circle: { at: { x: spots.burg.x, y: spots.burg.y }, radius: 25 } },
         set: { state: st }
       });
+      // op 3: a paint_cells height rebuild (risk) is replayable too (it records the graph it built)
+      await h.ok(
+        "paint_cells",
+        {
+          select: { circle: { at: { x: spots.coast.x, y: spots.coast.y }, radius: 40 } },
+          set: { height: { delta: 4, rebuild: "risk" } }
+        },
+        240_000
+      );
+      const g3 = await graph();
+      assert.notEqual(g3, graphAfter);
+      // op 4: a land-only import that keeps the cells
+      const now = (await ev("return Array.from(grid.cells.h)")) as number[];
+      const hill = now.map((v, i) =>
+        v >= 20 && Math.hypot(pts[i][0] - spots.burg.x, pts[i][1] - spots.burg.y) < 40 ? Math.min(100, v + 3) : v
+      );
+      const k = await h.ok("set_heights", { grid: hill, rebuild: "keep" }, 240_000);
+      assert.equal(k.cellsRenumbered, false);
+      const want = await ev("return __tupaia.fns.digest().cells");
       const s = await h.ok("sketch", { action: "status", full: true });
       assert.equal(s.blobOnly, false, JSON.stringify(s.blobOnlyReasons));
       const recs = s.records as Obj[];
-      assert.equal(recs[0].tool, "set_heights");
+      assert.deepEqual(
+        recs.map(x => x.tool),
+        ["set_heights", "paint_cells", "paint_cells", "set_heights"]
+      );
       assert.match(recs[0].summary, /Set heights from grid/);
       assert.equal(recs[0].args.grid, `<${n} grid heights>`, "the log keeps a description, not the array");
       const res = recs[0].resolved as Obj;
       assert.equal(res.cells, n);
       assert.equal(res.graphAfter, graphAfter);
+      assert.equal(Buffer.from(res.heights, "base64").length, n);
       assert.equal(recs[1].resolved.graph, graphAfter, "the paint refers to the rebuilt graph");
-      const bytes = Buffer.from(res.heights, "base64");
-      assert.equal(bytes.length, n);
+      assert.equal(recs[2].resolved.graphAfter, g3, "the risk paint records the graph it built");
       const reb = await h.ok("sketch", { action: "rebase", onto: { path: files.base } }, 400_000);
       assert.equal(reb.completed, true, JSON.stringify(reb.conflicts));
-      assert.deepEqual(reb.applied, [1, 2]);
-      assert.equal(await graph(), graphAfter, "same heights on the same grid give the same cells");
+      assert.deepEqual(reb.applied, [1, 2, 3, 4]);
+      assert.equal(await graph(), g3, "same heights on the same grid give the same cells");
+      assert.deepEqual(await ev("return __tupaia.fns.digest().cells"), want, "same heights, biomes, rivers, owners");
       assert.ok(!JSON.stringify(reb.notes ?? []).includes("another cell graph"));
     });
 
-    test("a base with a burg on new sea: the op applies with a note, the literal cell list conflicts", async () => {
+    test("a base with a burg on new sea: the import applies with a note, ops on the old cells conflict", async () => {
       const reb = await h.ok("sketch", { action: "rebase", onto: { path: files.burg }, onConflict: "skip" }, 400_000);
       assert.deepEqual(reb.applied, [1]);
       assert.match(JSON.stringify(reb.notes), /op 1: set_heights rebuilt another cell graph/);
-      assert.equal((reb.conflicts as Obj[])[0].seq, 2);
-      assert.match((reb.conflicts as Obj[])[0].reason, /renumbered/);
+      const conflicts = reb.conflicts as Obj[];
+      assert.deepEqual(
+        conflicts.map(c => c.seq),
+        [2, 3, 4]
+      );
+      assert.match(conflicts[0].reason, /renumbered/);
+      assert.match(conflicts[1].reason, /renumbered/);
+      assert.match(conflicts[2].reason, /cross height 20/, "the keep import would sink the burg's cell");
       const drift = await ev(
         "const b = pack.burgs.find(b => b && b.name === 'Driftwood'); return { found: !!b, removed: !!b?.removed, h: b ? pack.cells.h[b.cell] : null };"
       );

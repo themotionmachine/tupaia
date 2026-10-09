@@ -349,6 +349,15 @@ export async function replayOps(
     if (ext?.renumbers?.(r)) pageGraph = undefined;
     const extNote = ext?.afterReplay?.(r, applied, out);
     if (extNote) res.notes.push(`op ${op.seq}: ${extNote}`);
+    const wanted = op.tool === "paint_cells" ? (r as PaintResolved).graphAfter : undefined;
+    if (typeof wanted === "string") {
+      // a height rebuild:'risk' renumbered the cells
+      pageGraph = undefined;
+      if ((applied as PaintResolved).graphAfter !== wanted)
+        res.notes.push(
+          `op ${op.seq}: the height rebuild produced another cell graph than the sketch recorded (the heights or burgs there differ now): later literal cell lists will conflict`
+        );
+    }
     res.applied.push(op.seq);
     res.records.push({
       ...op,

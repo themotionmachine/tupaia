@@ -80,6 +80,9 @@ export function unreplayableReason(tool: string, resolved: Resolved | null): str
     const h = (resolved as PaintResolved).set?.height as { rebuild?: unknown } | undefined;
     if (h && typeof h === "object") {
       const rebuild = h.rebuild ?? "keep";
+      // a risk rebuild recorded with the graph it produced replays deterministically (the app
+      // reseeds from the map seed); older records without it stay blob-only
+      if (rebuild === "risk" && typeof (resolved as PaintResolved).graphAfter === "string") return null;
       if (rebuild !== "keep")
         return (
           NOT_REPLAYABLE[`paint_cells:${String(rebuild)}`] ??
@@ -129,6 +132,8 @@ export interface PaintResolved {
   set: Record<string, unknown>;
   /** Fingerprint of the cell graph `select.cells` refers to (bridge cellGraph). */
   graph?: string;
+  /** height rebuild:'risk': the cell graph the rebuild produced (replay compares its own). */
+  graphAfter?: string;
   redraw?: unknown;
 }
 
