@@ -38,7 +38,14 @@ export interface SetHeightsResolved {
   baseDigest: string;
   /** Hash of the final heights. */
   heightsDigest: string;
-  options: { rebuild: "risk" | "keep"; erosion: boolean; keepHeights: boolean; biomes: "redefine" | "keep" };
+  /** rivers: absent in ops logged before keep became local (replays as 'keep'). */
+  options: {
+    rebuild: "risk" | "keep";
+    erosion: boolean;
+    keepHeights: boolean;
+    biomes: "redefine" | "keep";
+    rivers?: "keep" | "regenerate";
+  };
   /** Pack cell graph after the rebuild (bridge cellGraph); replay compares its own. */
   graphAfter: string | null;
   /** Box of the changed grid cells [x0, y0, x1, y1] in map px (the sketch summary frames on it). */
@@ -135,7 +142,8 @@ function compactArgs(a: HeightArgs & Record<string, unknown>): Record<string, un
 }
 
 function describeOptions(o: SetHeightsResolved["options"]): string {
-  return `rebuild ${o.rebuild}, erosion ${o.erosion ? "on" : "off"}, biomes ${o.biomes}${o.keepHeights ? "" : ", keepHeights off"}`;
+  const rivers = o.rebuild === "keep" ? `, rivers ${o.rivers ?? "keep"}` : "";
+  return `rebuild ${o.rebuild}${rivers}, erosion ${o.erosion ? "on" : "off"}, biomes ${o.biomes}${o.keepHeights ? "" : ", keepHeights off"}`;
 }
 
 registerReplayable("set_heights", {
@@ -207,7 +215,7 @@ export function register(ctx: ToolContext): void {
     {
       title: "Import terrain (set heights)",
       description:
-        "Replace the heightmap in one call, then rebuild what depends on it. Exactly one source: grid (dense, one 0-100 height per GRID cell in grid order; a length mismatch error gives the expected length and grid geometry; eval 'return grid.points' gives each cell's [x,y]), pack ({<packCellId>: h}, sparse) or image ({path | dataUrl, invert?, range?, channel?}, stretched over the map). Sea level is 20. fill:true fills land depressions first (priority flood). rebuild 'risk' (default) re-packs the map: coastline, lakes, climate, rivers and biomes are recomputed and cell ids change; burgs, states, cultures, religions, provinces, zones, routes, markers and regiments stay where land remains and move to the new cells (a burg on new water keeps its cell as land, height 20); lake and island names carry over. 'keep' refuses any change across height 20 and keeps cell ids, still recomputing climate, rivers and biomes. The rebuild always runs, even with no height changed (an identity import is not a no-op). Rivers are regenerated; a new river overlapping an old course keeps its id, name and type (notes stay on it); the result counts kept/new/gone rivers and lists notes left on gone ones. erosion (default false) lowers river beds; keepHeights (default true) sets land heights the rebuild changed back (heightsRestored). biomes 'redefine' (default) recomputes every biome; 'keep' keeps each surviving land cell's biome. dryRun:true changes nothing and returns cells changed, land/water flips, land %, lakes, pits, fill raise, grid geometry, burgs on new water, painted biomes 'redefine' would recompute; detail:true lists pit and fill-raised cells. One auto-undo entry; replayable in a sketch (only the changed cells are logged; replay onto a map whose terrain changed since keeps its other heights).",
+        "Replace the heightmap in one call, then rebuild what depends on it. Exactly one source: grid (dense, one 0-100 height per GRID cell in grid order; a length mismatch error gives the expected length and grid geometry; eval 'return grid.points' gives each cell's [x,y]), pack ({<packCellId>: h}, sparse) or image ({path | dataUrl, invert?, range?, channel?}, stretched over the map). Sea level is 20. fill:true fills land depressions first (priority flood). rebuild 'risk' (default) re-packs the map: coastline, lakes, climate, rivers and biomes are recomputed and cell ids change; burgs, states, cultures, religions, provinces, zones, routes, markers and regiments stay where land remains and move to the new cells (a burg on new water keeps its cell as land, height 20); lake and island names carry over; rivers are regenerated (a new river overlapping an old course keeps its id, name and type; the result counts kept/new/gone rivers). 'keep' refuses any change across height 20, keeps cell ids and is local: only the changed cells' heights, temperature, biome and lake levels are updated (result local {packCells, temperature, biomes, lakes, rivers {through, climbing}}); rivers, precipitation, other biomes, burg economies and treasuries stay; rivers:'regenerate' is the opt-in global river pass. The rebuild runs even with no height changed. erosion (default false; with keep it implies rivers:'regenerate') lowers river beds; keepHeights (default true) sets land heights the rebuild changed back. biomes 'redefine' (default) recomputes biomes (risk: every one; keep: the changed cells'); 'keep' keeps them. For a few cells paint_cells height is the same local keep. dryRun:true changes nothing and returns cells changed, land/water flips, land %, lakes, pits, fill raise, grid geometry, burgs on new water, painted biomes, rivers; detail:true lists pit and fill-raised cells. One auto-undo entry; replayable in a sketch (only the changed cells are logged).",
       inputSchema: z.object({
         ...HeightSource,
         fill: z
@@ -217,7 +225,16 @@ export function register(ctx: ToolContext): void {
         rebuild: z.enum(["risk", "keep"]).optional().describe("Default 'risk'"),
         erosion: z.boolean().optional().describe("Default false"),
         keepHeights: z.boolean().optional().describe("Default true"),
-        biomes: z.enum(["redefine", "keep"]).optional().describe("Default 'redefine'"),
+        biomes: z
+          .enum(["redefine", "keep"])
+          .optional()
+          .describe("Default 'redefine' (rebuild 'keep': only the changed cells' biomes, from their new temperature)"),
+        rivers: z
+          .enum(["keep", "regenerate"])
+          .optional()
+          .describe(
+            "rebuild 'keep' only. 'keep' (default; 'regenerate' when erosion is on) leaves every river as it is and lists rivers through the changed cells that now climb. 'regenerate' re-runs the river generator over the whole map on the current precipitation (ids carried by course) and recomputes the biome of cells whose river or flux changed; the economy is never re-rolled"
+          ),
         dryRun: z.boolean().optional().describe("Return the counts and change nothing"),
         detail: z
           .boolean()

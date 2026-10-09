@@ -1973,7 +1973,7 @@
 
   function prepareHeight(h) {
     if (!isObj(h)) fail("BAD_ARGS", "height is {value|delta|smooth, rebuild:'keep'|'risk'|'erase'}");
-    const HEIGHT_KEYS = ["value", "delta", "smooth", "rebuild", "clamp", "erosion", "confirmErase"];
+    const HEIGHT_KEYS = ["value", "delta", "smooth", "rebuild", "clamp", "erosion", "confirmErase", "biomes"];
     for (const k of Object.keys(h))
       if (!HEIGHT_KEYS.includes(k))
         fail("BAD_FIELD", `height does not take '${k}'; allowed: ${HEIGHT_KEYS.join(", ")}`, {
@@ -1993,6 +1993,13 @@
     if (h.smooth !== undefined) num("height.smooth", 1, 10)(h.smooth);
     if (h.clamp !== undefined) bool("height.clamp")(h.clamp);
     if (h.erosion !== undefined) bool("height.erosion")(h.erosion);
+    if (h.biomes !== undefined && !["redefine", "keep"].includes(h.biomes))
+      fail(
+        "BAD_ARGS",
+        "height.biomes is 'redefine' (default: the changed cells' biomes follow their new climate) or 'keep'"
+      );
+    if (h.biomes !== undefined && rebuild !== "keep")
+      fail("BAD_ARGS", "height.biomes goes with rebuild:'keep' (risk and erase recompute every biome)");
     return { ...h, rebuild };
   }
 
@@ -2603,6 +2610,139 @@
     }
   }
 
+  // ---------------------------------------------------------------- local height update
+  // rebuild:'keep' (paint_cells height, set_heights) is local: it recomputes only what the
+  // changed cells' heights feed, never a global pass (no precipitation, river, biome, ice or
+  // economy regeneration, so burg economies, state treasuries and far biomes stay as they were).
+
+  /** Biome of pack cell i as Biomes.define gives it (same moisture formula and summing order). */
+  function climateBiome(i) {
+    const C = pack.cells;
+    const prec = grid.cells.prec;
+    const h = C.h[i];
+    if (h < 20) return 0;
+    let moisture = prec[C.g[i]];
+    if (C.r[i]) moisture += Math.max(C.fl[i] / 10, 2);
+    let s = 0;
+    let k = 0;
+    for (const nb of C.c[i])
+      if (C.h[nb] >= 20) {
+        s += prec[C.g[nb]];
+        k++;
+      }
+    s += moisture;
+    k++;
+    return Biomes.getId(Math.round(4 + s / k), grid.cells.temp[C.g[i]], h, Boolean(C.r[i]));
+  }
+
+  /** Recompute the biome of these pack cells (land only); returns how many changed. */
+  function localBiomes(cells) {
+    const C = pack.cells;
+    if (!grid.cells.prec || !grid.cells.temp || typeof Biomes?.getId !== "function") return 0;
+    let n = 0;
+    for (const i of cells) {
+      if (C.h[i] < 20) continue;
+      const b = climateBiome(i);
+      if (b !== C.biome[i]) {
+        C.biome[i] = b;
+        n++;
+      }
+    }
+    return n;
+  }
+
+  /** Rivers whose course holds a cell of `set` (pack ids), and the uphill steps next to those cells. */
+  function riversThrough(set, before) {
+    const C = pack.cells;
+    const out = [];
+    for (const r of pack.rivers || []) {
+      const cs = r.cells || [];
+      if (!cs.some(x => set.has(x))) continue;
+      const climbs = [];
+      for (let k = 1; k < cs.length; k++) {
+        const a = cs[k - 1];
+        const b = cs[k];
+        if (!(set.has(a) || set.has(b)) || a < 0 || b < 0) continue;
+        if (C.h[a] < 20 || C.h[b] < 20 || C.h[b] <= C.h[a]) continue;
+        if (before?.has(`${a}>${b}`)) continue; // climbed before the change too
+        climbs.push(before ? `${a} (h${C.h[a]}) -> ${b} (h${C.h[b]})` : `${a}>${b}`);
+      }
+      out.push({ i: r.i, name: r.name || "", climbs });
+    }
+    return out;
+  }
+
+  /**
+   * The local part of a rebuild:'keep' height change on grid cells `edited` (grid.cells.h already
+   * holds the new heights): their pack cells' heights, their temperature, the level of lakes on
+   * their shore and (biomes !== 'keep') their biome. A neighbour's biome needs no update: its
+   * inputs (its own temperature, precipitation and height, and which neighbours are land) do not
+   * change. Returns counts and the rivers through the changed cells (kept, with climbs listed).
+   */
+  function localHeights(edited, opts = {}) {
+    const C = pack.cells;
+    const gset = edited instanceof Set ? edited : new Set(edited);
+    const cells = [];
+    for (const i of C.i) if (gset.has(C.g[i])) cells.push(i);
+    const set = new Set(cells);
+    const climbedBefore = new Set(riversThrough(set).flatMap(r => r.climbs));
+    for (const i of cells) C.h[i] = grid.cells.h[C.g[i]];
+    const out = { packCells: cells.length, temperature: 0, lakes: 0, biomes: 0, biomesKept: opts.biomes === "keep" };
+    // temperature: the app's formula for the changed cells only (a whole-map pass would also
+    // overwrite temperatures set by an earlier settings edit without recalculate)
+    const old = grid.cells.temp;
+    if (old && typeof calculateTemperatures === "function") {
+      calculateTemperatures();
+      const fresh = grid.cells.temp;
+      grid.cells.temp = old;
+      for (const g of gset)
+        if (old[g] !== fresh[g]) {
+          old[g] = fresh[g];
+          out.temperature++;
+        }
+    }
+    for (const ft of pack.features || []) {
+      if (!ft || ft.type !== "lake" || !Array.isArray(ft.shoreline) || !ft.shoreline.some(x => set.has(x))) continue;
+      const lvl = Lakes.getHeight(ft);
+      if (lvl !== ft.height) {
+        ft.height = lvl;
+        out.lakes++;
+      }
+    }
+    if (opts.biomes !== "keep") out.biomes = localBiomes(cells);
+    out.rivers = riversThrough(set, climbedBefore);
+    return out;
+  }
+
+  /** Notes for a local keep update (localHeights' result); returns the lean result block. */
+  function localHeightNotes(L, c, hint, riversRegenerated = false) {
+    const climbing = riversRegenerated ? [] : L.rivers.filter(r => r.climbs.length);
+    c.notes.add(
+      `rebuild:'keep' is local: heights, temperature${L.biomesKept ? "" : ", biome"} and lake levels of the ${L.packCells} changed cells were updated; precipitation, ${riversRegenerated ? "" : "rivers, "}other biomes, burg economies and state treasuries were not touched`
+    );
+    if (L.rivers.length && !riversRegenerated)
+      c.notes.add(
+        `rivers were kept: ${L.rivers.length} run through the changed cells${
+          climbing.length
+            ? `; ${climbing.length} now climb there: ${climbing
+                .slice(0, 3)
+                .map(r => `${r.name || "river"} (${r.i}) ${r.climbs[0]}`)
+                .join(", ")}${climbing.length > 3 ? ", ..." : ""} (${hint})`
+            : ""
+        }`
+      );
+    const block = {
+      packCells: L.packCells,
+      temperature: L.temperature,
+      biomes: L.biomes,
+      lakes: L.lakes,
+      rivers: { through: L.rivers.length }
+    };
+    if (climbing.length)
+      block.rivers.climbing = climbing.slice(0, 10).map(r => ({ i: r.i, name: r.name, steps: r.climbs.length }));
+    return block;
+  }
+
   async function paintHeight(H, packCells, write, c) {
     const C = pack.cells;
     const gh = grid.cells.h;
@@ -2688,9 +2828,10 @@
     for (const [g, v] of edits) gh[g] = v;
     if (H.rebuild === "keep") {
       const edited = new Set(edits.map(e => e[0]));
-      for (const i of C.i) if (edited.has(C.g[i])) C.h[i] = gh[C.g[i]];
+      const L = localHeights(edited, { biomes: H.biomes });
+      stats.local = localHeightNotes(L, c, "reroute them with edit river; rebuild:'risk' regenerates rivers");
       c.R.add("heightmap");
-      c.notes.add("heights changed in 'keep' mode: rivers, biomes and the coastline were not recomputed");
+      if (L.biomes) c.R.add("biomes");
     } else {
       const hm = heightmapInternals();
       const erosionEl = document.getElementById("allowErosion");
@@ -3210,7 +3351,10 @@
     finishRiskFeatures,
     riskRebuild,
     captureRivers,
-    carryRivers
+    carryRivers,
+    localHeights,
+    localHeightNotes,
+    localBiomes
   };
   // removal hooks for bridge-ext/clear.js (province/culture/religion removal, forced burg removal)
   Object.assign(T.mutations, { NO_REMOVE, identOf, stateInternals, errRow });

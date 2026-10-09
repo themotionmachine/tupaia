@@ -287,7 +287,13 @@ describe("set_heights and flow on demo.map", () => {
     assert.ok(((r.lakes as Obj).formed as number) >= 1, JSON.stringify(r.lakes));
     assert.equal((r.pits as Obj).after, 0, "fill leaves no pits");
     assert.ok((r.fill as Obj).cellsRaised >= 0);
-    assert.deepEqual(r.options, { rebuild: "risk", erosion: false, keepHeights: true, biomes: "redefine" });
+    assert.deepEqual(r.options, {
+      rebuild: "risk",
+      erosion: false,
+      keepHeights: true,
+      biomes: "redefine",
+      rivers: "regenerate"
+    });
     const g = r.grid as Obj;
     assert.equal(g.cells, n);
     assert.ok(g.cellsX > 0 && g.cellsY > 0 && g.spacing > 0, JSON.stringify(g));

@@ -11,7 +11,19 @@
 //                                       its parent's source, as after a split): the inverse
 //   reroute: {cells:[...]} | {from: Place, to: Place | 'edge', through?: [Place...], snap?, edge?}
 //                                       run a stretch, the lower course or the upper course of
-//                                       the river through other cells
+//                                       the river through other cells (a path that changes
+//                                       nothing is a no-op success with a note; a path through
+//                                       another river's loose end, e.g. after end, joins it)
+//   end: {at: Place|cell}               cut the river so it ends at `at`: a cell of its course
+//                                       (the cells below are dropped; it ends there, in water,
+//                                       on another river or loose for a later op to join), or
+//                                       a cell of another river / water next to its course (it
+//                                       joins there from the lowest course cell next to it)
+//   joinAt: {river?: ref, at: Place|cell}
+//                                       move where the river joins `river` (default its parent):
+//                                       its lower course is re-routed from the course cell
+//                                       nearest `at` to that confluence cell (cheapest land path,
+//                                       uphill steps cost more), as a lower-course reroute
 // Each op keeps pack.rivers, cells.r (the lowest river id owns a shared cell, as
 // Rivers.generate does), cells.fl, cells.conf, tributary parents and basins, lake
 // inlets/outlets and river notes consistent, recomputes source, mouth, discharge, length and
@@ -19,7 +31,8 @@
 // redraws the rivers layer. Ops of one call apply in order; an op on rivers an earlier op of the
 // call restructures is checked when it is applied.
 // Resolved (replayable) form: literal. mainStem {ref: tributary id, expect: hash of the course it
-// produced, name}, split {at:{cell}, name, type}, merge true, reroute {cells}; a split reports the
+// produced, name}, split {at:{cell}, name, type}, merge true, reroute {cells}, end {at:{cell}},
+// joinAt {ref, at:{cell}, cells} (the literal path); a split reports the
 // river it created. before/after of a structural field is the river's course without river ids
 // ("<n> cells <source>-><mouth> #<cell hash>"), as it was before the call.
 // Same rules as bridge-mutations.js: bare app globals at call time, no locals that shadow app
@@ -32,7 +45,7 @@
   const nameSpec = T.mutations.nameSpec;
   const fold = T.pure.fold;
 
-  const STRUCT = ["mainStem", "split", "merge", "reroute"];
+  const STRUCT = ["mainStem", "split", "merge", "reroute", "end", "joinAt"];
   const isObj = v => !!v && typeof v === "object" && !Array.isArray(v);
   const rn2 = v => Math.round(v * 100) / 100;
   const isLandCell = c => Number.isInteger(c) && c >= 0 && pack.cells.h[c] >= 20;
@@ -717,7 +730,7 @@
         `a reroute starts or ends on ${tag(x)}'s course (cells ${xc[0]}..${xc[n - 2]}); neither ${first} nor ${last} is on it`
       );
     if (cellsNew.length === n && cellsNew.every((c, k) => c === xc[k]))
-      refuse(`${tag(x)} already runs through these cells; nothing would change`);
+      return { noop: true, mode, path, cellsNew, orphans: [], captured: [], target: null, climbs: [] };
     const keptSet = new Set(kept);
     const others = courseIndex(x.i);
 
@@ -765,6 +778,23 @@
       const b = path[k];
       if (isLandCell(a) && isLandCell(b) && C.h[b] > C.h[a]) climbs.push(`${a} (h${C.h[a]}) -> ${b} (h${C.h[b]})`);
     }
+
+    // rivers that end loose on a cell the new course takes (not on a river or in water, e.g. after
+    // edit river {end}) join x there
+    const xcAll = new Set(xc);
+    const captured = [];
+    path.forEach((c, k) => {
+      if (k === path.length - 1 || !isLandCell(c) || xcAll.has(c)) return;
+      for (const y of pack.rivers) {
+        if (y === x || lastOf(y.cells) !== c) continue;
+        if (isDescendant(x, y))
+          refuse(
+            `${tag(y)} ends at cell ${c} and ${tag(x)} flows into it; running ${tag(x)} through there would make a loop`,
+            [y.i]
+          );
+        captured.push({ y, c });
+      }
+    });
 
     // tributaries that joined a dropped cell reconnect to a neighbouring cell of the new course
     const keepNew = new Set(cellsNew);
@@ -815,10 +845,14 @@
       xc.filter(c => isWaterCell(c) && !keepNew.has(c) && pack.features[C.f[c]]?.type === "lake").map(c => C.f[c])
     );
     const left = `${dropped} cells left${lakes.size ? ` (and the lake${lakes.size > 1 ? "s" : ""} ${[...lakes].join(", ")}: the course no longer crosses ${lakes.size > 1 ? "them" : "it"})` : ""}`;
-    return { mode, ia, ib, path, cellsNew, target, orphans, climbs, parentAfter, dropped, added, left };
+    return { mode, ia, ib, path, cellsNew, target, orphans, captured, climbs, parentAfter, dropped, added, left };
   }
 
+  const noopText = (x, how) =>
+    `unchanged: ${tag(x)} already runs through these cells${how ? ` ${how}` : ""}; nothing changed (to make it end earlier use end:{at}, to move a confluence joinAt)`;
+
   function rerouteText(x, plan, snaps) {
+    if (plan.noop) return noopText(x, "in this order");
     const parts = [`${plan.mode}: ${plan.left}, ${plan.added} joined; ${describe(plan.cellsNew)}`];
     const wasRoot = isRootRiver(x);
     if (plan.parentAfter !== x.parent) {
@@ -827,6 +861,8 @@
     } else if (!wasRoot && plan.target) parts.push(`still a tributary of river ${x.parent}`);
     if (plan.orphans.length)
       parts.push(`${plan.orphans.length} tributar${plan.orphans.length === 1 ? "y" : "ies"} reconnect`);
+    if (plan.captured.length)
+      parts.push(`${plan.captured.map(o => tag(o.y)).join(", ")} join${plan.captured.length === 1 ? "s" : ""} it`);
     if (plan.climbs.length)
       parts.push(`climbs at ${plan.climbs.length} step(s): ${plan.climbs[0]}${plan.climbs.length > 1 ? ", ..." : ""}`);
     for (const s of snaps ?? []) parts.push(s);
@@ -836,6 +872,10 @@
   function applyReroute(x, path, cc) {
     const C = pack.cells;
     const plan = planReroute(x, path);
+    if (plan.noop) {
+      cc.notes.add(noopText(x, "in this order"));
+      return;
+    }
     const sigs = signatures();
     const discharges = new Map(pack.rivers.map(r => [r, r.discharge]));
     const xOld = x.cells;
@@ -861,8 +901,14 @@
     const lowest = u => C.c[u].reduce((m, w) => (C.h[w] < C.h[m] ? w : m), C.c[u][0]);
     // a cell off the old course: its rain plus the flux of off-river neighbours that drain into
     // it, at most its stored flux (which may still hold the water of a river that ran there)
+    // a river that ends loose there (plan.captured) brings its water too
+    const capturedAt = new Map();
+    for (const o of plan.captured) {
+      const m = mouthOf(o.y.cells);
+      capturedAt.set(o.c, (capturedAt.get(o.c) ?? 0) + (isLandCell(m) && m !== o.c ? C.fl[m] : 0));
+    }
     const overland = c => {
-      let s = prec(c);
+      let s = prec(c) + (capturedAt.get(c) ?? 0);
       for (const u of C.c[c])
         if (isLandCell(u) && !accounted.has(u) && !C.r[u] && C.h[u] > C.h[c] && lowest(u) === c) s += C.fl[u];
       return Math.min(C.fl[c], s);
@@ -952,7 +998,20 @@
         );
       }
     }
-    // 5. lakes: x may enter a lake now (a new mouth) or no longer touch one
+    // 5. rivers that ended loose on the new course now join x there
+    for (const o of plan.captured) {
+      markConf(o.c, capturedAt.get(o.c) ?? 0);
+      const was = o.y.parent;
+      const wasRootY = isRootRiver(o.y);
+      o.y.parent = x.i;
+      setBasin(o.y, x.basin ?? Rivers.getBasin(x.i));
+      followRole(o.y, wasRootY);
+      touched.add(o.y);
+      cc.notes.add(
+        `${tag(o.y)} ended loose at cell ${o.c}; it now joins ${tag(x)} there${was !== x.i ? ` (parent ${was} -> ${x.i})` : ""}`
+      );
+    }
+    // 6. lakes: x may enter a lake now (a new mouth) or no longer touch one
     refreshLakes([x, ...carriers.map(o => o.y)], [], cc.notes);
     reown(
       xOld.concat(
@@ -981,11 +1040,12 @@
       );
   }
 
-  /** Cheapest land path from `a` to `goal` (a cell, or a predicate); uphill steps cost more; `ok(c)` filters the way. */
+  /** Cheapest land path from `a` (a cell or several) to `goal` (a cell, or a predicate); uphill steps cost more; `ok(c)` filters the way. */
   function shortestPath(a, goal, ok) {
     const C = pack.cells;
     const isGoal = typeof goal === "function" ? goal : c => c === goal;
-    if (isGoal(a)) return [a];
+    const starts = Array.isArray(a) ? a : [a];
+    if (!Array.isArray(a) && isGoal(a)) return [a];
     const n = C.i.length;
     const dist = new Float64Array(n).fill(Infinity);
     const prev = new Int32Array(n).fill(-1);
@@ -1019,13 +1079,16 @@
       }
       return top;
     };
-    dist[a] = 0;
-    push(0, a);
+    for (const s0 of starts) {
+      dist[s0] = 0;
+      push(0, s0);
+    }
+    const startSet = new Set(starts);
     let found = -1;
     while (heap.length) {
       const [d, u] = pop();
       if (d > dist[u]) continue;
-      if (u !== a && isGoal(u)) {
+      if (!startSet.has(u) && isGoal(u)) {
         found = u;
         break;
       }
@@ -1146,6 +1209,251 @@
     }
     if (toEdge) path.push(-1);
     return { path, notes };
+  }
+
+  // ---------------------------------------------------------------- end
+
+  const isLiteralCell = v =>
+    Number.isInteger(v) || (isObj(v) && Number.isInteger(v.cell) && Object.keys(v).length === 1);
+
+  /** Where the cut course of x ends: water, another river (a confluence) or loose land. */
+  function endTarget(x, e, others) {
+    const C = pack.cells;
+    if (isWaterCell(e)) {
+      const f = pack.features[C.f[e]];
+      if (f?.type === "lake" && f.outlet && f.outlet !== x.i) {
+        const o = riverOf(f.outlet);
+        if (o && isDescendant(o, x))
+          refuse(`${tag(x)} would end in the lake its tributary ${tag(o)} drains; a loop`, [o.i]);
+      }
+      return { kind: "water", feature: f };
+    }
+    const hosts = (others.get(e) || []).slice().sort((a, b) => a.i - b.i);
+    if (hosts.length) {
+      const r = hosts[0];
+      if (isDescendant(r, x)) refuse(`${tag(r)} flows into ${tag(x)}; ending ${tag(x)} on it would make a loop`, [r.i]);
+      return { kind: "river", r };
+    }
+    return { kind: "loose" };
+  }
+
+  /** Plan end:{at} for river x (nothing is mutated). */
+  function planEnd(x, at) {
+    const C = pack.cells;
+    const xc = x.cells;
+    const n = xc.length;
+    const p = placeOf(at);
+    let c = p.cell;
+    const notes = [];
+    if (c === lastOf(xc)) return { noop: true, cell: c, notes };
+    const others = courseIndex(x.i);
+    let k = xc.indexOf(c);
+    let extra = null;
+    if (k < 0 && (isWaterCell(c) || others.has(c))) {
+      // another river or water next to the course: join it from the lowest course cell beside it
+      for (let q = n - 2; q >= 0; q--)
+        if (isLandCell(xc[q]) && C.c[xc[q]].includes(c)) {
+          k = q;
+          extra = c;
+          break;
+        }
+    }
+    if (k < 0 && !isLiteralCell(at)) {
+      const near = nearestOnRiver(x, p, 0, n);
+      if (near.k >= 0 && near.d <= snapRadius()) {
+        k = near.k;
+        notes.push(`at (cell ${c}) snapped to cell ${xc[k]} of the course, ${Math.round(near.d)} px away`);
+        c = xc[k];
+        if (k === n - 1) return { noop: true, cell: c, notes };
+      }
+    }
+    if (k < 0)
+      refuse(
+        `cell ${c} is not on ${tag(x)}'s course (cells ${xc[0]}..${xc[n - 2]}) nor water or another river next to it; end takes a cell of the course (the river stops there) or a neighbouring cell of another river or of water (it joins there)`
+      );
+    if (!extra && isWaterCell(xc[k])) {
+      // a lake the course crosses: end where the course enters it
+      const f = C.f[xc[k]];
+      while (k > 0 && isWaterCell(xc[k - 1]) && C.f[xc[k - 1]] === f) k--;
+    }
+    if (k === 0 && !extra)
+      refuse(
+        `cell ${xc[0]} is the source of ${tag(x)}; ending there leaves no river (remove it instead: {remove:true})`
+      );
+    const cellsNew = xc.slice(0, k + 1);
+    if (extra !== null) cellsNew.push(extra);
+    const e = lastOf(cellsNew);
+    const target = endTarget(x, e, others);
+    // tributaries that join below the new end lose their way
+    // (one that ends where x ended, on the river x joined or in water, stays there: it then
+    // joins that river, see applyEnd)
+    const lost = [];
+    const oldEnd = lastOf(xc);
+    const endStays = isWaterCell(oldEnd) || others.has(oldEnd);
+    for (const y of kids(x.i)) {
+      const j = joinIndex(y, xc);
+      if (j < 0 || (j === n - 1 && endStays && lastOf(y.cells) === oldEnd)) continue;
+      if (j > k || (j === k && !extra && target.kind !== "water")) lost.push({ y, j: xc[j] });
+    }
+    if (lost.length)
+      refuse(
+        `${lost.map(o => `${tag(o.y)} joins ${tag(x)} at cell ${o.j}`).join(", ")}, ${lost.length === 1 ? "which is" : "which are"} at or below the new end (cell ${e}); move ${lost.length === 1 ? "it" : "them"} first (joinAt, reroute or end, an earlier op of the same call works) or end ${tag(x)} lower`,
+        lost.map(o => o.y.i)
+      );
+    let parentAfter = x.parent;
+    if (target.kind === "river") parentAfter = target.r.i;
+    else if (target.kind === "water")
+      parentAfter =
+        target.feature?.type === "lake" && target.feature.outlet && target.feature.outlet !== x.i
+          ? target.feature.outlet
+          : isRootRiver(x)
+            ? x.parent
+            : x.i;
+    const kept = new Set(cellsNew);
+    const dropped = xc.filter(q => isLandCell(q) && !kept.has(q) && q !== lastOf(xc)).length;
+    return { k, cell: e, extra, cellsNew, target, parentAfter, dropped, notes };
+  }
+
+  function endText(x, plan) {
+    if (plan.noop) return `unchanged: ${tag(x)} already ends at cell ${plan.cell}`;
+    const t = plan.target;
+    const where =
+      t.kind === "river"
+        ? `joins ${tag(t.r)} there`
+        : t.kind === "water"
+          ? `flows into ${t.feature?.type === "lake" ? `lake ${t.feature.i}` : "the sea"} there`
+          : "ends loose on land there (no river or water): run another river through that cell (e.g. reroute, a later op of this call) to join them";
+    return `${describe(plan.cellsNew)}: ends at cell ${plan.cell}${plan.extra !== null ? " (a neighbour of the course)" : ""}, ${plan.dropped} cells dropped; ${where}${plan.notes.length ? `; ${plan.notes.join("; ")}` : ""}`;
+  }
+
+  function applyEnd(x, plan, cc) {
+    const C = pack.cells;
+    const prec = c => grid.cells.prec?.[C.g[c]] ?? 0;
+    const sigs = signatures();
+    const discharges = new Map(pack.rivers.map(r => [r, r.discharge]));
+    const xOld = x.cells;
+    const oldMouth = mouthOf(xOld);
+    const oldDelivered = isLandCell(oldMouth) ? C.fl[oldMouth] : 0;
+    const oldEnd = lastOf(xOld);
+    const oldParent = isRootRiver(x) ? null : riverOf(x.parent);
+    const wasRoot = isRootRiver(x);
+    const pts = validPoints(x);
+    x.cells = plan.cellsNew;
+    if (pts && plan.extra === null) x.points = pts.slice(0, x.cells.length);
+    else delete x.points;
+    const touched = new Set([x]);
+    // tributaries that ended where x ended now join the river (or water) there
+    for (const y of kids(x.i)) {
+      if (lastOf(y.cells) !== oldEnd) continue;
+      const host = oldParent?.cells.includes(oldEnd) ? oldParent : null;
+      y.parent = host ? host.i : y.i;
+      setBasin(y, host ? (host.basin ?? Rivers.getBasin(host.i)) : y.i);
+      followRole(y, false);
+      touched.add(y);
+      cc.notes.add(
+        `${tag(y)} ended where ${tag(x)} did (cell ${oldEnd}); it now ${host ? `joins ${tag(host)}` : "flows into the water there on its own"}`
+      );
+    }
+    // the old end stops receiving x's water; the cells x left go back to their rain
+    deliverAt(oldEnd, oldParent, -oldDelivered, touched, x);
+    refreshConf(oldEnd);
+    const elsewhere = courseIndex(x.i);
+    const keepNew = new Set(x.cells);
+    for (const c of xOld) {
+      if (!isLandCell(c) || keepNew.has(c) || elsewhere.has(c)) continue;
+      if (pack.rivers.some(r => r !== x && lastOf(r.cells) === c)) continue;
+      C.fl[c] = prec(c);
+      C.conf[c] = 0;
+    }
+    // the new end receives it
+    const t = plan.target;
+    const newMouth = mouthOf(x.cells);
+    const delivered = isLandCell(newMouth) ? C.fl[newMouth] : 0;
+    if (t.kind === "river") {
+      if (plan.extra !== null) deliverAt(plan.cell, t.r, delivered, touched, x);
+      markConf(plan.cell, delivered);
+    } else if (t.kind === "water" && plan.extra !== null) deliverAt(plan.cell, null, delivered, touched, x);
+    x.parent = plan.parentAfter;
+    setBasin(x, isRootRiver(x) ? x.i : (riverOf(x.parent)?.basin ?? Rivers.getBasin(x.parent)));
+    followRole(x, wasRoot);
+    refreshLakes([x], [], cc.notes);
+    reown(xOld.concat(x.cells));
+    for (const r of touched) restat(r, sigs);
+    cc.R.add("rivers");
+    cc.notes.add(
+      `${tag(x)} now ends at cell ${plan.cell} (${x.cells.length} cells, ${plan.dropped} dropped), discharge ${discharges.get(x)} -> ${x.discharge}`
+    );
+    if (t.kind === "river" && (wasRoot || oldParent?.i !== t.r.i))
+      cc.notes.add(`${tag(x)} is now a tributary of ${tag(t.r)}`);
+    if (t.kind === "loose")
+      cc.notes.add(
+        `warning: ${tag(x)} ends loose at cell ${plan.cell} (no river or water there); reroute a river through cell ${plan.cell} to join them (lint lists rivers that do not end on their parent)`
+      );
+    const downstream = [...touched].filter(r => r !== x && discharges.has(r) && discharges.get(r) !== r.discharge);
+    if (downstream.length)
+      cc.notes.add(
+        `discharge also changed on ${downstream
+          .slice(0, 4)
+          .map(r => `${tag(r)} ${discharges.get(r)} -> ${r.discharge}`)
+          .join(", ")}${downstream.length > 4 ? `, and ${downstream.length - 4} more` : ""}`
+      );
+  }
+
+  // ---------------------------------------------------------------- joinAt
+
+  /** Plan joinAt:{river?, at, cells?} for river x: the literal lower-course reroute path and its plan. */
+  function planJoinAt(x, v) {
+    const _C = pack.cells;
+    const yRef = v.ref ?? v.river ?? (isRootRiver(x) ? undefined : x.parent);
+    if (yRef === undefined || yRef === null)
+      fail("BAD_ARGS", `${tag(x)} is a main river: joinAt needs river (the river to join)`);
+    const y = T.resolve("river", yRef).entity;
+    if (y === x) fail("BAD_ARGS", "joinAt.river is the river to join, not this river");
+    if (isDescendant(y, x)) refuse(`${tag(y)} flows into ${tag(x)}; joining it would make a loop`, [y.i]);
+    const notes = [];
+    let path;
+    let c;
+    if (Array.isArray(v.cells)) {
+      path = v.cells.map(asCell);
+      c = lastOf(path);
+    } else {
+      if (v.at === undefined || v.at === null) fail("BAD_ARGS", "joinAt is {river?: ref, at: Place | cell}");
+      const yc = y.cells;
+      const p = placeOf(v.at);
+      c = p.cell;
+      const k = yc.indexOf(c);
+      if (k < 0 || k >= yc.length - 1 || !isLandCell(c)) {
+        const near = isLiteralCell(v.at) ? { k: -1, d: Infinity } : nearestOnRiver(y, p, 0, yc.length - 1);
+        if (near.k >= 0 && near.d <= snapRadius() && isLandCell(yc[near.k])) {
+          notes.push(`at (cell ${c}) snapped to cell ${yc[near.k]} of ${tag(y)}, ${Math.round(near.d)} px away`);
+          c = yc[near.k];
+        } else
+          refuse(
+            `cell ${c} is not a land cell of ${tag(y)}'s course (cells ${yc[0]}..${yc[yc.length - 2]}); joinAt.at is the confluence cell on the river to join`,
+            [y.i]
+          );
+      }
+      if (lastOf(x.cells) === c) return { noop: true, y, c, notes, path: null };
+      const xc = x.cells;
+      const xs = new Set(xc);
+      const others = courseIndex(x.i);
+      const starts = xc.slice(0, -1).filter(isLandCell);
+      const seg = shortestPath(starts, c, q => isLandCell(q) && !xs.has(q) && !others.has(q));
+      if (!seg)
+        fail(
+          "NO_PATH",
+          `no land path from ${tag(x)}'s course to cell ${c} on ${tag(y)} that avoids other rivers and water`
+        );
+      path = seg;
+    }
+    const plan = planReroute(x, path);
+    if (plan.noop) return { noop: true, y, c, notes, path };
+    if (plan.mode !== "lower" || plan.target?.kind !== "river")
+      refuse(
+        `the joinAt path does not end on ${tag(y)} (cell ${c}): it must run from ${tag(x)}'s course to a cell of ${tag(y)}`,
+        [y.i]
+      );
+    return { y, c, notes, path, plan };
   }
 
   // ---------------------------------------------------------------- the fields
@@ -1298,6 +1606,78 @@
       }
       for (const s of v.snaps ?? []) cc.notes.add(`${tag(x)}: ${s}`);
       applyReroute(x, v.cells, cc);
+    }
+  };
+
+  R.end = {
+    check: (v, x, c, set) => {
+      onlyOne(set);
+      const at = isObj(v) && "at" in v ? v.at : undefined;
+      if (at === undefined || at === null) fail("BAD_ARGS", "end is {at: Place | cell}");
+      const d = planOrDefer(
+        c,
+        x,
+        `end of river ${x.i}`,
+        () => planEnd(x, at),
+        pl => [...kidIds(x.i), ...(pl.target?.kind === "river" ? [pl.target.r.i] : [])]
+      );
+      preCourse.set(set, course(x));
+      if (d.deferredBy !== undefined) return { at, after: deferredText(d.deferredBy) };
+      return { at, cell: d.plan.cell, noop: !!d.plan.noop, after: endText(x, d.plan) };
+    },
+    show: v => v.after,
+    literal: v => ({ at: { cell: v.cell } }),
+    get: course,
+    set: (x, v, cc) => {
+      if (!pack.rivers.includes(x)) refuse(`${tag(x)} no longer exists (an earlier op of this call merged it)`);
+      const plan = planEnd(x, v.cell ?? v.at);
+      v.cell = plan.cell;
+      if (plan.noop) {
+        cc.notes.add(endText(x, plan));
+        return;
+      }
+      for (const s of plan.notes) cc.notes.add(`${tag(x)}: ${s}`);
+      applyEnd(x, plan, cc);
+    }
+  };
+
+  R.joinAt = {
+    check: (v, x, c, set) => {
+      onlyOne(set);
+      if (!isObj(v) || (v.at === undefined && !Array.isArray(v.cells)))
+        fail("BAD_ARGS", "joinAt is {river?: ref (default: its parent), at: Place | cell}");
+      const d = planOrDefer(
+        c,
+        x,
+        `joinAt of river ${x.i}`,
+        () => planJoinAt(x, v),
+        j => [
+          j.y.i,
+          ...(j.plan ? j.plan.orphans.map(o => o.y.i) : []),
+          ...(j.plan ? j.plan.captured.map(o => o.y.i) : [])
+        ]
+      );
+      preCourse.set(set, course(x));
+      if (d.deferredBy !== undefined) return { spec: v, after: deferredText(d.deferredBy) };
+      const j = d.plan;
+      const after = j.noop
+        ? `unchanged: ${tag(x)} already joins ${tag(j.y)} at cell ${j.c}`
+        : `joins ${tag(j.y)} at cell ${j.c}: ${rerouteText(x, j.plan, j.notes)}`;
+      return { spec: v, ref: j.y.i, cell: j.c, cells: j.path, noop: !!j.noop, after };
+    },
+    show: v => v.after,
+    literal: v => ({ ref: v.ref, at: { cell: v.cell }, cells: v.cells }),
+    get: course,
+    set: (x, v, cc) => {
+      if (!pack.rivers.includes(x)) refuse(`${tag(x)} no longer exists (an earlier op of this call merged it)`);
+      const j = planJoinAt(x, v.cells ? { ref: v.ref, cells: v.cells } : v.spec);
+      Object.assign(v, { ref: j.y.i, cell: j.c, cells: j.path });
+      for (const s of j.notes) cc.notes.add(`${tag(x)}: ${s}`);
+      if (j.noop) {
+        cc.notes.add(`unchanged: ${tag(x)} already joins ${tag(j.y)} at cell ${j.c}`);
+        return;
+      }
+      applyReroute(x, j.path, cc);
     }
   };
 

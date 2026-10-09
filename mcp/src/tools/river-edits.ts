@@ -1,17 +1,19 @@
-// River structure edits ride on the edit tool: edit river {mainStem, split, merge, reroute} is
+// River structure edits ride on the edit tool: edit river {mainStem, split, merge, reroute, end,
+// joinAt} is
 // implemented page-side in src/bridge-ext/rivers.js. This module defines no tool; server.ts
 // imports every tools/*.ts, so it registers their replay metadata at startup:
-// - mainStem holds a river ref ({ref, expect, name} in the resolved form), which replay maps
-//   when the sketch created that river (a split reports the river it created, like add);
+// - mainStem holds a river ref ({ref, expect, name} in the resolved form), and so does joinAt
+//   ({ref, at:{cell}, cells}: the river joined and the literal path), which replay maps when the
+//   sketch created that river (a split reports the river it created, like add);
 // - replay safety needs no id check: before/after of a structural field is the river's course
 //   ("<n> cells <source>-><mouth> #<cell hash>", no river ids), so a river someone else re-cut is
 //   a both-changed conflict; mainStem's literal carries the course it must produce (`expect`), so
-//   a re-cut tributary or a repeated swap is refused; a repeated split or reroute is refused
-//   (the cell is the source now / nothing would change);
+//   a re-cut tributary or a repeated swap is refused; a repeated split is refused (the cell is
+//   the source now); a repeated reroute, end or joinAt is a no-op success with a note;
 // - the sketch log gets one readable phrase per structural op (EDIT_FIELD_SUMMARIES).
 import { EDIT_FIELD_SUMMARIES, EDIT_REF_FIELDS, type EditResolved } from "../ops.ts";
 
-EDIT_REF_FIELDS.river = { ...(EDIT_REF_FIELDS.river ?? {}), mainStem: "river" };
+EDIT_REF_FIELDS.river = { ...(EDIT_REF_FIELDS.river ?? {}), mainStem: "river", joinAt: "river" };
 
 type Op = EditResolved["ops"][number];
 
@@ -59,11 +61,30 @@ EDIT_FIELD_SUMMARIES.river = {
     const b = course(o.before?.merge);
     return b ? `merged into the river it continues (its ${b.n} cells from cell ${b.source} now head that river)` : null;
   },
+  end: (o: Op) => {
+    const cell = obj(obj(o.set?.end).at).cell;
+    const a = course(o.after?.end);
+    const b = course(o.before?.end);
+    if (!a || !b) return null;
+    if (o.after?.end === o.before?.end) return `already ended at cell ${num(cell)} (unchanged)`;
+    return `now ends at cell ${num(cell)}: ${b.n} -> ${a.n} cells, mouth ${b.mouth} -> ${a.mouth}`;
+  },
+  joinAt: (o: Op) => {
+    const v = obj(o.set?.joinAt);
+    const a = course(o.after?.joinAt);
+    const b = course(o.before?.joinAt);
+    if (!a || !b) return null;
+    const at = num(obj(v.at).cell);
+    if (o.after?.joinAt === o.before?.joinAt) return `already joined river ${num(v.ref)} at cell ${at} (unchanged)`;
+    return `now joins river ${num(v.ref)} at cell ${at}: ${b.n} -> ${a.n} cells, mouth ${b.mouth} -> ${a.mouth}`;
+  },
   reroute: (o: Op) => {
     const cells = obj(o.set?.reroute).cells;
     const a = course(o.after?.reroute);
     const b = course(o.before?.reroute);
     if (!Array.isArray(cells) || !cells.length || !a || !b) return null;
+    if (o.after?.reroute === o.before?.reroute)
+      return `reroute through ${cells.length} cells it already held (unchanged)`;
     const ends: string[] = [];
     if (a.source !== b.source) ends.push(`source ${b.source} -> ${a.source}`);
     if (a.mouth !== b.mouth) ends.push(`mouth ${b.mouth} -> ${a.mouth}`);

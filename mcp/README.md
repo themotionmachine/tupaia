@@ -80,7 +80,10 @@ What the newer tools and fields replaced (all one undo entry each, all dryRun-ab
 
 - `set_heights {grid|pack|image}` imports a heightmap and rebuilds coast, lakes, climate, rivers
   and biomes, carrying burgs, routes, markers, regiments and lake/island names to the new cells
-  and keeping river identity by course; `flow` previews drainage on current or proposed heights.
+  and keeping river identity by course; with `rebuild:'keep'` it is local (the changed cells'
+  heights, temperature, biome and lake levels; rivers, economy and far biomes untouched;
+  `rivers:'regenerate'` opts into the global river pass), like `paint_cells` height keep; `flow`
+  previews drainage on current or proposed heights.
   App hook: `restoreRiskedData(opts)` in `public/modules/ui/heightmap-editor.js`.
 - `edit {type:'map'}` sets world settings (mapSize, latitude, temperatures, winds, precipitation,
   units, ...) with locks that travel in the `.map` (`options.tupaiaLocks`) and an optional
@@ -88,8 +91,8 @@ What the newer tools and fields replaced (all one undo entry each, all dryRun-ab
 - Routes: freehand `add route {points, noPathfind:true}` (locked by default), route groups as
   entities (`add/edit routeGroup`, find/inspect `routeGroup`, `counts.routeGroups`), `edit route
   {points, group}`. `cells.routes` always equals what `Routes.buildLinks` would give.
-- Rivers: `edit river {mainStem | split | merge | reroute}`; find/inspect report `joinsAt` and
-  tributaries.
+- Rivers: `edit river {mainStem | split | merge | reroute | end | joinAt}` (a reroute that
+  changes nothing is a no-op success); find/inspect report `joinsAt` and tributaries.
 - Biomes as entities (`find/inspect/add/edit biome`), `paint_cells feather`, and `regenerate
   {parts:['biomes'], biomes:{noise, smooth, minRegion, seed, keepPainted, ...}}`. App fix: the
   biome line's 4th field keeps icon density, icons and cost through save/load.
@@ -384,7 +387,7 @@ first.
 | tool / part | logged as | replay rule |
 | --- | --- | --- |
 | edit, add, paint_cells, display | resolved form | missing/removed target, a field both sides changed, a reused marker/route/zone id, a removal of something changed since, literal cells on a renumbered graph: conflict |
-| edit river structure | literal cells and ids; mainStem `{ref, expect}` | course comparison; a mainStem whose result differs from `expect` is REFUSED |
+| edit river structure | literal cells and ids; mainStem `{ref, expect}`; end `{at:{cell}}`; joinAt `{ref, at:{cell}, cells}` | course comparison; a mainStem whose result differs from `expect` is REFUSED |
 | edit map (settings, recalculate) | values, locks, derived-layer fingerprint | a recalculation whose derived layers changed on the target is a conflict; `skip` drops only both-changed fields |
 | paint_cells height `keep` / `risk` | literal cells (`risk` with the graph it produced) | deterministic; `erase` is blob-only |
 | set_heights | only the changed grid cells (deflated), digests, bbox | onto a target whose terrain changed since, its other heights are kept (note) |
