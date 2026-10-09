@@ -86,7 +86,7 @@ export function bridgeArgs(tool: string, r: Resolved): Record<string, unknown> {
         if (o.remove) return { ref: o.ref, remove: true };
         return o.ref === undefined ? { set: o.set } : { ref: o.ref, set: o.set };
       });
-      return withRedraw({ type: e.type, ops }, e.redraw);
+      return withRedraw({ type: e.type, ops, ...(e.recalculate ? { recalculate: e.recalculate } : {}) }, e.redraw);
     }
     case "add": {
       const a = r as AddResolved;
@@ -126,12 +126,19 @@ const show = (v: unknown): string => {
 const whoOf = (type: string, o: EditResolved["ops"][number]) =>
   type === "map" ? "the map" : `${type} ${o.name ? `'${o.name}' ` : ""}(${o.ref})`;
 
+export interface FieldConflict {
+  /** Index of the op in the edit. */
+  op: number;
+  key: string;
+  message: string;
+}
+
 /**
  * Fields of an edit op that both the sketch (before != after) and someone else (base value !=
  * current value) changed, to different values. `plan` is the bridge's validate plan.
  */
-export function bothChanged(r: EditResolved, plan: Array<Record<string, unknown>>): string[] {
-  const out: string[] = [];
+export function bothChangedFields(r: EditResolved, plan: Array<Record<string, unknown>>): FieldConflict[] {
+  const out: FieldConflict[] = [];
   r.ops.forEach((o, k) => {
     if (o.remove || !o.set || !o.before || !o.after) return;
     const row = plan.find(p => p.index === k) ?? plan[k];
@@ -142,12 +149,46 @@ export function bothChanged(r: EditResolved, plan: Array<Record<string, unknown>
       const mine = o.after[key];
       const cur = now[key];
       if (same(base, mine) || same(cur, base) || same(cur, mine)) continue;
-      out.push(
-        `both changed ${key} of ${whoOf(r.type, o)}: base ${show(base)}, now ${show(cur)}, sketch ${show(mine)}`
-      );
+      out.push({
+        op: k,
+        key,
+        message: `both changed ${key} of ${whoOf(r.type, o)}: base ${show(base)}, now ${show(cur)}, sketch ${show(mine)}`
+      });
     }
   });
   return out;
+}
+
+export function bothChanged(r: EditResolved, plan: Array<Record<string, unknown>>): string[] {
+  return bothChangedFields(r, plan).map(c => c.message);
+}
+
+/**
+ * A map edit with a rivers/biomes recalculation overwrites biome cells, rivers and lake names;
+ * the op carries a fingerprint of those layers as the sketch found them (`derived`). When the page
+ * it replays onto has other ones (`now`, from the bridge's validate result), someone changed them
+ * (or the terrain and climate under them) since, and the recalculation would discard that.
+ */
+export function derivedConflicts(r: EditResolved, now: unknown): string[] {
+  if (!r.derived || typeof now !== "string" || r.derived === now) return [];
+  return [
+    `recalculate '${r.recalculate ?? "?"}' would overwrite rivers, lake names or biome cells that differ from the sketch's base (someone changed them, or the terrain or climate under them, since the sketch recorded this op)`
+  ];
+}
+
+/** r without the given fields; an op left with no fields is dropped. null when nothing is left to apply. */
+export function withoutFields(r: EditResolved, drop: readonly FieldConflict[]): EditResolved | null {
+  const ops = r.ops
+    .map((o, k) => {
+      const keys = drop.filter(d => d.op === k).map(d => d.key);
+      if (!keys.length) return o;
+      const cut = (side?: Record<string, unknown>) =>
+        side ? Object.fromEntries(Object.entries(side).filter(([key]) => !keys.includes(key))) : side;
+      return { ...o, set: cut(o.set), before: cut(o.before), after: cut(o.after) };
+    })
+    .filter(o => o.remove || Object.keys(o.set ?? {}).length > 0);
+  if (!ops.length && !r.recalculate) return null;
+  return { ...r, ops };
 }
 
 /** Types whose ids the app reuses after a removal (max id + 1), so an id alone is not identity. */
@@ -279,8 +320,11 @@ export async function replayOps(
       if (conflict(op, e.message)) break;
       continue;
     }
-    const args = bridgeArgs(op.tool, r);
-    const timeoutMs = op.tool === "paint_cells" || ext?.timeout === "heavy" ? TIMEOUTS.heavy : TIMEOUTS.edit;
+    let args = bridgeArgs(op.tool, r);
+    // a map edit that recalculates (rivers, biomes) is a heavy call too
+    const recalculates = op.tool === "edit" && !!(r as EditResolved).recalculate;
+    const timeoutMs =
+      op.tool === "paint_cells" || ext?.timeout === "heavy" || recalculates ? TIMEOUTS.heavy : TIMEOUTS.edit;
 
     // validate (eval has no validation; it is replayed verbatim)
     if (op.tool === "display" || (phased && op.tool !== "eval")) {
@@ -301,13 +345,31 @@ export async function replayOps(
           const ref = orig.ops[k]?.ref;
           return ref !== undefined && rw.created.has(`${orig.type}:${ref}`);
         };
-        const problems = [
+        const hard = [
           ...identityConflicts(r as EditResolved, plan, created),
-          ...bothChanged(r as EditResolved, plan)
+          ...derivedConflicts(r as EditResolved, v.value?.derived)
         ];
-        if (problems.length) {
-          if (conflict(op, problems.join("; "))) break;
+        const fields = bothChangedFields(r as EditResolved, plan);
+        if (hard.length || (fields.length && !(onConflict === "skip" && (r as EditResolved).type === "map"))) {
+          if (conflict(op, [...hard, ...fields.map(f => f.message)].join("; "))) break;
           continue;
+        }
+        if (fields.length) {
+          // map settings are independent of each other: 'skip' leaves out only the fields that
+          // both sides changed and applies the rest of the op
+          const rest = withoutFields(r as EditResolved, fields);
+          const why = fields.map(f => f.message).join("; ");
+          if (!rest) {
+            conflict(op, why);
+            continue;
+          }
+          r = rest;
+          args = bridgeArgs(op.tool, r);
+          res.conflicts.push({
+            seq: op.seq,
+            reason: `${why} (those fields were skipped; the rest of the op was applied)`,
+            op
+          });
         }
       }
     }

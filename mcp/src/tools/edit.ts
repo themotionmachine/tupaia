@@ -173,7 +173,8 @@ function idsOnly(result: Record<string, unknown>): void {
 }
 
 function isEmptyResolved(r: Resolved): boolean {
-  if ("ops" in r) return !(r as EditResolved).ops.length;
+  // a map edit with no rows but a recalculation (the recalculate-only call) still did something
+  if ("ops" in r) return !(r as EditResolved).ops.length && !(r as EditResolved).recalculate;
   if ("items" in r) return !(r as AddResolved).items.length;
   return false;
 }
@@ -235,7 +236,7 @@ export function register(ctx: ToolContext): void {
     {
       title: "Edit or remove entities",
       description:
-        "Batch-edit entities of ONE type: ops [{ref, set:{field: value}} | {ref, remove:true}]. All ops are validated first; if any is invalid nothing changes (unless continueOnError). One auto-undo entry covers the call; redraws are coalesced. dryRun:true returns before/after per op. Fields per type are in tupaia://docs/cheatsheet.md, e.g. burg {name, population (people), group, type, culture, port, lock, move:Place}; state {name, fullName, form, formName, color, capital:burgRef, culture, lock}; marker {type, icon, size, pinned, note:{name, legend}, move}; label {text, move}; map (no ref) {name, populationRate, urbanization, year, era}. name can be {generate:{base:<namesbase>}} | {generate:{culture:<ref>}} | {generate:{}} (own culture). A state's capital changes only through edit state {capital}. remove works for burg (not capitals or market centres), state, marker, route, river, zone, note, label; provinces, cultures and religions are REFUSED (repaint their cells with paint_cells instead).",
+        "Batch-edit entities of ONE type: ops [{ref, set:{field: value}} | {ref, remove:true}]. All ops are validated first; if any is invalid nothing changes (unless continueOnError). One auto-undo entry covers the call; redraws are coalesced. dryRun:true returns before/after per op. Fields per type are in tupaia://docs/cheatsheet.md, e.g. burg {name, population (people), group, type, culture, port, lock, move:Place}; state {name, fullName, form, formName, color, capital:burgRef, culture, lock}; marker {type, icon, size, pinned, note:{name, legend}, move}; label {text, move}. map (no ref): {name, populationRate, urbanization, year (whole number), era} and the world settings {mapSize (% of the world), latitude/longitude (shift 0..100), temperatureEquator/NorthPole/SouthPole (degrees Celsius), winds (6 tier angles north to south, or {tier: degrees}), precipitation (%), distanceScale, distanceUnit, areaUnit, heightUnit, heightExponent, temperatureScale}. A setting takes a value or {value, lock:true|false}; an op may add lock:[names] / unlock:[names] (the app's own lock(): generate_map and the options panel keep the value; the locks travel in the .map text, so undo, restore, relaunch and save/load keep them). Settings only set inputs; recalculate refreshes derived data ('climate', 'biomes', 'rivers+biomes', 'climate+biomes'; rivers are regenerated, biome cells recomputed; omit ops to only recalculate). The map result lists `stale` layers and how to refresh them; dryRun shows what a recalculation replaces. name can be {generate:{base:<namesbase>}} | {generate:{culture:<ref>}} | {generate:{}}. A state's capital changes only through edit state {capital}. remove works for burg (not capitals or market centres), state, marker, route, river, zone, note, label; provinces, cultures and religions are REFUSED (repaint their cells with paint_cells instead).",
       inputSchema: z.object({
         type: z.enum(EDIT_TYPES),
         ops: z
@@ -243,11 +244,26 @@ export function register(ctx: ToolContext): void {
             z.object({
               ref: EntityRef.optional().describe("Entity ref (omit for type 'map')"),
               set: z.record(z.string(), z.unknown()).optional(),
-              remove: z.boolean().optional()
+              remove: z.boolean().optional(),
+              lock: z
+                .union([z.literal("all"), z.array(z.string())])
+                .optional()
+                .describe("type 'map': setting names to lock (['all'] or 'all' = every setting)"),
+              unlock: z
+                .union([z.literal("all"), z.array(z.string())])
+                .optional()
+                .describe("type 'map': setting names to unlock (['all'] or 'all' = every setting)")
             })
           )
-          .min(1)
-          .max(500),
+          .max(500)
+          .optional()
+          .describe("Required (1+ ops), except type 'map' with recalculate: then omit it to only recalculate"),
+        recalculate: z
+          .enum(["none", "climate", "biomes", "rivers+biomes", "climate+biomes"])
+          .optional()
+          .describe(
+            "type 'map': refresh derived data after settings changed (default none). climate = temperature + precipitation; biomes = biome cells only; rivers+biomes = rivers, lake data, biomes; climate+biomes = all. Rivers (ids, names, edits) and hand-painted biome cells are replaced; lake names and custom-biome cells are kept. dryRun reports the counts"
+          ),
         ...Common
       }),
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
@@ -257,12 +273,26 @@ export function register(ctx: ToolContext): void {
     async (args, scope) => {
       const { dryRun, timeoutMs, rows, ...rest } = args;
       const continueOnError = args.continueOnError;
-      return runPhased(ctx, scope, `edit ${args.type}`, args, "edit", rest, {
+      const recalculates = args.recalculate !== undefined && args.recalculate !== "none";
+      if (!args.ops?.length && !(args.type === "map" && recalculates))
+        throw new ToolError("BAD_ARGS", "ops must hold at least one op (only type 'map' with recalculate may omit it)");
+      const result = await runPhased(ctx, scope, `edit ${args.type}`, args, "edit", rest, {
         dryRun,
         continueOnError,
-        timeoutMs,
+        timeoutMs: timeoutMs ?? (recalculates ? TIMEOUTS.heavy : undefined),
         rows
       });
+      // settings are already in `applied` (before/after), and a climate recalculation renumbers rivers:
+      // a map edit reports counts only
+      const diff = result.changes as Record<string, unknown> | undefined;
+      if (args.type === "map" && diff && typeof diff === "object") {
+        const counts: Record<string, unknown> = {};
+        for (const [type, d] of Object.entries(diff))
+          if (type !== "settings" && type !== "map") counts[type] = (d as { counts?: unknown } | null)?.counts ?? d;
+        if (Object.keys(counts).length) result.changes = counts;
+        else delete result.changes;
+      }
+      return result;
     }
   );
 

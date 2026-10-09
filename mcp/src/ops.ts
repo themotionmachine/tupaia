@@ -103,6 +103,13 @@ export interface EditResolved {
     ident?: Record<string, unknown> | null;
   }>;
   redraw?: unknown;
+  /** type 'map': the refresh that ran after the settings changed ('climate', 'biomes', 'rivers+biomes' or 'climate+biomes'). */
+  recalculate?: string;
+  /**
+   * type 'map' with a rivers/biomes recalculation: fingerprint of the layers it overwrites (biome
+   * cells, rivers, lake names) as the sketch found them. Replay refuses the op when the target's differ.
+   */
+  derived?: string;
 }
 
 export interface CreatedRef {
@@ -459,6 +466,8 @@ const q = (v: unknown): string => {
   return s.length > 40 ? `${s.slice(0, 37)}...` : s;
 };
 
+const sameValue = (a: unknown, b: unknown): boolean => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+
 function listOut(parts: string[], max = 3): string {
   if (parts.length <= max) return parts.join("; ");
   return `${parts.slice(0, max).join("; ")}; and ${parts.length - max} more`;
@@ -500,14 +509,18 @@ export function summarizeOp(tool: string, resolved: Resolved | null, out: Row | 
         const parts = r.ops.map(o => {
           const who = r.type === "map" ? "the map" : `${r.type} ${o.name ? `${q(o.name)} ` : ""}(${o.ref})`;
           if (o.remove) return `removed ${who}`;
-          const fields = Object.keys(o.set ?? {}).map(k =>
+          const keys = Object.keys(o.set ?? {});
+          // fields that already had the value (a replay onto a map that holds it) add nothing
+          const moved = keys.filter(k => !(o.before && o.after && k in o.before && sameValue(o.before[k], o.after[k])));
+          const fields = (moved.length ? moved : keys).map(k =>
             o.before && o.after && k in o.before
               ? `${k} ${q(o.before[k])} -> ${q(o.after[k])}`
               : `${k} ${q(o.set?.[k])}`
           );
           return `${who}: ${fields.join(", ")}`;
         });
-        return `Edited ${listOut(parts)}.`;
+        if (!parts.length && r.recalculate) return `Recalculated the map (${r.recalculate}).`;
+        return `Edited ${listOut(parts)}${r.recalculate ? ` (recalculated ${r.recalculate})` : ""}.`;
       }
       case "add": {
         const r = resolved as AddResolved;

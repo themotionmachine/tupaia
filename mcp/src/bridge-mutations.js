@@ -2381,7 +2381,8 @@
     for (const id of locksNow) lock(id);
     const unlocked = [];
     for (const id of generatorLocks) {
-      if (!locksNow.has(id)) {
+      // T.settingLocks (bridge-ext/settings.js): locks taken through edit map are not generator locks
+      if (!locksNow.has(id) && !T.settingLocks?.has(id)) {
         unlock(id);
         unlocked.push(id);
       }
