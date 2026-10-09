@@ -6,6 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { after, before, describe, test } from "node:test";
 import { mapEntry, normalizeEntry, normalizeSpec, typeOfList } from "../src/apply-spec.ts";
+import { shapeResult } from "../src/tools/apply.ts";
 import { alive, errorBody, type Harness, startServer } from "./helpers.ts";
 
 type Obj = Record<string, any>;
@@ -30,7 +31,8 @@ describe("apply: spec normalization (no browser)", () => {
     const pts = normalizeEntry("route", { name: "P", draw: "points", through: ["Ballantine", [1072, 985]] });
     assert.deepEqual(pts, {
       name: "P",
-      points: [{ entity: { type: "burg", ref: "Ballantine" } }, { x: 1072, y: 985 }]
+      points: [{ entity: { type: "burg", ref: "Ballantine" } }, { x: 1072, y: 985 }],
+      noPathfind: true
     });
     const z = normalizeEntry("zone", {
       name: "Z",
@@ -107,6 +109,70 @@ describe("apply: spec normalization (no browser)", () => {
       ["labels"]
     );
   });
+
+  test("value-table defaults, ignore, only by the name before a rename, the nested-provinces note only in scope", () => {
+    const groups = { roads: "roads", "Oom flyways": "route-oom_flyways", "*": "route-{}" };
+    assert.deepEqual(mapEntry({ group: "roads" }, undefined, { group: groups }), { group: "roads" });
+    assert.deepEqual(mapEntry({ group: "Oom flyways" }, undefined, { group: groups }), {
+      group: "route-oom_flyways"
+    });
+    assert.deepEqual(mapEntry({ group: "journeys" }, undefined, { group: groups }), { group: "route-journeys" });
+    assert.deepEqual(mapEntry({ group: "x" }, undefined, { group: { "*": null } }), {});
+    const spec = {
+      frame: { name: "W", lock: ["winds"] },
+      rivers_intended: [{ name: "R" }],
+      states: [{ name: "S", form: "Monarchy (prose)", provinces: [{ name: "P" }] }],
+      burgs: [{ name: "B", note: "n", population: 3 }]
+    };
+    const m = { lists: { frame: "map", rivers_intended: "rivers" } };
+    const a = normalizeSpec(spec, {}, m, ["frame", "rivers_intended"], { map: ["lock"], "*": ["note"] });
+    assert.deepEqual(a.map, { name: "W" });
+    assert.deepEqual(
+      a.lists.map(l => l.key),
+      ["rivers"]
+    );
+    assert.deepEqual(a.notes, [], "provinces are not in scope");
+    assert.deepEqual(a.present.sort(), ["burgs", "map", "provinces", "rivers", "states"]);
+    const b = normalizeSpec(spec, {}, m, undefined, { "*": ["note"], states: ["form"] });
+    assert.deepEqual(b.lists.find(l => l.key === "burgs")?.entries, [{ name: "B", population: 3 }]);
+    assert.deepEqual(b.lists.find(l => l.key === "states")?.entries, [{ name: "S" }]);
+    assert.equal(b.notes.length, 1);
+  });
+
+  test("result shape: actionable rows first, identical errors grouped, plain creates as ids", () => {
+    const err = { code: "NOT_FOUND", message: "apply cannot create provinces" };
+    const rows = [
+      { at: "burgs[0]", key: "A", i: 7, status: "created" },
+      { at: "burgs[1]", key: "B", i: 8, status: "created", diffs: [{ field: "capital" }] },
+      { at: "burgs[2]", key: "C", i: 9, status: "unchanged" },
+      { at: "burgs[0].note", key: "burg7", i: "burg7", name: "A", status: "created" },
+      { at: "provinces[0]", key: "P1", status: "error", error: err },
+      { at: "provinces[1]", key: "P2", status: "error", error: err },
+      { at: "provinces[2]", key: "P3", status: "error", error: err },
+      { at: "provinces[3]", key: "P4", status: "error", error: err },
+      { at: "states[0]", key: "S", i: 2, status: "differs", diffs: [{ field: "form" }] },
+      { at: "routes[0]", key: "R", status: "error", error: { code: "BAD_ARGS", message: "other" } }
+    ];
+    const res = { rows, ignored: {}, unsupported: [], steps: [], also: {}, notes: [], wouldChange: 0 };
+    const out = shapeResult(res, { mode: "upsert" }) as Record<string, any>;
+    assert.deepEqual(out.counts, { created: 3, unchanged: 1, differs: 1, error: 5 });
+    assert.deepEqual(out.created, { burgs: { A: 7 }, "burgs.note": { A: "burg7" } });
+    assert.deepEqual(
+      out.rows.map((r: Obj) => r.at),
+      [["provinces[0]", "provinces[1]", "provinces[2]"], "routes[0]", "states[0]", "burgs[1]"]
+    );
+    assert.deepEqual(out.rows[0], {
+      status: "error",
+      count: 4,
+      at: ["provinces[0]", "provinces[1]", "provinces[2]"],
+      keys: ["P1", "P2", "P3"],
+      more: 1,
+      error: err
+    });
+    const v = shapeResult(res, { mode: "upsert", verbose: true }) as Record<string, any>;
+    assert.equal(v.rows.length, rows.length, "verbose: every row, ungrouped");
+    assert.equal(v.created, undefined);
+  });
 });
 
 const PICK_CODE = `
@@ -124,16 +190,16 @@ for (const cand of bs.slice(5)) {
   if (a === undefined) continue;
   b2 = land.find(c => c !== a && near(c, C.p[a][0], C.p[a][1], 40, 120) && C.c[c].every(k => k !== a));
   if (b2 === undefined) continue;
-  // five more free cells, apart from each other and from a and b2 (later burgs go there)
+  // nine more free cells, apart from each other and from a and b2 (later burgs go there)
   const used = [a, b2];
   extra = [];
   for (const c of land) {
-    if (extra.length === 5) break;
+    if (extra.length === 9) break;
     if (used.some(u => near(c, C.p[u][0], C.p[u][1], -1, 40))) continue;
     extra.push(c);
     used.push(c);
   }
-  if (extra.length === 5) { B = cand; break; }
+  if (extra.length === 9) { B = cand; break; }
 }
 const xy = c => ({ x: C.p[c][0], y: C.p[c][1] });
 const people = b => Math.round(b.population * populationRate * urbanization);
@@ -204,13 +270,14 @@ describe("tupaia-mcp apply", () => {
       burgs: [
         { name: pick.B.name, population: pick.B.pop, culture: pick.B.culture, state: pick.B.state },
         { name: pick.O.name.toUpperCase(), population: 5, x: pick.O.x + 0.5, y: pick.O.y, state: pick.S.name },
-        { name: "Zzyzx Nowhere", x: 1, y: 1 }
+        { name: "Zzyzx Nowhere", x: pick.n1.x, y: pick.n1.y },
+        { name: "Zzyzx Water", x: 1, y: 1 }
       ],
       states: [{ name: pick.S.name, color: pick.S.color.toUpperCase(), territory: "prose" }],
       markers: [{ name: pick.M.name, note: `${pick.M.legend} (edited)` }]
     });
     assert.equal(r.changed, false);
-    assert.deepEqual(r.counts, { unchanged: 2, differs: 2, missing: 1 });
+    assert.deepEqual(r.counts, { unchanged: 2, differs: 2, missing: 1, error: 1 });
     const o = rowAt(r, "burgs[1]");
     assert.equal(o.i, pick.O.i, "case-folded name match");
     assert.equal(o.status, "differs");
@@ -226,6 +293,10 @@ describe("tupaia-mcp apply", () => {
     if (pick.M.legend.length > 80)
       assert.equal(m.diffs[0].at, pick.M.legend.length, "long text: shown around the first difference");
     assert.equal(rowAt(r, "burgs[2]").status, "missing");
+    const wet = rowAt(r, "burgs[3]");
+    assert.equal(wet.status, "error", "check says what upsert would: this create cannot work");
+    assert.match(wet.error.message, /^missing; creating it would fail: .*water/, JSON.stringify(wet));
+    assert.equal((r.rows as Obj[])[0].at, "burgs[3]", "errors come first");
     assert.equal(rowAt(r, "burgs[0]"), undefined, "unchanged rows are left out");
     assert.deepEqual(r.ignored, { states: ["territory"] });
     assert.equal(await undoCount(), before, "check takes no undo entry");
@@ -235,7 +306,7 @@ describe("tupaia-mcp apply", () => {
 
   test("upsert creates and updates in one undo entry; applying again changes nothing", async () => {
     const before = await undoCount();
-    const r = await h.ok("apply", spec());
+    const r = await h.ok("apply", { ...spec(), verbose: true });
     assert.equal(r.changed, true);
     assert.deepEqual(r.counts, { created: 11, updated: 1 }, JSON.stringify(r.rows));
     assert.equal(await undoCount(), before + 1, "one auto-undo entry for the whole call");
@@ -418,7 +489,125 @@ describe("tupaia-mcp apply", () => {
       mapping: { lists: { frame: "map" } },
       only: ["burgs", "cultures"]
     });
-    assert.deepEqual(gone.counts, { missing: 3 }, "undo removed everything the call made");
+    // two burgs, their two note shorthands, the culture
+    assert.deepEqual(gone.counts, { missing: 5 }, "undo removed everything the call made");
+  });
+
+  test("number lists compare by position; write-only fields are skipped; a marker's note belongs to its entry; an impossible create takes no undo entry", async () => {
+    // map fields like the settings extension's winds (6 numbers) and its write-only lock
+    await h.ok("eval", {
+      readOnly: true,
+      code: `const F = __tupaia.mutations.FIELDS.map;
+        F.testWinds = { check: v => v, get: () => (options.testWinds || [225, 45, 225, 315, 135, 315]).slice(), set: (_x, v) => { options.testWinds = v.slice(); } };
+        F.lock = { check: v => v, get: () => null, show: v => v, set: () => {} };
+        return true;`
+    });
+    const winds = [225, 45, 45, 315, 135, 315]; // the same set of numbers as the default, in another order
+    const c = await h.ok("apply", { mode: "check", map: { testWinds: winds, lock: ["winds"] } });
+    const row = rowAt(c, "map");
+    assert.equal(row.status, "differs", JSON.stringify(c));
+    assert.deepEqual(row.diffs, [{ field: "testWinds", have: [225, 45, 225, 315, 135, 315], want: winds }]);
+    assert.match(JSON.stringify(c.notes), /map lock: write-only/);
+    const n0 = await undoCount();
+    const u = await h.ok("apply", { map: { testWinds: winds, lock: ["winds"] } });
+    assert.equal(rowAt(u, "map").status, "updated");
+    const again = await h.ok("apply", { map: { testWinds: winds, lock: ["winds"] } });
+    assert.equal(again.note, "nothing to change", JSON.stringify(again));
+    assert.equal(await undoCount(), n0 + 1);
+
+    // a marker's note given by its markers entry and by a notes entry: the notes entry is a CONFLICT
+    const twice = {
+      markers: [{ name: "Spec Tower", note: "Taller" }],
+      notes: [{ entity: { type: "marker", name: "Spec Tower" }, legend: "Other" }]
+    };
+    const m = await h.ok("apply", twice);
+    assert.equal(m.note, "nothing to change", JSON.stringify(m));
+    const cf = rowAt(m, "notes[0]");
+    assert.equal(cf.error.code, "CONFLICT");
+    assert.match(cf.error.message, /markers\[0\]/);
+    assert.equal((await h.ok("apply", twice)).note, "nothing to change");
+
+    // a route through names nothing in the spec creates: an error in the preview, no undo entry
+    const n1 = await undoCount();
+    const g = await h.ok("apply", { routes: [{ name: "Ghost Road", through: ["Nowhere Atall", "Nowhere Either"] }] });
+    assert.equal(g.note, "nothing to change", JSON.stringify(g));
+    assert.equal(rowAt(g, "routes[0]").error.code, "NOT_FOUND");
+    assert.equal(await undoCount(), n1);
+  });
+
+  test("check matches upsert: pending dependencies, notes of error rows, grouped errors, CONFLICT, x,y, label group, legend contains", async () => {
+    const at = (k: number) => ({ x: pick.x[k].x, y: pick.x[k].y });
+    // a culture, a burg of that culture, notes on both: all missing in check (not errors)
+    const chain = {
+      cultures: [{ name: "Pendish", at: [pick.x[5].x, pick.x[5].y], color: "#336699", namesbase: "English" }],
+      burgs: [
+        { name: "Pendton", ...at(6), culture: "Pendish", note: "a pending note" },
+        { name: pick.B.name, culture: "Pendish" }
+      ],
+      notes: [{ entity: { type: "culture", name: "Pendish" }, legend: "culture note" }]
+    };
+    const c = await h.ok("apply", { ...chain, mode: "check" });
+    assert.deepEqual(c.counts, { differs: 1, missing: 4 }, JSON.stringify(c.rows));
+    const b = rowAt(c, "burgs[1]");
+    assert.match(b.diffs[0].pending, /culture 'Pendish' is created by this spec/, JSON.stringify(b));
+    const up = await h.ok("apply", chain);
+    assert.deepEqual(up.counts, { created: 4, updated: 1 }, JSON.stringify(up));
+    const made = up.created as Obj;
+    assert.ok(made.burgs.Pendton > 0 && made.cultures.Pendish > 0, JSON.stringify(made));
+    assert.deepEqual((await h.ok("apply", { ...chain, mode: "check" })).counts, { unchanged: 5 });
+
+    // an entity row that is an error still gets its note; one whose create failed says so
+    const e = await h.ok("apply", {
+      burgs: [
+        { name: pick.O.name, culture: "No Such Culture", note: "noted anyway" },
+        { name: "Soggy", x: 1, y: 1, note: "never" }
+      ]
+    });
+    assert.equal(rowAt(e, "burgs[0]").status, "error");
+    assert.equal((e.created as Obj)["burgs.note"][pick.O.name], `burg${pick.O.i}`, JSON.stringify(e));
+    assert.equal(rowAt(e, "burgs[1]").note, "skipped: the entity does not exist");
+
+    const k = await h.ok("apply", {
+      mode: "check",
+      provinces: [{ name: "Pa" }, { name: "Pb" }, { name: "Pc" }],
+      routes: [
+        {
+          name: "Free Way",
+          draw: "points",
+          through: [
+            [pick.n1.x, pick.n1.y],
+            [pick.n2.x, pick.n2.y]
+          ]
+        }
+      ],
+      burgs: [
+        { ref: pick.O.i, population: 5 },
+        { name: pick.O.name },
+        { name: "Twinford", ...at(3) },
+        { name: "Moved In", x: pick.O.x, y: pick.O.y }
+      ]
+    });
+    const grouped = (k.rows as Obj[]).find(r => r.count === 3) as Obj;
+    assert.deepEqual(grouped.keys, ["Pa", "Pb", "Pc"], JSON.stringify(k.rows));
+    assert.match(grouped.error.message, /^missing; apply cannot create provinces/);
+    assert.match(rowAt(k, "routes[0]").error.message, /need the routes extension/);
+    assert.equal(rowAt(k, "burgs[1]").error.code, "CONFLICT");
+    assert.equal(rowAt(k, "burgs[2]"), undefined, "x,y picks one of two Twinfords: unchanged");
+    const refused = rowAt(k, "burgs[3]").error.message;
+    assert.ok(refused.includes(`'${pick.O.name}'`), refused);
+
+    // a label moves to another group; a legend that contains the spec's text matches with legend:'contains'
+    const lg = await h.ok("apply", { mode: "update", labels: [{ text: "Spec|Lands", group: "lbl_moved" }] });
+    assert.deepEqual(rowAt(lg, "labels[0]").diffs, [{ field: "group", have: "lbl_regions", want: "lbl_moved" }]);
+    const parent = (
+      await h.ok("eval", { readOnly: true, code: `return document.querySelector("#lbl_moved text")?.textContent` })
+    ).value;
+    assert.equal(parent, "SpecLands");
+    const partial = { burgs: [{ name: "Applyton", note: "othe" }] };
+    assert.equal(((await h.ok("apply", { ...partial, mode: "check" })).counts as Obj).differs, 1);
+    assert.deepEqual((await h.ok("apply", { ...partial, mode: "check", tolerance: { legend: "contains" } })).counts, {
+      unchanged: 2
+    });
   });
 
   test("sketch: one apply = several replayable records under one undo entry; undo/redo move them together; rebase remaps ids", async () => {
@@ -430,7 +619,7 @@ describe("tupaia-mcp apply", () => {
     const other = (await h.ok("save_map", { path: "other-apply.map", overwrite: true })).path as string;
     await h.ok("load_map", { path: "tests/fixtures/demo.map" });
     await h.ok("sketch", { action: "start", slug: "t-apply" });
-    const r = await h.ok("apply", spec());
+    const r = await h.ok("apply", { ...spec(), verbose: true });
     assert.equal(r.changed, true);
     const ids = Object.fromEntries((r.rows as Obj[]).map(x => [x.at, x.i]));
     let st = await h.ok("sketch", { action: "status" });
