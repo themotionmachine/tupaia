@@ -152,15 +152,16 @@ Token economy (results are counts first; ask for detail only when needed):
 2. `snapshot {action:'take', label:'pre-terrain'}`.
 3. `set_heights {grid:[...], fill:true, dryRun:true}` (or `image:{path:'/abs/h.png',
    range:[0,80]}`, or sparse `pack:{cellId:h}`): check `landPct`, `lakes`, `pits`,
-   `burgsOnNewWater` (count 0 included), `paintedBiomes`; `detail:true` lists pits. Any
-   set_heights rebuilds the WHOLE map (rivers, biomes map-wide, every burg's economy and state
-   treasury re-roll), even for one cell: for a few cells use `paint_cells {set:{height:{...,
-   rebuild:'keep'}}}` instead.
+   `burgsOnNewWater` (count 0 included), `paintedBiomes`; `detail:true` lists pits.
+   `rebuild:'keep'` (no land/water flips) is local: only the changed cells' heights,
+   temperature, biome and lake levels change; rivers, other biomes, burg economies and
+   treasuries stay (`local.rivers.climbing` lists rivers to reroute; `rivers:'regenerate'` is
+   the opt-in global river pass). `paint_cells {set:{height:{...}}}` is the same local keep.
 4. `flow {from:[{x:840, y:420}, {gridCell:5005}], heights:{grid:[...]}, fill:true}`: key rivers
    should end at `sea` (or `river` whose `goesTo` is the sea); `screenshot:true` draws them.
 5. `set_heights {...}` without dryRun. Read `rivers` (kept/new/gone, `notesOrphaned`) and
-   `carried` (field meanings in the cheatsheet, Terrain). Even an identity import regenerates
-   rivers (ids and names carry over by course). Verify: the same dryRun says `changed:0`, and
+   `carried` (field meanings in the cheatsheet, Terrain). Even an identity import with rebuild
+   'risk' regenerates rivers (ids and names carry over by course). Verify: the same dryRun says `changed:0`, and
    `edit {type:'map', recalculate:'biomes', dryRun:true}` reports `replaces.biomeCellsEdited:0`.
 6. World settings: `edit {type:'map', ops:[{set:{mapSize:1.1, latitude:38.8,
    temperatureEquator:30, temperatureNorthPole:-28, winds:[225,45,45,315,135,315],
@@ -276,7 +277,7 @@ replaces it:
 | Custom biomes in `biomesData`, polygon painting, edge noise (biomes2.js) | `add/edit {type:'biome'}` (saved in the .map since this build: files from before, v3 and shared v6/v7, lost iconsDensity/icons/cost, so re-apply them with `edit biome`, e.g. Glass desert `{iconsDensity:3, icons:{dune:3, cactus:6, deadTree:1}, cost:200}`), `paint_cells {set:{biome}, select:{polygon, buffer, except}, feather:{width:3, unit:'cells'}}`, `regenerate {parts:['biomes'], biomes:{...}}` |
 | Provinces spread from chosen centres with a flat queue (provinces.js) | `regenerate {parts:['provinces'], provinces:{states, centres:[{state, burg, name}], crossForeign:true}}` (`crossForeign:true` is what makes it a flat flood; add `lockedStates:true` for locked states; one call can mix centres and count) |
 | Emblem shields via `COA.getShield` | `regenerate {parts:['emblems'], emblems:{states, stateCulture:true}}` (provinces and burgs default true; `shieldOnly` keeps designs) |
-| River splices, splits, renames, moving notes (rivfix.js, split.py, rename_rivers.py) | `edit {type:'river', ops:[{ref, set:{split\|merge\|mainStem\|reroute\|name\|type}}]}` |
+| River splices, splits, renames, moving notes (rivfix.js, split.py, rename_rivers.py) | `edit {type:'river', ops:[{ref, set:{split\|merge\|mainStem\|reroute\|end\|joinAt\|name\|type}}]}`; rivfix in two calls: `[{ref:28, set:{end:{at:7437}}}, {ref:14, set:{reroute:{cells:[7141,7289,7437,7586]}}}]` then `[{ref:9, set:{mainStem:8}}, ...renames]` |
 | Burg labels hidden at full-map zoom | `display {labels:{...}}`, `screenshot {labels:'all'}` (check first: usually they show, just small) |
 | Relief icon density by hand | `regenerate {parts:['relief'], relief:{density\|matchIcons, perBiome, exclude, nearBurgs}}` |
 | Removed entities bloating the .map | `compact`, `compact:true` on saves; `edit map {reliefOnLoad:true}` |
@@ -298,7 +299,7 @@ points (spire.js), ice shapes. Read the runtime API first and pass `redraw`.
   `restoreLayers:true` turns back layers a part switched on. biomes, provinces, emblems and
   relief take options, are seeded or literal, and replay in sketches.
 - Height edits on part of the map: `paint_cells ... set:{height:{..., rebuild:'keep'}}` (land
-  only, refuses crossing 20), `'risk'` (coastline changes, entities carried), `'erase'` (wipes
+  only, refuses crossing 20, local: rivers and the economy stay), `'risk'` (coastline changes, entities carried), `'erase'` (wipes
   every entity; only when asked, with `confirmErase:true`).
 - Names from a culture's language: `set:{name:{generate:{base:'Hawaiian'}}}` or
   `{generate:{culture:<ref>}}`.

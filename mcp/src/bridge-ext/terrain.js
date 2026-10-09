@@ -656,11 +656,20 @@
     if (!["redefine", "keep"].includes(biomes)) fail("BAD_ARGS", "biomes is 'redefine' or 'keep'");
     for (const k of ["fill", "erosion", "keepHeights"])
       if (a[k] !== undefined && typeof a[k] !== "boolean") fail("BAD_ARGS", `${k} must be true or false`);
+    if (a.rivers !== undefined && !["keep", "regenerate"].includes(a.rivers))
+      fail("BAD_ARGS", "rivers is 'keep' or 'regenerate'");
+    if (rebuild === "risk" && a.rivers === "keep")
+      fail("BAD_ARGS", "rebuild:'risk' always regenerates the rivers; rivers:'keep' goes with rebuild:'keep'");
+    if (rebuild === "keep" && a.rivers === "keep" && a.erosion === true)
+      fail("BAD_ARGS", "erosion cuts the beds of regenerated rivers: pass rivers:'regenerate' (or drop erosion)");
+    // keep is local unless asked: erosion (a river step) implies regenerating the rivers
+    const rivers = rebuild === "risk" ? "regenerate" : (a.rivers ?? (a.erosion === true ? "regenerate" : "keep"));
     return {
       rebuild,
       erosion: a.erosion === true,
       keepHeights: a.keepHeights !== false,
       biomes,
+      rivers,
       fill: a.fill === true
     };
   }
@@ -683,15 +692,15 @@
     return (pack.burgs || []).filter(b => b?.i && !b.removed);
   }
 
-  /** Land cells whose biome differs from what Biomes.define gives on the current climate. */
-  function paintedBiomes() {
+  /** Land cells (passing `only`, a grid-cell filter, when given) whose biome differs from what Biomes.define gives. */
+  function paintedBiomes(only) {
     const C = pack.cells;
     const precip = grid.cells.prec;
     const temp = grid.cells.temp;
     if (!precip || !temp || typeof Biomes?.getId !== "function") return null;
     let n = 0;
     for (const i of C.i) {
-      if (C.h[i] < 20) continue;
+      if (C.h[i] < 20 || (only && !only(C.g[i]))) continue;
       let moisture = precip[C.g[i]];
       if (C.r[i]) moisture += Math.max(C.fl[i] / 10, 2);
       let s = moisture;
@@ -720,20 +729,31 @@
           effect: "the rebuild keeps each such burg's cell as land at height 20 (an island or a spit)"
         }
       : { count: 0 };
-    const painted = paintedBiomes();
+    const local = o.rebuild === "keep";
+    const painted = paintedBiomes(local ? g => cur[g] !== target[g] : null);
     if (painted)
       out.paintedBiomes = {
         cells: painted,
         effect:
           o.biomes === "redefine"
-            ? "land cells whose biome differs from their climate's (painted or older): biomes:'redefine' recomputes them, biomes:'keep' keeps them where land remains"
-            : "land cells whose biome differs from their climate's: kept where land remains (biomes:'keep')"
+            ? `land cells${local ? " among the changed ones" : ""} whose biome differs from their climate's (painted or older): biomes:'redefine' recomputes them, biomes:'keep' keeps them${local ? "" : " where land remains"}`
+            : `land cells${local ? " among the changed ones" : ""} whose biome differs from their climate's: kept (biomes:'keep')`
       };
-    out.rivers = {
-      now: (pack.rivers || []).length,
-      effect:
-        "rivers are regenerated on apply; a new river whose course overlaps an old one keeps its id, name and type (notes stay on it)"
-    };
+    if (o.rivers === "keep") {
+      const changed = new Set();
+      for (const i of C.i) if (cur[C.g[i]] !== target[C.g[i]]) changed.add(i);
+      out.rivers = {
+        now: (pack.rivers || []).length,
+        through: (pack.rivers || []).filter(r => (r.cells || []).some(x => changed.has(x))).length,
+        effect:
+          "kept (rebuild:'keep' is local); rivers that climb after the change are listed on apply; rivers:'regenerate' re-runs the river generator over the whole map"
+      };
+    } else
+      out.rivers = {
+        now: (pack.rivers || []).length,
+        effect:
+          "rivers are regenerated on apply; a new river whose course overlaps an old one keeps its id, name and type (notes stay on it)"
+      };
     if (a.detail) {
       const GP = grid.points;
       const at = g => [roundTo(GP[g][0], 1), roundTo(GP[g][1], 1)];
@@ -769,19 +789,30 @@
     });
   }
 
+  /**
+   * rebuild:'keep' is local (bridge-mutations localHeights): the changed cells' heights,
+   * temperature, biome and lake levels; precipitation, ice, other biomes, burg economies and state
+   * treasuries stay. rivers:'regenerate' (opt-in, the one global step) re-runs the river
+   * generator on the current precipitation and recomputes the biome of cells whose river or flux
+   * changed; the economy is still not re-rolled.
+   */
   function rebuildKeep(target, o, info) {
     const C = pack.cells;
     const gh = grid.cells.h;
-    for (let g = 0; g < gh.length; g++) gh[g] = target[g];
-    for (const i of C.i) C.h[i] = gh[C.g[i]];
-    for (const ft of pack.features || []) if (ft && ft.type === "lake") ft.height = Lakes.getHeight(ft);
+    const edited = [];
+    for (let g = 0; g < gh.length; g++)
+      if (gh[g] !== target[g]) {
+        gh[g] = target[g];
+        edited.push(g);
+      }
+    info.local = M.localHeights(edited, { biomes: o.biomes });
+    if (o.rivers !== "regenerate") return {};
+    const r0 = Uint8Array.from(C.r, v => (v ? 1 : 0));
+    const fl0 = Uint16Array.from(C.fl);
     const saved = M.captureRivers();
-    calculateTemperatures();
-    generatePrecipitation();
     Rivers.generate(o.erosion);
     Features.defineGroups();
     afterRivers(target, o, info);
-    if (o.biomes === "redefine") Biomes.define();
     Rivers.specify();
     for (const ft of pack.features || []) {
       if (!ft || ft.type !== "lake" || ft.name) continue;
@@ -792,9 +823,11 @@
       }
     }
     const carried = { rivers: M.carryRivers(saved) };
-    if (pack.goods?.length && typeof regenerateEconomy === "function") regenerateEconomy();
-    Ice.generate();
-    ice.selectAll("*").remove();
+    if (o.biomes !== "keep") {
+      const moved = [];
+      for (const i of C.i) if ((C.r[i] ? 1 : 0) !== r0[i] || C.fl[i] !== fl0[i]) moved.push(i);
+      info.riverBiomes = M.localBiomes(moved);
+    }
     return carried;
   }
 
@@ -860,7 +893,7 @@
     if (a.phase !== "apply") return { phase: "validate", ...plan, ...preview(cur, target, o, fill, a) };
 
     const c = M.batchContext(a);
-    const info = { heightsRestored: 0, rebuildChanged: 0 };
+    const info = { heightsRestored: 0, rebuildChanged: 0, local: null, riverBiomes: 0 };
     const before = M.featureSummary();
     const burgsBefore = liveBurgs().length;
     const graphBefore = T.cellGraph();
@@ -876,7 +909,11 @@
     } finally {
       Math.random = prevRandom;
     }
-    c.R.add("all");
+    if (o.rebuild === "risk" || o.rivers === "regenerate") c.R.add("all");
+    else {
+      c.R.add("heightmap");
+      if (info.local?.biomes) c.R.add("biomes");
+    }
     T.resetMemo?.();
     const final = Uint8Array.from(grid.cells.h);
     let raisedForBurgs = 0;
@@ -894,10 +931,25 @@
           ? "rebuild:'risk' re-ran features, climate, lakes and rivers and re-packed the cells (cell ids changed); burgs, states, cultures, religions, provinces, zones, routes and markers were kept where land remains and moved to the new cells; lake and island names were carried over"
           : "rebuild:'risk' re-ran features, climate, lakes and rivers; the re-packed cells came out the same (cell ids unchanged)"
       );
-    else
-      c.notes.add(
-        "rebuild:'keep' kept the coastline and cell ids; climate, rivers and lakes were recomputed on the new heights"
+    let local = null;
+    if (o.rebuild === "keep") {
+      local = M.localHeightNotes(
+        info.local,
+        c,
+        "reroute them with edit river, or pass rivers:'regenerate'",
+        o.rivers === "regenerate"
       );
+      if (o.rivers === "regenerate") {
+        local.rivers = { regenerated: true };
+        local.biomes += info.riverBiomes;
+        c.notes.add(
+          `rivers:'regenerate' re-ran the river generator over the whole map (the opt-in global step) on the current precipitation${o.biomes === "keep" ? "" : `; ${info.riverBiomes} biome cells whose river or flux changed were recomputed`}; burg economies and state treasuries were not re-rolled`
+        );
+      }
+      c.notes.add(
+        "a whole-map recompute is edit {type:'map', recalculate:'climate+biomes'|'rivers+biomes'} (it recomputes hand-painted biomes too)"
+      );
+    }
     if (raisedForBurgs)
       c.notes.add(`${raisedForBurgs} grid cells set to water hold a burg and were kept as land (height 20)`);
     if (deepLakes) c.notes.add(`erosion turned ${deepLakes} grid cells of deep depressions into lakes`);
@@ -919,6 +971,7 @@
       deepLakes,
       burgsRemoved: burgsBefore - liveBurgs().length,
       cellsRenumbered: renumbered,
+      ...(local ? { local } : {}),
       ...(carried?.rivers ? { rivers: carried.rivers } : {}),
       features: { before, after: M.featureSummary() }
     };
@@ -948,7 +1001,13 @@
       gridDigest: digestNow,
       baseDigest: hashArray(base),
       heightsDigest: hashArray(final),
-      options: { rebuild: o.rebuild, erosion: o.erosion, keepHeights: o.keepHeights, biomes: o.biomes },
+      options: {
+        rebuild: o.rebuild,
+        erosion: o.erosion,
+        keepHeights: o.keepHeights,
+        biomes: o.biomes,
+        rivers: o.rivers
+      },
       graphAfter,
       bbox: changedBox(base, final),
       stats: {

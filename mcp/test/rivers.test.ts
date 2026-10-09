@@ -243,7 +243,7 @@ describe("tupaia-mcp river structure edits", () => {
     await undo();
   });
 
-  test("refusals: merge mid-course, split too near an end or far away, non-tributary, no-op reroute", async () => {
+  test("refusals: merge mid-course, split too near an end or far away, non-tributary; a no-op reroute is not one", async () => {
     let e = await refused([{ ref: 7, set: { merge: true } }]);
     assert.equal(e.code, "REFUSED");
     assert.match(e.message, /mid-course/);
@@ -262,8 +262,10 @@ describe("tupaia-mcp river structure edits", () => {
     assert.equal(e.code, "BAD_ARGS");
     e = await refused([{ ref: 4, set: { merge: "yes" } }]);
     assert.equal(e.code, "BAD_ARGS");
-    e = await refused([{ ref: 6, set: { reroute: { cells: [6799, 6800, 6802] } } }]);
-    assert.match(e.message, /already runs through these cells/);
+    // a reroute that changes nothing is a no-op success (keeplocal.test.ts), not a refusal
+    const same = await edit([{ ref: 6, set: { reroute: { cells: [6799, 6800, 6802] } } }]);
+    assert.match(JSON.stringify(same.notes), /unchanged: .* already runs through these cells/);
+    await undo();
   });
 
   test("ops of one call apply in order: a reroute through a cell an earlier op frees", async () => {

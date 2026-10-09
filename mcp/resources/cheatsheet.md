@@ -21,7 +21,7 @@ only in a server a human spawned with `TUPAIA_MODE=live`, behind a preview and a
 | `edit {type, ops:[{ref, set}\|{ref, remove:true}], force?, recalculate?, dryRun?, rows?, ...}` | change or remove many entities of one type; type `map` = map fields and world settings. |
 | `add {type, items:[...], dryRun?, rows?, ...}` | create burgs, states, markers, routes, routeGroups, zones, labels, notes, cultures, religions, biomes. |
 | `paint_cells {select, set, feather?, dryRun?}` | assign state/province/culture/religion/biome/zone/height to cells. |
-| `set_heights {grid\|pack\|image, fill?, rebuild?, erosion?, keepHeights?, biomes?, dryRun?}` | replace the heightmap and rebuild coast, climate, rivers, biomes; entities carried over. |
+| `set_heights {grid\|pack\|image, fill?, rebuild?, rivers?, erosion?, keepHeights?, biomes?, dryRun?}` | replace the heightmap; `risk` rebuilds coast, climate, rivers, biomes (entities carried over), `keep` is local. |
 | `apply {<lists>, map?, specPath?, mode?:'upsert'\|'update'\|'check', mapping?, ignore?, tolerance?, only?}` | bring the map in line with a spec by name, or check it. Idempotent. |
 | `clear {types, where?, keep?, force?, orphanRoutes?, detail?, dryRun?}` | remove every entity of some types (wipe a random base), with each editor's cascade. |
 | `compact {types?, repointProvinces?, dryRun?, details?, limit?}` | shrink removed records to id-keeping stubs; drop their notes and SVG. |
@@ -138,10 +138,12 @@ feature, burg, river}`, minus `except:<another select>` ('polygon except circle'
 | culture / religion | land only (culture: burgs follow) |
 | biome | name or id; land only; `feather:{width, unit?:'px'\|'cells', seed?}` frays the edge (use `unit:'cells'`, width 2-4; under one cell spacing it does nothing and a note says so) |
 | zone | ref (adds cells) or `{ref, op:'add'\|'remove'}` |
-| height | alone in its call; `{value \| delta \| smooth:n, rebuild?, clamp?, erosion?, confirmErase?}`; the local way to edit a few cells |
+| height | alone in its call; `{value \| delta \| smooth:n, rebuild?, clamp?, erosion?, confirmErase?, biomes?}`; the local way to edit a few cells |
 
 Height `rebuild`: `keep` (default) land only, 20..100, refuses a change across 20 (`clamp:true`
-stops at 20); `risk` rebuilds coast, lakes, climate, rivers and re-packs the cells, carrying
+stops at 20) and is local: the changed cells' temperature, lake levels and biome follow
+(`biomes:'keep'` keeps the biome); rivers, other cells and the economy stay, and `local.rivers`
+lists rivers through the cells that now climb; `risk` rebuilds coast, lakes, climate, rivers and re-packs the cells, carrying
 burgs, routes, markers, regiments and lake/island names to the new cells (`erosion:true` re-runs
 erosion; a carried route point off its old cell is re-recorded to the cell under it,
 `carried.routePointsRepointed`); `erase` regenerates every entity (`confirmErase:true`). For whole-map terrain use
@@ -169,11 +171,17 @@ part keeps 3+ cells), `merge:true` (inverse of split), `reroute:{cells:[...]}` o
 `{from, to: Place|'edge', through?, snap?:false, edge?}` (no crossings; a climb is a warning;
 lint river-uphill only flags rises of `riverTol`, 12; notes give discharge before -> after).
 `{cells}` must be neighbours in order (inspect `{at}` lists a cell's `neighbours`; the error lists
-both cells'). A reroute through cells the river already holds is REFUSED, and a cell on
-another river must be freed first. To move a confluence or end a river earlier, use three ops in
-ONE call (they apply in order; a dryRun checks the later ones only when applied): detour river A
-off the cells (`reroute {cells}` via neighbours), reroute river B through the freed cell, then
-reroute A to its new end (`{cells:[...]}` ending on B). `find river fields:['joinsAt','tributaries']`.
+both cells'). A reroute that changes nothing (cells it already holds, in order) is a no-op
+success with a note; a cell on another river must be freed first. `end:{at: Place|cell}`: the
+river stops at that course cell (cells below dropped, flux and `cells.r` fixed; refused while a
+tributary joins below) or, given a cell of another river or water next to its course, joins it
+there. A land end with no river or water is loose (warned): run another river through it in a
+later op of the same call and it joins there. `joinAt:{river?: ref (default its parent), at:
+Place|cell}` re-routes the lower course from the nearest course cell to that confluence cell
+(cheapest free land path, uphill costs more; `NO_PATH` when other rivers box it in). Moving a
+confluence onto a cell another river holds (rivfix): `[{ref:A, set:{end:{at:c}}}, {ref:B,
+set:{reroute:{cells:[..., c, ...]}}}]` in ONE call (ops apply in order; a dryRun checks the later
+ones only when applied). `find river fields:['joinsAt','tributaries']`.
 
 **Routes**: freehand routes are drawn exactly, may cross water, are locked by default (regenerate
 keeps them), up to 2000 points; a burg point uses the burg's cell; `[x,y,cell]` pins a cell
@@ -223,14 +231,19 @@ redraw:['labels']}`.
 **Terrain**: `set_heights` takes exactly one source: `grid` (one 0-100 per GRID cell, grid order;
 a wrong length says the expected one), `pack:{cellId: h}` (sparse) or `image:{path|dataUrl,
 invert?, range?:[lo,hi], channel?}`. Sea level 20. `fill:true` fills pits. `rebuild:'risk'`
-(default) re-packs and carries entities; `'keep'` refuses land/water flips. Rivers regenerate;
-a river overlapping an old course keeps its id, name and type. `keepHeights` (default true)
-restores land heights the rebuild changed. `biomes:'redefine'` (default) | `'keep'`. An
+(default) re-packs and carries entities, and rivers regenerate (a river overlapping an old
+course keeps its id, name and type). `'keep'` refuses land/water flips and is local, as for
+paint_cells height: only the changed cells' heights, temperature, biome and lake levels change
+(result `local {packCells, temperature, biomes, lakes, rivers:{through, climbing?}}`); rivers,
+precipitation, other biomes, burg economies and state treasuries are untouched. `rivers:'regenerate'`
+(keep only; implied by `erosion:true`) is the opt-in global step: the river generator re-runs on
+the current precipitation and cells whose river or flux changed get their biome recomputed;
+the economy is never re-rolled. A whole-map climate/biome recompute is `edit {type:'map',
+recalculate}`. `keepHeights` (default true) restores land heights the rebuild changed.
+`biomes:'redefine'` (default) | `'keep'`. An
 `image.path` is read like load_map's path (Files); the result names `imagePath`. dryRun
 returns changed, toLand/toWater, landPct, lakes, pits, grid (cellsX, cellsY, spacing),
-burgsOnNewWater (count 0 included), paintedBiomes. Even a 1-cell `pack` edit rebuilds the whole
-map: rivers regenerate, biomes are redefined map-wide and every burg's economy and state treasury
-re-roll; for a few cells use `paint_cells {set:{height}}` (keep). The apply result: `carried.*`
+burgsOnNewWater (count 0 included), paintedBiomes, rivers (`through` with keep). The apply result: `carried.*`
 (entities moved to the new cells), `burgsBackOnTheirCell` (burgs put back on their own cell),
 `raisedForBurgs` (water cells kept as land under a burg), `deepLakes` (depressions erosion made
 lakes), `routeLinksBridged` (route steps added between cells no longer neighbours), `portsLost`
