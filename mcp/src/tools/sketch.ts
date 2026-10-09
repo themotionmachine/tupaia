@@ -111,9 +111,7 @@ async function start(ctx: ToolContext, scope: CallScope, args: { slug?: string; 
   const summary = await scope.call<{ counts: Record<string, number>; cells?: number }>(
     "summary",
     {},
-    {
-      noAlerts: true
-    }
+    { noAlerts: true }
   );
   if (old) notes.push(`replaced the stopped sketch '${old.slug}' (${old.ops.length} ops)`);
   const sk = ctx.sketches.begin({

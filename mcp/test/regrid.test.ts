@@ -38,6 +38,9 @@ const PAGE_STATE = `return {
   seed,
   digest: __tupaia.fns.digest().hash,
   notes: notes.length,
+  relief: document.querySelectorAll("#terrain use").length,
+  riverAnchors: pack.rivers.reduce((s, r) => s + (r.points?.length ?? r.cells.length), 0),
+  riversAligned: pack.rivers.every(r => !r.points || r.points.length === r.cells.length),
   burgNames: pack.burgs.filter(b => b.i && !b.removed).map(b => b.name).join("|")
 };`;
 
@@ -188,6 +191,23 @@ describe("regrid on demo.map (local)", () => {
     assert.equal(now.cells, applied.cells.after);
     assert.equal(now.notes, before0.notes);
     assert.equal(now.burgNames, before0.burgNames);
+    assert.equal(now.relief, before0.relief, "relief icons are kept as drawn (relief:'keep' default)");
+    // rivers keep their anchors (Resample stored the meandered line, so every regrid multiplied points)
+    assert.equal(now.riversAligned, true);
+    assert.ok(
+      now.riverAnchors <= before0.riverAnchors * 1.05 && now.riverAnchors >= before0.riverAnchors * 0.9,
+      `${before0.riverAnchors} -> ${now.riverAnchors}`
+    );
+    // layers that were on but undrawn stay undrawn
+    const undrawn = await ok(h, "eval", {
+      code: `return args.ids.map(id => document.getElementById(id).querySelectorAll("path, circle, polygon, line, text, use, image").length)`,
+      args: { ids: applied.layers.keptEmpty },
+      readOnly: true
+    });
+    assert.ok(
+      (undrawn.value as number[]).every(n => n === 0),
+      JSON.stringify(applied.layers)
+    );
     // the label is still drawn on its path
     const lab = await ok(h, "eval", {
       code: `const t = document.getElementById(args.id); return t ? t.textContent : null;`,

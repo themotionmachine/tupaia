@@ -87,13 +87,17 @@
   // How each .map line grows with the cell count (save.ts prepareMapData order): grid arrays
   // with the grid points, pack arrays with the pack cells, pack features and rivers by a power of
   // the pack ratio. The svg (line 5) by drawn layer: the redraw makes area outlines grow about
-  // with ratio^0.6, heightmap contours ^0.73, relief icons ^0.37, rivers ^0.4; labels, markers,
-  // routes, burg icons and defs stay (measured on demo.map and terraform-v3.map, 10K -> 50K).
+  // with ratio^0.6, heightmap contours ^0.73; rivers (re-anchored on their old control points),
+  // labels, markers, routes, burg icons and defs stay (measured on demo.map and terraform-v3.map,
+  // 10K -> 50K and 30K -> 10K). Relief icons are
+  // placed by area (a Poisson disc per cell), so a fresh draw grows only ^0.1-0.2 (terraform-v3 10K
+  // <-> 30K, 50K); a saved relief layer can be far from what a redraw at the same density draws, so
+  // the estimate starts from a fresh draw (freshLength).
   const GRID_LINES = [6, 7, 8, 9, 10, 11];
   const PACK_LINES = [16, 17, 18, 19, 20, 21, 22, 24, 25, 26, 27, 38, 40, 44];
-  const PACK_EXPONENT = { 12: 0.6, 32: 0.5 };
+  const PACK_EXPONENT = { 12: 0.6 }; // features; rivers (32) keep their anchors, so stay
   const SVG_LINE = 5;
-  const SVG_EXPONENT = { terrs: 0.73, terrain: 0.37, rivers: 0.4, cells: 1 };
+  const SVG_EXPONENT = { terrs: 0.73, terrain: 0.15, cells: 1 };
   for (const id of [
     "biomes",
     "regions",
@@ -113,12 +117,32 @@
   ])
     SVG_EXPONENT[id] = 0.6;
 
-  async function bytesEstimate(gridRatio, packRatio) {
+  /**
+   * The relief layer as a redraw at the current density would draw it (it is put back as it
+   * was right after: the dry run changes nothing); other layers as they are.
+   */
+  function freshLength(g, now) {
+    if (g.id !== "terrain" || !g.querySelector("use") || typeof drawReliefIcons !== "function") return now;
+    const saved = g.innerHTML;
+    try {
+      drawReliefIcons();
+      return g.outerHTML.length;
+    } catch {
+      return now;
+    } finally {
+      g.innerHTML = saved;
+    }
+  }
+
+  async function bytesEstimate(gridRatio, packRatio, relief) {
     const { prepareMapData } = await lazy.save();
     const lines = prepareMapData().split("\r\n");
     let svgGrowth = 0;
-    for (const g of document.getElementById("viewbox")?.children || [])
-      if (SVG_EXPONENT[g.id]) svgGrowth += g.outerHTML.length * (packRatio ** SVG_EXPONENT[g.id] - 1);
+    for (const g of document.getElementById("viewbox")?.children || []) {
+      if (!SVG_EXPONENT[g.id] || (g.id === "terrain" && relief === "keep")) continue;
+      const now = g.outerHTML.length;
+      svgGrowth += freshLength(g, now) * packRatio ** SVG_EXPONENT[g.id] - now;
+    }
     let now = 0;
     let est = 0;
     lines.forEach((l, k) => {
@@ -146,6 +170,8 @@
     if (!["interpolate", "nearest"].includes(heights)) fail("BAD_ARGS", "heights is 'interpolate' or 'nearest'");
     const iceMode = a.ice ?? "keep";
     if (!["keep", "regenerate"].includes(iceMode)) fail("BAD_ARGS", "ice is 'keep' or 'regenerate'");
+    const relief = a.relief ?? "keep";
+    if (!["keep", "redraw"].includes(relief)) fail("BAD_ARGS", "relief is 'keep' or 'redraw'");
     if (a.density === undefined) fail("BAD_ARGS", "density is required (1-13 or 1000-100000)");
     const want = targetCells(a.density);
     const shape = gridShape(want);
@@ -173,7 +199,7 @@
       );
     if (want > 50000)
       warnings.push("over 50K cells the app gets slow to draw and edit (the Options slider marks it red)");
-    return { want, shape, heights, iceMode, gridNow, packNow, packEst, warnings };
+    return { want, shape, heights, iceMode, relief, gridNow, packNow, packEst, warnings };
   }
 
   /**
@@ -391,6 +417,7 @@
     return {
       empty,
       layers: layerCounts(),
+      reliefHTML: document.getElementById("terrain")?.innerHTML ?? null,
       textPathIds: new Set([...(document.getElementById("textPaths")?.children || [])].map(e => e.id)),
       notes: Array.isArray(notes) ? notes : [],
       labelNodes,
@@ -409,6 +436,8 @@
   const ITEM_GROUPS = new Set(["zones", "armies", "ruler"]);
   // geography: what the redraw shows there is the new data (a new lake or coast is real)
   const DATA_LAYERS = new Set(["ocean", "lakes", "landmass", "coastline"]);
+  // animated, restarted after the redraw: its element count says nothing
+  const TRANSIENT_LAYERS = new Set(["tradeAnimation"]);
 
   /** Layer groups (#viewbox children and their child groups) and how many elements each draws. */
   function layerCounts() {
@@ -434,7 +463,7 @@
     const now = layerCounts();
     const keptEmpty = [];
     for (const [id, b] of before) {
-      if (b.n || DATA_LAYERS.has(id) || DATA_LAYERS.has(b.parent)) continue;
+      if (b.n || DATA_LAYERS.has(id) || DATA_LAYERS.has(b.parent) || TRANSIENT_LAYERS.has(id)) continue;
       if (b.parent && before.get(b.parent)?.n === 0) continue; // its parent is kept empty
       if ((id === "ice" || b.parent === "ice") && iceMode === "regenerate") continue;
       const a = now.get(id);
@@ -456,7 +485,7 @@
     const changed = {};
     const after = layerCounts();
     for (const [id, b] of before) {
-      if (b.parent || keptEmpty.includes(id)) continue;
+      if (b.parent || keptEmpty.includes(id) || TRANSIENT_LAYERS.has(id)) continue;
       const n = after.get(id)?.n ?? 0;
       if (Math.abs(n - b.n) > Math.max(20, 0.25 * b.n)) changed[id] = `${b.n} -> ${n}`;
     }
@@ -1219,6 +1248,54 @@
     }
   }
 
+  /**
+   * Each river's anchors before the regrid: its control points, or its cell centers (what the
+   * renderer meanders). Resample stores the meandered line as the new control points, so every
+   * resample meanders the river again: it wiggles more and its points multiply (terraform-v3:
+   * the rivers data grew 60 -> 159 -> 270 KB over 10K -> 30K -> 10K).
+   */
+  let riverAnchors = null;
+  function saveRiverAnchors(rivers) {
+    riverAnchors = new Map();
+    for (const r of rivers || []) {
+      if (!r || !Array.isArray(r.cells) || r.cells.length < 2) continue;
+      try {
+        const pts =
+          typeof Rivers?.getRiverPoints === "function"
+            ? Rivers.getRiverPoints(r.cells, r.points ?? null)
+            : r.points || r.cells.map(c => pack.cells.p[c]);
+        if (pts?.length === r.cells.length)
+          riverAnchors.set(r.i, { cells: [...r.cells], points: pts.map(q => [q[0], q[1]]), length: r.length });
+      } catch {}
+    }
+  }
+
+  /** After Resample.restoreRivers: each river follows its old anchors (one per new cell), as the rivers editor stores it. */
+  function reanchorRivers(projection) {
+    if (!riverAnchors) return 0;
+    const R = pack.cells.r;
+    let n = 0;
+    for (const r of pack.rivers || []) {
+      const a = riverAnchors.get(r.i);
+      if (!a) continue;
+      const cells = [];
+      const points = [];
+      a.points.forEach((pt, k) => {
+        const [x, y] = projection(pt[0], pt[1]);
+        if (!(x >= 0 && x <= graphWidth && y >= 0 && y <= graphHeight) && a.cells[k] !== -1) return;
+        const c = a.cells[k] === -1 ? -1 : findCell(x, y);
+        if (cells.length && cells[cells.length - 1] === c) return;
+        cells.push(c);
+        points.push([rn(x, 2), rn(y, 2)]);
+      });
+      if (cells.filter(c => c >= 0).length < 2) continue; // too short now: keep Resample's line
+      for (const c of cells) if (c >= 0 && R && !R[c]) R[c] = r.i;
+      Object.assign(r, { cells, points, source: cells[0], mouth: cells.at(-2) ?? cells[0] });
+      if (typeof a.length === "number") r.length = a.length;
+      n++;
+    }
+    return n;
+  }
   let parentQ = null;
   /** Nearest old pack cell to (x, y) in old coordinates. */
   function parentCellAt(parentMap, x, y) {
@@ -1488,6 +1565,18 @@
         report.treasuriesKept = kept;
       };
     }
+    if (typeof R.saveRiversData === "function" && typeof R.restoreRivers === "function") {
+      const origSave = R.saveRiversData;
+      own.saveRiversData = function (rivers) {
+        saveRiverAnchors(rivers);
+        return origSave.call(this, rivers);
+      };
+      const origRivers = R.restoreRivers;
+      own.restoreRivers = function (riversData, projection, ...rest) {
+        origRivers.call(this, riversData, projection, ...rest);
+        report.riversReanchored = reanchorRivers(projection);
+      };
+    }
     const origRoutes = R.restoreRoutes;
     own.restoreRoutes = function (parentMap, projection) {
       origRoutes.call(this, parentMap, projection);
@@ -1506,6 +1595,7 @@
         else delete R[k];
       }
       parentQ = null;
+      riverAnchors = null;
     };
   }
 
@@ -1520,10 +1610,12 @@
       density: { now: sliderOf(grid.cellsDesired), after: sliderOf(P.want) },
       spacing: { now: grid.spacing, after: P.shape.spacing },
       heights: P.heights,
-      ice: P.iceMode
+      ice: P.iceMode,
+      relief: P.relief
     };
     if (a.phase !== "apply") {
-      const bytes = await bytesEstimate(P.shape.points / P.gridNow, P.packEst / P.packNow);
+      if (!a.dryRun) return { phase: "validate", ...plan, warnings: P.warnings }; // apply follows
+      const bytes = await bytesEstimate(P.shape.points / P.gridNow, P.packEst / P.packNow, P.relief);
       if (bytes.est > WORKER_MAX_BYTES)
         P.warnings.push(
           `about ${rn(bytes.est / 1e6, 1)} MB: over the shared map's 64 MB limit, so it could not be saved there`
@@ -1559,7 +1651,9 @@
       "lakes and coastline features (re-detected from the new heights)",
       "temperature (recomputed from latitude and height)",
       "economy (regenerateEconomy on the new cells: burg product and production, deals, market stock and state treasuries are recomputed; burg treasuries are kept)",
-      "every drawn layer, from the data (relief icons and contours follow the cell count; see layers)"
+      P.relief === "keep"
+        ? "every drawn layer from the data except relief icons, kept as drawn (relief:'redraw' places them on the new cells)"
+        : "every drawn layer from the data, relief icons included (their count follows the cells; see layers)"
     ];
     const generatedIce = (pack.ice || []).length;
     if (P.iceMode === "keep") {
@@ -1588,6 +1682,8 @@
     }
     collectAreaStats();
     drawLayers();
+    const reliefEl = document.getElementById("terrain");
+    if (P.relief === "keep" && reliefEl && keep.reliefHTML !== null) reliefEl.innerHTML = keep.reliefHTML;
     const labelsRestored = restoreLabels(keep.labelNodes);
     const layers = keepLayerLook(keep.layers, keep.textPathIds, P.iceMode);
     const emblemHost = document.getElementById("defs-emblems");
