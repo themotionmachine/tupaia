@@ -1,10 +1,14 @@
 // set_heights (terrain import) and flow (read-only water-flow preview). Page side:
-// src/bridge-ext/terrain.js (setHeights, flow, flowOverlay).
+// src/bridge-ext/terrain.js (setHeights, flow, flowOverlay); the rebuild's carrying of routes,
+// markers, feature names and river identities over a re-pack is in bridge-mutations.js
+// (riskRebuild, carryRivers; paint_cells height rebuild:'risk' uses it too).
 //
 // set_heights is phased (runPhased: validate -> dryRun? -> one auto-undo entry -> apply) and
-// replayable: its resolved form holds the final grid heights (base64 bytes), the grid digest and
-// the options, so a sketch that terraforms stays replayable; replay onto a regridded map is a
-// conflict, and a replay whose rebuild yields another cell graph says so in the replay notes.
+// replayable: its resolved form holds the grid cells it changed (final and previous heights,
+// deflated), the digest of the heights it started from, the grid digest and the options. Replay
+// onto a regridded map is a conflict; onto a map whose heights differ from the recorded start it
+// sets only the recorded cells (keeping the target's other terrain edits) and says so; a replay
+// whose rebuild yields another cell graph says so too.
 import fs from "node:fs";
 import path from "node:path";
 import { z } from "zod";
@@ -19,18 +23,27 @@ import { takeScreenshot } from "./view.ts";
 
 /** The logged form of set_heights (a heightmap rebuild from literal grid heights). */
 export interface SetHeightsResolved {
-  /** Base64 of the final grid heights (one byte per grid cell, grid cell order). */
-  heights: string;
+  /**
+   * Base64 of deflate-raw(A ++ B): A = one byte per grid cell (the final height of a changed
+   * cell, 255 = unchanged), B = the previous height of each changed cell, in cell order.
+   */
+  changes: string;
+  /** Number of grid cells the op changed. */
+  changed: number;
   /** Grid cell count. */
   cells: number;
   /** Fingerprint of the grid (cell count, cellsX x cellsY, points); replay refuses another grid. */
   gridDigest: string;
+  /** Hash of the grid heights before the op; replay compares the target's (another terrain edit since). */
+  baseDigest: string;
   /** Hash of the final heights. */
   heightsDigest: string;
   options: { rebuild: "risk" | "keep"; erosion: boolean; keepHeights: boolean; biomes: "redefine" | "keep" };
   /** Pack cell graph after the rebuild (bridge cellGraph); replay compares its own. */
   graphAfter: string | null;
-  stats?: { changed: number; toLand: number; toWater: number; landPct: number };
+  /** Box of the changed grid cells [x0, y0, x1, y1] in map px (the sketch summary frames on it). */
+  bbox?: [number, number, number, number] | null;
+  stats?: { changed: number; toLand: number; toWater: number; lakesFormed?: number; landPct: number };
   redraw?: unknown;
 }
 
@@ -72,6 +85,11 @@ const HeightSource = {
     .describe("Sparse {<packCellId>: height}; mapped to grid cells, every other grid cell keeps its height"),
   image: ImageSource.optional()
 };
+
+const FlowPlace = z.union([
+  Place,
+  z.object({ gridCell: z.number().int().min(0) }).describe("A grid cell (as in set_heights grid arrays)")
+]);
 
 type HeightArgs = {
   grid?: number[];
@@ -124,7 +142,8 @@ registerReplayable("set_heights", {
   bridgeArgs: r => {
     const s = r as unknown as SetHeightsResolved;
     const args: Record<string, unknown> = {
-      heights: s.heights,
+      changes: s.changes,
+      baseDigest: s.baseDigest,
       gridDigest: s.gridDigest,
       ...s.options,
       fill: false,
@@ -135,8 +154,14 @@ registerReplayable("set_heights", {
   },
   unreplayable: r => {
     const s = r as unknown as SetHeightsResolved | null;
-    if (!s || typeof s.heights !== "string" || typeof s.gridDigest !== "string" || !s.options)
-      return "set_heights has no recorded heights array";
+    if (
+      !s ||
+      typeof s.changes !== "string" ||
+      typeof s.gridDigest !== "string" ||
+      typeof s.baseDigest !== "string" ||
+      !s.options
+    )
+      return "set_heights has no recorded height changes";
     return null;
   },
   summarize: (r, out) => {
@@ -145,17 +170,33 @@ registerReplayable("set_heights", {
     const st = (out as Record<string, unknown> | null) ?? null;
     const from = (st?.source as { from?: string } | undefined)?.from;
     const n = s.stats;
+    const lakes = n?.lakesFormed ? `, ${n.lakesFormed} lake${n.lakesFormed === 1 ? "" : "s"} formed` : "";
     const counts = n
-      ? `${n.changed} grid cells changed, ${n.toLand} to land, ${n.toWater} to water; land ${n.landPct}%`
+      ? `${n.changed} grid cells changed, ${n.toLand} to land, ${n.toWater} to water${lakes}; land ${n.landPct}%`
       : `heights ${s.heightsDigest}`;
-    return `Set heights${from ? ` from ${from}` : ""} (${counts}); ${describeOptions(s.options)}.`;
+    const where = s.bbox ? ` in ${s.bbox.map(v => Math.round(v)).join(",")}` : "";
+    return `Set heights${from ? ` from ${from}` : ""} (${counts})${where}; ${describeOptions(s.options)}.`;
   },
   timeout: "heavy",
   renumbers: r => (r as unknown as SetHeightsResolved).options?.rebuild === "risk",
   afterReplay: (recorded, _applied, out) => {
-    if (out.graphMatches !== false) return null;
     const s = recorded as unknown as SetHeightsResolved;
-    return `set_heights rebuilt another cell graph than the sketch recorded (${String(s.graphAfter)}): later literal cell lists will conflict. Likely causes: burgs on cells the heights make water (kept as land), or changed map settings (lake elevation limit, depression steps, precipitation, winds, temperatures)`;
+    const parts: string[] = [];
+    const base = out.replayBase as { matches?: boolean; changed?: number; overlap?: number } | undefined;
+    if (base && base.matches === false)
+      parts.push(
+        `set_heights: the target's heights differ from the ones the sketch started from (terrain edited there since), so only the op's ${base.changed} changed grid cells were set and the target's other heights kept${base.overlap ? `; ${base.overlap} of those cells had been changed on the target too and now hold the sketch's value` : ""}`
+      );
+    if (out.graphMatches === false)
+      parts.push(
+        `set_heights rebuilt another cell graph than the sketch recorded (${String(s.graphAfter)}): later literal cell lists will conflict. Likely causes: different heights (above), burgs on cells the heights make water (kept as land), or changed map settings (lake elevation limit, depression steps, precipitation, winds, temperatures)`
+      );
+    return parts.length ? parts.join(". ") : null;
+  },
+  frame: r => {
+    const s = r as unknown as SetHeightsResolved;
+    if (!Array.isArray(s.bbox) || s.bbox.length !== 4) return null;
+    return { bbox: s.bbox, label: `set_heights, ${s.changed} grid cells changed`, layers: ["heightmap"] };
   }
 });
 
@@ -165,7 +206,7 @@ export function register(ctx: ToolContext): void {
     {
       title: "Import terrain (set heights)",
       description:
-        "Replace the heightmap in one call, then rebuild everything that depends on it. Exactly one source: grid (dense array, one 0-100 height per GRID cell; on a length mismatch the error gives the expected length), pack ({<packCellId>: h}, sparse; other grid cells keep their height) or image ({path | dataUrl, invert?, range?:[min,max] for pixel 0..255, channel?:'luma'|'r'|'g'|'b'|'a'}; stretched over the map). Sea level is 20. fill:true fills land depressions first (priority flood) so no unintended interior pits or lakes form. rebuild 'risk' (default) re-packs the map: coastline, lakes, climate, rivers and biomes are recomputed, cell ids change, burgs/states/cultures/religions/provinces/zones are kept where land remains (a burg on a cell that becomes water keeps it as land, height 20); 'keep' refuses any change that crosses height 20 and keeps cell ids, but still recomputes climate, rivers and biomes. The rebuild always runs, even when no height changed. erosion (default false): rivers are regenerated without lowering terrain; true re-runs the app's erosion. keepHeights (default true): land heights the rebuild or erosion changed are set back to the requested value (count in heightsRestored). biomes 'redefine' (default) recomputes every biome; 'keep' keeps painted biomes where land remains (risk only). Rivers are always regenerated (new river ids and names). dryRun:true returns counts (cells changed, land/water flips, land %, lakes before/after/formed, pits, fill raise) and changes nothing. One auto-undo entry; logged replayably in a sketch.",
+        "Replace the heightmap in one call, then rebuild everything that depends on it. Exactly one source: grid (dense array, one 0-100 height per GRID cell in grid order; a length mismatch error gives the expected length and the grid geometry; eval 'return grid.points' gives each grid cell's [x,y]), pack ({<packCellId>: h}, sparse; other grid cells keep their height) or image ({path | dataUrl, invert?, range?:[min,max] for pixel 0..255, channel?:'luma'|'r'|'g'|'b'|'a'}; stretched over the map, warns on an aspect mismatch). Sea level is 20. fill:true fills land depressions first (priority flood) so no unintended interior pits or lakes form. rebuild 'risk' (default) re-packs the map: coastline, lakes, climate, rivers and biomes are recomputed and cell ids change; burgs, states, cultures, religions, provinces, zones, routes, markers and regiments are kept where land remains and moved to the new cells (a burg on a cell that becomes water keeps that cell as land, height 20); lake and island names carry over. 'keep' refuses any change that crosses height 20 and keeps cell ids, but still recomputes climate, rivers and biomes. The rebuild always runs, even when no height changed (an identity import is not a no-op: rivers and, under biomes 'redefine', biomes are recomputed). Rivers are always regenerated; a new river whose course overlaps an old one keeps the old id, name and type (so its notes stay on it); the result counts kept/new/gone rivers and lists notes left on gone rivers. erosion (default false): rivers are regenerated without lowering terrain; true re-runs the app's erosion. keepHeights (default true): land heights the rebuild or erosion changed are set back to the requested value (count in heightsRestored). biomes 'redefine' (default) recomputes every biome from the new climate; 'keep' keeps the old biome of every pack cell that stays land. dryRun:true returns counts (cells changed, land/water flips, land %, lakes before/after/formed, pits, fill raise), the grid geometry, burgs that would stand on new water, painted biomes 'redefine' would recompute, and with detail:true the pit and fill-raised cells; it changes nothing. One auto-undo entry; logged replayably in a sketch (only the changed cells are recorded; a replay onto a map whose terrain changed since keeps that map's other heights).",
       inputSchema: z.object({
         ...HeightSource,
         fill: z
@@ -177,6 +218,10 @@ export function register(ctx: ToolContext): void {
         keepHeights: z.boolean().optional().describe("Default true"),
         biomes: z.enum(["redefine", "keep"]).optional().describe("Default 'redefine'"),
         dryRun: z.boolean().optional().describe("Return the counts and change nothing"),
+        detail: z
+          .boolean()
+          .optional()
+          .describe("dryRun: also list pit cells and fill-raised cells (grid id, [x,y], h or raise)"),
         redraw: Redraw,
         timeoutMs: TimeoutMs
       }),
@@ -204,9 +249,9 @@ export function register(ctx: ToolContext): void {
     {
       title: "Preview water flow",
       description:
-        "Read-only: where water runs downhill from one or more places, traced the way the river generator drains (lowest neighbour on depression-resolved heights, coastal cells pour into the nearest water, open lakes drain through their lowest shore cell). Per start: end {type: 'sea'|'lake'|'river' (joins an existing river, named)|'border' (off the map edge)|'pit' (an unresolved depression), x, y, cell, lake?/river?}, steps, length {px, km}, drop, throughLakes, climbs (cells the generator had to raise to drain: depressions in the real heights). Without heights it runs on the current map's cells; with heights {grid|pack|image, as in set_heights} or fill:true it runs on the proposed grid heights (cell ids are then grid ids, existing rivers are ignored because the rebuild regenerates them, and a lake's evaporation is not modelled). detail:true adds each path's cells and points. screenshot:true draws the paths on a temporary overlay, takes a framed shot and removes the overlay. Changes nothing.",
+        "Read-only: where water runs downhill from one or more places, traced the way the river generator drains (lowest neighbour on depression-resolved heights, coastal cells pour into the nearest water, open lakes drain through their lowest shore cell). Per start: from {x, y (the start cell's centre), cell, h, asked?/snapped? (px) when the place was more than a cell away}, end {type: 'sea'|'lake'|'river' (an existing river: named, with goesTo {type, at, river, name?} = where that river's water finally goes)|'border' (off the map edge)|'pit' (an unresolved depression), x, y, cell, lake?/river?}, steps, length {px, km (km/mi/league/versta/nautical units), plus the map's own unit}, drop (or rise when the path ends above its start), throughLakes, climbs (cells the generator had to raise to drain: depressions in the real heights). Without heights it runs on the current map's cells; with heights {grid|pack|image, as in set_heights} or fill:true it runs on the proposed grid heights: cell ids are grid ids, a place resolves to the nearest GRID point (so a start where the current map is deep ocean is exact), {gridCell:N} names a grid cell directly, {cell:N} is the grid cell under current pack cell N; existing rivers are ignored there (the rebuild regenerates them) and a lake's evaporation and river flux thresholds are not modelled. detail:true adds each path's cells and points. screenshot:true draws the paths on a temporary overlay (one colour per path, numbered at its start; with proposed heights, cells that would become land are tinted green and water blue), takes a framed shot and removes the overlay. Changes nothing.",
       inputSchema: z.object({
-        from: z.union([Place, z.array(Place).min(1).max(50)]).describe("Start place(s)"),
+        from: z.union([FlowPlace, z.array(FlowPlace).min(1).max(50)]).describe("Start place(s)"),
         heights: z.object(HeightSource).optional().describe("Proposed heights (same forms as set_heights)"),
         fill: z.boolean().optional().describe("Fill land depressions in the (proposed or current) heights first"),
         detail: z.boolean().optional().describe("Include each path's cells and points"),
@@ -229,13 +274,17 @@ export function register(ctx: ToolContext): void {
       if (!args.detail) for (const p of out.paths) delete p.points;
       if (!args.screenshot) return out;
       let shot: WithImages;
+      let legend: string | undefined;
       try {
-        const o = await scope.call<{ bbox: [number, number, number, number] }>("flowOverlay", { paths: points });
+        const o = await scope.call<{ bbox: [number, number, number, number]; legend?: string }>("flowOverlay", {
+          paths: points
+        });
+        legend = o.legend;
         shot = await takeScreenshot(ctx, scope, { target: { bbox: o.bbox } });
       } finally {
         await scope.call("flowOverlay", { remove: true }, { noAlerts: true }).catch(() => {});
       }
-      shot.value = { ...out, screenshot: shot.value };
+      shot.value = { ...out, screenshot: shot.value, ...(legend ? { legend } : {}) };
       return shot;
     }
   );

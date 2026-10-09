@@ -2061,6 +2061,300 @@
     viewbox.selectAll("#coastline use, #lakes path, #oceanLayers path").remove();
   }
 
+  // ---- carrying data over a heightmap rebuild. restoreRiskedData re-packs the cells (reGraph)
+  // and keeps burgs, states, cultures, provinces and zones, but leaves route points and links,
+  // marker cells, religion centres, capital-less state centres, regiments and burg ports on the
+  // old cell/feature numbering, renames every lake, and (when rivers are regenerated) gives every
+  // river a new id and name. These helpers carry all of that over: cells by grid cell + position,
+  // features and rivers by overlap. Shared by paint_cells height rebuild:'risk' and set_heights.
+
+  /** Each river's id, name, type and grid cells (call before the rivers are regenerated). */
+  function captureRivers() {
+    const g = pack.cells.g;
+    return (pack.rivers || [])
+      .filter(r => r?.i)
+      .map(r => ({
+        i: r.i,
+        name: r.name,
+        type: r.type,
+        grid: [...new Set((r.cells || []).filter(x => x >= 0).map(x => g[x]))]
+      }));
+  }
+
+  /** What a risk rebuild needs from the old pack (call before restoreRiskedData). */
+  function captureCells() {
+    const C = pack.cells;
+    const n = C.i.length;
+    const p = new Float64Array(n * 2);
+    for (let i = 0; i < n; i++) {
+      p[2 * i] = C.p[i][0];
+      p[2 * i + 1] = C.p[i][1];
+    }
+    return {
+      n,
+      g: Uint32Array.from(C.g),
+      p,
+      h: Uint8Array.from(C.h),
+      f: Uint32Array.from(C.f),
+      biome: Uint8Array.from(C.biome),
+      features: (pack.features || []).map(f => (f && typeof f === "object" ? { type: f.type, name: f.name } : null)),
+      stateCenters: (pack.states || []).map(s => s?.center),
+      burgCells: (pack.burgs || []).map(b => b?.cell),
+      rivers: captureRivers()
+    };
+  }
+
+  /** Old pack cell -> new pack cell: the new cell on the same grid cell nearest the old centre. */
+  function cellRemap(old) {
+    const C = pack.cells;
+    const byGrid = new Map();
+    for (const i of C.i) {
+      const l = byGrid.get(C.g[i]);
+      if (l) l.push(i);
+      else byGrid.set(C.g[i], [i]);
+    }
+    const memo = new Map();
+    return o => {
+      if (!Number.isInteger(o) || o < 0 || o >= old.n) return o;
+      let v = memo.get(o);
+      if (v !== undefined) return v;
+      const x = old.p[2 * o];
+      const y = old.p[2 * o + 1];
+      const cand = byGrid.get(old.g[o]);
+      if (cand) {
+        let bd = Infinity;
+        for (const i of cand) {
+          const d = (C.p[i][0] - x) ** 2 + (C.p[i][1] - y) ** 2;
+          if (d < bd) {
+            bd = d;
+            v = i;
+          }
+        }
+      } else v = findCell(x, y); // the grid cell left the pack (deep ocean now)
+      memo.set(o, v);
+      return v;
+    };
+  }
+
+  /** Greedy one-to-one matching of [score, a, b] pairs, best first (ties by ids: deterministic). */
+  function matchPairs(pairs) {
+    pairs.sort((x, y) => y[0] - x[0] || x[1] - y[1] || x[2] - y[2]);
+    const ab = new Map();
+    const used = new Set();
+    for (const [, a, b] of pairs) {
+      if (ab.has(a) || used.has(b)) continue;
+      ab.set(a, b);
+      used.add(b);
+    }
+    return ab;
+  }
+
+  /** New features matched to old ones of the same type by shared grid cells; names carried. */
+  function carryFeatures(old) {
+    const C = pack.cells;
+    const oldOfGrid = new Int32Array(grid.cells.i.length).fill(-1);
+    for (let i = 0; i < old.n; i++) if (oldOfGrid[old.g[i]] < 0) oldOfGrid[old.g[i]] = old.f[i];
+    const count = new Map();
+    for (const i of C.i) {
+      const o = oldOfGrid[C.g[i]];
+      if (o < 0) continue;
+      const key = C.f[i] * 65536 + o;
+      count.set(key, (count.get(key) || 0) + 1);
+    }
+    const pairs = [];
+    for (const [key, v] of count) {
+      const nf = Math.floor(key / 65536);
+      const o = key % 65536;
+      if (pack.features[nf]?.type && pack.features[nf].type === old.features[o]?.type) pairs.push([v, nf, o]);
+    }
+    const newToOld = matchPairs(pairs);
+    const oldToNew = new Map();
+    let named = 0;
+    for (const [nf, o] of newToOld) {
+      oldToNew.set(o, nf);
+      const nm = old.features[o].name;
+      if (nm && pack.features[nf].name !== nm) {
+        pack.features[nf].name = nm;
+        named++;
+      }
+    }
+    return { oldToNew, named };
+  }
+
+  /**
+   * Regenerated rivers matched to the old ones by course (shared grid cells); a matched river
+   * takes the old one's id, name and type, so notes and later references stay on it. Unmatched
+   * new rivers get ids above every old id (an id never moves to another river).
+   */
+  function carryRivers(saved) {
+    const C = pack.cells;
+    const riverList = pack.rivers || [];
+    const byGrid = new Map();
+    saved.forEach((r, k) => {
+      for (const g of r.grid) {
+        const l = byGrid.get(g);
+        if (l) l.push(k);
+        else byGrid.set(g, [k]);
+      }
+    });
+    const pairs = [];
+    riverList.forEach((r, j) => {
+      const course = new Set((r.cells || []).filter(x => x >= 0).map(x => C.g[x]));
+      const cnt = new Map();
+      for (const g of course) for (const k of byGrid.get(g) || []) cnt.set(k, (cnt.get(k) || 0) + 1);
+      for (const [k, v] of cnt)
+        if (v >= 2 && v >= 0.3 * Math.min(course.size, saved[k].grid.length)) pairs.push([v, j, k]);
+    });
+    const match = matchPairs(pairs);
+    let next = saved.reduce((m, r) => Math.max(m, r.i), 0) + 1;
+    const idMap = new Map();
+    riverList.forEach((r, j) => {
+      idMap.set(r.i, match.has(j) ? saved[match.get(j)].i : next++);
+    });
+    // an id the app left dangling (a lake inlet of a river too short to keep) gets a fresh one too
+    const m = x => {
+      if (!x) return x;
+      if (!idMap.has(x)) idMap.set(x, next++);
+      return idMap.get(x);
+    };
+    for (const r of riverList) {
+      r.i = idMap.get(r.i);
+      r.parent = m(r.parent);
+      r.basin = m(r.basin);
+    }
+    riverList.forEach((r, j) => {
+      if (!match.has(j)) return;
+      const o = saved[match.get(j)];
+      if (o.name) r.name = o.name;
+      if (o.type) r.type = o.type;
+    });
+    for (const i of C.i) if (C.r[i]) C.r[i] = m(C.r[i]);
+    for (const f of pack.features || []) {
+      if (!f || f.type !== "lake") continue;
+      if (f.river) f.river = m(f.river);
+      if (f.outlet) f.outlet = m(f.outlet);
+      if (Array.isArray(f.inlets)) f.inlets = f.inlets.map(m);
+    }
+    const live = new Set(riverList.map(r => r.i));
+    const gone = saved.filter(r => !live.has(r.i));
+    const orphaned = [];
+    if (typeof notes !== "undefined" && Array.isArray(notes)) {
+      const goneIds = new Set(gone.map(r => `river${r.i}`));
+      for (const nt of notes) if (nt && goneIds.has(nt.id)) orphaned.push(`${nt.id}${nt.name ? ` ${nt.name}` : ""}`);
+    }
+    const out = { before: saved.length, after: riverList.length, kept: match.size, new: riverList.length - match.size };
+    if (gone.length) out.gone = gone.length;
+    if (orphaned.length) out.notesOrphaned = orphaned;
+    return out;
+  }
+
+  /** Cell and feature references the rebuild left on the old numbering, moved to the new one. */
+  function carryCellRefs(old, features, opts = {}) {
+    const C = pack.cells;
+    const remap = cellRemap(old);
+    const out = { routes: 0, markers: 0 };
+    // the app puts each burg on the cell nearest its x,y, which is not always the cell it stood on
+    // (a burg's x,y can sit nearer a neighbour's centre): put it back on its own cell when that
+    // is still land and free, so its routes and province still meet it
+    let burgsKept = 0;
+    for (const b of pack.burgs || []) {
+      if (!b?.i || b.removed || !Number.isInteger(old.burgCells[b.i])) continue;
+      const nc = remap(old.burgCells[b.i]);
+      if (nc === b.cell || !(C.h[nc] >= 20) || (C.burg[nc] && C.burg[nc] !== b.i)) continue;
+      if (C.burg[b.cell] === b.i) C.burg[b.cell] = 0;
+      C.burg[nc] = b.i;
+      b.cell = nc;
+      b.feature = C.f[nc];
+      if (b.capital && pack.states[b.state]) pack.states[b.state].center = nc;
+      for (const pr of pack.provinces || []) if (pr?.i && !pr.removed && pr.burg === b.i) pr.center = nc;
+      burgsKept++;
+    }
+    if (burgsKept) out.burgsBackOnTheirCell = burgsKept;
+    let bridged = 0;
+    for (const r of pack.routes || []) {
+      if (!r || !Array.isArray(r.points)) continue;
+      for (const pt of r.points) if (Number.isInteger(pt[2])) pt[2] = remap(pt[2]);
+      // two cells that were neighbours can come out of the re-pack with an edge flipped between
+      // them: step through the neighbour they share, so every route link joins neighbours
+      for (let k = 1; k < r.points.length; k++) {
+        const a = r.points[k - 1][2];
+        const b = r.points[k][2];
+        if (a === b || !Number.isInteger(a) || !Number.isInteger(b) || C.c[a]?.includes(b)) continue;
+        const via = (C.c[a] || []).filter(x => C.c[x]?.includes(b));
+        if (!via.length) continue;
+        const mx = (C.p[a][0] + C.p[b][0]) / 2;
+        const my = (C.p[a][1] + C.p[b][1]) / 2;
+        const v = via.reduce((m, x) =>
+          (C.p[x][0] - mx) ** 2 + (C.p[x][1] - my) ** 2 < (C.p[m][0] - mx) ** 2 + (C.p[m][1] - my) ** 2 ? x : m
+        );
+        r.points.splice(k, 0, [C.p[v][0], C.p[v][1], v]);
+        bridged++;
+        k++;
+      }
+      const first = r.points[0]?.[2];
+      r.feature = features.oldToNew.get(r.feature) ?? (Number.isInteger(first) ? C.f[first] : r.feature);
+      out.routes++;
+    }
+    if (bridged) out.routeLinksBridged = bridged;
+    if (typeof Routes !== "undefined" && typeof Routes.buildLinks === "function")
+      C.routes = Routes.buildLinks(pack.routes || []);
+    for (const mk of pack.markers || [])
+      if (mk && Number.isInteger(mk.cell)) {
+        mk.cell = remap(mk.cell);
+        out.markers++;
+      }
+    for (const r of pack.religions || [])
+      if (r?.i && !r.removed && Number.isInteger(r.center)) r.center = remap(r.center);
+    (pack.states || []).forEach((s, k) => {
+      if (!s?.i || s.removed) return;
+      const cap = pack.burgs[s.capital];
+      // the app moves a capital's state centre with its burg; the others still hold old ids
+      if (!(cap?.i && !cap.removed) && Number.isInteger(old.stateCenters[k])) s.center = remap(old.stateCenters[k]);
+      for (const reg of s.military || []) if (Number.isInteger(reg?.cell)) reg.cell = remap(reg.cell);
+    });
+    let portsLost = 0;
+    for (const b of pack.burgs || []) {
+      if (!b?.i || b.removed || !b.port) continue;
+      let port = features.oldToNew.get(b.port);
+      if (port === undefined) {
+        const hv = C.haven?.[b.cell];
+        port = hv && C.h[hv] < 20 ? C.f[hv] : 0;
+      }
+      if (!port) portsLost++;
+      b.port = port;
+    }
+    if (portsLost) out.portsLost = portsLost;
+    if (opts.keepBiomes)
+      for (let o = 0; o < old.n; o++) {
+        if (old.h[o] < 20) continue;
+        const i = remap(o);
+        if (C.h[i] >= 20) C.biome[i] = old.biome[o];
+      }
+    return out;
+  }
+
+  /**
+   * restoreRiskedData plus the carrying above. opts: {restore (restoreRiskedData's opts),
+   * keepRivers (the app keeps the rivers: map their cells back by grid), keepBiomes}.
+   */
+  function riskRebuild(opts = {}) {
+    const old = captureCells();
+    const riverGrid = opts.keepRivers ? saveRiversAsGrid() : null;
+    clearFeatureShapes();
+    heightmapInternals().restoreRiskedData(opts.restore);
+    const info = {};
+    if (riverGrid) {
+      const dropped = restoreRiversFromGrid(riverGrid);
+      if (dropped) info.riversDropped = dropped;
+      finishRiskFeatures();
+    }
+    const features = carryFeatures(old);
+    Object.assign(info, carryCellRefs(old, features, opts));
+    if (features.named) info.featureNames = features.named;
+    if (!riverGrid) info.rivers = carryRivers(old.rivers);
+    return info;
+  }
+
   // restoreRiskedData only groups and names features when erosion runs; do it here otherwise
   function finishRiskFeatures() {
     try {
@@ -2173,17 +2467,14 @@
       if (erosionEl) erosionEl.checked = !!H.erosion;
       try {
         if (H.rebuild === "risk") {
-          clearFeatureShapes();
           // Without erosion the app keeps pack.rivers, whose cells/source/mouth are pack ids of
           // the old graph; reGraph renumbers cells, so drawRivers would read p[staleId] and
-          // throw. Record them as grid ids here and map them back after the rebuild.
-          const riverGrid = H.erosion ? null : saveRiversAsGrid();
-          hm.restoreRiskedData();
-          if (riverGrid) {
-            const dropped = restoreRiversFromGrid(riverGrid);
-            if (dropped) c.notes.add(`${dropped} rivers lost their course in the rebuild and were removed`);
-            finishRiskFeatures();
-          }
+          // throw: riskRebuild records them as grid ids and maps them back (keepRivers). It also
+          // moves routes, markers and the other cell references to the new cells.
+          const carried = riskRebuild({ keepRivers: !H.erosion });
+          if (carried.riversDropped)
+            c.notes.add(`${carried.riversDropped} rivers lost their course in the rebuild and were removed`);
+          stats.carried = carried;
           c.notes.add(
             "rebuild:'risk' re-ran features, climate and the pack graph; cell ids changed, burgs were kept (non-capital burgs that ended in water were removed)"
           );
@@ -2588,6 +2879,9 @@
     heightmapInternals,
     featureSummary,
     clearFeatureShapes,
-    finishRiskFeatures
+    finishRiskFeatures,
+    riskRebuild,
+    captureRivers,
+    carryRivers
   };
 })(globalThis);

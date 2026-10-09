@@ -45,6 +45,8 @@ export interface ReplaySpec {
   renumbers?: (r: Resolved) => boolean;
   /** After a replayed apply: a note for the replay result (e.g. the outcome differs from the recording), or null. */
   afterReplay?: (recorded: Resolved, applied: Resolved, out: Record<string, unknown>) => string | null;
+  /** The map area the op changed (graph px), for the sketch summary's framed shot when no entity was edited. */
+  frame?: (r: Resolved) => { bbox: [number, number, number, number]; label: string; layers?: string[] } | null;
 }
 
 export const REPLAY_EXT: Record<string, ReplaySpec> = {};

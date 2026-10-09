@@ -15,6 +15,7 @@ import {
   blobOnlyReasons,
   type EditResolved,
   type PaintResolved,
+  REPLAY_EXT,
   type Sketch,
   type SketchBase,
   sanitizeRecord
@@ -163,7 +164,14 @@ interface Box {
 async function framedTarget(
   scope: CallScope,
   sk: Sketch
-): Promise<{ type: string; i: number | string; name: string | null; bbox: [number, number, number, number] } | null> {
+): Promise<{
+  type: string;
+  i: number | string;
+  name: string | null;
+  bbox: [number, number, number, number];
+  layers?: string[];
+  op?: boolean;
+} | null> {
   for (const c of changeRanking(sk).slice(0, 6)) {
     const env = await scope.envelope<Box & { name?: string }>(
       "entityBox",
@@ -178,6 +186,21 @@ async function framedTarget(
       i: c.i,
       name: b.name ?? null,
       bbox: [b.x0 - pad, b.y0 - pad, b.x1 + pad, b.y1 + pad]
+    };
+  }
+  // no entity to frame: an op that knows the area it changed (set_heights), the latest first
+  for (const o of [...sk.ops].reverse()) {
+    const f = o.resolved && o.replayable ? REPLAY_EXT[o.tool]?.frame?.(o.resolved) : null;
+    if (!f) continue;
+    const [x0, y0, x1, y1] = f.bbox;
+    const pad = Math.max(40, 0.15 * Math.max(x1 - x0, y1 - y0));
+    return {
+      type: o.tool,
+      i: o.seq,
+      name: f.label,
+      bbox: [x0 - pad, y0 - pad, x1 + pad, y1 + pad],
+      layers: f.layers,
+      op: true
     };
   }
   return null;
@@ -240,7 +263,7 @@ async function summaryShots(
 ): Promise<Record<string, string | null>> {
   const shots: Record<string, string | null> = {};
   const dir = path.join("sketches", sk.slug);
-  const on = target ? (LAYERS_FOR[target.type] ?? []) : [];
+  const on = target ? ((target.layers as LayerNameT[] | undefined) ?? LAYERS_FOR[target.type] ?? []) : [];
   const layers0 = await scope.call<string[]>("layersOn", {}, { noAlerts: true });
   const view0 = await scope.call<{ x: number; y: number; scale: number }>("getView", {}, { noAlerts: true });
   const pair = async (which: "before" | "after") => {
@@ -328,7 +351,8 @@ async function summary(ctx: ToolContext, scope: CallScope, args: { shots?: boole
   const shotFiles = Object.entries(shots).filter(([, f]) => !!f);
   if (shotFiles.length) {
     lines.push("", "## Screenshots", "");
-    if (target)
+    if (target?.op) lines.push(`Framed on the area op ${target.i} changed: ${target.name}.`, "");
+    else if (target)
       lines.push(
         `Framed on the most-changed entity: ${target.type} ${target.name ? `'${target.name}' ` : ""}(${target.i}).`,
         ""

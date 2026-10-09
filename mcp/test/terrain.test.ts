@@ -1,14 +1,16 @@
 // set_heights (terrain import) and flow (water-flow preview).
 // Pure helpers of src/bridge-ext/terrain.js in node:vm on a tiny synthetic grid, then the tools
 // on tests/fixtures/demo.map with synthetic height arrays: sources, dryRun, keep/risk, the
-// rebuild without a sentinel, biomes, undo, the sketch log and its replay (same graph on the
-// same base; a regridded base is a conflict; a base whose burgs differ is noted), and flow.
+// rebuild without a sentinel, biomes, undo, what a re-pack carries over (routes, markers, burg
+// cells, river ids and names, lake names), the sketch log and its replay (same graph on the
+// same base; a regridded base is a conflict; a base whose burgs differ is noted; a base whose
+// terrain was edited since keeps those edits), the summary's frame, and flow.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { after, before, describe, test } from "node:test";
 import vm from "node:vm";
-import { sanitizeRecord, unreplayableReason } from "../src/ops.ts";
+import { REPLAY_EXT, sanitizeRecord, unreplayableReason } from "../src/ops.ts";
 import "../src/tools/terrain.ts";
 import { alive, DEMO_MAP, errorBody, type Harness, MCP_ROOT, startServer } from "./helpers.ts";
 
@@ -17,7 +19,19 @@ type Obj = Record<string, any>;
 // ---------------------------------------------------------------- pure (node:vm)
 
 function loadPure(): Obj {
-  const ctx = vm.createContext({ console, setTimeout, clearTimeout, btoa, atob, pack: {}, grid: {} });
+  const ctx = vm.createContext({
+    console,
+    setTimeout,
+    clearTimeout,
+    btoa,
+    atob,
+    Blob,
+    Response,
+    CompressionStream,
+    DecompressionStream,
+    pack: {},
+    grid: {}
+  });
   for (const f of ["bridge.js", "bridge-mutations.js", "bridge-ext/terrain.js"])
     vm.runInContext(fs.readFileSync(path.join(MCP_ROOT, "src", f), "utf8"), ctx, { filename: f });
   return (ctx.__tupaia as Obj).terrain.pure;
@@ -96,6 +110,21 @@ describe("terrain pure helpers", () => {
     assert.deepEqual(Array.from(P.b64ToBytes(P.bytesToB64(u))), Array.from(u));
   });
 
+  test("recorded changes: only the changed cells, with their previous heights, deflated", async () => {
+    const before = Uint8Array.from({ length: 10000 }, (_, i) => (i * 7) % 90);
+    const after = Uint8Array.from(before);
+    for (const i of [3, 500, 9999]) after[i] = 100 - after[i];
+    const enc = await P.encodeChanges(before, after);
+    assert.equal(enc.changed, 3);
+    assert.ok(enc.changes.length < 600, `a 3-cell change on 10k cells stays small: ${enc.changes.length} chars`);
+    const dec = await P.decodeChanges(enc.changes, 10000);
+    assert.equal(dec.changed, 3);
+    assert.deepEqual(Array.from(dec.before), [before[3], before[500], before[9999]]);
+    assert.equal(dec.after[500], after[500]);
+    assert.equal(dec.after[501], 255, "unchanged");
+    await assert.rejects(P.decodeChanges(enc.changes, 9000), /do not fit/);
+  });
+
   test("flow: downhill to the sea, through an open lake, into a closed basin, off the map edge", () => {
     // sea on the left edge; land rises to the right; an open lake at (3,2) drains west
     const toSea = box([
@@ -135,25 +164,52 @@ describe("terrain pure helpers", () => {
     const G3 = P.graphFromHeights(dome.h, dome.c, dome.p, dome.b);
     const t3 = P.traceFlow(G3, P.drainSurface(G3, LIMITS), 12);
     assert.equal(t3.end.type, "border");
-    assert.equal(t3.cells.length, 3);
+    assert.equal(t3.path.length, 3);
+  });
+
+  test("flow: a start on the map border drains to its lowest neighbour like the generator (no river there yet)", () => {
+    const g = box([
+      [5, 60, 70, 80, 90],
+      [5, 30, 40, 50, 80],
+      [5, 30, 40, 45, 60],
+      [5, 30, 40, 50, 80],
+      [5, 60, 70, 80, 90]
+    ]);
+    const G = P.graphFromHeights(g.h, g.c, g.p, g.b);
+    const t = P.traceFlow(G, P.drainSurface(G, LIMITS), 14); // the right edge, h 60
+    assert.equal(t.end.type, "sea", JSON.stringify(t));
+    assert.ok(t.path.length > 2);
+    assert.equal(g.b[t.path[1]], 0, "it went inland, not off the edge");
   });
 });
 
 describe("set_heights replay spec", () => {
-  test("a recorded heights array is replayable; one without is not", () => {
+  test("recorded height changes are replayable; a record without them is not", () => {
     const good = {
-      heights: "AAAA",
+      changes: "AAAA",
+      changed: 2,
       cells: 3,
       gridDigest: "3:3x1:x",
+      baseDigest: "b",
       heightsDigest: "y",
       options: { rebuild: "risk", erosion: false, keepHeights: true, biomes: "redefine" },
-      graphAfter: "5:z"
+      graphAfter: "5:z",
+      bbox: [10, 20, 110, 220],
+      stats: { changed: 2, toLand: 1, toWater: 0, lakesFormed: 1, landPct: 40 }
     };
     assert.equal(unreplayableReason("set_heights", good as never), null);
-    assert.match(String(unreplayableReason("set_heights", { cells: 3 } as never)), /no recorded heights/);
+    assert.match(String(unreplayableReason("set_heights", { cells: 3 } as never)), /no recorded height changes/);
     const rec = sanitizeRecord({ tool: "set_heights", seq: 1, resolved: good }, 0);
     assert.equal(rec.replayable, true);
-    assert.match(rec.summary, /Set heights .*rebuild risk, erosion off, biomes redefine/);
+    assert.match(
+      rec.summary,
+      /Set heights \(2 grid cells changed, 1 to land, 0 to water, 1 lake formed; land 40%\) in 10,20,110,220; rebuild risk, erosion off, biomes redefine/
+    );
+    assert.deepEqual(REPLAY_EXT.set_heights.frame?.(good as never), {
+      bbox: [10, 20, 110, 220],
+      label: "set_heights, 2 grid cells changed",
+      layers: ["heightmap"]
+    });
   });
 });
 
@@ -206,9 +262,15 @@ describe("set_heights and flow on demo.map", () => {
     const two = await h.call("set_heights", { grid: base, pack: { 1: 30 } });
     assert.match(errorBody(two).error.message, /exactly one height source/);
     const short = await h.call("set_heights", { grid: base.slice(0, 100) });
-    const e = errorBody(short).error;
+    const e = errorBody(short).error as Obj;
     assert.equal(e.code, "BAD_ARGS");
     assert.match(e.message, new RegExp(`grid has 100 values; this map's grid has ${n} cells`));
+    assert.match(e.message, /grid\.points/, "the message says where the grid geometry is");
+    const bad = await h.call("set_heights", { pack: { abc: 30 } });
+    assert.equal(errorBody(bad).error.code, "BAD_ARGS");
+    assert.match(errorBody(bad).error.message, /'abc' is not a pack cell id/);
+    const empty = await h.ok("set_heights", { pack: {}, dryRun: true });
+    assert.match(JSON.stringify((empty.source as Obj).warnings), /pack is empty/);
   });
 
   test("dryRun counts changes, flips, lakes and fill, and changes nothing", async () => {
@@ -226,6 +288,28 @@ describe("set_heights and flow on demo.map", () => {
     assert.equal((r.pits as Obj).after, 0, "fill leaves no pits");
     assert.ok((r.fill as Obj).cellsRaised >= 0);
     assert.deepEqual(r.options, { rebuild: "risk", erosion: false, keepHeights: true, biomes: "redefine" });
+    const g = r.grid as Obj;
+    assert.equal(g.cells, n);
+    assert.ok(g.cellsX > 0 && g.cellsY > 0 && g.spacing > 0, JSON.stringify(g));
+    assert.ok(typeof (r.paintedBiomes as Obj | undefined)?.cells === "number" || r.paintedBiomes === undefined);
+    assert.ok(((r.rivers as Obj).now as number) > 0);
+    // detail lists the cells: pits without fill, raised cells with it
+    const raw = await h.ok("set_heights", { grid: next, dryRun: true, detail: true });
+    assert.equal((raw.pitCells as Obj[]).length, Math.min(50, (raw.pits as Obj).after as number));
+    const filled = await h.ok("set_heights", { grid: next, fill: true, dryRun: true, detail: true });
+    assert.deepEqual(filled.pitCells, []);
+    const fc = (filled.filledCells as Obj[]) ?? [];
+    assert.equal(fc.length, Math.min(100, (filled.fill as Obj).cellsRaised as number));
+    if (fc.length) assert.ok(fc[0].raise >= 1 && Array.isArray(fc[0].at));
+    // a burg where the heights put water: named, and what happens to it
+    const drown = await h.ok("set_heights", {
+      grid: shaped([{ x: spots.burg.x, y: spots.burg.y, r: 12, set: 5 }]),
+      dryRun: true
+    });
+    const bw = drown.burgsOnNewWater as Obj;
+    assert.ok(bw.count >= 1, JSON.stringify(drown).slice(0, 400));
+    assert.ok((bw.burgs as string[]).some(x => x.includes(`(${spots.burg.i})`)));
+    assert.match(bw.effect, /height 20/);
     assert.equal(await digest(), d0, "dry run changed nothing");
   });
 
@@ -282,6 +366,88 @@ describe("set_heights and flow on demo.map", () => {
     await h.ok("set_heights", { grid: base, erosion: true, keepHeights: false }, 240_000);
     assert.ok((await ev(packVsGrid)) > 0, "without keepHeights the eroded heights stay");
     await h.ok("snapshot", { action: "undo" }, 240_000);
+    assert.equal(await digest(), d0);
+  });
+
+  test("a risk rebuild carries routes, markers, burg cells, river ids and names and lake names to the new cells", async () => {
+    const d0 = await digest();
+    const consistency = `
+      const C = pack.cells;
+      let badLinks = 0; for (const [k, v] of Object.entries(C.routes)) for (const nb of Object.keys(v)) if (!C.c[+k]?.includes(+nb)) badLinks++;
+      let routeCells = 0; for (const r of pack.routes) for (const p of r.points) if (!(p[2] >= 0 && p[2] < C.i.length) || Math.hypot(C.p[p[2]][0] - p[0], C.p[p[2]][1] - p[1]) > 3 * grid.spacing) routeCells++;
+      let markers = 0; for (const m of pack.markers) if (Math.hypot(C.p[m.cell][0] - m.x, C.p[m.cell][1] - m.y) > 3 * grid.spacing) markers++;
+      const burgs = pack.burgs.filter(b => b.i && !b.removed);
+      return { badLinks, routeCells, markers, burgCellsOff: burgs.filter(b => C.burg[b.cell] !== b.i).length,
+        connected: burgs.filter(b => Routes.isConnected(b.cell)).length };`;
+    const c0 = await ev(consistency);
+    assert.equal(c0.badLinks, 0);
+    // an undoable eval (the names and notes are part of what undo restores)
+    const named = (
+      await h.ok("eval", {
+        code: `
+      const r = pack.rivers.filter(r => r.cells.length > 8).sort((a, b) => b.cells.length - a.cells.length)[0];
+      r.name = 'Spire';
+      const l = pack.features.find(f => f && f.type === 'lake' && f.cells > 2);
+      l.name = 'Lake Tupaia';
+      // a short river inside a patch the import floods: it is gone afterwards
+      const C = pack.cells;
+      const small = pack.rivers.find(x => x.i !== r.i && x.cells.length >= 3 && x.cells.length <= 6 && x.cells.every(c => c >= 0 && C.h[c] >= 25));
+      notes.push({ id: 'river' + r.i, name: 'The Spire', legend: '' }, { id: 'river' + small.i, name: 'Brook note', legend: '' });
+      const pts = small.cells.map(c => C.p[c]);
+      const cx = pts.reduce((s, p) => s + p[0], 0) / pts.length, cy = pts.reduce((s, p) => s + p[1], 0) / pts.length;
+      const rad = Math.max(...pts.map(p => Math.hypot(p[0] - cx, p[1] - cy))) + 2 * grid.spacing;
+      return { river: r.i, lake: l.i, small: small.i, at: { x: cx, y: cy, r: rad } };`
+      })
+    ).value as Obj;
+    // an identity import re-packs the cells: everything still lines up, names and ids carry over
+    const same = await h.ok("set_heights", { grid: base }, 240_000);
+    const rv = same.rivers as Obj;
+    assert.ok(rv.kept >= rv.before - 3, JSON.stringify(rv));
+    assert.ok(((same.carried as Obj).routes as number) > 0 && ((same.carried as Obj).markers as number) > 0);
+    const c1 = await ev(consistency);
+    assert.deepEqual(c1, c0, "routes, markers and burgs line up with the new cells as before");
+    const kept = await ev(
+      "return { spire: pack.rivers.filter(r => r.name === 'Spire').map(r => r.i), lake: pack.features.filter(f => f && f.name === 'Lake Tupaia').length }"
+    );
+    assert.deepEqual(kept, { spire: [named.river], lake: 1 }, "the river keeps its id and name, the lake its name");
+    const rm = await h.call("edit", { type: "route", ops: [{ ref: 0, remove: true }] });
+    assert.ok(!rm.isError, `removing a route works after the rebuild: ${JSON.stringify(rm.content[0]).slice(0, 300)}`);
+    // flood the short river's patch: it is gone, and its note is reported
+    const flooded = await h.ok(
+      "set_heights",
+      { grid: shaped([{ x: named.at.x, y: named.at.y, r: named.at.r, set: 8 }]) },
+      240_000
+    );
+    const fr = flooded.rivers as Obj;
+    assert.ok(fr.gone >= 1, JSON.stringify(fr));
+    assert.ok((fr.notesOrphaned as string[]).includes(`river${named.small} Brook note`), JSON.stringify(fr));
+    assert.match(JSON.stringify(flooded.notes), /notes belong to rivers that are gone/);
+    const c2 = await ev(consistency);
+    assert.equal(c2.badLinks, 0);
+    assert.equal(c2.burgCellsOff, 0);
+    assert.equal(await ev("return pack.rivers.find(r => r.name === 'Spire')?.i"), named.river);
+    await h.ok("snapshot", { action: "undo", n: 4 }, 240_000);
+    assert.equal(await digest(), d0);
+  });
+
+  test("paint_cells height rebuild:'risk' carries routes the same way", async () => {
+    const d0 = await digest();
+    const p = await h.ok(
+      "paint_cells",
+      {
+        select: { circle: { at: { x: spots.coast.x, y: spots.coast.y }, radius: 40 } },
+        set: { height: { delta: 6, rebuild: "risk" } }
+      },
+      240_000
+    );
+    assert.ok((((p.set as Obj).height as Obj).carried as Obj).routes > 0, JSON.stringify(p.set));
+    const bad = await ev(
+      "const C = pack.cells; let n = 0; for (const [k, v] of Object.entries(C.routes)) for (const nb of Object.keys(v)) if (!C.c[+k]?.includes(+nb)) n++; return n;"
+    );
+    assert.equal(bad, 0);
+    const rm = await h.call("edit", { type: "route", ops: [{ ref: 1, remove: true }] });
+    assert.ok(!rm.isError, JSON.stringify(rm.content[0]).slice(0, 300));
+    await h.ok("snapshot", { action: "undo", n: 2 }, 240_000);
     assert.equal(await digest(), d0);
   });
 
@@ -361,8 +527,65 @@ describe("set_heights and flow on demo.map", () => {
     assert.equal(undoAfter, undoBefore, "no undo entry");
   });
 
+  test("flow on proposed heights starts at the nearest grid cell (even where the map is open sea now), takes {gridCell}; a joined river says where it goes; lengths in the map's unit", async () => {
+    const d0 = await digest();
+    const [gw, gh] = (await ev("return [graphWidth, graphHeight]")) as number[];
+    const deep = base.findIndex(
+      (v, i) =>
+        v < 10 &&
+        pts[i][0] > 150 &&
+        pts[i][1] > 150 &&
+        pts[i][0] < gw - 150 &&
+        pts[i][1] < gh - 150 &&
+        base.every((u, j) => u < 20 || Math.hypot(pts[j][0] - pts[i][0], pts[j][1] - pts[i][1]) > 100)
+    );
+    assert.ok(deep >= 0, "demo.map has open sea away from land");
+    const [cx, cy] = pts[deep];
+    const island = shaped([
+      { x: cx, y: cy, r: 30, set: 60 },
+      { x: cx, y: cy, r: 70, set: 35 }
+    ]);
+    const at = { x: cx + 9, y: cy + 4 };
+    let want = 0;
+    for (let i = 1; i < n; i++)
+      if (Math.hypot(pts[i][0] - at.x, pts[i][1] - at.y) < Math.hypot(pts[want][0] - at.x, pts[want][1] - at.y))
+        want = i;
+    const f = await h.ok("flow", { from: [at, { gridCell: want }], heights: { grid: island }, screenshot: true });
+    const [p1, p2] = f.paths as Obj[];
+    assert.equal(p1.from.cell, want, JSON.stringify(p1.from));
+    assert.equal(p1.from.snapped, undefined, "within a cell of the asked point");
+    assert.equal(p1.from.h, island[want]);
+    assert.equal(p2.from.cell, want);
+    assert.equal(p1.end.type, "sea", JSON.stringify(p1.end));
+    assert.match(String(f.legend), /green tint = becomes land/);
+    assert.equal(await ev("return document.querySelectorAll('#tupaiaFlow').length"), 0);
+    // a start on an existing river (current map): the river, and where its water finally goes
+    const onRiver = await ev(
+      "const C = pack.cells; const r = pack.rivers.find(r => r.cells.length > 6 && r.cells.slice(0, -1).every(c => c >= 0 && C.h[c] >= 20)); return { cell: r.cells[2], i: r.i };"
+    );
+    const rf = ((await h.ok("flow", { from: { cell: onRiver.cell } })).paths as Obj[])[0];
+    assert.equal(rf.end.type, "river");
+    assert.equal(rf.steps, 0);
+    assert.ok(["sea", "lake", "border"].includes(rf.end.goesTo?.type), JSON.stringify(rf.end));
+    assert.match(String(rf.end.goesTo.river), /\(\d+\)$/);
+    // lengths: km always, plus the map's own unit
+    const unit0 = await ev("return document.getElementById('distanceUnitInput').value");
+    try {
+      await ev("document.getElementById('distanceUnitInput').value = 'mi'; return 1");
+      const mi = ((await h.ok("flow", { from: at, heights: { grid: island } })).paths as Obj[])[0];
+      assert.ok(mi.length.km > 0 && mi.length.mi > 0, JSON.stringify(mi.length));
+      assert.ok(Math.abs(mi.length.km / mi.length.mi - 1.609) < 0.05);
+      await ev("document.getElementById('distanceUnitInput').value = 'lg'; return 1");
+      const lg = ((await h.ok("flow", { from: at, heights: { grid: island } })).paths as Obj[])[0];
+      assert.ok(lg.length.km > 0 && lg.length.lg > 0, JSON.stringify(lg.length));
+    } finally {
+      await ev("document.getElementById('distanceUnitInput').value = args; return 1", unit0);
+    }
+    assert.equal(await digest(), d0, "flow changed nothing");
+  });
+
   describe("sketch log and replay", () => {
-    const files = { base: "", regrid: "", burg: "" };
+    const files = { base: "", regrid: "", burg: "", other: "" };
     let next: number[] = [];
     let graphAfter = "";
 
@@ -434,7 +657,13 @@ describe("set_heights and flow on demo.map", () => {
       const res = recs[0].resolved as Obj;
       assert.equal(res.cells, n);
       assert.equal(res.graphAfter, graphAfter);
-      assert.equal(Buffer.from(res.heights, "base64").length, n);
+      assert.equal(typeof res.baseDigest, "string");
+      assert.ok(res.changed > 0 && res.changed < n, JSON.stringify({ changed: res.changed }));
+      assert.ok(
+        res.changes.length < 4000,
+        `only the changed cells are recorded (deflated): ${res.changes.length} chars`
+      );
+      assert.ok(Array.isArray(res.bbox) && res.bbox.length === 4);
       assert.equal(recs[1].resolved.graph, graphAfter, "the paint refers to the rebuilt graph");
       assert.equal(recs[2].resolved.graphAfter, g3, "the risk paint records the graph it built");
       const reb = await h.ok("sketch", { action: "rebase", onto: { path: files.base } }, 400_000);
@@ -447,16 +676,19 @@ describe("set_heights and flow on demo.map", () => {
 
     test("a base with a burg on new sea: the import applies with a note, ops on the old cells conflict", async () => {
       const reb = await h.ok("sketch", { action: "rebase", onto: { path: files.burg }, onConflict: "skip" }, 400_000);
-      assert.deepEqual(reb.applied, [1]);
-      assert.match(JSON.stringify(reb.notes), /op 1: set_heights rebuilt another cell graph/);
+      // op 4 (the keep import) sets only its own cells, on top of what this base now holds
+      assert.deepEqual(reb.applied, [1, 4]);
+      const notes = JSON.stringify(reb.notes);
+      assert.match(notes, /op 1: set_heights rebuilt another cell graph/);
+      assert.doesNotMatch(notes, /op 1: set_heights: the target's heights differ/, "a burg changes no heights");
+      assert.match(notes, /op 4: set_heights: the target's heights differ/, "ops 2-3 were skipped here");
       const conflicts = reb.conflicts as Obj[];
       assert.deepEqual(
         conflicts.map(c => c.seq),
-        [2, 3, 4]
+        [2, 3]
       );
       assert.match(conflicts[0].reason, /renumbered/);
       assert.match(conflicts[1].reason, /renumbered/);
-      assert.match(conflicts[2].reason, /cross height 20/, "the keep import would sink the burg's cell");
       const drift = await ev(
         "const b = pack.burgs.find(b => b && b.name === 'Driftwood'); return { found: !!b, removed: !!b?.removed, h: b ? pack.cells.h[b.cell] : null };"
       );
@@ -466,12 +698,55 @@ describe("set_heights and flow on demo.map", () => {
     });
 
     test("a regridded base is a conflict", async () => {
-      // the sketch now holds op 1 only (the skipped paint left the log)
+      // the sketch now holds ops 1 and 4 (the skipped paints left the log)
       const reb = await h.ok("sketch", { action: "rebase", onto: { path: files.regrid } }, 400_000);
       assert.equal(reb.completed, false);
       const conflicts = reb.conflicts as Obj[];
       assert.equal(conflicts[0]?.seq, 1, JSON.stringify(reb).slice(0, 500));
       assert.match(conflicts[0].reason, /CONFLICT: the heights were recorded on another grid/);
+    });
+
+    test("replay onto a map whose terrain was edited since keeps those edits: only the op's cells are set, and the replay says so; the summary frames on the changed area", async () => {
+      await h.ok("sketch", { action: "stop" });
+      await h.ok("load_map", { path: files.base });
+      // someone else raises a hill near the burg
+      await h.ok("paint_cells", {
+        select: { circle: { at: { x: spots.burg.x, y: spots.burg.y }, radius: 30 }, where: { land: true } },
+        set: { height: { delta: 15 } }
+      });
+      const otherH = (await ev("return Array.from(grid.cells.h)")) as number[];
+      files.other = (
+        await h.ok("save_map", { path: path.join(h.env.TUPAIA_OUT, "terrain-other.map"), overwrite: true })
+      ).path as string;
+      await h.ok("load_map", { path: files.base });
+      await h.ok("sketch", { action: "start", slug: "t-terrain-2" });
+      // the sketch lifts one inland cell far from that hill by 3 (keep)
+      const cell = await ev(
+        "const C = pack.cells; return [...C.i].find(c => C.h[c] >= 40 && C.h[c] <= 90 && Math.hypot(C.p[c][0] - args.x, C.p[c][1] - args.y) > 150);",
+        spots.burg
+      );
+      const ph = await ev(`return pack.cells.h[${cell}]`);
+      await h.ok("set_heights", { pack: { [cell]: ph + 3 }, rebuild: "keep" }, 240_000);
+      const g = await ev(`return pack.cells.g[${cell}]`);
+      const gNew = await ev(`return grid.cells.h[${g}]`);
+      const rec = ((await h.ok("sketch", { action: "status", full: true })).records as Obj[])[0].resolved as Obj;
+      assert.equal(rec.changed, 1);
+      assert.ok(rec.changes.length < 200, `a one-cell change is tiny in the log: ${rec.changes.length} chars`);
+      const sum = await h.ok("sketch", { action: "summary", shots: false });
+      assert.equal((sum.framedOn as Obj)?.type, "set_heights", JSON.stringify(sum.framedOn));
+      const reb = await h.ok("sketch", { action: "rebase", onto: { path: files.other } }, 400_000);
+      assert.deepEqual(reb.applied, [1], JSON.stringify(reb.conflicts));
+      assert.match(
+        JSON.stringify(reb.notes),
+        /op 1: set_heights: the target's heights differ .*only the op's 1 changed grid cells were set/
+      );
+      const want = otherH.slice();
+      want[g] = gNew;
+      assert.deepEqual(
+        await ev("return Array.from(grid.cells.h)"),
+        want,
+        "the other edit stays; the sketch's cell is set"
+      );
     });
   });
 });
