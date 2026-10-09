@@ -37,15 +37,26 @@ export interface ReplaySpec {
   unreplayable?: (r: Resolved | null) => string | null;
   /** Entities the op created, per op, for the replay id map (like AddResolved.created). */
   created?: (r: Resolved) => CreatedRef[][];
+  /** Entities the sketch summary may frame its shots on (higher score first), with the layers that show the change. */
+  focus?: (r: Resolved) => Array<{ type: string; i: number | string; score: number; layers?: string[] }>;
   /** Default true: validate then apply with phase 'apply'. */
   phased?: boolean;
   /** Timeout class for replay (default 'edit'). */
   timeout?: "edit" | "heavy";
+  /** The op can renumber pack cells (a heightmap rebuild): replay re-reads the page's cell graph after it. */
+  renumbers?: (r: Resolved) => boolean;
+  /** After a replayed apply: a note for the replay result (e.g. the outcome differs from the recording), or null. */
+  afterReplay?: (recorded: Resolved, applied: Resolved, out: Record<string, unknown>) => string | null;
+  /** The map area the op changed (graph px), for the sketch summary's framed shot when no entity was edited. */
+  frame?: (r: Resolved) => { bbox: [number, number, number, number]; label: string; layers?: string[] } | null;
 }
 
 export const REPLAY_EXT: Record<string, ReplaySpec> = {};
 
 export function registerReplayable(tool: string, spec: ReplaySpec): void {
+  // two modules registering one tool would silently drop one spec's replays: combine them instead
+  if (REPLAY_EXT[tool] && REPLAY_EXT[tool] !== spec)
+    throw new Error(`registerReplayable: '${tool}' already has a replay spec; combine the two into one`);
   REPLAY_EXT[tool] = spec;
 }
 
@@ -76,6 +87,9 @@ export function unreplayableReason(tool: string, resolved: Resolved | null): str
     const h = (resolved as PaintResolved).set?.height as { rebuild?: unknown } | undefined;
     if (h && typeof h === "object") {
       const rebuild = h.rebuild ?? "keep";
+      // a risk rebuild recorded with the graph it produced replays deterministically (the app
+      // reseeds from the map seed); older records without it stay blob-only
+      if (rebuild === "risk" && typeof (resolved as PaintResolved).graphAfter === "string") return null;
       if (rebuild !== "keep")
         return (
           NOT_REPLAYABLE[`paint_cells:${String(rebuild)}`] ??
@@ -125,6 +139,8 @@ export interface PaintResolved {
   set: Record<string, unknown>;
   /** Fingerprint of the cell graph `select.cells` refers to (bridge cellGraph). */
   graph?: string;
+  /** height rebuild:'risk': the cell graph the rebuild produced (replay compares its own). */
+  graphAfter?: string;
   redraw?: unknown;
 }
 
@@ -213,7 +229,18 @@ export interface Sketch {
 
 export function blobOnlyReasons(sk: Sketch): string[] {
   const out = [...sk.blockers];
-  for (const o of sk.ops) if (!o.replayable) out.push(`op ${o.seq} (${o.tool}): ${o.reason ?? "not replayable"}`);
+  // one line per distinct reason ("ops 3, 5 (regrid): ..."), not one per op
+  const groups = new Map<string, { tool: string; reason: string; seqs: number[] }>();
+  for (const o of sk.ops) {
+    if (o.replayable) continue;
+    const reason = o.reason ?? "not replayable";
+    const key = `${o.tool}\u0000${reason}`;
+    const g = groups.get(key);
+    if (g) g.seqs.push(o.seq);
+    else groups.set(key, { tool: o.tool, reason, seqs: [o.seq] });
+  }
+  for (const g of groups.values())
+    out.push(`${g.seqs.length > 1 ? "ops" : "op"} ${g.seqs.join(", ")} (${g.tool}): ${g.reason}`);
   return out;
 }
 
@@ -684,7 +711,8 @@ export function rewriteResolved(tool: string, resolved: Resolved, rw: Rewriter):
     }
     case "paint_cells": {
       const p = r as unknown as PaintResolved;
-      for (const k of ["state", "province", "culture", "religion"]) if (k in p.set) p.set[k] = rw.id(k, p.set[k]);
+      for (const k of ["state", "province", "culture", "religion", "biome"])
+        if (k in p.set) p.set[k] = rw.id(k, p.set[k]);
       const z = p.set.zone as { ref: unknown; op?: string } | undefined;
       if (z) p.set.zone = { ...z, ref: rw.id("zone", z.ref) };
       return p;

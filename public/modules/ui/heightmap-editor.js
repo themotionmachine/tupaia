@@ -292,10 +292,14 @@ function editHeightmap(options) {
     }
   }
 
-  function restoreRiskedData() {
+  // tupaia-mcp: opts (MCP set_heights only) = {erosion, regenerateRivers, redefineBiomes, afterRivers}:
+  // regenerate rivers without erosion, recompute every biome, and run a hook right after the
+  // rivers. Called without opts (the editor) it behaves exactly as before.
+  function restoreRiskedData(opts) {
     INFO && console.group("Edit Heightmap");
     TIME && console.time("restoreRiskedData");
-    const erosionAllowed = allowErosion.checked;
+    const erosionAllowed = opts?.erosion ?? allowErosion.checked;
+    const regenerateRivers = erosionAllowed || Boolean(opts?.regenerateRivers); // tupaia-mcp
 
     // assign pack data to grid cells
     const l = grid.cells.i.length;
@@ -310,7 +314,7 @@ function editHeightmap(options) {
     const religion = new Uint16Array(l);
     const good = new Uint16Array(l);
 
-    // rivers data, stored only if allowErosion is unchecked
+    // rivers data, stored only if rivers are not regenerated (allowErosion is unchecked)
     const fl = new Uint16Array(l);
     const r = new Uint16Array(l);
     const conf = new Uint8Array(l);
@@ -328,7 +332,7 @@ function editHeightmap(options) {
       religion[g] = pack.cells.religion[i];
       good[g] = pack.cells.good?.[i] || 0;
 
-      if (!erosionAllowed) {
+      if (!regenerateRivers) {
         fl[g] = pack.cells.fl[i];
         r[g] = pack.cells.r[i];
         conf[g] = pack.cells.conf[i];
@@ -365,10 +369,11 @@ function editHeightmap(options) {
     reGraph();
     Features.markupPack();
 
-    if (erosionAllowed) {
-      Rivers.generate(true);
+    if (regenerateRivers) {
+      Rivers.generate(erosionAllowed);
       Features.defineGroups();
     }
+    opts?.afterRivers?.(); // tupaia-mcp
 
     // assign saved pack data from grid back to pack
     const n = pack.cells.i.length;
@@ -383,7 +388,7 @@ function editHeightmap(options) {
     pack.cells.biome = new Uint8Array(n);
     pack.cells.good = new Uint16Array(n);
 
-    if (!erosionAllowed) {
+    if (!regenerateRivers) {
       pack.cells.r = new Uint16Array(n);
       pack.cells.conf = new Uint8Array(n);
       pack.cells.fl = new Uint16Array(n);
@@ -394,7 +399,7 @@ function editHeightmap(options) {
       const isLand = pack.cells.h[i] >= 20;
 
       // rivers data
-      if (!erosionAllowed) {
+      if (!regenerateRivers) {
         pack.cells.r[i] = r[g];
         pack.cells.conf[i] = conf[g];
         pack.cells.fl[i] = fl[g];
@@ -417,6 +422,8 @@ function editHeightmap(options) {
       pack.cells.province[i] = province[g];
       pack.cells.religion[i] = religion[g];
     }
+
+    if (opts?.redefineBiomes) Biomes.define(); // tupaia-mcp: every biome from the new heights and climate
 
     // find closest land cell to burg
     const findBurgCell = function (x, y) {
@@ -463,7 +470,7 @@ function editHeightmap(options) {
       c.center = findCell(c.x, c.y);
     }
 
-    if (erosionAllowed) {
+    if (regenerateRivers) {
       Rivers.specify();
       Lakes.defineNames();
     }

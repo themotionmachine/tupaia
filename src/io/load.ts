@@ -1,5 +1,7 @@
 import { lazy } from "@/lazy-loaders";
+import { restoreReliefOnLoad } from "@/renderers/relief-settings";
 import { calculateVoronoi, ensureEl, last, link, minmax, parseError, rn } from "@/utils";
+import { applyBiomeExtras } from "./biome-extras"; // tupaia-mcp: biome icon density/icons/cost
 
 export async function quickLoad(): Promise<void> {
   const blob = await ldb.get("lastMap");
@@ -336,6 +338,7 @@ async function parseLoadedData(data: string[], mapVersion: string | null): Promi
         biomesData.icons.push([]);
         biomesData.cost.push(50);
       }
+      applyBiomeExtras(biomesData, biomes, biomesData.i.length); // tupaia-mcp: 4th field, absent in older files
     }
     svg.remove();
     document.body.insertAdjacentHTML("afterbegin", data[5]);
@@ -804,6 +807,7 @@ async function parseLoadedData(data: string[], mapVersion: string | null): Promi
     // draw data layers (not kept in svg)
     if (rulers && layerIsOn("toggleRulers")) rulers.draw();
     if (layerIsOn("toggleGrid")) drawGrid();
+    restoreReliefOnLoad(); // tupaia-mcp: icons of a #terrain[data-regenerate] map are not kept in svg
     if (typeof window.restoreDefaultEvents === "function") restoreDefaultEvents();
     focusOn(); // based on searchParams focus on point, cell or burg
     invokeActiveZooming();

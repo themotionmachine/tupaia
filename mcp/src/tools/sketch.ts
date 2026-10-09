@@ -15,6 +15,7 @@ import {
   blobOnlyReasons,
   type EditResolved,
   type PaintResolved,
+  REPLAY_EXT,
   type Sketch,
   type SketchBase,
   sanitizeRecord
@@ -108,9 +109,19 @@ async function start(ctx: ToolContext, scope: CallScope, args: { slug?: string; 
   const base = baseFromProvenance(ctx, notes);
   const slug = args.slug ?? defaultSlug();
   const baseText = await scope.mapText();
-  const summary = await scope.call<{ counts: Record<string, number> }>("summary", {}, { noAlerts: true });
+  const summary = await scope.call<{ counts: Record<string, number>; cells?: number }>(
+    "summary",
+    {},
+    { noAlerts: true }
+  );
   if (old) notes.push(`replaced the stopped sketch '${old.slug}' (${old.ops.length} ops)`);
-  const sk = ctx.sketches.begin({ slug, note: args.note ?? null, base, baseText, baseCounts: summary.counts });
+  const sk = ctx.sketches.begin({
+    slug,
+    note: args.note ?? null,
+    base,
+    baseText,
+    baseCounts: withCells(summary)
+  });
   scope.notes.push(...notes);
   return {
     started: true,
@@ -126,17 +137,22 @@ function baseLine(b: SketchBase): string {
 }
 
 /** The entity the sketch touched most (edits per field, adds, paints), best first. */
-export function changeRanking(sk: Sketch): Array<{ type: string; i: number | string; score: number }> {
-  const score = new Map<string, { type: string; i: number | string; score: number }>();
-  const bump = (type: string, i: unknown, n: number) => {
+export function changeRanking(
+  sk: Sketch
+): Array<{ type: string; i: number | string; score: number; layers?: string[] }> {
+  const score = new Map<string, { type: string; i: number | string; score: number; layers?: string[] }>();
+  const bump = (type: string, i: unknown, n: number, layers?: string[]) => {
     if (typeof i !== "number" && typeof i !== "string") return;
     const k = `${type}:${i}`;
     const cur = score.get(k) ?? { type, i, score: 0 };
     cur.score += n;
+    if (layers) cur.layers = layers; // the latest op's view
     score.set(k, cur);
   };
   for (const o of sk.ops) {
     if (!o.resolved || !o.replayable) continue;
+    // tools registered with a focus hook (e.g. regenerate:provinces-emblems) name their own
+    for (const f of REPLAY_EXT[o.tool]?.focus?.(o.resolved) ?? []) bump(f.type, f.i, f.score, f.layers);
     if (o.tool === "edit") {
       const e = o.resolved as EditResolved;
       if (e.type === "map") continue;
@@ -147,7 +163,8 @@ export function changeRanking(sk: Sketch): Array<{ type: string; i: number | str
     } else if (o.tool === "paint_cells") {
       const p = o.resolved as PaintResolved;
       const n = 2 + Math.min(10, Math.floor(p.select.cells.length / 25));
-      for (const k of ["state", "province", "culture", "religion"]) if (k in p.set && p.set[k]) bump(k, p.set[k], n);
+      for (const k of ["state", "province", "culture", "religion", "biome"])
+        if (k in p.set && p.set[k]) bump(k, p.set[k], n);
     }
   }
   return [...score.values()].sort((a, b) => b.score - a.score);
@@ -163,7 +180,14 @@ interface Box {
 async function framedTarget(
   scope: CallScope,
   sk: Sketch
-): Promise<{ type: string; i: number | string; name: string | null; bbox: [number, number, number, number] } | null> {
+): Promise<{
+  type: string;
+  i: number | string;
+  name: string | null;
+  bbox: [number, number, number, number];
+  layers?: string[];
+  op?: boolean;
+} | null> {
   for (const c of changeRanking(sk).slice(0, 6)) {
     const env = await scope.envelope<Box & { name?: string }>(
       "entityBox",
@@ -177,7 +201,23 @@ async function framedTarget(
       type: c.type,
       i: c.i,
       name: b.name ?? null,
-      bbox: [b.x0 - pad, b.y0 - pad, b.x1 + pad, b.y1 + pad]
+      bbox: [b.x0 - pad, b.y0 - pad, b.x1 + pad, b.y1 + pad],
+      ...(c.layers ? { layers: c.layers } : {})
+    };
+  }
+  // no entity to frame: an op that knows the area it changed (set_heights), the latest first
+  for (const o of [...sk.ops].reverse()) {
+    const f = o.resolved && o.replayable ? REPLAY_EXT[o.tool]?.frame?.(o.resolved) : null;
+    if (!f) continue;
+    const [x0, y0, x1, y1] = f.bbox;
+    const pad = Math.max(40, 0.15 * Math.max(x1 - x0, y1 - y0));
+    return {
+      type: o.tool,
+      i: o.seq,
+      name: f.label,
+      bbox: [x0 - pad, y0 - pad, x1 + pad, y1 + pad],
+      layers: f.layers,
+      op: true
     };
   }
   return null;
@@ -193,7 +233,8 @@ const LAYERS_FOR: Record<string, LayerNameT[]> = {
   route: ["routes"],
   marker: ["markers"],
   zone: ["zones"],
-  label: ["labels"]
+  label: ["labels"],
+  biome: ["biomes"]
 };
 
 async function shoot(
@@ -240,7 +281,7 @@ async function summaryShots(
 ): Promise<Record<string, string | null>> {
   const shots: Record<string, string | null> = {};
   const dir = path.join("sketches", sk.slug);
-  const on = target ? (LAYERS_FOR[target.type] ?? []) : [];
+  const on = target ? ((target.layers as LayerNameT[] | undefined) ?? LAYERS_FOR[target.type] ?? []) : [];
   const layers0 = await scope.call<string[]>("layersOn", {}, { noAlerts: true });
   const view0 = await scope.call<{ x: number; y: number; scale: number }>("getView", {}, { noAlerts: true });
   const pair = async (which: "before" | "after") => {
@@ -301,9 +342,13 @@ async function summaryShots(
 
 async function summary(ctx: ToolContext, scope: CallScope, args: { shots?: boolean }) {
   const sk = needSketch(ctx);
-  const now = await scope.call<{ counts: Record<string, number> }>("summary", {}, { noAlerts: true });
-  const keys = [...new Set([...Object.keys(sk.baseCounts), ...Object.keys(now.counts)])];
-  const counts = keys.map(k => ({ k, base: sk.baseCounts[k] ?? 0, now: now.counts[k] ?? 0 }));
+  const now = await scope.call<{ counts: Record<string, number>; cells?: number }>("summary", {}, { noAlerts: true });
+  const nowCounts = withCells(now);
+  // a count the base never recorded (a sketch started before it was counted: biomes, cells) is left out
+  const keys = [...new Set([...Object.keys(sk.baseCounts), ...Object.keys(nowCounts)])].filter(
+    k => sk.baseCounts[k] !== undefined
+  );
+  const counts = keys.map(k => ({ k, base: sk.baseCounts[k] ?? 0, now: nowCounts[k] ?? 0 }));
   const target = await framedTarget(scope, sk);
   const shots: Record<string, string | null> = args.shots !== false ? await summaryShots(ctx, scope, sk, target) : {};
   const reasons = blobOnlyReasons(sk);
@@ -328,7 +373,8 @@ async function summary(ctx: ToolContext, scope: CallScope, args: { shots?: boole
   const shotFiles = Object.entries(shots).filter(([, f]) => !!f);
   if (shotFiles.length) {
     lines.push("", "## Screenshots", "");
-    if (target)
+    if (target?.op) lines.push(`Framed on the area op ${target.i} changed: ${target.name}.`, "");
+    else if (target)
       lines.push(
         `Framed on the most-changed entity: ${target.type} ${target.name ? `'${target.name}' ` : ""}(${target.i}).`,
         ""
@@ -351,14 +397,27 @@ async function summary(ctx: ToolContext, scope: CallScope, args: { shots?: boole
   };
 }
 
+/** Summary counts plus the cell count (a regrid changes only that). */
+function withCells(s: { counts: Record<string, number>; cells?: number }): Record<string, number> {
+  return typeof s.cells === "number" ? { ...s.counts, cells: s.cells } : { ...s.counts };
+}
+
 /** REFUSED with the reasons when the sketch cannot be replayed. */
 export function refuseBlobOnly(sk: Sketch): void {
   const reasons = blobOnlyReasons(sk);
   if (reasons.length)
     throw new ToolError(
       "REFUSED",
-      `sketch '${sk.slug}' is blob-only, so it cannot be replayed: ${reasons.join("; ")}. It can still be saved and viewed as a blob.`
+      `sketch '${sk.slug}' is blob-only, so it cannot be replayed: ${reasons.join("; ")}. ${blobOnlyNext(sk)}`
     );
+}
+
+/** What to do with a blob-only sketch instead of a rebase. */
+function blobOnlyNext(sk: Sketch): string {
+  const v = sk.base.kind === "shared" && typeof sk.base.version === "number" ? `v${sk.base.version}` : null;
+  return v
+    ? `No rebase is needed while the shared map is still at ${v} (shared_status): sketch_promote it directly. If the shared map moved, a blob-only sketch cannot be carried over: start a new sketch from the current shared map and redo the non-replayable steps (a regrid is one call). It can still be saved and viewed as a blob.`
+    : "It can still be saved and viewed as a blob.";
 }
 
 /**
@@ -387,7 +446,11 @@ export async function rebaseOnto(
   entries.push(await scope.pushUndo("sketch rebase", { onto: target.describe }));
   await target.load();
   const baseText = await scope.mapText();
-  const baseSummary = await scope.call<{ counts: Record<string, number> }>("summary", {}, { noAlerts: true });
+  const baseSummary = await scope.call<{ counts: Record<string, number>; cells?: number }>(
+    "summary",
+    {},
+    { noAlerts: true }
+  );
   const res = await replayOps(ctx, scope, sk.ops, { onConflict, label: "sketch replay" });
   entries.push(...res.undoEntries);
   scope.notes.push(...res.notes);
@@ -410,7 +473,7 @@ export async function rebaseOnto(
   if (completed) {
     sk.base = target.base;
     sk.baseText = baseText;
-    sk.baseCounts = baseSummary.counts;
+    sk.baseCounts = withCells(baseSummary);
     sk.ops = res.records;
     sk.redo = [];
     sk.blockers = [];
@@ -819,9 +882,13 @@ async function promote(
   if (!meta) throw new ToolError("NOT_FOUND", "the shared map does not exist yet");
   const base = sk.base.version;
   if (meta.version !== base) {
+    const moved = `sketch '${sk.slug}' is based on shared v${base}, but the shared map is now v${meta.version} (saved by ${meta.updated_by} at ${meta.updated_at}).`;
+    const reasons = blobOnlyReasons(sk);
     throw new ToolError(
       "REFUSED",
-      `rebase first: sketch '${sk.slug}' is based on shared v${base}, but the shared map is now v${meta.version} (saved by ${meta.updated_by} at ${meta.updated_at}). sketch {action:'rebase'} replays the sketch onto v${meta.version} keeping their edits; check the result, then sketch_promote again.`,
+      reasons.length
+        ? `${moved} It is blob-only (${reasons.join("; ")}), so rebase cannot replay it: start a new sketch from v${meta.version} (load_map {source:'shared'}) and redo its steps there (a regrid is one call), then promote that one.`
+        : `rebase first: ${moved} sketch {action:'rebase'} replays the sketch onto v${meta.version} keeping their edits; check the result, then sketch_promote again.`,
       { details: { sketchBase: base, live: meta.version } }
     );
   }
@@ -893,7 +960,7 @@ export function register(ctx: ToolContext): void {
     {
       title: "Provisional sketches",
       description:
-        "Propose a change to the shared map without changing it: a sketch is base version N of the shared map plus the ops log that produced it. start {slug?, note?}: needs a page map from load_map {source:'shared'} with no edits; then every mutating call is logged in its resolved form (ids, literal names and cells). regenerate, generate_map, load_map and snapshot restore make it blob-only (not replayable) until undone; snapshot undo takes the last op out of the log. status: base, ops, blobOnly, lastSaved, dirty, viewUrl. summary: markdown for humans with before/after screenshots under TUPAIA_OUT/sketches/<slug>/. stop: end recording. rebase {onConflict?}: replay the log onto the CURRENT shared map (a GET), keeping other people's edits; a removed target or a field both sides changed is a conflict ('stop' default, or 'skip'); does not save. Network (Worker id sketch-<slug>, never the shared map): save {confirm:true} PUTs the page map and ops.json and returns viewUrl (opens the sketch in the app); list (read-only) shows saved sketches with their headers; open {slug} loads one into the page as the active sketch; discard {slug, confirm:true} deletes it. save and discard need a server spawned with TUPAIA_MODE=live; without confirm they preview. To put a sketch on the shared map use sketch_promote.",
+        "Propose a change to the shared map without changing it: a sketch is base version N of the shared map plus the ops log that produced it. start {slug?, note?}: needs a page map from load_map {source:'shared'} with no edits; then every mutating call is logged in its resolved form (ids, literal names and cells). regenerate (unless its parts are only replayable ones: provinces/emblems, biomes, relief), generate_map, load_map and snapshot restore make it blob-only (not replayable) until undone; snapshot undo takes the last op out of the log. status: base, ops, blobOnly, lastSaved, dirty, viewUrl. summary: markdown for humans with before/after screenshots under TUPAIA_OUT/sketches/<slug>/. stop: end recording. rebase {onConflict?}: replay the log onto the CURRENT shared map (a GET), keeping other people's edits; a removed target or a field both sides changed is a conflict ('stop' default, or 'skip'); does not save. Network (Worker id sketch-<slug>, never the shared map): save {confirm:true} PUTs the page map and ops.json and returns viewUrl (opens the sketch in the app); list (read-only) shows saved sketches with their headers; open {slug} loads one into the page as the active sketch; discard {slug, confirm:true} deletes it. save and discard need a server spawned with TUPAIA_MODE=live; without confirm they preview. To put a sketch on the shared map use sketch_promote.",
       inputSchema: SketchInput,
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
       _meta: META_TEXT_HEAVY,

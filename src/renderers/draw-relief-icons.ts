@@ -1,5 +1,6 @@
-import { extent, polygonContains } from "d3";
+import { extent, polygonArea, polygonContains, quadtree } from "d3";
 import { minmax, rand, rn } from "../utils";
+import { cellRandom, gridKey, hashString, keepOdds, packCellKey, readReliefSettings } from "./relief-settings";
 
 interface ReliefIcon {
   i: string;
@@ -24,14 +25,47 @@ const reliefIconsRenderer = (): void => {
   const mod = 0.2 * size; // size modifier
   const relief: ReliefIcon[] = [];
 
+  // tupaia-mcp: map-level settings on #terrain (relief-settings.ts); none set = upstream behaviour
+  const settings = readReliefSettings(terrain.node(), () => gridKey(grid.points));
+  const seedHash = settings.seed === null ? null : hashString(settings.seed);
+  const burgs = settings.nearBurgs ? pack.burgs.filter(b => b?.i && !b.removed) : [];
+  const burgTree = burgs.length
+    ? quadtree(
+        burgs,
+        b => b.x,
+        b => b.y
+      )
+    : null;
+  const nearBurg = (x: number, y: number) => !!burgTree?.find(x, y, settings.nearBurgs);
+  const ex = settings.exclude;
+  const excluded = (i: number) => {
+    if (!ex) return false;
+    const g = cells.g[i];
+    if (ex.cells.has(g)) return true;
+    if (!ex.partGrids.has(g)) return false;
+    return ex.parts.has(packCellKey(g, cells.p[i][0], cells.p[i][1], grid.points, grid.cells.c));
+  };
+
   for (const i of cells.i) {
     const height = cells.h[i];
     if (height < 20) continue; // no icons on water
     if (cells.r[i]) continue; // no icons on rivers
     const biome = cells.biome[i];
     if (height < 50 && biomesData.iconsDensity[biome] === 0) continue; // no icons for this biome
+    if (height < settings.minHeight || excluded(i)) continue; // tupaia-mcp
+    const k = settings.scale * (settings.biomes.get(biome) ?? 1); // tupaia-mcp
+    const cellDensity = density * k; // tupaia-mcp
+    if (!(cellDensity > 0)) continue;
+    // tupaia-mcp: seeded draw, one stream per cell (Math.random is restored by drawReliefIcons)
+    if (seedHash !== null) Math.random = cellRandom(seedHash, cells.p[i][0], cells.p[i][1]);
 
     const polygon = getPackPolygon(i);
+    // tupaia-mcp: thinned below k = 1 without a floor of one icon per cell (relief-settings.ts keepOdds)
+    if (k < 1) {
+      const spacing = height < 50 ? 200 / biomesData.iconsDensity[biome] / cellDensity : 2 / cellDensity;
+      const area = cells.area?.[i] || Math.abs(polygonArea(polygon));
+      if (Math.random() >= keepOdds(k, area, spacing)) continue;
+    }
     const [minX, maxX] = extent(polygon, p => p[0]) as [number, number];
     const [minY, maxY] = extent(polygon, p => p[1]) as [number, number];
 
@@ -40,11 +74,11 @@ const reliefIconsRenderer = (): void => {
 
     function placeBiomeIcons(): void {
       const iconsDensity = biomesData.iconsDensity[biome] / 100;
-      const radius = 2 / iconsDensity / density;
+      const radius = 2 / iconsDensity / cellDensity;
       if (Math.random() > iconsDensity * 10) return;
 
       for (const [cx, cy] of window.poissonDiscSampler(minX, minY, maxX, maxY, radius)) {
-        if (!polygonContains(polygon, [cx, cy])) continue;
+        if (!polygonContains(polygon, [cx, cy]) || nearBurg(cx, cy)) continue;
         let h = (4 + Math.random()) * size;
         const icon = getBiomeIcon(i, biomesData.icons[biome]);
         if (icon === "#relief-grass-1") h *= 1.2;
@@ -58,11 +92,11 @@ const reliefIconsRenderer = (): void => {
     }
 
     function placeReliefIcons(): void {
-      const radius = 2 / density;
+      const radius = 2 / cellDensity;
       const [icon, h] = getReliefIcon(i, height);
 
       for (const [cx, cy] of window.poissonDiscSampler(minX, minY, maxX, maxY, radius)) {
-        if (!polygonContains(polygon, [cx, cy])) continue;
+        if (!polygonContains(polygon, [cx, cy]) || nearBurg(cx, cy)) continue;
         relief.push({
           i: icon,
           x: rn(cx - h, 2),
@@ -147,4 +181,12 @@ const reliefIconsRenderer = (): void => {
   }
 };
 
-window.drawReliefIcons = reliefIconsRenderer;
+// tupaia-mcp: a seeded draw swaps Math.random per cell; always put the native one back
+window.drawReliefIcons = () => {
+  const nativeRandom = Math.random;
+  try {
+    reliefIconsRenderer();
+  } finally {
+    Math.random = nativeRandom;
+  }
+};

@@ -14,7 +14,8 @@ export const ENTITY_TYPES = [
   "feature",
   "note",
   "label",
-  "namesbase"
+  "namesbase",
+  "biome"
 ] as const;
 
 export const EntityType = z.enum(ENTITY_TYPES).describe("Entity type");

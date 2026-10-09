@@ -328,19 +328,20 @@ describe("tupaia-mcp sketch (local ops log and replay)", () => {
     assert.equal(st2.ops, recordedOps);
   });
 
-  test("a paint_cells height rebuild (risk) makes the sketch blob-only; undo clears it", async () => {
+  // (a risk rebuild is replayable since it records the cell graph it built: test/terrain.test.ts)
+  test("a paint_cells height rebuild (erase) makes the sketch blob-only; undo clears it", async () => {
     const r = await h.ok(
       "paint_cells",
       {
         select: { circle: { at: pick.paintAt, radius: 20 }, where: { land: true } },
-        set: { height: { delta: 3, rebuild: "risk" } }
+        set: { height: { delta: 3, rebuild: "erase", confirmErase: true } }
       },
       240_000
     );
     assert.ok(r.cells);
     const st = await h.ok("sketch", { action: "status" });
     assert.equal(st.blobOnly, true);
-    assert.match(JSON.stringify(st.blobOnlyReasons), /rebuild:'risk' renumbers every cell/);
+    assert.match(JSON.stringify(st.blobOnlyReasons), /rebuild:'erase' regenerates every state/);
     const log = st.log as Obj[];
     assert.equal(log[log.length - 1].tool, "paint_cells");
     assert.equal(log[log.length - 1].replayable, false);

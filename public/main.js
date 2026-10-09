@@ -675,6 +675,7 @@ async function generate(options) {
     else delete grid.cells.h;
     grid.cells.h = await HeightmapGenerator.generate(grid);
     pack = {}; // reset pack
+    window.ReliefSettings?.clear(); // tupaia-mcp: relief icon settings (#terrain data-*) belong to one map
 
     Features.markupGrid();
     addLakesInDeepDepressions();

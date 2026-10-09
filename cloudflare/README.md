@@ -76,14 +76,53 @@ client guard, each marked `// tupaia-mcp:`:
 `stateRemove` on `window.__tupaiaInternals` when the states editor module loads, and
 `public/modules/ui/heightmap-editor.js` returns its rebuild closures (`restoreKeptData`,
 `restoreRiskedData`, `regenerateErasedData`) from `editHeightmap({tupaiaExport: true})`
-without opening the editor. The guard: `src/io/load.ts` fires a `map:loading` event when a load
+without opening the editor; `restoreRiskedData(opts)` also takes an optional
+`{erosion, regenerateRivers, redefineBiomes, afterRivers}` (MCP `set_heights`: regenerate the
+rivers without erosion, recompute every biome, restore heights right after the rivers), and
+without it behaves exactly as before. The guard: `src/io/load.ts` fires a `map:loading` event when a load
 starts (before the loader's callback) and a `map:loaded` event after a successful load (one line
 each), and `src/io/cloud-cloudflare.ts` uses them (with the existing `map:generated`) so a shared
 load that never completes cannot lend its version to the next load, and so `loadedVersion` only holds while the page still has the map it loaded from
 `shared`; when it does not (a `?maplink` sketch, a file, a new map), `saveSharedMap` shows
 "Replace the shared map v<N>?" and, on Replace, PUTs with `X-Map-Version: N` instead of the old
-versionless PUT whose 409 dialog offered an `X-Map-Overwrite` button. Re-check all three after
-an upstream rebase.
+versionless PUT whose 409 dialog offered an `X-Map-Overwrite` button. One save-format fix,
+also marked `// tupaia-mcp:`: upstream saves only `color|habitability|name` per biome, so every
+reload reset biome icon density, relief icons and movement cost to the defaults (custom biomes
+to 0, none and 50). `src/io/save.ts` appends a 4th `|` field to the biome line (JSON
+`{iconsDensity, icons, cost}`, from `src/io/biome-extras.ts`) and `src/io/load.ts` applies it when
+present; files without it load as before, and older clients read only the first three fields (a
+re-save by an older client drops the 4th). Re-check all four after an upstream rebase.
+
+Relief icons (MCP `regenerate {parts:['relief']}` and `edit map {set:{reliefOnLoad}}`) add one
+new file and five marked hooks. `src/renderers/relief-settings.ts` reads map-level settings from
+attributes of `#terrain` (`data-seed`, `data-scale`, `data-biomes`, `data-min-height`,
+`data-exclude`, `data-near-burgs`, `data-regenerate`) and exposes its helpers as the page global
+`ReliefSettings` (the MCP bridge uses them); `src/renderers/draw-relief-icons.ts` applies them
+(with none set it draws as upstream; a seeded draw swaps `Math.random` per cell and
+`drawReliefIcons` puts it back; below a multiplier of 1 a cell keeps its icons with odds that keep
+the count going with the square of the multiplier, instead of always keeping one). With
+`data-regenerate` set, `prepareMapData` (`src/io/save.ts`) empties `#terrain` in the saved SVG, so
+every save path (File > Save, browser storage, autosave, the shared map, MCP saves and snapshots)
+drops the icons, and `src/io/load.ts` calls `restoreReliefOnLoad()` after a load to draw the same
+icons again and turn the Relief button on. `generate()` in `public/main.js` clears the settings,
+so a new map starts as upstream. `public/modules/ui/relief-editor.js` warns that manual relief
+edits are not saved on such a map. Old files load unchanged. A client without these hooks (an
+older deploy) loading such a file shows no relief and the Relief button off; turning Relief on
+draws unseeded icons at the style density, and its next save stores them again. So MCP
+`shared_save` and `sketch_promote` refuse (BUILD) a `data-regenerate` map unless the deployed
+build is the local one or its entry chunk contains the hook. Deploy the app before saving such a
+map to `shared` by hand. In-app edits that change what relief is drawn from (the biomes editor,
+heightmap tools) do not redraw the icons on a `data-regenerate` map until its next load; MCP
+calls do. Re-check after an upstream rebase (upstream has a `relief-webgl-renderer` branch).
+
+Resampling (for the MCP `regrid` tool and the app's Transform tool): `src/generators/resample.ts`
+`process()` takes a `keepId` option; with it (scale 1) it keeps the map id and fires `map:resampled` instead of
+`showStatistics()` (a new id and `map:generated`), so a density-only change of the shared map
+still saves with its loaded version. Only the MCP `regrid` and a Transform with no shift,
+rotation, zoom, mirror or canvas change pass it; any other Transform and every Submap stay a new
+map ("Replace the shared map?"). `public/modules/ui/transform-tool.js` computes that and keeps
+`notes` across its `undraw()` so Resample carries them over (it dropped them). Re-check all of these
+after an upstream rebase.
 
 ## Local smoke test (no Cloudflare account needed)
 

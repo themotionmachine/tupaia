@@ -378,7 +378,8 @@
     "feature",
     "note",
     "label",
-    "namesbase"
+    "namesbase",
+    "biome"
   ];
   // Arrays whose index equals the id and whose slot 0 is a placeholder.
   const INDEXED = { burg: 1, state: 1, province: 1, culture: 1, religion: 1, feature: 1 };
@@ -398,7 +399,8 @@
     feature: {},
     note: {},
     label: {},
-    namesbase: {}
+    namesbase: {},
+    biome: {}
   };
   // pack.cells field holding membership for cell-based entities.
   const CELL_FIELD = {
@@ -407,7 +409,8 @@
     culture: "culture",
     religion: "religion",
     feature: "f",
-    river: "r"
+    river: "r",
+    biome: "biome"
   };
 
   let memo = null; // per-call cache, reset by T.call
@@ -463,9 +466,53 @@
         return cached("namesbases", () =>
           (typeof nameBases !== "undefined" ? nameBases : []).map((b, i) => (b ? Object.assign({}, b, { i }) : b))
         );
+      case "biome":
+        return cached("biomes", biomeRows);
       default:
         return checkType(type);
     }
+  }
+
+  // Biomes are parallel arrays in biomesData (index = id); rows are read-only copies. The app
+  // "removes" a custom biome by naming it 'removed'. Ids from defaultBiomeCount on are custom
+  // (the climate generator never produces them).
+  function defaultBiomeCount() {
+    return cached("defaultBiomes", () => (typeof Biomes !== "undefined" ? Biomes.getDefault().name.length : 13));
+  }
+
+  function iconWeights(list) {
+    const w = {};
+    for (const k of list || []) w[k] = (w[k] || 0) + 1;
+    return w;
+  }
+
+  function biomeRows() {
+    if (typeof biomesData === "undefined" || !biomesData?.name) return [];
+    const d = biomesData;
+    const custom = defaultBiomeCount();
+    return d.name.map((name, i) => {
+      const row = {
+        i,
+        name,
+        color: d.color[i] ?? null,
+        habitability: d.habitability[i] ?? null,
+        iconsDensity: d.iconsDensity[i] ?? null,
+        icons: iconWeights(d.icons[i]),
+        cost: d.cost[i] ?? null,
+        custom: i >= custom
+      };
+      if (name === "removed") row.removed = true;
+      return row;
+    });
+  }
+
+  function biomeCellCounts() {
+    return cached("biomeCells", () => {
+      const out = new Map();
+      const b = pack.cells.biome;
+      if (b) for (let c = 0; c < b.length; c++) out.set(b[c], (out.get(b[c]) || 0) + 1);
+      return out;
+    });
   }
 
   function idOf(type, x) {
@@ -892,6 +939,7 @@
       return p ? rn(p.length, 1) : 0;
     }
     if (type === "zone" && field === "cells") return (x.cells || []).length;
+    if (type === "biome" && field === "cells") return biomeCellCounts().get(x.i) || 0;
     if (type === "label" && field === "text") return x.name;
     if (type === "note" && field === "legend") {
       const s = String(x.legend || "").replace(/<[^>]+>/g, " ");
@@ -969,7 +1017,8 @@
     feature: ["type", "group", "cells", "area"],
     note: ["legend"],
     label: ["group"],
-    namesbase: ["min", "max"]
+    namesbase: ["min", "max"],
+    biome: ["color", "habitability", "iconsDensity", "cost", "cells", "custom"]
   };
 
   function rowOf(type, x, fields, withPos) {
@@ -1147,6 +1196,9 @@
         break;
       case "zone":
         rel.cells = (x.cells || []).length;
+        break;
+      case "biome":
+        rel.cells = biomeCellCounts().get(x.i) || 0;
         break;
       case "feature": {
         const s = featureStats().get(x.i);
@@ -1341,7 +1393,8 @@
         markers: countLive(pack.markers),
         zones: countLive(pack.zones),
         notes: typeof notes !== "undefined" && Array.isArray(notes) ? notes.length : 0,
-        labels: labelList().length
+        labels: labelList().length,
+        biomes: liveList("biome").length
       },
       features: featureCounts(),
       mapCoordinates: typeof mapCoordinates !== "undefined" ? mapCoordinates : null,
@@ -1374,7 +1427,8 @@
     "zone",
     "feature",
     "note",
-    "label"
+    "label",
+    "biome"
   ];
   const CELL_ARRAYS = ["h", "state", "province", "culture", "religion", "biome", "burg", "f", "r"];
 

@@ -3,6 +3,9 @@ function editReliefIcon() {
   if (customization) return;
   closeDialogs(".stable");
   if (!layerIsOn("toggleRelief")) toggleRelief();
+  // tupaia-mcp: saves drop the icons of a #terrain[data-regenerate] map (src/renderers/relief-settings.ts)
+  if (terrain.attr("data-regenerate"))
+    tip("This map draws its relief icons again on every load: changes made here are not saved", true, "warn", 8000);
 
   terrain.selectAll("use").call(d3.drag().on("drag", dragReliefIcon)).classed("draggable", true);
   elSelected = d3.select(d3.event.target);
