@@ -230,7 +230,9 @@
       let n = 0;
       for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) {
         if (a[k] === b[k]) continue;
-        const tagged = String(a[k]).startsWith("#") || String(b[k]).startsWith("#");
+        // hashes of arrays/objects are tagged "#arr<n>:..." / "#obj:..."; a colour such as "#3d2b6b" is not one
+        const isTag = v => /^#(arr\d|obj:)/.test(String(v));
+        const tagged = isTag(a[k]) || isTag(b[k]);
         fields[k] = tagged ? "changed" : [a[k] ?? null, b[k] ?? null];
         n++;
       }
@@ -721,9 +723,10 @@
       if (x.removed) fail("REMOVED", `${type} ${id}${x.name ? ` (${x.name})` : ""} was removed`);
       return { type, i: idOf(type, x), name: nameOf(type, x), entity: x };
     }
-    // by name: notes/labels also match their id string
+    // by name: notes/labels also match their id string, and so do string-id extension types
+    // (an exact id wins over another row's display name: a group named 'roads' must not hide 'roads')
     const live = liveList(type, true);
-    if (type === "note" || type === "label") {
+    if (type === "note" || type === "label" || EXT[type]?.stringIds) {
       const byStr = live.find(x => x.id === r.name);
       if (byStr) return { type, i: byStr.id, name: nameOf(type, byStr), entity: byStr };
     }

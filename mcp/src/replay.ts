@@ -143,6 +143,9 @@ export function bothChanged(r: EditResolved, plan: Array<Record<string, unknown>
     const now = (row?.before ?? {}) as Record<string, unknown>;
     for (const key of Object.keys(o.set)) {
       if (!(key in o.before) || !(key in now)) continue;
+      // a route group's draw-order anchors are its current neighbours: another group added next to it is
+      // not a competing change to this one (replay still fails if the anchor group is gone)
+      if (r.type === "routeGroup" && (key === "after" || key === "before")) continue;
       const base = o.before[key];
       const mine = o.after[key];
       const cur = now[key];

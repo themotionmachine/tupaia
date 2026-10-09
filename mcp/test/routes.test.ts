@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import { after, before, describe, test } from "node:test";
 import { type EditResolved, Rewriter, rewriteResolved, summarizeOp } from "../src/ops.ts";
+import { bothChanged } from "../src/replay.ts";
 import { alive, errorBody, type Harness, startServer } from "./helpers.ts";
 
 type Obj = Record<string, any>;
@@ -153,6 +154,9 @@ describe("tupaia-mcp routes (freehand routes, route groups)", () => {
     await bad({ id: "roads" }, "BAD_ARGS", /start with 'route-'/);
     await bad({ id: "route-tunnels" }, "REFUSED", /already exists/);
     await bad({ id: "route-x", stroke: "not a colour!" }, "BAD_ARGS", /CSS colour/);
+    await bad({ id: "route-x", stroke: "banana" }, "BAD_ARGS", /CSS colour/);
+    await bad({ id: "route-x", stroke: "rgb(1,2,3" }, "BAD_ARGS", /CSS colour/);
+    await bad({ id: "route-x", name: "roads" }, "BAD_ARGS", /id of another route group/);
     await bad({ id: "route-x", dash: "wavy" }, "BAD_ARGS", /dash/);
     await bad({ id: "route-x", width: 0 }, "BAD_ARGS", /width/);
     await bad({ id: "route-x", opacity: 2 }, "BAD_ARGS", /opacity/);
@@ -161,7 +165,7 @@ describe("tupaia-mcp routes (freehand routes, route groups)", () => {
     await bad({ id: "route-x", after: "roads", before: "trails" }, "BAD_ARGS", /after or before/);
     await bad({ id: "route-x", after: "route-missing" }, "NOT_FOUND", /route-missing/);
     const dup = await fail("add", { type: "routeGroup", items: [{ id: "route-x" }, { id: "route-x" }] });
-    assert.match(dup.message, /already exists/);
+    assert.match(dup.message, /appears twice/);
     assert.deepEqual(await order(), before);
   });
 
@@ -261,7 +265,10 @@ describe("tupaia-mcp routes (freehand routes, route groups)", () => {
     assert.equal(((await groupDom("roads")) as Obj).attrs.stroke, "#c44ac0");
 
     for (const [set, match] of [
-      [{ id: "route-other" }, /no editable field 'id'/],
+      [{ id: "tunnels" }, /start with 'route-'/],
+      [{ id: "route-plain" }, /already exists/],
+      [{ id: "route-tunnels" }, /already 'route-tunnels'/],
+      [{ name: "route-plain" }, /id of another route group/],
       [{ after: "roads", before: "trails" }, /not both/],
       [{ after: "route-tunnels" }, /cannot be placed after itself/],
       [{ stroke: 5 }, /CSS colour/],
@@ -369,10 +376,8 @@ describe("tupaia-mcp routes (freehand routes, route groups)", () => {
   });
 
   test("add route validates points, flags and groups", async () => {
-    const two = [
-      { x: 100, y: 100 },
-      { x: 200, y: 150 }
-    ];
+    // two points in different cells (the demo's corner cells are large)
+    const two = [{ cell: pick.A.cell }, { cell: pick.far.cell }];
     const bad = async (item: Obj, code: string, match: RegExp) => {
       const e = await fail("add", { type: "route", items: [item] });
       assert.equal(e.code, code, `${JSON.stringify(item).slice(0, 120)}: ${e.message}`);
@@ -459,23 +464,40 @@ describe("tupaia-mcp routes (freehand routes, route groups)", () => {
     await undo();
   });
 
-  test("a freehand route never steals a link another route holds, and removal leaves that link alone", async () => {
+  /** Pairs whose owner differs from what Routes.buildLinks gives for pack.routes (links must equal a rebuild). */
+  const rebuildDiff = (): Promise<number> =>
+    ev(
+      `const want = Routes.buildLinks(pack.routes); const have = pack.cells.routes; let n = 0;
+       const keys = new Set([...Object.keys(want), ...Object.keys(have)]);
+       for (const a of keys) {
+         const w = want[a] || {}, h = have[a] || {};
+         for (const b of new Set([...Object.keys(w), ...Object.keys(h)])) if (w[b] !== h[b]) n++;
+       }
+       return n;`
+    );
+
+  test("the last route through a pair owns its link, as Routes.buildLinks has it; removal gives it back", async () => {
     const { road } = pick;
     assert.equal(await ev("pack.cells.routes[args.a][args.b]", road), road.i);
+    assert.equal(await rebuildDiff(), 0, "the demo's links are what a rebuild gives");
     const r = await h.ok("add", {
       type: "route",
       items: [{ points: [{ cell: road.a }, { cell: road.b }], noPathfind: true, group: "route-plain" }]
     });
     const row = created(r)[0];
-    assert.equal(row.links, 0, "the only pair is held by the road");
-    assert.equal(await ev("pack.cells.routes[args.a][args.b]", road), road.i);
-    assert.deepEqual(await linksOf(row.i), []);
+    assert.equal(row.links, 1, "the new route is last, so it takes the pair");
+    assert.equal(await ev("pack.cells.routes[args.a][args.b]", road), row.i);
+    assert.equal(await ev("pack.cells.routes[args.b][args.a]", road), row.i);
+    assert.deepEqual(await linksOf(row.i), [[Math.min(road.a, road.b), Math.max(road.a, road.b)]]);
+    assert.equal(await rebuildDiff(), 0, "and the links still equal a rebuild");
     await h.ok("edit", { type: "route", ops: [{ ref: row.i, remove: true }] });
-    assert.equal(await ev("pack.cells.routes[args.a][args.b]", road), road.i, "the road keeps its link");
+    assert.equal(await ev("pack.cells.routes[args.a][args.b]", road), road.i, "the road has its link back");
+    assert.equal(await ev("pack.cells.routes[args.b][args.a]", road), road.i);
+    assert.equal(await rebuildDiff(), 0);
     await undo(2);
   });
 
-  test("when the route that owns a shared link goes, another route through the same pair takes it over", async () => {
+  test("when the route that owns a shared link goes or moves away, the last other route through the pair takes it", async () => {
     const A = { cell: pick.A.cell };
     const far = { cell: pick.far.cell };
     const r = await h.ok("add", {
@@ -487,46 +509,42 @@ describe("tupaia-mcp routes (freehand routes, route groups)", () => {
     });
     const [first, second] = created(r);
     const pair = [Math.min(A.cell, far.cell), Math.max(A.cell, far.cell)];
-    assert.deepEqual(await linksOf(first.i), [pair], "the first route owns the pair");
-    assert.equal(second.links, 1, "the second one only links its other leg");
-    assert.equal(
-      (await linksOf(second.i)).some(p => p[0] === pair[0] && p[1] === pair[1]),
-      false
-    );
+    const has = async (id: number) => (await linksOf(id)).some(p => p[0] === pair[0] && p[1] === pair[1]);
+    assert.equal(first.links, 1);
+    assert.equal(second.links, 2, "two distinct pairs");
+    assert.equal(await has(first.i), false, "the second route, added last, owns the shared pair");
+    assert.equal(await has(second.i), true);
+    assert.equal(await rebuildDiff(), 0);
     // removing the owner hands the pair on
-    await h.ok("edit", { type: "route", ops: [{ ref: first.i, remove: true }] });
-    assert.equal(
-      (await linksOf(second.i)).some(p => p[0] === pair[0] && p[1] === pair[1]),
-      true
-    );
+    await h.ok("edit", { type: "route", ops: [{ ref: second.i, remove: true }] });
+    assert.equal(await has(first.i), true);
     assert.equal(await asymmetric(), 0);
-    await undo(); // the removal: the first route owns it again
-    assert.deepEqual(await linksOf(first.i), [pair]);
+    assert.equal(await rebuildDiff(), 0);
+    await undo(); // the removal: the second route owns it again
+    assert.equal(await has(second.i), true);
     // editing the owner's points away hands it on too
     await h.ok("edit", {
       type: "route",
       ops: [
         {
-          ref: first.i,
+          ref: second.i,
           set: {
-            points: [
-              { x: 100, y: 100 },
-              { x: 200, y: 200 }
-            ]
+            points: [{ cell: pick.offCell.cell }, { cell: pick.other.cell }]
           }
         }
       ]
     });
-    assert.equal(
-      (await linksOf(second.i)).some(p => p[0] === pair[0] && p[1] === pair[1]),
-      true
-    );
-    assert.equal(
-      (await linksOf(first.i)).some(p => p[0] === pair[0] && p[1] === pair[1]),
-      false
-    );
+    assert.equal(await has(first.i), true);
+    assert.equal(await has(second.i), false);
     assert.equal(await asymmetric(), 0);
-    await undo(2);
+    assert.equal(await rebuildDiff(), 0);
+    // editing the earlier route back over the pair does not take it from the later route
+    await h.ok("edit", { type: "route", ops: [{ ref: second.i, set: { points: [A, far, { x: 100, y: 100 }] } }] });
+    assert.equal(await has(second.i), true, "the later route owns it again");
+    await h.ok("edit", { type: "route", ops: [{ ref: first.i, set: { points: [far, A, { x: 300, y: 300 }] } }] });
+    assert.equal(await has(second.i), true, "the earlier route does not steal it");
+    assert.equal(await rebuildDiff(), 0);
+    await undo(4);
     assert.equal(await routeOf(first.i), null);
   });
 
@@ -581,7 +599,8 @@ describe("tupaia-mcp routes (freehand routes, route groups)", () => {
         /points\[1\]/
       ],
       [{ points: "no" }, "BAD_ARGS", /at least 2/],
-      [{ group: "route-nope" }, "BAD_ARGS", /unknown route group/]
+      [{ group: "route-nope" }, "NOT_FOUND", /group: no routeGroup named 'route-nope'/],
+      [{ group: "" }, "BAD_ARGS", /group must be/]
     ] as Array<[Obj, string, RegExp]>) {
       const e = await fail("edit", { type: "route", ops: [{ ref: tunnel, set }] });
       assert.equal(e.code, code);
@@ -732,25 +751,49 @@ describe("tupaia-mcp routes (freehand routes, route groups)", () => {
     assert.equal((f.rows as Obj[])[0].i, "route-tunnels", "find works on a loaded map");
   });
 
-  test("regenerate routes keeps locked freehand routes in their custom group and drops unlocked ones", async () => {
+  test("regenerate routes keeps locked freehand routes in their custom group, renumbers them, and moves their notes", async () => {
     await h.ok("add", {
       type: "route",
       items: [{ points: burgPts(), noPathfind: true, group: "route-plain", name: "Gone", lock: false }]
     });
-    assert.ok(await routeNamed("Gone"));
-    await h.ok("regenerate", { parts: ["routes"] }, 240_000);
+    const gone = (await routeNamed("Gone")) as Obj;
+    assert.ok(gone);
+    // notes are keyed 'route<id>': one on the locked route, one on the route that will be replaced
+    await h.ok("eval", {
+      code: `notes.push({ id: 'route' + args.keep, name: 'Kept note', legend: 'k' }, { id: 'route' + args.gone, name: 'Gone note', legend: 'g' }, { id: 'burg1', name: 'Other', legend: 'o' }); return notes.length;`,
+      args: { keep: tunnel, gone: gone.i }
+    });
+    const reg = await h.ok("regenerate", { parts: ["routes"] }, 240_000);
     assert.equal(await routeNamed("Gone"), null, "an unlocked route is regenerated away");
     const kept = (await routeNamed("Short Tunnel")) as Obj;
     assert.ok(kept, "the locked freehand route survives");
     assert.equal(kept.group, "route-tunnels");
     assert.equal(kept.lock, true);
+    assert.equal(kept.i, 0, "locked routes are renumbered from 0");
     const g = (await groupDom("route-tunnels")) as Obj;
     assert.ok(g.kids.includes(`route${kept.i}`), "and is drawn in its group");
     assert.equal(g.attrs.stroke, "#3d2b6b", "regenerating does not touch group styles");
     assert.equal((await linksOf(kept.i)).length, 2, "its links were rebuilt under the renumbered id");
+    assert.equal(await rebuildDiff(), 0);
+    // the note followed its route; the replaced route's note is gone; other notes are untouched
+    const ids = await ev("notes.filter(n => /^route|^burg1$/.test(n.id)).map(n => [n.id, n.name])");
+    assert.deepEqual(ids, [
+      ["route0", "Kept note"],
+      ["burg1", "Other"]
+    ]);
+    assert.deepEqual(reg.routeIds, { [String(tunnel)]: 0 });
+    assert.match(JSON.stringify(reg.notes), new RegExp(`renumbered \\(${tunnel}->0`));
+    assert.match(JSON.stringify(reg.notes), /1 route note\(s\) moved/);
+    assert.match(JSON.stringify(reg.notes), /1 note\(s\) of replaced routes removed/);
     await undo(); // regenerate
-    await undo(); // the "Gone" route
     assert.equal(((await routeNamed("Short Tunnel")) as Obj).i, tunnel);
+    assert.equal(
+      await ev("notes.some(n => n.id === 'route' + args.i)", { i: tunnel }),
+      true,
+      "undo restores the notes"
+    );
+    await undo(2); // the notes, the "Gone" route
+    assert.equal(await routeNamed("Gone"), null);
   });
 
   test("removing a freehand route removes exactly its links", async () => {
@@ -764,6 +807,334 @@ describe("tupaia-mcp routes (freehand routes, route groups)", () => {
     assert.equal(await ev("document.getElementById('route' + args.i)", { i: tunnel }), null);
     await undo();
     assert.deepEqual(await linksOf(tunnel), mine, "undo restores the links");
+  });
+
+  // ------------------------------------------------------------ review fixes
+
+  test("a group whose display name equals another group's id cannot hide it: an exact id wins", async () => {
+    // add/edit refuse such a name, so make one by hand (as a loaded map could hold)
+    await h.ok("eval", {
+      code: "document.getElementById('route-plain').setAttribute('data-name', 'roads'); return 1;"
+    });
+    const r = await h.ok("add", {
+      type: "route",
+      items: [{ points: burgPts(), noPathfind: true, name: "ShadowTest" }]
+    });
+    const row = created(r)[0];
+    assert.equal(row.group, "roads", "no group given: the built-in roads, not an ambiguity");
+    await h.ok("edit", { type: "route", ops: [{ ref: row.i, set: { group: "roads" } }] });
+    await h.ok("edit", { type: "route", ops: [{ ref: row.i, set: { group: "route-plain" } }] });
+    assert.equal(((await routeOf(row.i)) as Obj).group, "route-plain");
+    const f = await h.ok("find", { type: "routeGroup", name: "roads", limit: 5 });
+    assert.equal((f.rows as Obj[])[0].i, "roads");
+    // a force remove falls back to roads (its default moveTo) even though another group is named 'roads'
+    await h.ok("add", { type: "routeGroup", items: [{ id: "route-shadow" }] });
+    await h.ok("edit", { type: "route", ops: [{ ref: row.i, set: { group: "route-shadow" } }] });
+    const rm = await h.ok("edit", { type: "routeGroup", ops: [{ ref: "route-shadow", remove: true, force: true }] });
+    assert.equal((rm.applied as Obj[])[0].moveTo, "roads");
+    assert.equal(((await routeOf(row.i)) as Obj).group, "roads");
+    await undo(7);
+    assert.equal(await ev("document.getElementById('route-plain').getAttribute('data-name')"), null);
+  });
+
+  test("removing groups in one call: the checks see what the earlier ops of the call do", async () => {
+    await h.ok("add", { type: "routeGroup", items: [{ id: "route-b1" }, { id: "route-b2" }] });
+    const m = created(
+      await h.ok("add", { type: "route", items: [{ points: burgPts(), noPathfind: true, group: "route-b1" }] })
+    )[0];
+    const intact = async () => {
+      assert.ok(await groupDom("route-b1"));
+      assert.ok(await groupDom("route-b2"));
+      assert.equal(((await routeOf(m.i)) as Obj).group, "route-b1");
+    };
+    // moveTo names a group an earlier op removes
+    const e1 = await fail("edit", {
+      type: "routeGroup",
+      ops: [
+        { ref: "route-b2", remove: true },
+        { ref: "route-b1", remove: true, force: true, moveTo: "route-b2" }
+      ]
+    });
+    assert.equal(e1.code, "BAD_ARGS");
+    assert.match(e1.message, /removed earlier in this call/);
+    await intact();
+    // a group an earlier op moves routes into is not empty any more
+    const e2 = await fail("edit", {
+      type: "routeGroup",
+      ops: [
+        { ref: "route-b1", remove: true, force: true, moveTo: "route-b2" },
+        { ref: "route-b2", remove: true }
+      ]
+    });
+    assert.equal(e2.code, "REFUSED");
+    assert.match(e2.message, /moved in by an earlier op/);
+    await intact();
+    const e3 = await fail("edit", {
+      type: "routeGroup",
+      ops: [
+        { ref: "route-b2", remove: true },
+        { ref: "route-b2", remove: true }
+      ]
+    });
+    assert.match(e3.message, /removed twice/);
+    await intact();
+    // a chain that is consistent applies in order
+    const ok = await h.ok("edit", {
+      type: "routeGroup",
+      ops: [
+        { ref: "route-b1", remove: true, force: true, moveTo: "route-b2" },
+        { ref: "route-b2", remove: true, force: true }
+      ]
+    });
+    assert.deepEqual(
+      (ok.applied as Obj[]).map(a => [a.moved, a.moveTo]),
+      [
+        [1, "route-b2"],
+        [1, "roads"]
+      ]
+    );
+    assert.equal(((await routeOf(m.i)) as Obj).group, "roads");
+    await undo(3);
+  });
+
+  test("a pinned point [x, y, cell] keeps its cell while the line is drawn at x,y", async () => {
+    const C = pick.landCell;
+    const other = pick.far.cell;
+    const items = [
+      {
+        points: [[C.x + 3, C.y + 2, other], { x: C.x, y: C.y, cell: C.cell }, { x: C.x + 40, y: C.y + 40 }],
+        noPathfind: true,
+        group: "route-plain",
+        name: "Pinned"
+      }
+    ];
+    const r = await h.ok("add", { type: "route", items });
+    const route = (await routeOf(created(r)[0].i)) as Obj;
+    assert.deepEqual(route.points[0], [C.x + 3, C.y + 2, other], "x,y as given, the pinned cell");
+    assert.deepEqual(route.points[1], [C.x, C.y, C.cell]);
+    assert.equal(route.points[0][2] === (await ev("findCell(args.x, args.y)", { x: C.x + 3, y: C.y + 2 })), false);
+    assert.equal(route.feature, await ev("pack.cells.f[args.c]", { c: other }));
+    // edit with a pinned point (the builder moved a drawn coordinate and kept the cell)
+    await h.ok("edit", {
+      type: "route",
+      ops: [
+        {
+          ref: route.i,
+          set: { points: [[C.x + 9, C.y + 9, other], { x: C.x, y: C.y, cell: C.cell }, [C.x + 40, C.y + 40, other]] }
+        }
+      ]
+    });
+    const moved = (await routeOf(route.i)) as Obj;
+    assert.deepEqual(moved.points[0], [C.x + 9, C.y + 9, other]);
+    assert.deepEqual(moved.points[2], [C.x + 40, C.y + 40, other]);
+    assert.equal(await rebuildDiff(), 0);
+    for (const [pt, code, match] of [
+      [[1, 2], "BAD_PLACE", /\[x, y, cell\]/],
+      [[1, 2, 99999999], "OUT_OF_BOUNDS", /cell 99999999/],
+      [{ x: 1, y: 2, cell: -1 }, "OUT_OF_BOUNDS", /cell -1/],
+      [[99999, 2, other], "OUT_OF_BOUNDS", /outside the map/]
+    ] as Array<[unknown, string, RegExp]>) {
+      const e = await fail("add", {
+        type: "route",
+        items: [{ points: [pt, { x: 100, y: 100 }], noPathfind: true }]
+      });
+      assert.equal(e.code, code, e.message);
+      assert.match(e.message, match);
+      assert.match(e.message, /points\[0\]/);
+    }
+    await undo(2);
+  });
+
+  test("freehand add: dry-run rows carry the name and notes; points in one cell are refused", async () => {
+    const dry = await h.ok("add", {
+      type: "route",
+      items: [{ points: burgPts(), noPathfind: true, name: "Short Tunnel", group: "route-plain" }],
+      dryRun: true
+    });
+    const row = (dry.plan as Obj[])[0];
+    assert.equal(row.name, "Short Tunnel");
+    assert.match(String(row.notes), /named 'Short Tunnel' already exists/);
+    const C = pick.landCell;
+    const e = await fail("add", {
+      type: "route",
+      items: [
+        {
+          points: [{ x: C.x, y: C.y }, { x: C.x + 0.2, y: C.y + 0.1 }, { cell: C.cell }],
+          noPathfind: true
+        }
+      ]
+    });
+    assert.equal(e.code, "BAD_ARGS");
+    assert.match(e.message, /fall into cell/);
+    const twice = await h.ok("add", {
+      type: "route",
+      items: [
+        { points: burgPts(), noPathfind: true, name: "Twin", group: "route-plain" },
+        { points: burgPts(), noPathfind: true, name: "Twin", group: "route-plain" }
+      ]
+    });
+    assert.match(JSON.stringify(twice.notes), /'Twin' is used twice/);
+    await undo();
+  });
+
+  test("a pathfound dry run measures the line that is drawn", async () => {
+    const items = [
+      {
+        through: [{ entity: { type: "burg", ref: pick.A.i } }, { entity: { type: "burg", ref: pick.far.i } }],
+        group: "route-plain"
+      }
+    ];
+    const dry = await h.ok("add", { type: "route", items, dryRun: true });
+    const planned = ((dry.plan as Obj[])[0].length as Obj).px;
+    const real = created(await h.ok("add", { type: "route", items }))[0];
+    assert.equal(planned, real.length.px, "the plan and the drawn route have the same length");
+    await undo();
+  });
+
+  test("edit route {points}: batch order, locking and no-op notes", async () => {
+    const made = created(
+      await h.ok("add", {
+        type: "route",
+        items: [
+          { points: burgPts(), noPathfind: true, group: "route-plain", name: "R1", lock: false },
+          { points: burgPts(), noPathfind: true, group: "route-plain", name: "R2", lock: false }
+        ]
+      })
+    );
+    const [r1, r2] = made;
+    // an unlocked route that becomes hand-drawn is lost on regenerate: say so
+    const same = await h.ok("edit", { type: "route", ops: [{ ref: r1.i, set: { points: burgPts() } }] });
+    assert.match(JSON.stringify(same.notes), /not locked/);
+    assert.match(JSON.stringify(same.notes), /points are the same as before/);
+    const kept = await h.ok("edit", {
+      type: "route",
+      ops: [
+        {
+          ref: r1.i,
+          set: {
+            points: [
+              { x: 120, y: 120 },
+              { x: 260, y: 200 }
+            ],
+            lock: true
+          }
+        }
+      ]
+    });
+    assert.doesNotMatch(JSON.stringify(kept.notes ?? []), /not locked/, "lock:true in the same op is enough");
+    // a place that names a route an earlier op of the same call removes still applies (it was resolved when checked)
+    const batch = await h.ok("edit", {
+      type: "route",
+      ops: [
+        { ref: r1.i, remove: true },
+        {
+          ref: r2.i,
+          set: {
+            points: [
+              { entity: { type: "route", ref: r1.i }, at: 0.5 },
+              { x: 400, y: 300 }
+            ]
+          }
+        }
+      ]
+    });
+    assert.deepEqual(batch.errors ?? [], []);
+    assert.equal(await routeOf(r1.i), null);
+    const r2now = (await routeOf(r2.i)) as Obj;
+    assert.equal(r2now.points.length, 2);
+    assert.deepEqual(r2now.points[0].slice(0, 2), [190, 160], "the middle of the removed route's line");
+    assert.equal(await rebuildDiff(), 0);
+    await undo(4);
+  });
+
+  test("find route where:{group} takes ids and names; inspect route shows unit, lock and note; counts include groups", async () => {
+    const mk = created(
+      await h.ok("add", {
+        type: "route",
+        items: [{ points: burgPts(), noPathfind: true, group: "route-tunnels", name: "Seen" }]
+      })
+    )[0];
+    for (const g of ["route-tunnels", "Tunnels", ["Tunnels", "roads"]]) {
+      const f = await h.ok("find", { type: "route", where: { group: g }, fields: ["group"], limit: 500 });
+      assert.ok(
+        (f.rows as Obj[]).some(x => x.i === mk.i),
+        `group ${JSON.stringify(g)} finds the route`
+      );
+    }
+    const nope = await fail("find", { type: "route", where: { group: "Ferries" } });
+    assert.equal(nope.code, "NOT_FOUND");
+    await h.ok("eval", {
+      code: "notes.push({ id: 'route' + args.i, name: 'About it', legend: 'x' }); return 1;",
+      args: { i: mk.i }
+    });
+    const ins = await h.ok("inspect", { entity: { type: "route", ref: mk.i } });
+    const rel = ins.relations as Obj;
+    assert.equal(rel.lock, true);
+    assert.ok(rel.length.px > 0 && Object.keys(rel.length).length === 2, JSON.stringify(rel.length));
+    assert.equal(rel.note.name, "About it");
+    const info = await h.ok("map_info", {});
+    assert.equal((info.counts as Obj).routeGroups, await ev("document.querySelectorAll('#routes > g').length"));
+    await undo(2);
+  });
+
+  test("group ids: in-batch anchors, rename (routes follow), and the empty-group error", async () => {
+    // an anchor created earlier in the same call
+    const r = await h.ok("add", {
+      type: "routeGroup",
+      items: [{ id: "route-n1" }, { id: "route-n2", after: "route-n1" }, { id: "route-n3", before: "route-n1" }]
+    });
+    assert.equal(created(r).length, 3);
+    const o = await order();
+    assert.deepEqual(o.slice(o.indexOf("route-n3"), o.indexOf("route-n3") + 3), ["route-n3", "route-n1", "route-n2"]);
+    const dup = await fail("add", { type: "routeGroup", items: [{ id: "route-n4", after: "route-n9" }] });
+    assert.equal(dup.code, "NOT_FOUND");
+    // rename: the group keeps its style and position, its routes follow, path elements stay drawn inside it
+    await h.ok("edit", { type: "routeGroup", ops: [{ ref: "route-n1", set: { stroke: "#123456", width: 2 } }] });
+    const m = created(
+      await h.ok("add", { type: "route", items: [{ points: burgPts(), noPathfind: true, group: "route-n1" }] })
+    )[0];
+    const rn = await h.ok("edit", { type: "routeGroup", ops: [{ ref: "route-n1", set: { id: "route-renamed" } }] });
+    assert.equal((rn.applied as Obj[])[0].before.id, "route-n1");
+    assert.equal((rn.applied as Obj[])[0].after.id, "route-renamed");
+    assert.equal(await groupDom("route-n1"), null);
+    const g = (await groupDom("route-renamed")) as Obj;
+    assert.equal(g.attrs.stroke, "#123456");
+    assert.deepEqual(g.kids, [`route${m.i}`]);
+    assert.equal(((await routeOf(m.i)) as Obj).group, "route-renamed");
+    const o2 = await order();
+    assert.equal(o2.indexOf("route-renamed"), o.indexOf("route-n1"), "same place in the draw order");
+    // refused: built-ins, a taken id, a bad id
+    for (const [ref, id, match] of [
+      ["roads", "route-roads2", /built-in/],
+      ["route-renamed", "route-n2", /already exists/],
+      ["route-renamed", "plain", /start with 'route-'/]
+    ] as Array<[string, string, RegExp]>) {
+      const e = await fail("edit", { type: "routeGroup", ops: [{ ref, set: { id } }] });
+      assert.match(e.message, match);
+    }
+    await undo(); // rename
+    assert.equal(((await routeOf(m.i)) as Obj).group, "route-n1", "undo points the routes back");
+    assert.ok(await groupDom("route-n1"));
+    await undo(3);
+    assert.equal(await groupDom("route-n1"), null);
+  });
+
+  test("route group errors are the same on add and edit; an empty group is a clear error", async () => {
+    const two = [{ cell: pick.A.cell }, { cell: pick.far.cell }];
+    const add = await fail("add", { type: "route", items: [{ points: two, noPathfind: true, group: "route-nope" }] });
+    const edit = await fail("edit", { type: "route", ops: [{ ref: tunnel, set: { group: "route-nope" } }] });
+    assert.equal(add.code, "NOT_FOUND");
+    assert.equal(edit.code, "NOT_FOUND");
+    const empty = await fail("edit", { type: "route", ops: [{ ref: tunnel, set: { group: "" } }] });
+    assert.equal(empty.code, "BAD_ARGS");
+    assert.doesNotMatch(empty.message, /querySelector/);
+  });
+
+  test("the change report shows a group's old and new colour", async () => {
+    const r = await h.ok("edit", { type: "routeGroup", ops: [{ ref: "route-tunnels", set: { stroke: "#445566" } }] });
+    const fields = ((r.changes as Obj).routeGroup.modified as Obj[])[0].fields;
+    assert.deepEqual(fields.stroke, ["#3d2b6b", "#445566"]);
+    await undo();
   });
 
   // ------------------------------------------------------------ sketch replay
@@ -800,7 +1171,7 @@ describe("tupaia-mcp routes (freehand routes, route groups)", () => {
         {
           points: [
             { entity: { type: "burg", ref: pick.A.i } },
-            { x: pick.A.x + 40, y: pick.A.y + 20 },
+            { x: pick.A.x + 40, y: pick.A.y + 20, cell: pick.other.cell },
             { entity: { type: "burg", ref: pick.far.i } }
           ],
           noPathfind: true,
@@ -812,23 +1183,29 @@ describe("tupaia-mcp routes (freehand routes, route groups)", () => {
     sketchRoute = created(add)[0].i;
     await h.ok("edit", {
       type: "route",
-      ops: [{ ref: sketchRoute, set: { points: [{ entity: { type: "burg", ref: pick.A.i } }, { x: 300, y: 300 }] } }]
+      ops: [
+        {
+          ref: sketchRoute,
+          set: { points: [{ entity: { type: "burg", ref: pick.A.i } }, { x: 300, y: 300, cell: pick.far.cell }] }
+        }
+      ]
     });
     await h.ok("edit", {
       type: "routeGroup",
       ops: [{ ref: "route-tunnels", set: { stroke: "#00aa00", after: "searoutes" } }]
     });
     await h.ok("add", { type: "routeGroup", items: [{ id: "route-spare", before: "route-tunnels" }] });
+    await h.ok("edit", { type: "routeGroup", ops: [{ ref: "route-spare", set: { id: "route-moved" } }] });
     await h.ok("edit", {
       type: "routeGroup",
-      ops: [{ ref: "route-tunnels", remove: true, force: true, moveTo: "route-spare" }]
+      ops: [{ ref: "route-tunnels", remove: true, force: true, moveTo: "route-moved" }]
     });
     const st = await h.ok("sketch", { action: "status", full: true });
     assert.equal(st.blobOnly, false, JSON.stringify(st.blobOnlyReasons));
     const recs = st.records as Obj[];
     assert.deepEqual(
       recs.map(r => r.tool),
-      ["display", "add", "add", "edit", "edit", "add", "edit"]
+      ["display", "add", "add", "edit", "edit", "add", "edit", "edit"]
     );
     assert.ok(recs.every(r => r.replayable));
     const rr = recs[2].resolved;
@@ -837,13 +1214,17 @@ describe("tupaia-mcp routes (freehand routes, route groups)", () => {
     assert.equal(rr.items[0].lock, true);
     assert.deepEqual(rr.items[0].points[0], { entity: { type: "burg", ref: pick.A.i } });
     assert.equal(rr.items[0].points[1].x, pick.A.x + 40);
+    assert.equal(rr.items[0].points[1].cell, pick.other.cell, "a pinned cell is kept in the resolved form");
     assert.deepEqual(rr.created, [[{ type: "route", i: sketchRoute }]]);
     assert.deepEqual(recs[1].resolved.created, [[{ type: "routeGroup", i: "route-tunnels" }]]);
     assert.equal(recs[1].resolved.items[0].width, 1.2);
     assert.equal(recs[1].resolved.items[0].linecap, "butt", "defaults are recorded explicitly");
     assert.deepEqual(recs[3].resolved.ops[0].set.points[0], { entity: { type: "burg", ref: pick.A.i } });
-    assert.equal(recs[6].resolved.ops[0].force, true);
-    assert.equal(recs[6].resolved.ops[0].moveTo, "route-spare");
+    assert.deepEqual(recs[6].resolved.ops[0].set, { id: "route-moved" });
+    assert.equal(recs[7].resolved.ops[0].force, true);
+    assert.equal(recs[7].resolved.ops[0].moveTo, "route-moved");
+    assert.match(String(recs[3].summary), /points 3 -> 2 \(.* -> .* px\)/);
+    assert.match(String(recs[7].summary), /removed routeGroup .*route-tunnels.* \(1 route moved to route-moved\)/);
     assert.match(String(recs[2].summary), /Sketch Tunnel/);
     assert.match(String(recs[2].summary), /along 3 places/);
   });
@@ -852,7 +1233,7 @@ describe("tupaia-mcp routes (freehand routes, route groups)", () => {
     const r = await h.ok("sketch", { action: "rebase", onto: { path: copies.routes } }, 240_000);
     assert.equal(r.completed, true, JSON.stringify(r.conflicts));
     assert.deepEqual(r.conflicts, []);
-    assert.deepEqual(r.applied, [1, 2, 3, 4, 5, 6, 7]);
+    assert.deepEqual(r.applied, [1, 2, 3, 4, 5, 6, 7, 8]);
     const idMap = r.idMap as Obj;
     const newRoute = idMap.route[String(sketchRoute)];
     assert.ok(newRoute !== undefined && newRoute !== sketchRoute, `the route id shifted: ${JSON.stringify(idMap)}`);
@@ -861,17 +1242,19 @@ describe("tupaia-mcp routes (freehand routes, route groups)", () => {
       `const r = pack.routes.find(x => x.i === args.i);
        return { r, theirs: pack.routes.some(x => x.name === 'Theirs'), far: pack.burgs[args.far].name,
          order: [...document.querySelectorAll('#routes > g')].map(g => g.id), tunnels: !!document.getElementById('route-tunnels'),
-         spare: document.getElementById('route-spare')?.getAttribute('stroke-width'),
-         path: document.getElementById('route-spare')?.querySelector('#route' + args.i)?.id };`,
+         spare: document.getElementById('route-moved')?.getAttribute('stroke-width'),
+         gone: !!document.getElementById('route-spare'),
+         path: document.getElementById('route-moved')?.querySelector('#route' + args.i)?.id };`,
       { i: newRoute, far: pick.far.i }
     );
     assert.equal(v.theirs, true, "their route survives");
     assert.equal(v.far, "Elsewhere", "their rename survives");
     assert.equal(v.tunnels, false, "the group was removed by the sketch's last op");
-    assert.deepEqual(v.order, ["roads", "trails", "searoutes", "route-spare"]);
-    assert.equal(v.r.group, "route-spare", "force moved the route to the fallback group");
+    assert.deepEqual(v.order, ["roads", "trails", "searoutes", "route-moved"]);
+    assert.equal(v.gone, false, "the rename replayed");
+    assert.equal(v.r.group, "route-moved", "force moved the route to the renamed fallback group");
     assert.equal(v.r.points.length, 2, "the edited points replayed");
-    assert.deepEqual(v.r.points[1].slice(0, 2), [300, 300]);
+    assert.deepEqual(v.r.points[1], [300, 300, pick.far.cell], "the pinned cell replayed");
     assert.equal(v.r.points[0][2], pick.A.cell, "the burg place still resolves to its own cell");
     assert.equal(v.r.lock, true);
     assert.equal(v.r.name, "Sketch Tunnel");
@@ -963,5 +1346,64 @@ describe("tupaia-mcp routes (freehand routes, route groups)", () => {
       { created: [{ i: 9, name: "T" }] }
     );
     assert.match(sum, /route "T" \(9\) along 2 places/);
+  });
+
+  test("sketch summaries and conflicts read well for the new ops", () => {
+    const pts = summarizeOp(
+      "edit",
+      {
+        type: "route",
+        ops: [
+          {
+            ref: 5,
+            name: "R",
+            set: { points: [{ x: 1, y: 2 }] },
+            before: { points: { n: 3, px: 100.5 } },
+            after: { points: { n: 2, px: 80 } }
+          }
+        ]
+      } as EditResolved,
+      null
+    );
+    assert.match(pts, /points 3 -> 2 \(100.5 -> 80 px\)/);
+    const noBefore = summarizeOp(
+      "edit",
+      {
+        type: "route",
+        ops: [
+          {
+            ref: 5,
+            set: {
+              points: [
+                { x: 1, y: 2 },
+                { x: 3, y: 4 }
+              ]
+            }
+          }
+        ]
+      } as EditResolved,
+      null
+    );
+    assert.match(noBefore, /points 2 places/);
+    const rm = summarizeOp(
+      "edit",
+      {
+        type: "routeGroup",
+        ops: [{ ref: "route-a", name: "A", remove: true, force: true, moveTo: "roads", ident: { routes: 3 } }]
+      } as EditResolved,
+      null
+    );
+    assert.match(rm, /removed routeGroup "A" \(route-a\) \(3 routes moved to roads\)/);
+    // draw-order anchors name neighbours: a group added next to this one is not a competing change
+    const move = {
+      type: "routeGroup",
+      ops: [{ ref: "route-t", set: { before: "trails" }, before: { before: null }, after: { before: "trails" } }]
+    } as EditResolved;
+    assert.deepEqual(bothChanged(move, [{ index: 0, before: { before: "route-u" } }]), []);
+    const style = {
+      type: "routeGroup",
+      ops: [{ ref: "route-t", set: { stroke: "#fff" }, before: { stroke: "#111" }, after: { stroke: "#fff" } }]
+    } as EditResolved;
+    assert.equal(bothChanged(style, [{ index: 0, before: { stroke: "#222" } }]).length, 1, "a style both changed is");
   });
 });
