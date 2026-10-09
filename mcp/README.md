@@ -38,15 +38,36 @@ It is a separate Node package. Nothing here is imported by the app or shipped in
   modes and aborts every non-loopback host (analytics are stubbed, fonts are allowed unless
   `TUPAIA_OFFLINE=1`). So `eval` cannot write the live map; only `shared_save`,
   `shared_restore`, `sketch_promote` and sketch save/discard can, from Node.
+- Arguments are checked centrally (`context.ts`): every tool except `apply` (whose lists go under
+  any key) refuses an unknown top-level key with BAD_ARGS naming the allowed keys
+  (`details {unknown, allowed}`), schema errors are BAD_ARGS `invalid arguments for <tool>: ...`,
+  and tools/list advertises `additionalProperties:false`.
 - Snapshots, the undo/redo history and the map's provenance live in Node memory and survive
-  browser relaunches. A mutating call that times out marks the page dirty; the next call
-  relaunches and restores the newest snapshot.
+  browser relaunches. After every call that changed the page (a mutating bridge call, an undo
+  entry, a relaunch) the page map is kept as a restore point (`SnapshotStore.restorePoint`,
+  ordered by a monotonic tick). A relaunch restores whichever is newest, so a crash or hang after
+  an edit loses nothing (`Restored the map as '<tool>' left it (...) (nothing lost)`), and a
+  mutating call that times out loses only itself (its undo point is newer). The restore point
+  touches neither the sketch log nor the redo stack.
+- A read-only call that stalls is not a reason to relaunch: the next call probes the page for up
+  to 10 s and keeps it if it answers (`the page answers again after: ... It was not relaunched`).
+  A call's `timeoutMs` budget starts after any launch or relaunch at its start. Put-back steps
+  (`CallScope.cleanup`/`putBack`: sketch summary's return to the sketch map, screenshot
+  layer/label/animation restore, flow overlay removal) ignore the caller's cancellation and get
+  at least 60 s.
+- Every map state carries an epoch (`Provenance.epoch`; a load, generate, restore or sketch open
+  starts a new one, a shared_save keeps it). map_info against a baseline from another epoch
+  reports `mapReplaced` instead of diffing two unrelated maps. Within one map, routes, markers
+  and zones pair by a page-session identity, so a regenerate shows added/removed; across a reload
+  they pair by id.
+- `consoleErrors` in every result are folded (`msg (xN)`, most repeated first, at most 8 distinct
+  of up to 300 chars, then a `+K more ...` line); `session` status keeps the newest 20 distinct.
 
 ## Tools by family
 
 | family | tools | notes |
 | --- | --- | --- |
-| Session and reading | session, map_info, find, inspect, flow, lint, screenshot | read-only (screenshot `keepLayers` excepted); `format:'compact'`, `diff:'counts'`, `crop:'changed'` keep results small |
+| Session and reading | session, map_info, find, inspect, flow, lint, screenshot | read-only (screenshot `keepLayers` excepted); `format:'compact'` (also session, shared_status, sketch status), `diff:'counts'`, map_info `detail`, `crop:'changed'` keep results small |
 | Entity edits | edit, add, paint_cells, display, apply | one undo entry per call; `dryRun`; replayable in sketches |
 | Terrain and grid | set_heights, regrid, regenerate (biomes, relief) | set_heights replays; regrid is blob-only in a sketch |
 | Bulk and cleanup | clear, compact | dependency-ordered cascades; id-stable stubs |
@@ -88,6 +109,27 @@ What the newer tools and fields replaced (all one undo entry each, all dryRun-ab
   notes and labels. App hook: `Resample.process({keepId})`.
 - `apply` (declarative spec, `mode:'check'|'upsert'|'update'`, idempotent) and `lint` (23 checks
   with ready fix calls).
+
+Behaviour worth knowing:
+
+- `generate_map` is reproducible: the same seed and options give the same `digest` after other
+  seeds, sizes and culture sets and in a fresh session (it clears the app's per-session caches:
+  `Names.clearChains()`, `Rivers.smallLength`, the culture range inputs' max). Omitted
+  width/height mean the server's default viewport. The page is reloaded from its own .map text,
+  so snapshots hold the generated map exactly (the generator's river erosion of pack heights is
+  not kept by .map files). `regenerate {parts:['rivers']}` keeps pack heights.
+- find and inspect compute culture/religion/state/province `cells`, `area`, `rural`, `urban`
+  and `burgs` live from the cells (the app refreshes the stored stats only in its editors);
+  inspect adds `statsNote` when the stored values were stale. Unknown fields come back as
+  `warnings`.
+- `add culture` gives the culture a COA shield (the default culture's, a same-base culture's, a
+  random one, else heater); `shield` is an editable culture field.
+- After a `rebuild:'risk'` (set_heights, paint_cells height) a carried route point whose cell
+  moved away from its x,y is re-recorded to the cell under it (`carried.routePointsRepointed`),
+  so lint `route-point-cell` stays clean.
+- App load repairs (`src/io/load-repairs.ts`): cells of an invalid culture become culture 0
+  (provinces untouched), and the state-capital repair keeps `state.capital` in step with the
+  burg it promotes.
 
 ## Run it
 
@@ -188,8 +230,11 @@ tupaia headers                  # {"Authorization":"Bearer ..."} for Claude Code
   gets the caller's environment. Concurrent first callers start exactly one.
 - The daemon's mode is fixed at its start. If the caller's `TUPAIA_MODE` differs, the CLI warns
   and keeps the running daemon: `tupaia stop` first to change mode.
-- Paths: `load_map {path}` is taken from your cwd when the file exists there, else from the
-  repo root; `save_map` and `export` write relative paths under TUPAIA_OUT. Prefer absolute.
+- Paths: the CLI makes a relative `load_map path`, `apply specPath`, `set_heights image.path`,
+  `flow heights.image.path` (and `sketch onto.path`) absolute when the file exists from your
+  cwd. The server reads a relative path from its own cwd, then TUPAIA_OUT, then the repo root
+  (first match; NOT_FOUND lists them), and results name the absolute file (`path`, `specPath`,
+  `imagePath`). `save_map` and `export` write relative paths under TUPAIA_OUT. Prefer absolute.
 - Large arguments (heights, cell lists) go through stdin: `tupaia call set_heights - < args.json`.
   Plain-JSON args of 32 KB or more are sent to the page as one string (0.9 MB in about 80 ms).
 - Exit codes: 0 ok, 1 tool error (or status: not running), 2 usage or daemon error. An unusable
@@ -268,7 +313,9 @@ independent locks:
 
 1. **Spawn-time mode.** Writes need `TUPAIA_MODE=live` in the server's environment, which only
    a human edits. There is no runtime switch to live. In local mode `shared_save`,
-   `shared_restore` and `sketch_promote` return MODE before doing anything.
+   `shared_restore` and `sketch_promote` return MODE before doing anything; the message names
+   the fix for this process (stdio: the `tupaia-live` .mcp.json entry and a restart; the --http
+   daemon: `tupaia stop` and a new start with `TUPAIA_MODE=live` in its environment).
 2. **Preview and one-time token.** A call without `confirm` is a preview: what would be
    overwritten (version, who saved it, when, lock holder), lineage, stale, the build check,
    the exact request it would send, and a `token`. The confirmed call must pass
@@ -354,7 +401,11 @@ updated, summaryMarkdown, baseCounts, blob:{id, version, bytes, sha256}, viewUrl
 - `rebase` replays the log onto the CURRENT shared map (a GET) and leaves the result in the page
   with the shared origin at that version; it does not save. Verified in local mode against the
   live v7 map (edit, freehand route, relief, compact: 4 of 4 applied).
-- `discard {slug, confirm:true}` DELETEs `sketch-<slug>` (blob, versions, ops.json).
+- `discard {slug, confirm:true}` DELETEs `sketch-<slug>` (blob, versions, ops.json; live mode).
+  An active sketch that was never saved is discarded locally in any mode: without `confirm` a
+  preview `{preview, local:true, wouldDiscard}`, with it the sketch ends and its log is dropped
+  (`{discarded:{slug, ops, local:true}}`); the page keeps its map and snapshot undo still works.
+- `status` (and `session`, `shared_status`) take `format:'compact'`: one key=value line.
 - `sketch_promote` refuses "rebase first" until the sketch's base version equals the shared
   map's current version; then it runs `shared_save`'s own code path (preview, token, confirm;
   lineage, lock, build, backups; one PUT with X-Map-Version). `then:'discard'` deletes the
@@ -378,7 +429,15 @@ npm run lint            # root biome over src/ and test/
 node --test --test-concurrency=3 "test/**/*.test.ts"
 ```
 
-- `test/bridge.test.ts`, `test/ops.test.ts`, `test/paths.test.ts`: pure unit tests.
+- `test/bridge.test.ts`, `test/ops.test.ts`, `test/paths.test.ts`: pure unit tests;
+  `test/docs.test.ts` keeps the cheatsheet, this README, the skill and the server instructions in
+  step with the registered tools; `test/integrate2.test.ts` checks small message fixes.
+- `test/reliability.test.ts` (restore points, stalls, cancelled cleanups, failed undo/restore,
+  console folding, epochs, compact status) and `test/core2.test.ts` (strict arguments, read
+  paths, diff identity, generate reproducibility, live stats, shields, load repairs, route
+  points, locks). They use test-only page faults: `__tupaia.testFaults.loadMap = n` (the next n
+  loads fail part-way) and `__tupaia.testFaults.stall = {fn, ms}` (the next call of bridge
+  function fn waits ms).
 - `test/smoke.test.ts`: stdio end-to-end of every tool against `tests/fixtures/demo.map`; checks
   every description is at most 2048 chars, the instructions too, and the exact tool list.
 - One file per feature: `terrain`, `regrid`, `clear`, `compact`, `apply`, `lint`, `settings`,
@@ -391,7 +450,8 @@ node --test --test-concurrency=3 "test/**/*.test.ts"
 Tests never touch the live site: `test/helpers.ts` defaults `TUPAIA_LIVE_ORIGIN=none` and
 throws if any test points it at activationlayer.org. Never run the repo's Playwright e2e
 suite as part of this. Known load flakes (pass when the file runs alone): smoke `aa`/`cc`
-timing, tokens `pad widens the shown box`.
+timing, tokens `pad widens the shown box`, http `a caller that leaves before its call starts is
+skipped`.
 
 A write rehearsal against a real Worker: run `wrangler dev --local` with a scratch config and
 `--persist-to` a scratch directory (never the repo's `cloudflare/.wrangler`), then spawn the

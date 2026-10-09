@@ -41,11 +41,15 @@ $T tools ; $T status ; $T stop
 - **Mode** comes only from the daemon's spawn environment: local unless `TUPAIA_MODE=live` was
   set when it started. A caller with another mode only gets a warning; to change it, `stop`
   and call again. Never start a live daemon unless the human asked for a shared-map write.
+- Every tool but `apply` refuses unknown top-level arguments (BAD_ARGS lists the allowed ones);
+  per-op options such as `orphanRoutes` go inside the op. `tupaia help <tool>` shows them.
 - `--timeout <ms>` is the call's budget once it starts; queueing is extra, so give Bash a timeout
   that covers both (e.g. 600000 for set_heights or regrid). Slow calls print progress on stderr.
   A CLI killed while queued skips the call; killed after the start, the call still finishes.
-- Paths: prefer absolute. A relative `load_map` path is taken from your cwd when the file is
-  there; `save_map`/`export` write relative paths under the out dir.
+- Paths: prefer absolute. The CLI makes a relative input path (load_map `path`, apply
+  `specPath`, set_heights/flow `image.path`) absolute when the file is in your cwd; otherwise the
+  server tries its cwd, then the out dir, then the repo root, and results name the file it read.
+  `save_map`/`export` write relative paths under the out dir.
 - The daemon stops after 120 idle minutes; a changed page is saved first, and the next call
   prints the `load_map` line for `<out>/maps/daemon-exit-*.map`.
 - For future sessions, the human can register the daemon as an http MCP server (an entry with
@@ -56,8 +60,9 @@ $T tools ; $T status ; $T stop
 
 ## 1. Start
 
-- Call `session` first. It launches the browser and reports the mode, the origin shared reads
-  hit, the app version, the map's provenance and, under the daemon, `serving`.
+- Call `session` first (`format:'compact'` for one line). It launches the browser and reports
+  the mode, the origin shared reads hit, the app version, the map's provenance and, under the
+  daemon, `serving`.
 - Mode is `local` unless the human spawned the server with `TUPAIA_MODE=live`. You cannot
   switch to live; do not try, and do not suggest it unless the human wants the live map changed.
 - A fresh page holds a random map. Get the one you want with `load_map {path}`,
@@ -86,7 +91,9 @@ $T tools ; $T status ; $T stop
    `set_heights`). One call with many ops beats many calls; each call validates everything
    first and changes nothing if one op is invalid (unless `continueOnError`). `dryRun:true`
    for big batches and anything that resolves names you have not seen.
-4. Check the diff cheaply: `map_info {diff:'counts'}` (or `since:'<label>'`).
+4. Check the diff cheaply: `map_info {diff:'counts'}` (or `since:'<label>'`). A baseline that
+   holds another map (taken before a load or generate) answers `mapReplaced` with the new counts,
+   not a diff.
 5. `screenshot` framed on what changed; for before/after, keep a shotId and use
    `screenshot {compare:'<shotId>', crop:'changed'}`.
 6. If wrong: `snapshot {action:'undo'}` (or `n:3`), or `snapshot {action:'restore', label}`.
@@ -96,7 +103,12 @@ Token economy (results are counts first; ask for detail only when needed):
 
 - Read with `find {format:'compact'}` and `inspect {format:'compact', fields:[...]}`; JSON only
   when you need nested data or false/null fields. Name a field in `fields` to get it uncut.
-- `map_info {diff:'counts'}` before any full diff; list only the types that moved.
+- `map_info {diff:'counts'}` before any full diff; the default `detail:'summary'` compacts more
+  than 25 changed entities to counts plus 3 of each list (`'list'` = 50 per type, `'full'` = 1000).
+- find/inspect `warnings` name fields that do not exist (a typo reads null in every row: check).
+  Culture/religion/state/province cells, area, rural, urban and burgs are live, not stored.
+- `shared_status` and `sketch {action:'status'}` take `format:'compact'` too.
+- `consoleErrors` are folded (`msg (xN)`, 8 distinct at most); `session` lists the newest 20.
 - `screenshot {compare, crop:'changed', sideBySide?:true}` instead of a full frame; a note with no
   image means nothing visible changed (it says when the edit ran with `redraw:[]` or only touched
   hidden layers). `compare.bbox` is map px: feed it to `target:{bbox}` or `find {near}`.
@@ -169,7 +181,8 @@ tolerance:{legend:'contains'}, ignore:{states:['form']}
   `entity:{type, name}`; free-standing notes need an `id`. A marker's note text goes in
   `note:{name, legend}` (a bare `legend` key is ignored).
 - apply matches rivers by name but never creates them; use `edit river` for structure.
-- `specPath`: absolute (a relative one resolves against the Tupaia repo).
+- `specPath`: absolute (a relative one: your cwd via the CLI, else the server's cwd, the out dir,
+  the repo root; the result's `specPath` names the file read).
 
 **Quality pass.** `lint {}` (overview: warn and error rows) -> run each `fixAll` call and the
 per-row `fix` calls (ready `edit`/`paint_cells`/`eval` calls) -> `lint {checks:[...]}` to confirm.
@@ -227,8 +240,10 @@ points (spire.js), ice shapes. Read the runtime API first and pass `redraw`.
 
 ## 7. Generation
 
-- Always pass an explicit `seed` to `generate_map` and report it. World settings: set and lock
-  them with `edit map` first (locks survive generate_map).
+- Always pass an explicit `seed` to `generate_map` and report it; the same seed and options give
+  the same `digest` in any session. Omitted width/height = the server's default viewport. World
+  settings: set and lock them with `edit map` first (locks survive generate_map; edit map rows
+  with lock/unlock show the whole set as `locked:{before, after}`).
 - `regenerate {parts}` consumes the random stream; `states` reseeds it. Snapshot first.
   `restoreLayers:true` turns back layers a part switched on. biomes, provinces, emblems and
   relief take options, are seeded or literal, and replay in sketches.
@@ -242,7 +257,8 @@ points (spire.js), ice shapes. Read the runtime API first and pass `redraw`.
 
 - Last resort, when no tool covers the change (section 6). Read `tupaia://docs/runtime-api.md`.
 - Use bare globals (`pack`, `grid`, `notes`, `svg`), not `window.notes`. Undoable by default;
-  `readOnly:true` for reads; pass `redraw:[...]` with the layers you touched.
+  `readOnly:true` for reads; pass `redraw:[...]` with the layers you touched (`redraw:false`
+  redraws nothing).
 - Never call `regenerateMap`, `saveSharedMap`, `restoreSharedMap` or `cloudflare.save`, and never
   replace the map with `generate()`/`uploadMap()` (lineage breaks). Page writes to `/api` get 403.
 - After `compact`, never read `.name`/`.x`/`.cell` of removed records: they are stubs.
@@ -295,21 +311,28 @@ whatever the shared map is by then, so other people's edits survive.
    {confirm:true, token:'<token>', then:'discard'}` -> report the new version.
    A blob-only sketch: promote directly while `shared_status` still shows its base version;
    if the shared map moved, start a new sketch from it and redo the work.
-7. On no: `sketch {action:'discard', slug, confirm:true}`.
+7. On no: `sketch {action:'discard', slug, confirm:true}` (live mode). A sketch you never saved:
+   `sketch {action:'discard'}` (preview) then `{action:'discard', confirm:true}`, in any mode; the
+   page keeps its map.
 
 Stop and ask instead of working around: a rebase conflict (name each op and its reason; do not
 `onConflict:'skip'` without a yes; while a stopped rebase holds the page, shared_save refuses
 too: undo it as the rebase said); ops.json over 2 MB; a CONFLICT on save (the slug exists);
 `diverged` in status; any LOCKED/BUILD/STALE on promote.
 
-Local mode can start, summarise, list, open and rebase sketches; save, discard and promote need
-the live-mode server.
+Local mode can start, summarise, list, open and rebase sketches and discard an unsaved one;
+save, discarding a saved sketch, and promote need the live-mode server.
 
 ## 11. Failure handling
 
 - Results list `alerts` (app dialogs, auto-dismissed), `consoleErrors` and `notes`. Read them.
-- TIMEOUT on a mutating call, or a relaunch note: call `session`, check the map, restore the
-  latest snapshot if needed. Under the daemon a call refused while it was closing never ran.
+- TIMEOUT on a mutating call: only that call is lost; the next call relaunches and restores the
+  map from before it. A crash or hang after an edit: the relaunch note says `Restored the map as
+  '<tool>' left it (...) (nothing lost)`. A read-only call that stalls usually keeps the page
+  (`the page answers again ... not relaunched`). Check with `session`/`map_info` if unsure. Under
+  the daemon a call refused while it was closing never ran.
+- A failed `snapshot` undo/redo/restore changes nothing: the map from before it is loaded back
+  (`details.pageRestored`) and the history is as it was.
 - APP_ALERT on load: the app rejected the file (Invalid, Ancient or Newer file).
 - REFUSED with "customization": an editor is open (`eval {code:"closeDialogs(); customization =
   0"}`).
@@ -322,7 +345,8 @@ the live-mode server.
 - Freehand routes are locked; `regenerate routes` keeps them but renumbers every locked route
   (use `routeIds`). An edited generated route needs `lock:true` to survive.
 - After a risk rebuild (set_heights, paint_cells height risk) or regrid, run `lint`: markers can
-  sit on new water, and regrid can leave river cell lists with gaps (`river-gap`).
+  sit on new water (route points are re-recorded to their cells: `carried.routePointsRepointed`),
+  and regrid can leave river cell lists with gaps (`river-gap`).
 - Biome icon changes show only after `regenerate {parts:['relief']}`.
 - Settings only set inputs: recalculate or read `stale`.
 - Typed arrays come back from eval as plain arrays; large results are capped.

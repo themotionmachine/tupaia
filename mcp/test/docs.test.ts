@@ -11,6 +11,7 @@ const read = (...p: string[]) => fs.readFileSync(path.join(...p), "utf8");
 
 describe("docs match the tools", () => {
   const names: string[] = [];
+  const schemas = new Map<string, unknown>();
 
   before(async () => {
     const dir = path.join(MCP_ROOT, "src", "tools");
@@ -18,7 +19,13 @@ describe("docs match the tools", () => {
       if (f.endsWith(".ts") && f !== "registry.ts" && !f.endsWith(".d.ts")) await import(path.join(dir, f));
     const { registerAll } = await import("../src/tools/registry.ts");
     // a stand-in context that only records tool names (registration must not need a browser)
-    const ctx = { tool: (name: string) => void names.push(name), config: { testHooks: false, warnings: [] } };
+    const ctx = {
+      tool: (name: string, spec: { inputSchema: unknown }) => {
+        names.push(name);
+        schemas.set(name, spec.inputSchema);
+      },
+      config: { testHooks: false, warnings: [] }
+    };
     registerAll(ctx as never);
     assert.ok(names.length > 20, `only ${names.length} tools registered`);
   });
@@ -29,6 +36,22 @@ describe("docs match the tools", () => {
     assert.match(text, new RegExp(`\\b${names.length} tools\\.`));
     const rows = [...text.matchAll(/^\| `([a-z_]+)[ `]/gm)].map(m => m[1]);
     for (const n of names) assert.ok(rows.includes(n), `cheatsheet tool table has no row for ${n}`);
+  });
+
+  test("cheatsheet: every optional argument a tool row shows is one the tool takes", async () => {
+    // unknown top-level arguments are BAD_ARGS, so a stale name in the table would mislead
+    const { allowedArgKeys } = await import("../src/context.ts");
+    const text = read(MCP_ROOT, "resources", "cheatsheet.md");
+    let checked = 0;
+    for (const m of text.matchAll(/^\| `([a-z_]+) (\{[^`]*)` \|/gm)) {
+      const allowed = allowedArgKeys(schemas.get(m[1]) as never);
+      if (!allowed) continue; // apply: its lists go under any key
+      for (const k of m[2].matchAll(/([A-Za-z]+)\?/g)) {
+        assert.ok(allowed.includes(k[1]), `cheatsheet row ${m[1]} shows '${k[1]}?', which ${m[1]} does not take`);
+        checked++;
+      }
+    }
+    assert.ok(checked > 60, `only ${checked} arguments checked`);
   });
 
   test("README and SKILL name every tool and state the count", () => {

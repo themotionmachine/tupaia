@@ -60,11 +60,22 @@ async function buildCheck(ctx: ToolContext): Promise<BuildCheck> {
   return { ...base, verdict: "ok", message: "local and deployed builds match" };
 }
 
+/**
+ * How a human turns on live writes for THIS process (one sentence, no final period): a stdio server needs the tupaia-live
+ * .mcp.json entry and a restart; the --http daemon needs a new start with TUPAIA_MODE=live in its
+ * environment (a .mcp.json edit changes nothing for it).
+ */
+export function liveHowTo(ctx: Pick<ToolContext, "serving" | "config">): string {
+  if (ctx.serving.transport === "http")
+    return `This --http daemon (TUPAIA_OUT ${ctx.config.outDir}) was started with TUPAIA_MODE=local and keeps that mode until it stops; only a human can enable shared writes: 'tupaia stop' (only when no Claude session is attached to it; Claude Code does not reconnect) and start it again with TUPAIA_MODE=live in its environment ('TUPAIA_MODE=live mcp/bin/tupaia --out <dir> start')`;
+  return "This server was spawned with TUPAIA_MODE=local; only a human can enable shared writes, by adding the tupaia-live server entry (TUPAIA_MODE=live) to .mcp.json and restarting";
+}
+
 export function requireLive(ctx: ToolContext): void {
   if (ctx.config.envMode !== "live") {
     throw new ToolError(
       "MODE",
-      "local mode: no network writes. This server was spawned with TUPAIA_MODE=local; only a human can enable shared writes, by adding the tupaia-live server entry (TUPAIA_MODE=live) to .mcp.json and restarting. Reads (shared_status, load_map {source:'shared'}) still work."
+      `local mode: no network writes. ${liveHowTo(ctx)}. Reads (shared_status, load_map {source:'shared'}) still work.`
     );
   }
   if (ctx.mode.mode !== "live") {

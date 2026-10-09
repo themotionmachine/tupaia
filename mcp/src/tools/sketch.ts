@@ -29,7 +29,7 @@ import { type LAYER_NAMES, TimeoutMs } from "../schemas.ts";
 import { sha256 } from "../shared-api.ts";
 import { CompactFlag, readMapData } from "./compact.ts";
 import { defineTools } from "./registry.ts";
-import { requireLive, sharedSave } from "./shared.ts";
+import { liveHowTo, requireLive, sharedSave } from "./shared.ts";
 import { takeScreenshot } from "./view.ts";
 
 type LayerNameT = (typeof LAYER_NAMES)[number];
@@ -605,7 +605,7 @@ function requireLiveSketch(ctx: ToolContext, action: string): void {
   if (ctx.config.envMode !== "live" || ctx.mode.mode !== "live") {
     throw new ToolError(
       "MODE",
-      `local mode: sketch ${action} writes the Worker (sketch-<slug>), which needs a server a human spawned with TUPAIA_MODE=live${ctx.mode.droppedFromLive ? " (this one dropped to local)" : ""}. list, open, rebase, summary and the local actions still work.`
+      `local mode: sketch ${action} writes the Worker (sketch-<slug>), which needs a server a human spawned with TUPAIA_MODE=live${ctx.mode.droppedFromLive ? " (this one dropped to local)" : ctx.serving.transport === "http" ? ` (${liveHowTo(ctx)})` : ""}. list, open, rebase, summary and the local actions still work.`
     );
   }
 }

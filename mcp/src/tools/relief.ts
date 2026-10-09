@@ -160,7 +160,7 @@ export async function regenerateRelief(
 // The sketch log's reason for a regenerate that is not relief-only (ops.ts NOT_REPLAYABLE is
 // meant to be extended by tool modules).
 NOT_REPLAYABLE.regenerate =
-  "regenerate re-runs random generators (e.g. states reseeds Math.random), so it cannot be replayed; only parts:['relief'] on its own is seeded and replays";
+  "regenerate re-runs random generators (e.g. states reseeds Math.random), so it cannot be replayed; only a call whose parts are all biomes, provinces, emblems or relief replays (logged as its literal outcome or seed)";
 
 const TERRAIN_TAG = /<g\b[^>]*\bid="terrain"[^>]*>/;
 

@@ -10,10 +10,10 @@ only in a server a human spawned with `TUPAIA_MODE=live`, behind a preview and a
 
 | tool | one line |
 | --- | --- |
-| `session {action?:'status'\|'set_mode'\|'restart', mode?:'local', restore?, clear?}` | mode, origin reads hit, app version, browser, provenance, undo counts, console errors, outward requests, `serving` (http daemon). `set_mode` only drops live to local. |
-| `map_info {since?, diff?:'list'\|'counts', overview?, detail?}` | overview + diff since the newest snapshot/undo point, `'checkpoint'`, a snapshot index/label, or `'none'`. `diff:'counts'` = counts only, no overview. |
-| `find {type, name?, where?, near?, radius?, sort?, fields?, limit?, offset?, format?}` | list/filter one type (incl. `routeGroup`, `biome`, `namesbase`); `format:'compact'` = text rows. |
-| `inspect {entity:{type,ref}} \| {at:Place} \| {at:{screen:[px,py], shot}}, format?, fields?` | one entity or one cell; id/name and x,y/lat,lon conversion. |
+| `session {action?:'status'\|'set_mode'\|'restart', mode?:'local', restore?, clear?, format?:'compact'}` | mode, origin reads hit, app version, browser, provenance, undo counts, console errors (newest 20 distinct), outward requests, `serving` (http daemon). `set_mode` only drops live to local. |
+| `map_info {since?, diff?:'list'\|'counts', overview?, detail?:'summary'\|'list'\|'full'}` | overview + diff since the newest snapshot/undo point, `'checkpoint'`, a snapshot index/label, or `'none'`. `diff:'counts'` = counts only, no overview. A baseline holding another map gives `mapReplaced`, not a diff. |
+| `find {type, name?, where?, near?, radius?, sort?, fields?, limit?, offset?, format?}` | list/filter one type (incl. `routeGroup`, `biome`, `namesbase`); `format:'compact'` = text rows; `warnings` for unknown fields. |
+| `inspect {entity:{type,ref}} \| {at:Place} \| {at:{screen:[px,py], shot}}, format?, fields?` | one entity or one cell; id/name and x,y/lat,lon conversion; `warnings` for unknown fields. |
 | `flow {from, heights?, fill?, detail?, screenshot?}` | read-only: where water runs from a place, on current or proposed heights. |
 | `screenshot {target?, zoom?, full?, view?, layers?, labels?:'all', compare?, crop?:'changed', pad?, sideBySide?, ...}` | JPEG (maxSide 1024) + full PNG on disk + shotId; compare diffs against a shot. |
 | `lint {checks?, types?, bbox?\|near+radius, minSeverity?, ignore?, limit?, ...}` | read-only quality check; rows carry ready `fix` calls, some checks a `fixAll`. |
@@ -26,20 +26,23 @@ only in a server a human spawned with `TUPAIA_MODE=live`, behind a preview and a
 | `clear {types, where?, keep?, force?, orphanRoutes?, detail?, dryRun?}` | remove every entity of some types (wipe a random base), with each editor's cascade. |
 | `compact {types?, repointProvinces?, dryRun?, details?, limit?}` | shrink removed records to id-keeping stubs; drop their notes and SVG. |
 | `regrid {density, heights?, ice?, relief?, details?, dryRun?}` | change the cell density and keep the map (id, names, notes, labels). |
-| `generate_map {seed, template?, cells?, states?, cultures?, ...}` | new map, deterministic for the same seed and options. |
+| `generate_map {seed, template?, cells?, states?, cultures?, width?, height?, ...}` | new map, deterministic for the same seed and options (`digest`), in any session. |
 | `regenerate {parts:[...], restoreLayers?, biomes?, provinces?, emblems?, relief?, dryRun?}` | partial regeneration; biomes/provinces/emblems/relief take options and replay in sketches. |
 | `snapshot {action:'take'\|'list'\|'drop'\|'restore'\|'undo'\|'redo', label?, index?, n?, saveTo?}` | named whole-map snapshots and the auto-undo/redo history. |
-| `eval {code, args?, readOnly?, redraw?, timeoutMs?}` | escape hatch: JS in the page (read tupaia://docs/runtime-api.md first). |
+| `eval {code, args?, readOnly?, redraw?:[layers]\|false, timeoutMs?}` | escape hatch: JS in the page (read tupaia://docs/runtime-api.md first). |
 | `load_map {path} \| {source:'shared'}` | load a .map file, or the live shared map (a read-only GET). |
 | `save_map {path?, overwrite?, allowOutside?, compact?}` | write the map as a .map file (`compact:true` = compacted copy). |
 | `export {format, path?, scale?, ...}` | svg, png, jpeg, json-full, json-minimal, geojson-cells/-routes/-rivers/-markers/-zones. |
-| `shared_status {versions?, build?}` | live shared map metadata vs the page map: lineage, stale, build check. |
+| `shared_status {versions?, build?, format?:'compact'}` | live shared map metadata vs the page map: lineage, stale, build check. |
 | `shared_save {confirm?, token?, force?, replaceWithUnrelated?, expectVersion?, skipBuildCheck?, compact?}` | OUTWARD: overwrite the live shared map (preview, then confirm + token). |
 | `shared_restore {version, confirm?, token?, expectCurrent?, force?, reload?}` | OUTWARD: roll the live shared map back to a retained version. |
-| `sketch {action, slug?, note?, onConflict?, confirm?, shots?, full?, compact?}` | provisional change: ops log against shared version N; summary, save (view link), list, open, rebase, discard. |
+| `sketch {action, slug?, note?, onConflict?, confirm?, shots?, full?, compact?, format?}` | provisional change: ops log against shared version N; status, summary, save (view link), list, open, rebase, discard. |
 | `sketch_promote {confirm?, token?, then?:'keep'\|'discard', compact?}` | OUTWARD: put the active sketch on the live shared map (rebase first). |
 
-Every tool's arguments: `tupaia help <tool>` (CLI) or the tool's own schema.
+Every tool's arguments: `tupaia help <tool>` (CLI) or the tool's own schema. Every tool except
+`apply` (its lists go under any key) refuses an unknown top-level argument: BAD_ARGS `<tool> does
+not take 'k'; allowed arguments: ...` (`details {unknown, allowed}`); a schema error is BAD_ARGS
+`invalid arguments for <tool>: ...`. Per-op options (e.g. `orphanRoutes`) go inside the op.
 
 ## Refs and places
 
@@ -60,8 +63,14 @@ call), coalesces redraws and returns `changes`. `dryRun:true` returns the plan o
 layers are not redrawn (`skippedHidden`); they draw when turned on.
 
 - `changes` lists up to 8 changed entities in full; beyond that, per type `counts` + the first 3
-  of each list + `more:{list:n}`. `edit`/`add` `rows:'ids'` returns `appliedIds`/`createdIds`
-  instead of one row per op.
+  of each list + `more:{list:n}` (`{mapReplaced:true}` in the rare case the call's own undo point
+  holds a different map). Routes, markers and zones pair by identity within one map, so a
+  regenerate shows them as added/removed, not modified; across a reload (undo, restore, load)
+  they pair by id. `edit`/`add` `rows:'ids'` returns `appliedIds`/`createdIds` instead of one row
+  per op.
+- `consoleErrors` in any result: identical messages fold into `msg (xN)`, most repeated first, at
+  most 8 distinct (300 chars each), then `+K more distinct message(s) (M of T errors not shown)`;
+  `session` status lists the newest 20 distinct `{at, kind, text, count?}`.
 - `redraw:false` redraws nothing; an array replaces the computed list (all, features, heightmap,
   biomes, cultures, religions, states, provinces, borders, rivers, routes, zones, markers,
   burgIcons, labels, stateLabels, burgLabels, emblems).
@@ -73,7 +82,7 @@ layers are not redrawn (`skippedHidden`); they draw when turned on.
 | burg | name, population (people), group, type, culture, port, lock, move (Place: land, free cell) | yes; a capital or market centre needs `force` |
 | state | name, fullName, form, formName, color, capital (burg ref inside), culture, lock | yes: its provinces, label and regiment notes go too (not Neutrals) |
 | province | name, fullName, formName, color, capital (burg inside), lock | yes: cells become province-less |
-| culture | name, color, type, base (namesbase), expansionism, lock | yes: cells, burgs, states, religions fall back to 0 |
+| culture | name, color, type, base (namesbase), shield (a COA shield name), expansionism, lock | yes: cells, burgs, states, religions fall back to 0 |
 | religion | name, color, type, form, deity, expansionism, lock | yes: cells fall back to No religion |
 | river | name, type, mainStem, split, merge, reroute (see Rivers) | yes (with tributaries) |
 | route | group (id or name), name, lock, points | yes |
@@ -107,7 +116,7 @@ layers are not redrawn (`skippedHidden`); they draw when turned on.
 | zone | `{name?, type?, color?, cells?: [ids] \| select?: <paint_cells select>}` |
 | label | `{at, text, group?}` (default addedLabels) |
 | note | `{id:'burg12' \| entity:{type,ref}, name, legend?}`; fails if it exists (edit it) |
-| culture / religion | `{at (land), name?, color?, type?, base?/form?/deity?, expansionism?, expand?}` |
+| culture / religion | `{at (land), name?, color?, type?, base?/shield?/form?/deity?, expansionism?, expand?}` (a culture gets a shield: the default culture's, a same-base culture's, else random) |
 | biome | `{name, base?:<biome to copy>, color?, habitability?, iconsDensity?, icons?, cost?}` (no base: 50, 0, none, 50) |
 
 ### paint_cells
@@ -128,7 +137,8 @@ biome, state, province, culture, religion, feature, burg, river}`.
 Height `rebuild`: `keep` (default) land only, 20..100, refuses a change across 20 (`clamp:true`
 stops at 20); `risk` rebuilds coast, lakes, climate, rivers and re-packs the cells, carrying
 burgs, routes, markers, regiments and lake/island names to the new cells (`erosion:true` re-runs
-erosion); `erase` regenerates every entity (`confirmErase:true`). For whole-map terrain use
+erosion; a carried route point off its old cell is re-recorded to the cell under it,
+`carried.routePointsRepointed`); `erase` regenerates every entity (`confirmErase:true`). For whole-map terrain use
 `set_heights`.
 
 ## Feature notes
@@ -137,7 +147,8 @@ erosion); `erase` regenerates every entity (`confirmErase:true`). For whole-map 
 temperatureNorthPole, temperatureSouthPole (Celsius), winds (6 angles north to south, or
 `{tier: degrees}` for some tiers 0-5), precipitation, distanceScale, distanceUnit, areaUnit,
 heightUnit, heightExponent, temperatureScale. A value or `{value, lock:true|false}`; op-level
-`lock`/`unlock`: names or `'all'`. Locks survive generate_map and travel in the .map
+`lock`/`unlock`: names or `'all'`; such rows carry `locked:{before, after}`, the whole lock set
+(dryRun: the set the op would leave). Locks survive generate_map and travel in the .map
 (`options.tupaiaLocks`), so save/load, undo and restore keep them. Settings only set inputs:
 `recalculate:'climate'|'biomes'|'rivers+biomes'|'climate+biomes'` refreshes now (rivers and
 hand-painted biome cells are replaced; lake names and custom-biome cells kept; `ops` may be
@@ -189,7 +200,8 @@ a wrong length says the expected one), `pack:{cellId: h}` (sparse) or `image:{pa
 invert?, range?:[lo,hi], channel?}`. Sea level 20. `fill:true` fills pits. `rebuild:'risk'`
 (default) re-packs and carries entities; `'keep'` refuses land/water flips. Rivers regenerate;
 a river overlapping an old course keeps its id, name and type. `keepHeights` (default true)
-restores land heights the rebuild changed. `biomes:'redefine'` (default) | `'keep'`. dryRun
+restores land heights the rebuild changed. `biomes:'redefine'` (default) | `'keep'`. An
+`image.path` is read like load_map's path (Files); the result names `imagePath`. dryRun
 returns changed, toLand/toWater, landPct, lakes, pits, burgsOnNewWater, paintedBiomes.
 `flow {from:[Place|{gridCell}...], heights?:<same sources>, fill?}` traces drainage first
 (`end.type` sea/lake/river/border/pit; `goesTo` where a river ends).
@@ -231,9 +243,27 @@ unfiltered overview lists warn/error rows only.
 ## Reading cheaply
 
 - `find {..., format:'compact'}`: `burg 12 Agamathel pop=61419 state=3 capital at=(812,440)` rows
-  plus a `names:` legend; `fields` picks columns; strings cut at 80 chars unless named.
-- `inspect {..., format:'compact', fields:[...]}`: key=value lines (about a fifth of the JSON).
+  plus a `names:` legend; `fields` picks columns; strings cut at 80 chars unless named. Unknown
+  fields, where-fields and sort keys come back as `warnings` (compact: `warning:` lines).
+- `inspect {..., format:'compact', fields:[...]}`: key=value lines (about a fifth of the JSON);
+  unknown field names are `warnings`.
+- Cultures, religions, states and provinces: `cells`, `area`, `rural`, `urban`, `burgs` in find
+  (fields, where, sort) and inspect are computed live from the cells (the stored stats go stale
+  after paints and adds; inspect says so in `statsNote`).
 - `map_info {since:'<label>', diff:'counts'}`: `{type:{added, removed, changed}, cells, settings}`.
+  `detail`: `'summary'` (default) lists up to 25 changed entities in full, past that per-type
+  counts + the first 3 of each list + `changesTruncated`; `'list'` up to 50 per type; `'full'` up
+  to 1000. A baseline that holds another map (since:'checkpoint' or a snapshot from before a
+  load_map, generate_map, shared_restore, sketch open or another map's restore) returns
+  `{changed:true, changes:{mapReplaced:true, counts}, mapReplaced:'...'}`; `detail:'list'|'full'`
+  diffs anyway with a warning. Right after a whole-map replacement the default since is
+  `changed:false`.
+- `session`, `shared_status` and `sketch {action:'status'}` take `format:'compact'`: one
+  key=value line (`session mode=local browser=ready launches=1 app=1.130.1 map=Chanland ...
+  undo=1 redo=0 consoleErrors=0 ...`; `shared v7 name=.. by=.. lock=none | page lineage=..
+  opsSince=N | mode=local writes=off build=skipped`, plus a `versions:` line with versions:true;
+  `sketch <slug> recording base="shared v7" ops=2 dirty saved=never ...`, with full:true one line
+  per op).
 - `screenshot {compare:'s3', crop:'changed', sideBySide?:true}`: only the changed region; nothing
   changed = no image, one-line note. Keep the frame: no target/zoom with compare.
 - `edit`/`add` `rows:'ids'`; `lint {limit:0}` = counts only; `apply` lists counts first.
@@ -249,20 +279,29 @@ Errors come back as `isError` with `CODE: message`, an optional `candidates:` li
 | NOT_FOUND, AMBIGUOUS | ref did not resolve; read `candidates` and retry with an id |
 | REMOVED | the id exists but the entity was removed |
 | OUT_OF_BOUNDS, BAD_PLACE | a Place outside the map / malformed |
-| BAD_ARGS, BAD_FIELD, BAD_TYPE, BAD_REF, BAD_LAYER | invalid input |
+| BAD_ARGS, BAD_FIELD, BAD_TYPE, BAD_REF, BAD_LAYER | invalid input (incl. an unknown top-level argument) |
 | NO_PATH | add route: no land path (use a freehand route) |
 | REFUSED | a guard said no (capital without force, path policy, editor open, token, ...) |
 | CHANGED | sketch replay of a clear: the target was renamed, renumbered, reused or locked since |
-| MODE | local mode: no shared or sketch writes; or TUPAIA_LIVE_ORIGIN=none |
+| MODE | local mode: no shared writes, no sketch save/promote (the message says how a human enables live for this stdio server or daemon); or TUPAIA_LIVE_ORIGIN=none |
 | STALE, LOCKED, LINEAGE, BUILD, CONFLICT | shared-map gate (see below) |
 | SKETCH | a stopped rebase holds the page |
 | NETWORK | a request to the live origin failed |
-| TIMEOUT, CANCELLED | out of time / cancelled (a mutating one relaunches and restores before the next call) |
+| TIMEOUT, CANCELLED | out of time / cancelled. A mutating call: the next call relaunches and restores the state before it (only that call is lost). A read-only call whose page stops answering: the next call gives it 10 s more and keeps the page if it answers |
 | EVAL_ERROR, EVAL_SYNTAX | eval threw / did not parse |
 | APP_ALERT | the app showed an error dialog (Invalid/Ancient/Newer file, Generation error) |
 | PAGE_ERROR, BROWSER, STALE_OP | page or browser failure |
 | RESULT_TOO_LARGE | narrow the request (limit, fields, where) |
 | SIZE_MISMATCH | screenshot compare of different-size shots |
+
+Recovery: after every call that changed the map the server keeps the page map as a restore
+point; a relaunch (crash, hang, a restart that finds the page gone) restores it with the note
+`Restored the map as '<tool>' left it (<time>) (nothing lost).` A call's `timeoutMs` starts after
+any relaunch at its start. Put-back steps (sketch summary's return to the sketch map, screenshot
+layer/label restore, flow overlay removal) ignore a cancellation and get at least 60 s. A
+`snapshot` undo/redo/restore whose load fails is an error `<action> failed: <cause>. Nothing
+changed: the map from before the <action> was loaded back into the page. The undo/redo history
+is as it was.` with `details.pageRestored` `'now'` or `'on the next call (relaunch)'`.
 
 ## Layers, templates, presets
 
@@ -279,15 +318,22 @@ cultural, religions, provinces, biomes, heightmap, physical, poi, goods, trade, 
 emblems, landmass. display order: `layersPreset`, then `only`, then `on`/`off`.
 
 generate_map: options given are locked so the generator keeps them; `cells` is a density 1-13
-or a count; same seed + options = same map (`digest`). regenerate parts run in this order:
+or a count; omitted `width`/`height` = the server's default viewport (not the previous call's).
+Same seed + options = same map (`digest`) across calls and sessions. The page is then reloaded
+from its own .map text, so snapshots and saves hold exactly that map (generator river erosion of
+heights is not kept by .map files). regenerate parts run in this order:
 rivers, biomes, population, cultures, burgs, states, provinces, routes, religions, emblems,
 military, markers, zones, ice, goods, markets, economy, production, relief; `states` reseeds the
-random stream; `restoreLayers:true` undoes layer changes.
+random stream; `rivers` keeps pack heights; `restoreLayers:true` undoes layer changes.
 
 ## Files
 
-- save_map/export: relative paths go under TUPAIA_OUT (default `<repo>/.tupaia-mcp-out`). load_map:
-  relative paths resolve from the repo root (the CLI first tries your cwd). Prefer absolute paths.
+- Writes (save_map, export): relative paths go under TUPAIA_OUT (default `<repo>/.tupaia-mcp-out`).
+- Reads (load_map `path`, apply `specPath`, set_heights `image.path`, flow `heights.image.path`):
+  an absolute path as given; a relative one from the server cwd, then TUPAIA_OUT, then the repo
+  root, first match wins (NOT_FOUND lists every place looked). Results name the absolute file
+  (`path`, `specPath`, `imagePath`). The CLI makes a relative path that exists from your cwd
+  absolute first. Prefer absolute paths.
 - In the repo only a subfolder outside `src/`, `public/`, `mcp/`, `cloudflare/`, `docs/`, `dist/`,
   `tests/`, `node_modules/` and dot-folders, never over a git-tracked file. Elsewhere needs
   `allowOutside:true` (only where the human named). `overwrite:true` replaces. `tests/fixtures`
@@ -314,6 +360,10 @@ mutating call is logged with what it resolved to (ids, literal names and cells, 
 `summary` -> `save {confirm:true}` (live mode; returns `viewUrl`) -> on yes `rebase` (replays
 onto the current shared map, keeping others' edits) -> `sketch_promote {}` -> `{confirm:true,
 token}`. `status` shows the log, `blobOnly` and `blobOnlyReasons`; undo/redo pops/pushes ops.
+A summary cancelled part-way leaves the sketch map in the page (or the next call restores it).
+`discard` of an active sketch that was never saved works in local mode too: without confirm a
+preview `{preview, local:true, wouldDiscard}`, with `confirm:true` the sketch ends and its log is
+dropped; the page keeps its map. A saved sketch or another slug needs live mode + confirm.
 
 | replays on rebase | makes the sketch blob-only (save/view/promote as is; no rebase) |
 | --- | --- |
@@ -368,4 +418,4 @@ daemon's spawn environment only.
     note:'...'}` -> edits -> `sketch {action:'summary'}` -> `sketch {action:'save', confirm:true}` ->
     give the human `viewUrl` -> on yes `sketch {action:'rebase'}` -> `sketch_promote {}` ->
     `sketch_promote {confirm:true, token, then:'discard'}`; on no `sketch {action:'discard', slug,
-    confirm:true}`.
+    confirm:true}` (live mode; an unsaved sketch: `sketch {action:'discard', confirm:true}`).

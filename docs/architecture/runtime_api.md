@@ -40,7 +40,7 @@ This is a reference for scripting a running Tupaia page, for example from the pl
 | `?width=&height=` | `public/modules/ui/options.js:535` (`applyStoredOptions`) | Overrides the stored map size. |
 | `?options=default` | `options.js:598` | Forces `randomizeOptions`. |
 | **Ready (first map)** | `main.js:1308-1314` | `showStatistics` sets `mapId = Date.now()` and `window.mapId`, pushes `mapHistory`, then dispatches `map:generated` with `{seed, mapId}`. |
-| `map:loading` / `map:loaded` / `map:resampled` | `src/io/load.ts:127, 820`, `src/generators/resample.ts:476` | Tupaia additions: a load starts / a load succeeded / a density-only resample kept the map id (instead of `map:generated`). See §10. |
+| `map:loading` / `map:loaded` / `map:resampled` | `src/io/load.ts:128, 789`, `src/generators/resample.ts:476` | Tupaia additions: a load starts / a load succeeded / a density-only resample kept the map id (instead of `map:generated`). See §10. |
 
 **Ready recipe [R].**
 
@@ -66,7 +66,7 @@ This is a reference for scripting a running Tupaia page, for example from the pl
 | `populationRate`, `distanceScale`, `urbanization`, `urbanDensity` | `main.js:251-254` | Read from DOM inputs. Defaults are 1000, 3, 1. |
 | `graphWidth`/`graphHeight` | `var`, `main.js:259-260` | Map space. Set from `mapWidthInput`/`mapHeightInput`. |
 | `svgWidth`/`svgHeight` | `let`, `main.js:263-264` | Viewport. With width 1600 in a 1280 viewport you get svg 1280x720, scaleExtent `[0.8, 20]` [R]. |
-| SVG selections | `let`, `main.js:35-108` | `svg`, `viewbox`, `rivers`, `labels`, `burgIcons`, `burgLabels`, `statesBody`, `zones`, `markers`, and others. **They are reassigned on load** (`src/io/load.ts:339-397`). |
+| SVG selections | `let`, `main.js:35-108` | `svg`, `viewbox`, `rivers`, `labels`, `burgIcons`, `burgLabels`, `statesBody`, `zones`, `markers`, and others. **They are reassigned on load** (`src/io/load.ts:344-398`). |
 
 **Placeholders [R].**
 
@@ -273,7 +273,7 @@ The low-level draw calls are `drawBurgIcon(b)`, `removeBurgIcon(id)`, `drawBurgL
 | `saveToStorage(data, showTip)` | Writes IndexedDB `lastMap`. | `save.ts:188` | |
 | `(await lazy.load()).uploadMap(blob, cb?)` | **Fire-and-forget** (FileReader). `cb` runs at `onloadend`, **before parsing**. Accepts plain, base64 or gzip. | `src/io/load.ts:120` | Await `map:generated` (~450ms for `tests/fixtures/demo.map`) [R]. |
 | `showUploadMessage` | Invalid, ancient or newer files open an `#alert`; **no event fires** [R]. | `load.ts:198` | Add a timeout and check `#alert`. |
-| `parseLoadedData` | Calls `closeDialogs`, then `svg.remove()` and reassigns every layer selection (339-397), auto-updates via `resolveVersionConflicts` (539), applies integrity fixes (560-800), then `showStatistics` (812). Errors open a "Loading error" `#alert` (819-841). | `load.ts:233` | Old DOM handles go stale. `mapId` is re-stamped. |
+| `parseLoadedData` | Calls `closeDialogs`, then `svg.remove()` and reassigns every layer selection (344-398), auto-updates via `resolveVersionConflicts` (545), applies integrity fixes (560-776; two of them in `load-repairs.ts`, §10), then `showStatistics` (786). Errors open a "Loading error" `#alert` (790-812). | `load.ts:233` | Old DOM handles go stale. `mapId` is re-stamped. |
 | `loadMapFromURL(url, random?)`, `quickLoad()` | Load from a URL or from IndexedDB. | `load.ts:76, 4` | |
 | `(await lazy.exportMap()).getMapURL(type, {fullMap, noLabels, noWater, noScaleBar, noIce, noVignette, debug})` | Returns a blob URL **revoked after 5s** (`src/io/export.ts:496`). | `export.ts:229` | Fetch it immediately in the page. The SVG is ~587KB [R]. |
 | `exportToSvg` 21, `exportToPng` 40, `exportToJpeg` 82, `exportToPngTiles` 124 | Download only. PNG covers **the current view** at svgWidth×svgHeight×`pngResolutionInput`. | `export.ts` | Prefer a Playwright screenshot or a rasterized `getMapURL`. |
@@ -368,6 +368,7 @@ The low-level draw calls are `drawBurgIcon(b)`, `removeBurgIcon(id)`, `drawBurgL
 5. **No load event on failure.** `uploadMap` failures and generate errors open an `#alert` rather than throwing. After each action, check for a visible `.ui-dialog` and read `#alertMessage`.
 6. **The shared `#alert` dialog** is reused by every prompt (update notice, conflict, errors, regenerate confirm). No native `alert`/`confirm` fires [R]. `window.prompt` is overridden by a DOM prompt (`src/utils/commonUtils.ts:279`).
 7. **Options re-randomize** unless locked. Locks persist in localStorage. Culture inputs come in Input/Output pairs.
+   **Session caches break same-seed generation**: `Names` chains are never cleared on generate or load, `Rivers.smallLength` is computed once per session, and `culturesInput`/`culturesOutput` keep the previous culture set's range `max`, which clamps `randomizeOptions`' culture count. The MCP's generate_map resets all three (`Names.clearChains()`, `Rivers.smallLength = null`, the inputs' `max`) before generating; an eval `generate()` does not.
 8. **Toggles flip.** Some fade asynchronously.
 9. **Detached DOM handles.** The SVG and every layer selection are replaced on load; re-query after loading.
 10. **Seeded randomness.** `Math.random` is the seeded Alea, and `Rivers.generate` and `Provinces.generate` reseed it.
@@ -404,13 +405,13 @@ no tool covers the change.
     ignored on another grid).
   - `data-regenerate`: `prepareMapData` (`src/io/save.ts:100`) empties `#terrain` in the saved
     copy, so every save drops the icons, and `restoreReliefOnLoad()` (called from
-    `src/io/load.ts:810`) draws them again after a load. Manual relief-editor edits are lost on
+    `src/io/load.ts:779`) draws them again after a load. Manual relief-editor edits are lost on
     such a map (the editor warns).
   - `window.ReliefSettings` = `{attrs, gridKey, packCellKey, encodeRanges, parseExclusion, clear}`;
     `generate()` (`public/main.js:692`) calls `ReliefSettings.clear()`, so a new map starts as
     upstream. MCP: `regenerate {parts:['relief'], relief:{...}}`, `edit map {set:{reliefOnLoad}}`.
 - **Biome extras** (`src/io/biome-extras.ts`). The `.map` biome line (line 3) gets a 4th `|` field,
-  JSON `{iconsDensity:[], icons:[[]], cost:[]}`, written by `save.ts` and applied by `load.ts:341`
+  JSON `{iconsDensity:[], icons:[[]], cost:[]}`, written by `save.ts` and applied by `load.ts:342`
   when present. Upstream keeps only `color|habitability|name`, so custom biomes lost their icon
   density, icons and cost on reload. An older client ignores the field and drops it on re-save.
 - **Label visibility attributes** (`invokeActiveZooming`, `public/main.js:566` and `:584`). A
@@ -434,6 +435,12 @@ no tool covers the change.
   whole and ignores the key (a File > Save carries whatever value the object last held); a file
   without it leaves the page's locks alone. MCP: `edit {type:'map', ops:[{set:{...},
   lock:[names]|'all'}]}`.
+- **Load repairs** (`src/io/load-repairs.ts`, called from `parseLoadedData`). Two integrity fixes
+  moved out of `load.ts` and corrected: `repairInvalidCultures` resets the cells of an invalid or
+  removed culture to culture 0 (upstream reset their province instead) and leaves provinces
+  alone; `repairStateCapital` sets `state.capital` to the burg it promotes, and when a state has
+  several capitals keeps the one `state.capital` names (upstream kept the first). The ERROR
+  console messages are as upstream. Unit tests: `src/io/load-repairs.test.ts`.
 - **Other hooks**: `window.__tupaiaInternals = {adjustProvinces, stateRemove}` (set when the states
   editor module loads); `editHeightmap({tupaiaExport:true})` returns `{restoreKeptData,
   restoreRiskedData, regenerateErasedData}` without opening the editor, and
