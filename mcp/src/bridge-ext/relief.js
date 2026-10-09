@@ -530,11 +530,11 @@
   // ---------------------------------------------------------------- regenerate {parts:[..., 'relief']}
 
   const baseRegenerate = FNS.regenerate;
-  FNS.regenerate = async a => {
+  FNS.regenerate = async (a, meta) => {
     const parts = Array.isArray(a?.parts) ? a.parts : [];
     if (!parts.includes("relief")) {
       if (a?.relief !== undefined) fail("BAD_ARGS", "relief settings need 'relief' in parts");
-      return baseRegenerate(a);
+      return baseRegenerate(a, meta);
     }
     const rest = parts.filter(p => p !== "relief");
     if (!rest.length) {
@@ -542,10 +542,25 @@
       const out = await FNS.relief({ relief: a.relief, base: a.base, phase: a.phase ?? "apply" });
       return out.phase ? out : { ran: ["relief"], ...out };
     }
+    if (a.phase === "validate") {
+      // mixed with other parts: every wrapper below validates its own parts and changes nothing
+      const v = await FNS.relief({ relief: a.relief, phase: "validate" });
+      const inner = (await baseRegenerate({ ...a, parts: rest }, meta)) || {};
+      const errors = [...(v.errors || []), ...(Array.isArray(inner.errors) ? inner.errors : [])];
+      return { phase: "validate", ...(errors.length ? { errors } : {}) };
+    }
     parse(a.relief, stored()); // invalid settings change nothing
-    const out = await baseRegenerate({ ...a, parts: rest });
+    const out = await baseRegenerate({ ...a, parts: rest }, meta);
     const r = await FNS.relief({ relief: a.relief, phase: "apply" });
-    return { ...out, ran: [...out.ran, "relief"], relief: r.relief, notes: [...(out.notes || []), ...r.notes] };
+    // reliefResolved: the relief part's literal form, for a sketch op mixing replayable parts
+    // (mcp/src/regen-replay.ts takes it out of the result)
+    return {
+      ...out,
+      ran: [...out.ran, "relief"],
+      relief: r.relief,
+      notes: [...(out.notes || []), ...r.notes],
+      reliefResolved: r.resolved
+    };
   };
 
   // ---------------------------------------------------------------- edit map {set:{reliefOnLoad}}
@@ -711,5 +726,20 @@
       () => PENDING.delete(q)
     );
     return q;
+  };
+
+  // ---------------------------------------------------------------- for other bridge extensions
+
+  /** The stored exclusion, by pack cell (regrid.js moves it to the new cells of a new grid). */
+  T.relief = {
+    exclusionText: () => document.getElementById("terrain")?.getAttribute(ATTR.excludeGrid) ?? null,
+    exclusionInfo,
+    excludedCells,
+    encodeExclusion,
+    setExclusion: text => {
+      const el = terrainEl();
+      if (text) el.setAttribute(ATTR.excludeGrid, text);
+      else el.removeAttribute(ATTR.excludeGrid);
+    }
   };
 })(globalThis);

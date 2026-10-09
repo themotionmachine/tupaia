@@ -4,12 +4,13 @@ import { z } from "zod";
 import type { ToolContext } from "../context.ts";
 import { registerReplayable } from "../ops.ts";
 import { planRegen, RegenEmblems, RegenProvinces, recordRegen } from "../regen.ts";
+import { REGENERATE_REPLAY, recordCombinedRegen } from "../regen-replay.ts";
 import { META_TEXT_HEAVY, ToolError } from "../result.ts";
 import { TIMEOUTS, TimeoutMs } from "../schemas.ts";
 import { BiomesRegenOptions, recordBiomesRegen, validateBiomesRegen } from "./biomes.ts";
 import { changesSinceUndo } from "./edit.ts";
 import { defineTools } from "./registry.ts";
-import { RELIEF_REPLAY, ReliefParams, regenerateRelief } from "./relief.ts";
+import { ReliefParams, regenerateRelief } from "./relief.ts";
 
 export const REGEN_PARTS = [
   "rivers",
@@ -33,8 +34,10 @@ export const REGEN_PARTS = [
   "relief"
 ] as const;
 
-// relief-only regenerate calls are seeded and replay in sketches (tools/relief.ts); other parts do not
-registerReplayable("regenerate", RELIEF_REPLAY);
+// One replay slot for 'regenerate' (regen-replay.ts): relief alone (seeded, tools/relief.ts), or a
+// mix of biomes, provinces/emblems and relief logged as their literal outcomes. biomes alone and
+// provinces/emblems alone are logged under their own op names (tools/biomes.ts, regen.ts).
+registerReplayable("regenerate", REGENERATE_REPLAY);
 
 export function register(ctx: ToolContext): void {
   ctx.tool(
@@ -119,7 +122,7 @@ export function register(ctx: ToolContext): void {
         "Parts with options (details in each option object): biomes re-derives biomes from the climate with seeded edge noise, smoothing and small-region merging, keeping painted and custom biomes (result in details.biomes); " +
         "provinces gives new provinces to the named states only (auto, centres, or count N of balanced area; also hand-made states with few or no burgs); emblems gives new coats of arms with each culture's shield; " +
         "relief redraws the relief icons seeded (same settings, same icons) with settings stored on the map, used by every later draw (map_info shows them as relief). " +
-        "dryRun:true previews and changes nothing: biomes alone, relief alone, or provinces and/or emblems. In a sketch, biomes alone, relief alone, and provinces and/or emblems replay (logged as literal outcomes); any other regenerate makes the sketch blob-only.",
+        "dryRun:true previews and changes nothing: biomes alone, relief alone, or provinces and/or emblems. In a sketch, a regenerate whose parts are only biomes, provinces, emblems and/or relief replays (logged as literal outcomes); any other part makes the sketch blob-only.",
       inputSchema: z.object({
         parts: z.array(z.enum(REGEN_PARTS)).min(1),
         restoreLayers: z.boolean().optional().describe("Undo layer visibility changes made by the regenerators"),
@@ -176,8 +179,12 @@ export function register(ctx: ToolContext): void {
       } finally {
         ctx.snapshots.noteMutation();
       }
-      await recordRegen(scope, rest, out);
-      await recordBiomesRegen(scope, args, args.parts, out);
+      // the literal forms go to the sketch log, never to the client
+      if (!(await recordCombinedRegen(scope, rest, out))) {
+        await recordRegen(scope, rest, out);
+        await recordBiomesRegen(scope, args, args.parts, out);
+      }
+      delete out.reliefResolved;
       const changes = await changesSinceUndo(ctx, scope);
       return {
         ...out,

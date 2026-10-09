@@ -5,18 +5,21 @@
 // and/or 'emblems' is logged as op tool 'regenerate:provinces-emblems' (REGEN_OP) with its
 // literal outcome ({parts, graph?, provinces?, emblems?}): the new provinces with their cells
 // (run-length encoded) and coats of arms, and every regenerated coat of arms. Replay re-applies
-// that outcome through the bridge's regenerateLiteral. A call that mixes them with any other
-// part is logged as a plain 'regenerate', not replayable, like every other regenerate (the
-// 'regenerate' replay slot stays free for other parts).
+// that outcome through the bridge's regenerateLiteral. A call that mixes them with biomes and/or
+// relief only is logged as one 'regenerate' op whose outcome holds each part's literal form
+// (regen-replay.ts); a call with any other part is a plain 'regenerate', not replayable.
 import { z } from "zod";
 import type { CallScope } from "./context.ts";
-import { type CreatedRef, type Resolved, type Rewriter, registerReplayable } from "./ops.ts";
+import { type CreatedRef, type ReplaySpec, type Resolved, type Rewriter, registerReplayable } from "./ops.ts";
 import { ToolError } from "./result.ts";
 import { EntityRef, Place, TIMEOUTS } from "./schemas.ts";
 
 export const REGEN_OP = "regenerate:provinces-emblems";
 export const LITERAL_REGEN_PARTS = ["provinces", "emblems"] as const;
 const isLiteralPart = (p: string) => (LITERAL_REGEN_PARTS as readonly string[]).includes(p);
+/** Parts whose outcome is recorded literally (or seeded), so a regenerate of only these replays. */
+export const REPLAYABLE_REGEN_PARTS = ["biomes", "provinces", "emblems", "relief"] as const;
+const isReplayablePart = (p: string) => (REPLAYABLE_REGEN_PARTS as readonly string[]).includes(p);
 
 export const RegenProvinces = z
   .object({
@@ -188,7 +191,8 @@ function literalShapeOk(x: RegenResolved): boolean {
   return true;
 }
 
-const ONLY = "a regenerate of only parts provinces and/or emblems records its outcome and can be replayed";
+const ONLY =
+  "a regenerate of only parts provinces, emblems, biomes and/or relief records its outcome and can be replayed";
 
 /** Why a logged REGEN_OP cannot be replayed, or null. */
 export function regenUnreplayable(r: Resolved | null): string | null {
@@ -349,7 +353,12 @@ export async function recordRegen(scope: CallScope, args: RegenArgs, out: Record
   if (!args.parts.some(isLiteralPart)) return;
   const other = args.parts.filter(p => !isLiteralPart(p));
   if (other.length) {
-    await scope.record("regenerate", args, null, { replayable: false, reason: mixedReason(other) });
+    // (a mix of only replayable parts is recorded by regen-replay.ts before this runs)
+    const random = args.parts.filter(p => !isReplayablePart(p));
+    await scope.record("regenerate", args, null, {
+      replayable: false,
+      reason: mixedReason(random.length ? random : other)
+    });
     return;
   }
   const why = regenUnreplayable((resolved ?? null) as Resolved | null);
@@ -357,7 +366,7 @@ export async function recordRegen(scope: CallScope, args: RegenArgs, out: Record
   else await scope.record(REGEN_OP, args, resolved as Resolved, { out });
 }
 
-registerReplayable(REGEN_OP, {
+export const REGEN_REPLAY: ReplaySpec = {
   bridgeFn: "regenerateLiteral",
   rewrite: regenRewrite,
   summarize: regenSummary,
@@ -365,4 +374,6 @@ registerReplayable(REGEN_OP, {
   created: regenCreated,
   focus: regenFocus,
   timeout: "heavy"
-});
+};
+
+registerReplayable(REGEN_OP, REGEN_REPLAY);

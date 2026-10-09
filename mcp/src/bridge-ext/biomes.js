@@ -45,8 +45,18 @@
     "mountSnow",
     "vulcan"
   ];
-  const RELIEF_NOTE =
-    "iconsDensity and icons take effect when relief icons are next drawn (regenerate {parts:['relief']} redraws them); the icons on the map now are unchanged";
+  /**
+   * What happens to the relief icons drawn now. A map that draws them on load (reliefOnLoad,
+   * bridge-ext/relief.js) has them redrawn after this MCP call when its relief layer is on.
+   */
+  function reliefNote() {
+    const el = document.getElementById("terrain");
+    const onLoad = !!el?.hasAttribute("data-regenerate");
+    const shown = typeof layerIsOn !== "function" || layerIsOn("toggleRelief");
+    if (onLoad && shown)
+      return "iconsDensity and icons are drawn now: this map draws its relief icons on load (reliefOnLoad), so they are redrawn after this call (see the 'relief icons redrawn' note)";
+    return "iconsDensity and icons take effect when relief icons are next drawn (regenerate {parts:['relief']} redraws them, seeded, for every biome); the icons on the map now are unchanged";
+  }
 
   const num = (field, min, max) => v => {
     if (typeof v !== "number" || !Number.isFinite(v) || v < min || v > max)
@@ -207,7 +217,7 @@
       get: x => biomesData.iconsDensity[x.i] ?? null,
       set: (x, v, c) => {
         biomesData.iconsDensity[x.i] = v;
-        c.notes.add(RELIEF_NOTE);
+        c.notes.add(reliefNote());
       }
     },
     icons: {
@@ -222,7 +232,7 @@
       get: x => iconWeights(biomesData.icons[x.i]),
       set: (x, w, c) => {
         biomesData.icons[x.i] = expandIcons(w);
-        c.notes.add(RELIEF_NOTE);
+        c.notes.add(reliefNote());
       }
     },
     cost: {

@@ -1599,6 +1599,40 @@
     };
   }
 
+  // ---------------------------------------------------------------- relief exclusion
+
+  /**
+   * The relief icon exclusion (bridge-ext/relief.js, relief.exclude) is stored by grid cell and
+   * keyed by the grid, so on the new grid it would be ignored. Before the resample: the old pack
+   * cells' points, each flagged excluded or not; null when there is no exclusion (or it was
+   * already recorded on another grid).
+   */
+  function captureReliefExclusion() {
+    const R = T.relief;
+    const text = R?.exclusionText();
+    if (!R || !text) return null;
+    const info = R.exclusionInfo(text);
+    if (!info || info.stale) return null;
+    const ex = R.excludedCells(text);
+    const C = pack.cells;
+    return { before: ex.size, pts: Array.from(C.i, i => [C.p[i][0], C.p[i][1], ex.has(i)]) };
+  }
+
+  /** After the resample: a new cell is excluded when its nearest old cell was (stored on the new grid). */
+  function remapReliefExclusion(cap) {
+    if (!cap) return null;
+    const q = d3.quadtree(
+      cap.pts,
+      p => p[0],
+      p => p[1]
+    );
+    const C = pack.cells;
+    const cells = new Set();
+    for (const i of C.i) if (q.find(C.p[i][0], C.p[i][1])?.[2]) cells.add(i);
+    T.relief.setExclusion(T.relief.encodeExclusion(cells));
+    return { before: cap.before, after: cells.size };
+  }
+
   // ---------------------------------------------------------------- the call
 
   FNS.regrid = async a => {
@@ -1634,6 +1668,7 @@
     const report = {};
     const before = inventory();
     const keep = capture();
+    const reliefEx = captureReliefExclusion();
     if (typeof closeDialogs === "function") closeDialogs();
     setDensity(P.want);
     const unpatch = patchResample(P, report);
@@ -1647,14 +1682,26 @@
     } finally {
       unpatch();
     }
+    // before the redraw, so relief:'redraw' (and a reliefOnLoad map's next draw) leaves it out
+    const reliefExclusion = remapReliefExclusion(reliefEx);
+    // a map that draws its relief icons on load (reliefOnLoad, bridge-ext/relief.js) saves none:
+    // keeping the old drawing would show icons the next load does not draw, so it is redrawn
+    const reliefOnLoad = !!document.getElementById("terrain")?.hasAttribute("data-regenerate");
+    const keepRelief = P.relief === "keep" && !reliefOnLoad;
     const regenerated = [
       "lakes and coastline features (re-detected from the new heights)",
       "temperature (recomputed from latitude and height)",
       "economy (regenerateEconomy on the new cells: burg product and production, deals, market stock and state treasuries are recomputed; burg treasuries are kept)",
-      P.relief === "keep"
+      keepRelief
         ? "every drawn layer from the data except relief icons, kept as drawn (relief:'redraw' places them on the new cells)"
-        : "every drawn layer from the data, relief icons included (their count follows the cells; see layers)"
+        : P.relief === "keep"
+          ? "every drawn layer from the data, relief icons included: this map draws them on load (reliefOnLoad, with its stored settings), so they are drawn as a load would, not kept"
+          : "every drawn layer from the data, relief icons included (their count follows the cells; see layers)"
     ];
+    if (reliefExclusion)
+      regenerated.push(
+        `relief icon exclusion moved to the new cells (each new cell takes its nearest old cell's): ${reliefExclusion.before} -> ${reliefExclusion.after} cells`
+      );
     const generatedIce = (pack.ice || []).length;
     if (P.iceMode === "keep") {
       pack.ice = keep.ice.map(e => {
@@ -1683,7 +1730,7 @@
     collectAreaStats();
     drawLayers();
     const reliefEl = document.getElementById("terrain");
-    if (P.relief === "keep" && reliefEl && keep.reliefHTML !== null) reliefEl.innerHTML = keep.reliefHTML;
+    if (keepRelief && reliefEl && keep.reliefHTML !== null) reliefEl.innerHTML = keep.reliefHTML;
     const labelsRestored = restoreLabels(keep.labelNodes);
     const layers = keepLayerLook(keep.layers, keep.textPathIds, P.iceMode);
     const emblemHost = document.getElementById("defs-emblems");
@@ -1772,6 +1819,7 @@
         ...(Object.keys(layers.changed).length ? { redrawn: layers.changed } : {})
       },
       regenerated,
+      ...(reliefExclusion ? { reliefExclusion } : {}),
       warnings,
       bytes: prepareMapData().length,
       mapId: T.summary().mapId,

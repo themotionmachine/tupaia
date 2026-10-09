@@ -7,11 +7,12 @@
 // FNS.regenerate is wrapped: parts 'provinces' and 'emblems' run here, every other part goes to
 // the previous FNS.regenerate (in segments, so the dependency order holds: rivers..states, then
 // provinces, then routes/religions, then emblems, then the rest). A call without those parts
-// passes straight through, unchanged. The wrapper never sees a phase: Node validates (and
-// previews a dryRun) through FNS.regenPlan, which changes nothing. When every part is
-// provinces/emblems the result carries `resolved` {parts, graph?, provinces?, emblems?}: the
-// literal outcome (each new province with its run-length encoded cells and coa; each
-// regenerated coa) that FNS.regenerateLiteral re-applies when a sketch is replayed.
+// passes straight through, unchanged. Node validates (and previews a dryRun) through
+// FNS.regenPlan, which changes nothing; a phase 'validate' call (a wrapper above validating a
+// mixed call) only checks the options. When every part is provinces/emblems (or those and
+// biomes) the result carries `resolved` {parts, graph?, provinces?, emblems?}: the literal
+// outcome (each new province with its run-length encoded cells and coa; each regenerated coa)
+// that FNS.regenerateLiteral re-applies when a sketch is replayed.
 (root => {
   const T = root.__tupaia;
   if (!T?.fns || typeof T.fns.regenerate !== "function") return;
@@ -1617,6 +1618,13 @@
     const parts = Array.isArray(a?.parts) ? [...new Set(a.parts)] : [];
     checkOptionParts(a, parts);
     if (!parts.some(p => LITERAL_PARTS.includes(p))) return baseRegenerate(a, meta);
+    if (a.phase === "validate") {
+      // the phased protocol (a wrapper above validating): check the options, change nothing
+      if (parts.includes("provinces")) planProvinces(a.provinces, parts);
+      if (parts.includes("emblems")) planEmblems(a.emblems, parts);
+      const others = parts.filter(p => !LITERAL_PARTS.includes(p));
+      return others.length ? baseRegenerate({ ...a, parts: others }, meta) : { phase: "validate" };
+    }
     // checked up front: a bad option changes nothing
     if (parts.includes("provinces")) planProvinces(a.provinces, parts);
     if (parts.includes("emblems")) planEmblems(a.emblems, parts);
@@ -1685,9 +1693,10 @@
       layersOn: FNS.layersOn(),
       notes: notesOut
     };
-    // the literal outcome, for the sketch log (Node logs it only when every part is provinces/emblems)
-    if (parts.every(p => LITERAL_PARTS.includes(p))) {
-      const resolved = { parts: order };
+    // the literal outcome, for the sketch log: Node logs it when every part is provinces/emblems,
+    // or in a combined op when the other parts are only biomes (and relief, run by its wrapper)
+    if (parts.every(p => LITERAL_PARTS.includes(p) || p === "biomes")) {
+      const resolved = { parts: order.filter(p => LITERAL_PARTS.includes(p)) };
       if (provRun) {
         resolved.provinces = provincesLiteral(provRun);
         if (graph) resolved.graph = graph;

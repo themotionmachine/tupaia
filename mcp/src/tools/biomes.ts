@@ -9,7 +9,7 @@
 // other parts it stays a plain, non-replayable regenerate.
 import { z } from "zod";
 import type { CallScope } from "../context.ts";
-import { type Resolved, type Rewriter, registerReplayable } from "../ops.ts";
+import { type ReplaySpec, type Resolved, type Rewriter, registerReplayable } from "../ops.ts";
 import { ToolError } from "../result.ts";
 import { EntityRef } from "../schemas.ts";
 import { SelectSchema } from "./edit.ts";
@@ -125,7 +125,7 @@ export async function recordBiomesRegen(
   else await scope.record(BIOMES_OP, args, resolved as unknown as Resolved, { out: b });
 }
 
-registerReplayable(BIOMES_OP, {
+export const BIOMES_REPLAY: ReplaySpec = {
   bridgeFn: "setBiomeCells",
   bridgeArgs: r => {
     const b = r as unknown as BiomesResolved;
@@ -158,4 +158,6 @@ registerReplayable(BIOMES_OP, {
   unreplayable: r =>
     isBiomesResolved(r) ? null : "this biomes regenerate has no literal cell list, so it cannot be replayed",
   timeout: "heavy"
-});
+};
+
+registerReplayable(BIOMES_OP, BIOMES_REPLAY);

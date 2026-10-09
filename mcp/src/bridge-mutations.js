@@ -2778,6 +2778,12 @@
     const known = REGEN.map(r => r[0]);
     if (!parts.length) fail("BAD_ARGS", "parts must be a non-empty array", { details: known });
     for (const p of parts) if (!known.includes(p)) fail("BAD_ARGS", `unknown part '${p}'`, { details: known });
+    if (a.phase === "validate") {
+      // the phased protocol (a wrapper validating a mixed call): check what can be, change nothing
+      if (parts.includes("biomes") && typeof FNS.defineBiomes === "function")
+        await FNS.defineBiomes({ ...(a.biomes || {}), phase: "validate" });
+      return { phase: "validate" };
+    }
     const before = FNS.layersOn();
     const ran = [];
     const notesOut = [];
