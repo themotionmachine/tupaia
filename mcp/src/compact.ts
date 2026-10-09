@@ -341,10 +341,30 @@ export function countChanges(changes: Record<string, unknown> | undefined): Reco
       out.cells = v;
       continue;
     }
+    if (isFieldDiff(v)) {
+      // settings / map fields: nothing is added or removed, so name the fields that changed
+      const names = Object.keys(v);
+      out[type] = { changed: names.length, names };
+      continue;
+    }
     const c = (v as TypeChanges).counts ?? {};
     out[type] = { added: c.added ?? 0, removed: c.removed ?? 0, changed: c.modified ?? 0 } satisfies CountRow;
   }
   return out;
+}
+
+/**
+ * A non-entity entry of the bridge diff: `settings` and `map` (bridge-ext/settings.js) are
+ * `{<field>: {from, to}}`, with no counts or lists. They are small and pass through as they are.
+ */
+function isFieldDiff(v: unknown): v is Record<string, { from: unknown; to: unknown }> {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return false;
+  const vals = Object.values(v as Record<string, unknown>);
+  return (
+    !("counts" in (v as object)) &&
+    vals.length > 0 &&
+    vals.every(x => !!x && typeof x === "object" && "from" in (x as object) && "to" in (x as object))
+  );
 }
 
 /** Up to this many listed changes across all types a mutating tool returns them in full. */
@@ -364,15 +384,15 @@ export function compactChanges(changes: Record<string, unknown> | undefined): Re
   if (!changes) return changes;
   let total = 0;
   for (const [type, v] of Object.entries(changes)) {
-    if (type === "cells") continue;
+    if (type === "cells" || isFieldDiff(v)) continue;
     const c = (v as TypeChanges).counts;
     total += (c?.added ?? 0) + (c?.removed ?? 0) + (c?.modified ?? 0);
   }
   if (total <= CHANGES_FULL_MAX) {
     const whole: Record<string, unknown> = {};
     for (const [type, v] of Object.entries(changes)) {
-      if (type === "cells") {
-        whole.cells = v;
+      if (type === "cells" || isFieldDiff(v)) {
+        whole[type] = v;
         continue;
       }
       const t = v as TypeChanges;
@@ -384,8 +404,8 @@ export function compactChanges(changes: Record<string, unknown> | undefined): Re
   }
   const out: Record<string, unknown> = {};
   for (const [type, v] of Object.entries(changes)) {
-    if (type === "cells") {
-      out.cells = v;
+    if (type === "cells" || isFieldDiff(v)) {
+      out[type] = v;
       continue;
     }
     const t = v as TypeChanges;

@@ -154,7 +154,9 @@ export function register(ctx: ToolContext): void {
         diff: z
           .enum(["list", "counts"])
           .optional()
-          .describe("counts: per entity type {added, removed, changed} instead of listing each change (default list)"),
+          .describe(
+            "counts: per entity type {added, removed, changed} (world settings and map fields: {changed, names}) instead of listing each change (default list)"
+          ),
         overview: z
           .boolean()
           .optional()

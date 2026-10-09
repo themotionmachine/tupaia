@@ -455,7 +455,17 @@ export async function takeScreenshot(
 
   if (cropped) {
     // changed-region result: no repeat of the view metadata, the shot is already known
-    return new WithImages({ shotId: id, ...(images.length ? { file } : {}), ...cropped, compare }, images);
+    return new WithImages(
+      {
+        shotId: id,
+        ...(images.length ? { file } : {}),
+        ...cropped,
+        // labels:'all' with crop:'changed': still say how many hidden labels the shot revealed
+        ...(args.labels === "all" ? { labels: { mode: "all", revealed: labelsRevealed } } : {}),
+        compare
+      },
+      images
+    );
   }
 
   return new WithImages(
