@@ -2,12 +2,14 @@
 // the current map). Both take an auto-undo entry first.
 import { z } from "zod";
 import type { ToolContext } from "../context.ts";
+import { registerReplayable } from "../ops.ts";
 import { planRegen, RegenEmblems, RegenProvinces, recordRegen } from "../regen.ts";
 import { META_TEXT_HEAVY, ToolError } from "../result.ts";
 import { TIMEOUTS, TimeoutMs } from "../schemas.ts";
 import { BiomesRegenOptions, recordBiomesRegen, validateBiomesRegen } from "./biomes.ts";
 import { changesSinceUndo } from "./edit.ts";
 import { defineTools } from "./registry.ts";
+import { RELIEF_REPLAY, ReliefParams, regenerateRelief } from "./relief.ts";
 
 export const REGEN_PARTS = [
   "rivers",
@@ -27,8 +29,12 @@ export const REGEN_PARTS = [
   "goods",
   "markets",
   "economy",
-  "production"
+  "production",
+  "relief"
 ] as const;
+
+// relief-only regenerate calls are seeded and replay in sketches (tools/relief.ts); other parts do not
+registerReplayable("regenerate", RELIEF_REPLAY);
 
 export function register(ctx: ToolContext): void {
   ctx.tool(
@@ -109,11 +115,11 @@ export function register(ctx: ToolContext): void {
     {
       title: "Regenerate parts of the map",
       description:
-        "Re-run generator parts on the current map (heightmap and cells stay). parts run in dependency order regardless of the order given: rivers, biomes, population, cultures, burgs, states, provinces, routes, religions, emblems, military, markers, zones, ice, goods, markets, economy, production. Locked entities are kept where the app supports locks. Several parts turn their layer on (reported in layerChanges); restoreLayers:true turns them back. states reseeds the random stream, so it is not reproducible. One auto-undo entry. " +
-        "Parts with options (see each option object): biomes re-derives biomes from the climate with deterministic edge noise, smoothing and small-region merging, keeping painted and custom biomes (result in details.biomes); " +
-        "provinces {states?, centres?:[{state, burg|at, name?, formName?, fullName?}], count?, ratio?, keepLocked?, lockedStates?, crossForeign?}: new provinces for those states only (default every unlocked state, by the generator's rules; centres: exactly those; count: N per state, of balanced area), also for hand-made states with few or no burgs; " +
-        "emblems {states?, provinces?, burgs?, shieldOnly?, keepLocked?, lockedStates?, stateCulture?}: new coats of arms with each culture's shield. " +
-        "dryRun:true previews (changes nothing) for biomes alone or provinces and/or emblems. These turn no layer on, and replay in a sketch when they are the only parts (logged as literal outcomes).",
+        "Re-run generator parts on the current map (heightmap and cells stay). parts run in dependency order regardless of the order given: rivers, biomes, population, cultures, burgs, states, provinces, routes, religions, emblems, military, markers, zones, ice, goods, markets, economy, production, relief. Locked entities are kept where the app supports locks. Several parts turn their layer on (reported in layerChanges); restoreLayers:true turns them back. states reseeds the random stream, so it is not reproducible. One auto-undo entry. " +
+        "Parts with options (details in each option object): biomes re-derives biomes from the climate with seeded edge noise, smoothing and small-region merging, keeping painted and custom biomes (result in details.biomes); " +
+        "provinces gives new provinces to the named states only (auto, centres, or count N of balanced area; also hand-made states with few or no burgs); emblems gives new coats of arms with each culture's shield; " +
+        "relief redraws the relief icons seeded (same settings, same icons) with settings stored on the map, used by every later draw (map_info shows them as relief). " +
+        "dryRun:true previews and changes nothing: biomes alone, relief alone, or provinces and/or emblems. In a sketch, biomes alone, relief alone, and provinces and/or emblems replay (logged as literal outcomes); any other regenerate makes the sketch blob-only.",
       inputSchema: z.object({
         parts: z.array(z.enum(REGEN_PARTS)).min(1),
         restoreLayers: z.boolean().optional().describe("Undo layer visibility changes made by the regenerators"),
@@ -121,16 +127,19 @@ export function register(ctx: ToolContext): void {
           "Options for part biomes (re-derived from temperature and moisture): noise/mode/scale/seed add deterministic edge noise (no straight 1° bands; mode 'warp' keeps biome totals close), smooth is a boundary majority filter, minRegion merges small regions; custom biomes and cells painted away from their climate biome are kept (keepPainted), as are keep:[biomes] and exclude:select, and smoothing leaves river cells alone (keepRivers); select limits the cells; from:'current' only smooths/merges. The result is in details.biomes (changed, keptBy, net per biome, seed); try seeds with dryRun, then apply once"
         ),
         provinces: RegenProvinces.optional().describe(
-          "Options for part provinces: only these states' provinces are replaced (other states keep theirs; one of theirs left with no cells is removed); locked provinces keep their cells"
+          "Options for part provinces: new provinces for these states only (default every unlocked state, by the generator's rules; centres: exactly those; count: N per state, of balanced area), also for hand-made states with few or no burgs. Other states keep theirs (one of theirs left with no cells is removed); locked provinces keep their cells. Turns no layer on"
         ),
         emblems: RegenEmblems.optional().describe(
-          "Options for part emblems: locked and custom emblems are kept (the notes name locked states skipped); a Wildlands burg or province takes its state's culture shield"
+          "Options for part emblems: new coats of arms with each culture's shield; locked and custom emblems are kept (the notes name locked states skipped); a Wildlands burg or province takes its state's culture shield. Turns no layer on"
+        ),
+        relief: ReliefParams.optional().describe(
+          "Options for part relief: {density | matchIcons, perBiome, minHeight, exclude | excludeAdd/excludeRemove, nearBurgs, seed, onLoad}. Stored with the map and used by every later draw; keys left out keep their stored value. parts:['relief'] alone takes dryRun (the stored settings before/after; with no relief keys it just reads them)"
         ),
         dryRun: z
           .boolean()
           .optional()
           .describe(
-            "Preview, change nothing: parts:['biomes'] alone (counts what would change), or provinces and/or emblems (the outcome in the real result's shape)"
+            "Preview, change nothing: parts:['biomes'] alone (counts what would change), parts:['relief'] alone (the relief settings before/after, draws nothing), or provinces and/or emblems (the outcome in the real result's shape)"
           ),
         timeoutMs: TimeoutMs
       }),
@@ -139,8 +148,12 @@ export function register(ctx: ToolContext): void {
       kind: "heavy"
     },
     async (args, scope) => {
-      // options are checked in the page first (biomes.ts, regen.ts): a bad one changes nothing
+      // options are checked first (relief.ts, biomes.ts, regen.ts): a bad one changes nothing
       const { dryRun, ...rest } = args;
+      if (args.relief !== undefined && !args.parts.includes("relief"))
+        throw new ToolError("BAD_ARGS", "relief settings need 'relief' in parts. Nothing was changed.");
+      // relief alone is phased (dryRun, replay) and needs no other check
+      if (args.parts.every(p => p === "relief")) return regenerateRelief(ctx, scope, args);
       const biomesPlan = await validateBiomesRegen(scope, args.parts, args.biomes);
       const plan = await planRegen(scope, rest, dryRun === true);
       if (dryRun) {
@@ -150,7 +163,7 @@ export function register(ctx: ToolContext): void {
           return { dryRun: true, ...plan, note: "dry run: nothing was changed" };
         throw new ToolError(
           "BAD_ARGS",
-          "dryRun works with parts provinces and/or emblems only, or parts:['biomes'] alone. Nothing was changed."
+          "dryRun works with parts provinces and/or emblems only, or parts:['biomes'] or parts:['relief'] alone. Nothing was changed."
         );
       }
       await scope.pushUndo("regenerate", args);

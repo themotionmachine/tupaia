@@ -96,6 +96,8 @@ export function prepareMapData(): string {
   if (cloneRuler) cloneRuler.innerHTML = ""; // always remove rulers
   const cloneTradeAnimation = cloneEl.querySelector("#tradeAnimation");
   if (cloneTradeAnimation) cloneTradeAnimation.innerHTML = ""; // always remove transient trade animations
+  const cloneTerrain = cloneEl.querySelector("#terrain");
+  if (cloneTerrain?.hasAttribute("data-regenerate")) cloneTerrain.innerHTML = ""; // tupaia-mcp: redrawn on load (relief-settings.ts)
 
   const serializedSVG = new XMLSerializer().serializeToString(cloneEl);
 
