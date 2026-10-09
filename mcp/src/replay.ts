@@ -102,6 +102,7 @@ export function bridgeArgs(tool: string, r: Resolved): Record<string, unknown> {
       if (d.layersPreset !== undefined) out.layersPreset = d.layersPreset;
       if (d.stylePreset !== undefined) out.stylePreset = d.stylePreset;
       if (d.styleRules !== undefined) out.styleRules = d.styleRules;
+      if (d.labels !== undefined) out.labels = d.labels;
       return out;
     }
     case "eval": {

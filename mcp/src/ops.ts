@@ -134,6 +134,8 @@ export interface DisplayResolved {
   layersPreset?: string;
   stylePreset?: string;
   styleRules?: Record<string, unknown>;
+  /** Per label/emblem group visibility override (literal group ids; null clears the group's override). */
+  labels?: Record<string, { minSize?: number | null; maxSize?: number | null; alwaysShow?: boolean | null } | null>;
 }
 
 export interface EvalResolved {
@@ -464,6 +466,31 @@ function listOut(parts: string[], max = 3): string {
 
 type Row = Record<string, unknown>;
 
+/** What one label group's override says: "min size 0, always shown", or "override cleared". */
+function labelSpecText(spec: NonNullable<DisplayResolved["labels"]>[string]): string {
+  if (!spec || typeof spec !== "object") return "override cleared";
+  const bits: string[] = [];
+  if (spec.minSize !== undefined) bits.push(spec.minSize === null ? "default min size" : `min size ${spec.minSize}`);
+  if (spec.maxSize !== undefined) bits.push(spec.maxSize === null ? "default max size" : `max size ${spec.maxSize}`);
+  if (spec.alwaysShow !== undefined) bits.push(spec.alwaysShow ? "always shown" : "auto-hide");
+  return bits.join(", ") || "override cleared";
+}
+
+/** "city, town min size 0; states always shown": groups with the same override are listed together. */
+function labelsText(labels: NonNullable<DisplayResolved["labels"]>): string {
+  const byText = new Map<string, string[]>();
+  for (const [group, spec] of Object.entries(labels)) {
+    const text = labelSpecText(spec);
+    byText.set(text, [...(byText.get(text) ?? []), group]);
+  }
+  const parts = [...byText].map(([text, groups]) => {
+    const names =
+      groups.length > 5 ? `${groups.length} groups (${groups.slice(0, 3).join(", ")}, ...)` : groups.join(", ");
+    return `${names} ${text}`;
+  });
+  return listOut(parts, 8);
+}
+
 /** One sentence for a recorded call, from the resolved form and the bridge's result rows. */
 export function summarizeOp(tool: string, resolved: Resolved | null, out: Row | null, args?: unknown): string {
   try {
@@ -513,6 +540,7 @@ export function summarizeOp(tool: string, resolved: Resolved | null, out: Row | 
         }
         if (r.stylePreset) parts.push(`style ${q(r.stylePreset)}`);
         if (r.styleRules) parts.push(`style rules for ${Object.keys(r.styleRules).join(", ")}`);
+        if (r.labels && typeof r.labels === "object") parts.push(`label visibility ${labelsText(r.labels)}`);
         return `Display: ${parts.join("; ") || "no change"}.`;
       }
       case "eval": {

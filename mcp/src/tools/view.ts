@@ -104,14 +104,27 @@ export const ScreenshotInput = z.object({
     .min(0.1)
     .max(20)
     .optional()
-    .describe("Absolute zoom (scale) 1-20; default fits the target (8 for points)"),
-  full: z.boolean().optional().describe("Whole map rasterised at graph size x scale (ignores target/zoom)"),
+    .describe(
+      "Absolute zoom (scale) 0.1-20, raised to the full-map fit when lower (view.scale in the result is the zoom used); default fits the target (8 for points)"
+    ),
+  full: z
+    .boolean()
+    .optional()
+    .describe(
+      "Whole map rasterised at graph size x scale (ignores target/zoom); labels are sized and hidden for the full-map zoom, whatever the camera was"
+    ),
   view: z.string().optional().describe("Reuse the exact view of an earlier shot: 'last' or a shotId"),
   layers: z.object({ on: z.array(LayerName).optional(), off: z.array(LayerName).optional() }).optional(),
   keepLayers: z
     .boolean()
     .optional()
     .describe("Keep the layer changes after the shot (default: revert); kept changes are undoable like display"),
+  labels: z
+    .enum(["all"])
+    .optional()
+    .describe(
+      "'all': show every text label for this shot only, including the ones the zoom rule hides (not emblems; turns the labels layer on if it is off); nothing is kept and there is no undo entry"
+    ),
   hideUi: z.boolean().optional().describe("Hide UI overlays and dialogs (default true)"),
   format: z.enum(["jpeg", "png"]).optional().describe("Returned image format (default jpeg)"),
   quality: z.number().min(0.3).max(1).optional().describe("JPEG quality (default 0.85)"),
@@ -153,6 +166,9 @@ export const ScreenshotInput = z.object({
     .describe("crop:'changed': return before | after in one image instead of just the new shot")
 });
 
+/** Servers whose last labels:'all' shot could not clean up (the temporary <style> may still be in the page). */
+const labelsShotDirty = new WeakSet<ToolContext>();
+
 export async function takeScreenshot(
   ctx: ToolContext,
   scope: CallScope,
@@ -172,6 +188,8 @@ export async function takeScreenshot(
   const format = args.format ?? "jpeg";
   const maxSide = args.maxSide ?? 1024;
   const hideUi = args.hideUi ?? true;
+  if (args.labels === "all" && args.layers?.off?.includes("labels"))
+    throw new ToolError("BAD_ARGS", "labels:'all' needs the labels layer on, but layers.off lists 'labels'");
   // validated up front: a refused path leaves no shot id behind
   const saveTo = args.saveTo
     ? resolveWritePath(ctx.config, args.saveTo, { exts: [".png"], overwrite: !!args.overwrite })
@@ -183,6 +201,15 @@ export async function takeScreenshot(
     before = fs.readFileSync(compareRec.file).toString("base64");
   }
 
+  if (labelsShotDirty.has(ctx)) {
+    // an earlier labels:'all' shot failed to clean up: drop its style tag before this shot sees it
+    await scope.call("labelsShot", { on: false }).then(
+      () => labelsShotDirty.delete(ctx),
+      () => {}
+    );
+  }
+  let labelsShot: { layerTurnedOn: boolean } | null = null;
+  let labelsRevealed: number | undefined;
   let exactView = false;
   let layerChange: { changed: unknown[]; previous: { on: string[]; off: string[] } } | null = null;
   let png: Buffer;
@@ -197,6 +224,10 @@ export async function takeScreenshot(
       // kept layers are a display change in a sketch's log
       if (args.keepLayers)
         await scope.record("display", args, { on: args.layers.on ?? [], off: args.layers.off ?? [] });
+    }
+    if (args.labels === "all") {
+      labelsShotDirty.add(ctx);
+      labelsShot = await scope.call<{ layerTurnedOn: boolean }>("labelsShot", { on: true });
     }
     if (full) {
       view = await scope.call<ViewInfo>("getView");
@@ -246,7 +277,20 @@ export async function takeScreenshot(
       png = await ctx.browser.screenshotMap({ hideUi, scale, timeoutMs: scope.remainingMs });
     }
   } finally {
+    // undone in the reverse order of setup: thaw (set last), then the labels:'all' style, then layers
     if (frozen) await scope.call("thaw", {}, { noAlerts: true, timeoutMs: STEP_MS }).catch(() => {});
+    if (labelsShot) {
+      // a <style> tag and (maybe) the labels layer: removed/restored here, never in the map or the undo stack
+      const r = await scope
+        .call<{ revealed: number }>("labelsShot", { on: false, restoreLayer: labelsShot.layerTurnedOn })
+        .catch(() => null);
+      labelsRevealed = r?.revealed;
+      if (r) labelsShotDirty.delete(ctx);
+      else
+        scope.notes.push(
+          "labels:'all' could not be undone in the page (its temporary style may remain); the next screenshot retries, or reload the page"
+        );
+    }
     if (layerChange && !args.keepLayers) {
       const prev = layerChange.previous;
       if (prev.on.length || prev.off.length)
@@ -426,6 +470,7 @@ export async function takeScreenshot(
       view: full ? undefined : { x: view.x, y: view.y, scale: view.scale },
       mapBboxShown: full ? [0, 0, view.graphWidth, view.graphHeight] : view.mapBboxShown,
       target: view.target,
+      labels: args.labels === "all" ? { mode: "all", revealed: labelsRevealed } : undefined,
       layersChanged: layerChange?.changed.length
         ? { changed: layerChange.changed, reverted: !args.keepLayers }
         : undefined,
@@ -442,7 +487,7 @@ export function register(ctx: ToolContext): void {
     {
       title: "Screenshot the map",
       description:
-        "See the map. Frames target {entity:{type,ref}} | {bbox:[x0,y0,x1,y1]} | {at:Place} at an optional zoom (1-20; default fits the target, 8 for a point), or reuses an earlier shot's exact view (view:'last'|shotId), or keeps the current view. full:true rasterises the whole map instead. layers:{on,off} apply only for this shot (keepLayers:true keeps them). Returns a JPEG (maxSide 1024 by default) plus {shotId, file (full-resolution PNG), view, mapBboxShown}. The animated trade markers are hidden while capturing, so two shots of one view are pixel-identical. compare:shotId diffs against that shot at the same view (a different frame is refused: BAD_ARGS) and returns the diff image (red = changed) with changedPct. crop:'changed' (with compare) returns only the changed region of the new shot instead (pad in map px; sideBySide = before | after), with compare.bbox and compare.shown (the box the image maps onto) in map px, compare.clusters (each separate change, largest first, when there are several), touchesEdge and spread notes; nothing changed = no image and a one-line note (which says when the newest edit ran with redraw:[] or only touched hidden layers, so it was not drawn). inspect {at:{screen,shot}} works on a crop shot (pixels of the returned image). Take one after any visual change, framed on what changed; skip it after pure reads.",
+        "See the map. Frames target {entity:{type,ref}} | {bbox:[x0,y0,x1,y1]} | {at:Place} at an optional zoom (0.1-20, not below the full-map fit; default fits the target, 8 for a point), or reuses an earlier shot's exact view (view:'last'|shotId), or keeps the current view. full:true rasterises the whole map instead, with labels sized for the full-map zoom whatever the camera was. layers:{on,off} apply only for this shot (keepLayers:true keeps them). labels:'all' shows every text label for this shot only, including the ones the zoom rule hides (display {labels} changes that for good). Returns a JPEG (maxSide 1024 by default) plus {shotId, file (full-resolution PNG), view, mapBboxShown}. The animated trade markers are hidden while capturing, so two shots of one view are pixel-identical. compare:shotId diffs against that shot at the same view (a different frame is refused: BAD_ARGS) and returns the diff image (red = changed) with changedPct. crop:'changed' (with compare) returns only the changed region of the new shot instead (pad in map px; sideBySide = before | after), with compare.bbox and compare.shown (the box the image maps onto) in map px, compare.clusters (each separate change, largest first, when there are several), touchesEdge and spread notes; nothing changed = no image and a one-line note (which says when the newest edit ran with redraw:[] or only touched hidden layers, so it was not drawn). inspect {at:{screen,shot}} works on a crop shot (pixels of the returned image). Take one after any visual change, framed on what changed; skip it after pure reads.",
       inputSchema: ScreenshotInput,
       annotations: { readOnlyHint: true, openWorldHint: false },
       kind: "view"
