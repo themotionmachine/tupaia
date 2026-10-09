@@ -110,13 +110,28 @@ export interface EditResolved {
     after?: Record<string, unknown>;
     remove?: boolean;
     /**
+     * A forced removal: a routeGroup whose routes moved to `moveTo`, or a burg that was a capital
+     * or a market centre.
+     */
+    force?: boolean;
+    moveTo?: number | string;
+    /**
      * The entity's identifying and main fields before the op (bridge identOf): replay checks
      * that the target is still the same entity (marker, route and zone ids are reused) and,
      * for a removal, that nobody changed it since.
      */
     ident?: Record<string, unknown> | null;
+    /** Entities the op created (edit river {split}), for the replay id map. */
+    created?: CreatedRef[];
+    /** burg removal: the burg made capital, orphan routes too (force: see above). */
+    newCapital?: number;
+    orphanRoutes?: boolean;
+    /** burg removal: the burg that took over each province the removed burg headed. */
+    provinceHeads?: Array<{ province: number; burg: number }>;
   }>;
   redraw?: unknown;
+  /** Structural river edits: fingerprint of the cell graph their literal cell lists refer to. */
+  graph?: string;
 }
 
 export interface CreatedRef {
@@ -333,10 +348,19 @@ export class SketchStore {
       }
       const last = sk.ops[sk.ops.length - 1];
       if (last && last.undoId === e.id) {
-        sk.ops.pop();
-        sk.redo.push(last);
+        // one call can log several records under its one undo entry (apply): take them all out
+        const taken: OpRecord[] = [];
+        while (sk.ops.length && sk.ops[sk.ops.length - 1].undoId === e.id) {
+          const o = sk.ops.pop() as OpRecord;
+          sk.redo.push(o);
+          taken.push(o);
+        }
         sk.rev++;
-        notes.push(`sketch '${sk.slug}': op ${last.seq} (${last.tool}) removed from the log (redo restores it)`);
+        const what =
+          taken.length === 1
+            ? `op ${last.seq} (${last.tool})`
+            : `ops ${taken[taken.length - 1].seq}-${last.seq} (one ${e.op} call)`;
+        notes.push(`sketch '${sk.slug}': ${what} removed from the log (redo restores it)`);
         continue;
       }
       if (!sk.recording) {
@@ -358,11 +382,19 @@ export class SketchStore {
     pairs.forEach(({ from, to }, k) => {
       const top = sk.redo[sk.redo.length - 1];
       if (top && top.undoId === from) {
-        sk.redo.pop();
-        top.undoId = to;
-        sk.ops.push(top);
+        // every record of that call (oldest is on top of the redo list)
+        let n = 0;
+        while (sk.redo.length && sk.redo[sk.redo.length - 1].undoId === from) {
+          const o = sk.redo.pop() as OpRecord;
+          o.undoId = to;
+          sk.ops.push(o);
+          n++;
+        }
         sk.rev++;
-        notes.push(`sketch '${sk.slug}': op ${top.seq} (${top.tool}) is back in the log`);
+        const last = sk.ops[sk.ops.length - 1];
+        notes.push(
+          `sketch '${sk.slug}': ${n === 1 ? `op ${top.seq} (${top.tool}) is` : `ops ${top.seq}-${last.seq} are`} back in the log`
+        );
         return;
       }
       if (!sk.recording) {
@@ -384,7 +416,7 @@ export class SketchStore {
     const last = sk.ops[sk.ops.length - 1];
     if (kind === "undo" && poppedUndoId !== undefined) {
       if (last && last.undoId === poppedUndoId) {
-        sk.ops.pop();
+        while (sk.ops.length && sk.ops[sk.ops.length - 1].undoId === poppedUndoId) sk.ops.pop();
         sk.rev++;
         return;
       }
@@ -491,23 +523,98 @@ function listOut(parts: string[], max = 3): string {
 
 type Row = Record<string, unknown>;
 
+/** A route's points as the bridge reports them ({n, px, ...}), or a literal list of places. */
+function pointsInfo(v: unknown): { n: number; px?: number } | null {
+  if (Array.isArray(v)) return { n: v.length };
+  const o = v as { n?: unknown; px?: unknown } | null;
+  if (o && typeof o === "object" && typeof o.n === "number")
+    return { n: o.n, ...(typeof o.px === "number" ? { px: o.px } : {}) };
+  return null;
+}
+
+/** "before -> after" for one edited field; a route's points read as counts and lengths ("3 -> 2 (123.4 -> 80 px)"). */
+function changeText(before: unknown, after: unknown): string {
+  const b = pointsInfo(before);
+  const a = pointsInfo(after);
+  if (b && a) return `${b.n} -> ${a.n}${b.px !== undefined && a.px !== undefined ? ` (${b.px} -> ${a.px} px)` : ""}`;
+  return `${q(before)} -> ${q(after)}`;
+}
+
+/** The value an edit set when the op recorded no before/after: a points list reads "N places". */
+const setText = (v: unknown): string => {
+  const p = pointsInfo(v);
+  return p ? `${p.n} places` : q(v);
+};
+
+/**
+ * Per entity type and edit field: a phrase for the sketch log built from the resolved op (its
+ * literal set value, before/after and created), for fields whose before/after values are opaque
+ * (edit river {mainStem, split, merge, reroute}). Return null to fall back to "field a -> b".
+ * Built from the resolved data only, so a stored record cannot inject free text.
+ */
+export const EDIT_FIELD_SUMMARIES: Record<
+  string,
+  Record<string, (o: EditResolved["ops"][number]) => string | null>
+> = {};
+
+/** ' (forced; capital of Oom -> Kerfhold; 1 orphan route removed)' for a removal's result row. */
+function removalDetail(o: EditResolved["ops"][number], row: Row | undefined): string {
+  const parts: string[] = [];
+  if (o.force) parts.push("forced");
+  const cap = row?.capital as
+    | { state?: number; stateName?: string | null; to?: number; name?: string | null }
+    | undefined;
+  if (cap && typeof cap === "object")
+    parts.push(
+      `capital of ${cap.stateName ?? `state ${cap.state}`} -> ${cap.to ? (cap.name ?? `burg ${cap.to}`) : "none"}`
+    );
+  const markets = row?.marketsRemoved;
+  if (Array.isArray(markets) && markets.length) parts.push(`market ${markets.join(", ")} removed`);
+  const routes = row?.routesRemoved;
+  if (Array.isArray(routes) && routes.length)
+    parts.push(`${routes.length} orphan route${routes.length === 1 ? "" : "s"} removed`);
+  return parts.length ? ` (${parts.join("; ")})` : "";
+}
+
 /** One sentence for a recorded call, from the resolved form and the bridge's result rows. */
 export function summarizeOp(tool: string, resolved: Resolved | null, out: Row | null, args?: unknown): string {
   try {
     switch (tool) {
       case "edit": {
         const r = resolved as EditResolved;
-        const parts = r.ops.map(o => {
+        const rows = (out?.applied as Row[] | undefined) ?? [];
+        const edited: string[] = [];
+        const removed: string[] = [];
+        r.ops.forEach((o, k) => {
           const who = r.type === "map" ? "the map" : `${r.type} ${o.name ? `${q(o.name)} ` : ""}(${o.ref})`;
-          if (o.remove) return `removed ${who}`;
-          const fields = Object.keys(o.set ?? {}).map(k =>
-            o.before && o.after && k in o.before
-              ? `${k} ${q(o.before[k])} -> ${q(o.after[k])}`
-              : `${k} ${q(o.set?.[k])}`
-          );
-          return `${who}: ${fields.join(", ")}`;
+          if (o.remove) {
+            // a route group removed with force: its routes moved to moveTo
+            const held = Number((o.ident as { routes?: unknown } | null | undefined)?.routes ?? 0);
+            removed.push(
+              o.force && o.moveTo !== undefined
+                ? `${who} (${held ? `${held} route${held === 1 ? "" : "s"} ` : ""}moved to ${o.moveTo})`
+                : `${who}${removalDetail(o, rows[k])}`
+            );
+            return;
+          }
+          const fields = Object.keys(o.set ?? {}).map(k => {
+            const say = EDIT_FIELD_SUMMARIES[r.type]?.[k];
+            let said: string | null = null;
+            try {
+              said = say ? say(o) : null;
+            } catch {
+              said = null;
+            }
+            if (said) return said;
+            return o.before && o.after && k in o.before
+              ? `${k} ${changeText(o.before[k], o.after[k])}`
+              : `${k} ${setText(o.set?.[k])}`;
+          });
+          const made = (o.created ?? []).map(c => `${c.type} ${c.i}`);
+          edited.push(`${who}: ${fields.join(", ")}${made.length ? ` (created ${made.join(", ")})` : ""}`);
         });
-        return `Edited ${listOut(parts)}.`;
+        if (!edited.length) return `Removed ${listOut(removed)}.`;
+        return `Edited ${listOut(edited)}${removed.length ? `; removed ${listOut(removed)}` : ""}.`;
       }
       case "add": {
         const r = resolved as AddResolved;
@@ -515,7 +622,8 @@ export function summarizeOp(tool: string, resolved: Resolved | null, out: Row | 
         const parts = r.items.map((it, k) => {
           const row = rows[k] ?? {};
           const name = (row.name as string | undefined) ?? (it.name as string | undefined);
-          const extra = r.type === "route" ? ` through ${(it.through as unknown[]).length} places` : "";
+          const pts = (it.points ?? it.through) as unknown[] | undefined;
+          const extra = r.type === "route" && pts ? ` ${it.noPathfind ? "along" : "through"} ${pts.length} places` : "";
           return `${r.type} ${name ? `${q(name)} ` : ""}(${row.i ?? r.created[k]?.[0]?.i ?? "?"})${extra}`;
         });
         return `Added ${listOut(parts)}.`;
@@ -579,14 +687,19 @@ export class Unmapped extends Error {
   }
 }
 
+/** Per item (add) or op (edit), the entities a resolved form says it created. */
+export function createdLists(tool: string, resolved: Resolved): CreatedRef[][] {
+  if (tool === "add") return (resolved as AddResolved).created ?? [];
+  if (tool === "edit") return ((resolved as EditResolved).ops ?? []).map(o => o.created ?? []);
+  const ext = REPLAY_EXT[tool];
+  return ext?.created ? ext.created(resolved) : [];
+}
+
 /** The entities one op created (as "type:id"). */
 export function createdBy(o: OpRecord): string[] {
   if (!o.resolved) return [];
-  const ext = REPLAY_EXT[o.tool];
-  const lists =
-    o.tool === "add" ? ((o.resolved as AddResolved).created ?? []) : ext?.created ? ext.created(o.resolved) : [];
   const out: string[] = [];
-  for (const list of lists) for (const c of list) out.push(`${c.type}:${c.i}`);
+  for (const list of createdLists(o.tool, o.resolved)) for (const c of list) out.push(`${c.type}:${c.i}`);
   return out;
 }
 
@@ -604,7 +717,9 @@ const NOTE_PREFIX: Array<[string, string]> = [
   ["marker", "marker"],
   ["burg", "burg"],
   ["route", "route"],
-  ["river", "river"]
+  ["river", "river"],
+  ["culture", "culture"],
+  ["religion", "religion"]
 ];
 
 export class Rewriter {
@@ -626,6 +741,8 @@ export class Rewriter {
   }
 
   noteId(id: string): string {
+    // a label's note shares the label's own id (label12), which is the label's id
+    if (/^label\d+$/.test(id)) return String(this.id("label", id));
     for (const [prefix, type] of NOTE_PREFIX) {
       const m = new RegExp(`^${prefix}(\\d+)$`).exec(id);
       if (m) return `${prefix}${this.id(type, Number(m[1]))}`;
@@ -647,14 +764,17 @@ export const EDIT_REF_FIELDS: Record<string, Record<string, string>> = {
   state: { capital: "burg", culture: "culture" },
   province: { capital: "burg" },
   marker: { move: "@place" },
-  label: { move: "@place" }
+  label: { move: "@place" },
+  route: { points: "@places", group: "routeGroup" },
+  routeGroup: { after: "routeGroup", before: "routeGroup" }
 };
 
 export const ADD_REF_FIELDS: Record<string, Record<string, string>> = {
   burg: { at: "@place", culture: "culture" },
   state: { capital: "@capital", culture: "culture" },
   marker: { at: "@place" },
-  route: { through: "@places" },
+  route: { through: "@places", points: "@places", group: "routeGroup" },
+  routeGroup: { after: "routeGroup", before: "routeGroup" },
   label: { at: "@place" },
   note: { entity: "@entity", id: "@noteId" },
   culture: { at: "@place" },
@@ -679,6 +799,9 @@ export function rewriteField(rw: Rewriter, kind: string, v: unknown): unknown {
     case "@noteId":
       return typeof v === "string" ? rw.noteId(v) : v;
     default:
+      // a ref field's literal may carry the ref with a precondition: {ref, ...} (river mainStem)
+      if (v && typeof v === "object" && !Array.isArray(v) && "ref" in v)
+        return { ...(v as Record<string, unknown>), ref: rw.id(kind, (v as { ref: unknown }).ref) };
       return rw.id(kind, v);
   }
 }
@@ -692,6 +815,13 @@ export function rewriteResolved(tool: string, resolved: Resolved, rw: Rewriter):
       const fields = EDIT_REF_FIELDS[e.type] ?? {};
       for (const o of e.ops) {
         if (o.ref !== undefined) o.ref = rw.id(e.type, o.ref) as number | string;
+        if (o.moveTo !== undefined && e.type === "routeGroup") o.moveTo = rw.id("routeGroup", o.moveTo) as string;
+        if (o.newCapital) o.newCapital = rw.id("burg", o.newCapital) as number;
+        if (o.provinceHeads)
+          o.provinceHeads = o.provinceHeads.map(x => ({
+            province: rw.id("province", x.province) as number,
+            burg: rw.id("burg", x.burg) as number
+          }));
         for (const [k, kind] of Object.entries(fields))
           if (o.set && k in o.set) o.set[k] = rewriteField(rw, kind, o.set[k]);
         // before/after hold the same fields as get() returns them (e.g. a capital burg id)

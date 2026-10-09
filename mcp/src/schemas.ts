@@ -9,6 +9,7 @@ export const ENTITY_TYPES = [
   "religion",
   "river",
   "route",
+  "routeGroup",
   "marker",
   "zone",
   "feature",

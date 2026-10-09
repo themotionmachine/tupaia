@@ -485,6 +485,9 @@ describe("tupaia-mcp sketch network actions (live mode, fake Worker)", () => {
     await h.ok("edit", { type: "burg", ops: [{ ref: pick.A.i, set: { name: "Sketchford" } }] });
     await h.ok("add", { type: "burg", items: [{ at: pick.newAt, name: "Newhaven" }] });
     await h.ok("edit", { type: "state", ops: [{ ref: pick.S1.i, set: { color: "#aa2200" } }] });
+    // an unsaved sketch has no view link yet
+    const unsaved = await h.ok("sketch", { action: "summary", shots: false });
+    assert.doesNotMatch(String(unsaved.markdown), /View:/);
     fake.clearLog();
     const p = await h.ok("sketch", { action: "save" });
     assert.equal(p.preview, true);
@@ -511,6 +514,8 @@ describe("tupaia-mcp sketch network actions (live mode, fake Worker)", () => {
     const status = await h.ok("sketch", { action: "status" });
     assert.equal(status.dirty, false);
     assert.equal(status.viewUrl, viewUrl);
+    const saved = await h.ok("sketch", { action: "summary", shots: false });
+    assert.match(String(saved.markdown), /View: /);
 
     const l = await h.ok("sketch", { action: "list" });
     const items = l.sketches as Obj[];

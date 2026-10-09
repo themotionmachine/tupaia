@@ -25,6 +25,7 @@ import { replayOps } from "../replay.ts";
 import { META_TEXT_HEAVY, ToolError } from "../result.ts";
 import { type LAYER_NAMES, TimeoutMs } from "../schemas.ts";
 import { sha256 } from "../shared-api.ts";
+import { CompactFlag, readMapData } from "./compact.ts";
 import { defineTools } from "./registry.ts";
 import { requireLive, sharedSave } from "./shared.ts";
 import { takeScreenshot } from "./view.ts";
@@ -340,7 +341,7 @@ async function summaryShots(
   return shots;
 }
 
-async function summary(ctx: ToolContext, scope: CallScope, args: { shots?: boolean }) {
+async function summary(ctx: ToolContext, scope: CallScope, args: { shots?: boolean; willSave?: boolean }) {
   const sk = needSketch(ctx);
   const now = await scope.call<{ counts: Record<string, number>; cells?: number }>("summary", {}, { noAlerts: true });
   const nowCounts = withCells(now);
@@ -357,7 +358,9 @@ async function summary(ctx: ToolContext, scope: CallScope, args: { shots?: boole
   if (sk.note) lines.push(sk.note, "");
   lines.push(`- Base: ${baseLine(sk.base)}`);
   lines.push(`- Operations: ${sk.ops.length}${sk.recording ? " (recording)" : " (stopped)"}`);
-  if (ctx.config.liveOrigin) lines.push(`- View: ${viewUrl(ctx.config.liveOrigin, sk.slug)}`);
+  // the sketch has a view link once it is saved (or while it is being saved)
+  if (ctx.config.liveOrigin && (sk.saved || args.willSave))
+    lines.push(`- View: ${viewUrl(ctx.config.liveOrigin, sk.slug)}`);
   if (reasons.length) lines.push(`- Blob only (cannot be replayed onto a newer shared map): ${reasons.join("; ")}`);
   if (sk.ops.some(o => o.unsafe)) lines.push("- Contains eval code, replayed verbatim (marked unsafe).");
   lines.push("", "## Changes", "");
@@ -613,7 +616,7 @@ export function refuseOversizeOps(header: Record<string, unknown>, sk: Sketch): 
 }
 
 /** save: PUT the page map to sketch-<slug> and its ops.json. Never touches `shared`. */
-async function save(ctx: ToolContext, scope: CallScope, args: { confirm?: boolean }) {
+async function save(ctx: ToolContext, scope: CallScope, args: { confirm?: boolean; compact?: boolean }) {
   requireLiveSketch(ctx, "save");
   const sk = needSketch(ctx);
   if (sk.base.kind !== "shared" || typeof sk.base.version !== "number")
@@ -628,11 +631,7 @@ async function save(ctx: ToolContext, scope: CallScope, args: { confirm?: boolea
     );
   const origin = ctx.shared.origin();
   const id = sketchId(sk.slug);
-  const data = await scope.call<{ text: string; customization: number; fileName: string | null }>(
-    "mapData",
-    {},
-    { noAlerts: true }
-  );
+  const data = await readMapData(scope, args.compact);
   if (data.customization)
     throw new ToolError(
       "REFUSED",
@@ -656,10 +655,11 @@ async function save(ctx: ToolContext, scope: CallScope, args: { confirm?: boolea
       blobOnly: reasons.length > 0,
       ...(reasons.length ? { blobOnlyReasons: reasons } : {}),
       viewUrl: url,
-      next: "Nothing was written. sketch {action:'save', confirm:true} writes the sketch (never the shared map)."
+      ...(data.compacted ? { compacted: data.compacted } : {}),
+      next: `Nothing was written. sketch {action:'save', confirm:true${args.compact ? ", compact:true" : ""}} writes the sketch (never the shared map).`
     };
   }
-  if (!sk.summaryMarkdown || sk.summaryRev !== sk.rev) await summary(ctx, scope, { shots: false });
+  if (!sk.summaryMarkdown || sk.summaryRev !== sk.rev) await summary(ctx, scope, { shots: false, willSave: true });
   const makeHeader = (blobVersion: number | null, updated: string) => ({
     schema: OPS_SCHEMA,
     slug: sk.slug,
@@ -707,6 +707,7 @@ async function save(ctx: ToolContext, scope: CallScope, args: { confirm?: boolea
   sk.saved = { rev: sk.rev, version: put.version, at: now };
   return {
     saved: { id, version: put.version, bytes: body.length, updated_by: put.updated_by, opsBytes: opsSaved.bytes },
+    ...(data.compacted ? { compacted: data.compacted } : {}),
     viewUrl: url,
     sketch: ctx.sketches.view(sk),
     next: "Give the human the viewUrl (it opens the sketch, not the shared map) and the summary markdown. Promote only after they say yes: sketch {action:'rebase'} if the shared map moved, then sketch_promote."
@@ -867,7 +868,7 @@ async function discard(ctx: ToolContext, args: { slug?: string; confirm?: boolea
 async function promote(
   ctx: ToolContext,
   scope: CallScope,
-  args: { confirm?: boolean; token?: string; then?: "keep" | "discard" }
+  args: { confirm?: boolean; token?: string; then?: "keep" | "discard"; compact?: boolean }
 ): Promise<Record<string, unknown>> {
   requireLive(ctx);
   const sk = needSketch(ctx);
@@ -900,6 +901,7 @@ async function promote(
     confirm: args.confirm,
     token: args.token,
     expectVersion: base,
+    compact: args.compact,
     viaSketch: true
   });
   const sketchInfo = { slug: sk.slug, base, ops: sk.ops.length, then, ...(notes.length ? { notes } : {}) };
@@ -907,7 +909,7 @@ async function promote(
     if (typeof res.next === "string")
       res.next = res.next.replace(
         /shared_save \{confirm:true, token:'([^']+)'([^}]*)\}/,
-        `sketch_promote {confirm:true, token:'$1'${then === "discard" ? ", then:'discard'" : ""}}`
+        `sketch_promote {confirm:true, token:'$1'${then === "discard" ? ", then:'discard'" : ""}${args.compact ? ", compact:true" : ""}}`
       );
     return { ...res, sketch: sketchInfo };
   }
@@ -951,6 +953,7 @@ export const SketchInput = z.object({
     .optional()
     .describe("save/discard: true performs the write (live mode only); absent returns a preview"),
   full: z.boolean().optional().describe("status: include every op record with its resolved form (large)"),
+  compact: CompactFlag.describe("save: write a compacted copy of the page map (see compact); the page is not changed"),
   timeoutMs: TimeoutMs
 });
 
@@ -960,7 +963,7 @@ export function register(ctx: ToolContext): void {
     {
       title: "Provisional sketches",
       description:
-        "Propose a change to the shared map without changing it: a sketch is base version N of the shared map plus the ops log that produced it. start {slug?, note?}: needs a page map from load_map {source:'shared'} with no edits; then every mutating call is logged in its resolved form (ids, literal names and cells). regenerate (unless its parts are only replayable ones: provinces/emblems, biomes, relief), generate_map, load_map and snapshot restore make it blob-only (not replayable) until undone; snapshot undo takes the last op out of the log. status: base, ops, blobOnly, lastSaved, dirty, viewUrl. summary: markdown for humans with before/after screenshots under TUPAIA_OUT/sketches/<slug>/. stop: end recording. rebase {onConflict?}: replay the log onto the CURRENT shared map (a GET), keeping other people's edits; a removed target or a field both sides changed is a conflict ('stop' default, or 'skip'); does not save. Network (Worker id sketch-<slug>, never the shared map): save {confirm:true} PUTs the page map and ops.json and returns viewUrl (opens the sketch in the app); list (read-only) shows saved sketches with their headers; open {slug} loads one into the page as the active sketch; discard {slug, confirm:true} deletes it. save and discard need a server spawned with TUPAIA_MODE=live; without confirm they preview. To put a sketch on the shared map use sketch_promote.",
+        "Propose a change to the shared map without changing it: a sketch is base version N of the shared map plus the ops log that produced it. start {slug?, note?}: needs a page map from load_map {source:'shared'} with no edits; then every mutating call is logged in its resolved form (ids, literal names and cells). regenerate (unless its parts are only replayable ones: provinces/emblems, biomes, relief), generate_map, load_map and snapshot restore make it blob-only (not replayable) until undone; snapshot undo takes the last op out of the log. status: base, ops, blobOnly, lastSaved, dirty, viewUrl. summary {shots?}: markdown for humans with before/after screenshots under TUPAIA_OUT/sketches/<slug>/ (the screenshots reload the base map and can take a minute on a busy machine; shots:false skips them). stop: end recording. rebase {onConflict?}: replay the log onto the CURRENT shared map (a GET), keeping other people's edits; a removed target or a field both sides changed is a conflict ('stop' default, or 'skip'); does not save. Network (Worker id sketch-<slug>, never the shared map): save {confirm:true} PUTs the page map and ops.json and returns viewUrl (opens the sketch in the app); list (read-only) shows saved sketches with their headers; open {slug} loads one into the page as the active sketch; discard {slug, confirm:true} deletes it. save and discard need a server spawned with TUPAIA_MODE=live; without confirm they preview. To put a sketch on the shared map use sketch_promote.",
       inputSchema: SketchInput,
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
       _meta: META_TEXT_HEAVY,
@@ -1020,7 +1023,8 @@ export function register(ctx: ToolContext): void {
         then: z
           .enum(["keep", "discard"])
           .optional()
-          .describe("After a confirmed promote: 'keep' (default) the saved sketch, or 'discard' it")
+          .describe("After a confirmed promote: 'keep' (default) the saved sketch, or 'discard' it"),
+        compact: CompactFlag
       }),
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
       kind: "heavy"

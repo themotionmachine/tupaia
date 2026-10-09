@@ -230,7 +230,9 @@
       let n = 0;
       for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) {
         if (a[k] === b[k]) continue;
-        const tagged = String(a[k]).startsWith("#") || String(b[k]).startsWith("#");
+        // hashes of arrays/objects are tagged "#arr<n>:..." / "#obj:..."; a colour such as "#3d2b6b" is not one
+        const isTag = v => /^#(arr\d|obj:)/.test(String(v));
+        const tagged = isTag(a[k]) || isTag(b[k]);
         fields[k] = tagged ? "changed" : [a[k] ?? null, b[k] ?? null];
         n++;
       }
@@ -413,6 +415,9 @@
     biome: "biome"
   };
 
+  // Entity types added by bridge-ext/*.js through T.registerType (defined near the end).
+  const EXT = {};
+
   let memo = null; // per-call cache, reset by T.call
   const cached = (key, fn) => {
     if (!memo) memo = {};
@@ -469,7 +474,7 @@
       case "biome":
         return cached("biomes", biomeRows);
       default:
-        return checkType(type);
+        return EXT[type] ? EXT[type].list() : checkType(type);
     }
   }
 
@@ -556,6 +561,7 @@
   }
 
   function altNames(type, x) {
+    if (EXT[type]?.alt) return EXT[type].alt(x);
     if (type === "state" || type === "province") return x.fullName ? [x.fullName] : [];
     if (type === "marker") return x.type ? [x.type] : [];
     return [];
@@ -749,11 +755,11 @@
     const r = parseRef(ref);
     if (r.id !== undefined) {
       const id = r.id;
-      if (type === "note" || type === "label") {
-        // string ids such as burg12 / label3; a bare number is never valid here
+      if (type === "note" || type === "label" || EXT[type]?.stringIds) {
+        // string ids such as burg12 / label3 / route-tunnels; a bare number is never valid here
         const x = byId(type, String(id));
         if (!x) fail("NOT_FOUND", `no ${type} with id '${id}'`);
-        return { type, i: x.id, name: nameOf(type, x), entity: x };
+        return { type, i: idOf(type, x), name: nameOf(type, x), entity: x };
       }
       if (!Number.isInteger(id) || id < 0) fail("NOT_FOUND", `${type} id must be a non-negative integer, got ${id}`);
       if (id === 0 && INDEXED[type] && !(type in ZERO_OK)) {
@@ -764,9 +770,10 @@
       if (x.removed) fail("REMOVED", `${type} ${id}${x.name ? ` (${x.name})` : ""} was removed`);
       return { type, i: idOf(type, x), name: nameOf(type, x), entity: x };
     }
-    // by name: notes/labels also match their id string
+    // by name: notes/labels also match their id string, and so do string-id extension types
+    // (an exact id wins over another row's display name: a group named 'roads' must not hide 'roads')
     const live = liveList(type, true);
-    if (type === "note" || type === "label") {
+    if (type === "note" || type === "label" || EXT[type]?.stringIds) {
       const byStr = live.find(x => x.id === r.name);
       if (byStr) return { type, i: byStr.id, name: nameOf(type, byStr), entity: byStr };
     }
@@ -912,6 +919,8 @@
     } else if (type === "note") {
       const a = anchor(type, x);
       if (a) b = { x0: a.x, y0: a.y, x1: a.x, y1: a.y, cx: a.x, cy: a.y };
+    } else if (EXT[type]?.box) {
+      b = EXT[type].box(x);
     }
     if (!b) fail("NO_POSITION", `${type} ${r.i} has no position on the map`);
     for (const k of ["x0", "y0", "x1", "y1", "cx", "cy"]) b[k] = rn(b[k], 2);
@@ -1206,6 +1215,7 @@
         break;
       }
       default:
+        if (EXT[type]?.relations) Object.assign(rel, EXT[type].relations(x));
         break;
     }
     const noteId =
@@ -1273,6 +1283,7 @@
     }
     let ent = x;
     if (r.type === "label") ent = { id: x.id, text: x.name, group: x.group };
+    else if (EXT[r.type]?.entity) ent = EXT[r.type].entity(x);
     out.entity = safeJson(ent, { maxItems: 300, maxDepth: 6 });
     out.relations = relationsOf(r.type, x);
     if (r.type === "feature" && out.relations.bbox) out.bbox = out.relations.bbox;
@@ -1375,6 +1386,22 @@
   }
 
   function summary() {
+    const counts = {
+      states: liveList("state").length,
+      burgs: liveList("burg").length,
+      provinces: liveList("province").length,
+      cultures: liveList("culture").length,
+      religions: liveList("religion").length,
+      rivers: countLive(pack.rivers),
+      routes: countLive(pack.routes),
+      markers: countLive(pack.markers),
+      zones: countLive(pack.zones),
+      notes: typeof notes !== "undefined" && Array.isArray(notes) ? notes.length : 0,
+      labels: labelList().length,
+      biomes: liveList("biome").length
+    };
+    // types added by bridge-ext files count themselves (routeGroup -> routeGroups)
+    for (const [type, spec] of Object.entries(EXT)) if (spec.count) counts[`${type}s`] = spec.count();
     return {
       name: typeof mapName !== "undefined" && mapName ? mapName.value : null,
       seed: typeof seed !== "undefined" ? seed : null,
@@ -1382,20 +1409,7 @@
       graph: { w: graphWidth, h: graphHeight },
       cells: pack.cells.i.length,
       gridCells: grid?.cells ? grid.cells.i.length : null,
-      counts: {
-        states: liveList("state").length,
-        burgs: liveList("burg").length,
-        provinces: liveList("province").length,
-        cultures: liveList("culture").length,
-        religions: liveList("religion").length,
-        rivers: countLive(pack.rivers),
-        routes: countLive(pack.routes),
-        markers: countLive(pack.markers),
-        zones: countLive(pack.zones),
-        notes: typeof notes !== "undefined" && Array.isArray(notes) ? notes.length : 0,
-        labels: labelList().length,
-        biomes: liveList("biome").length
-      },
+      counts,
       features: featureCounts(),
       mapCoordinates: typeof mapCoordinates !== "undefined" ? mapCoordinates : null,
       view: typeof svgWidth !== "undefined" ? getView() : null,
@@ -1439,6 +1453,7 @@
       for (const x of liveList(type, true)) {
         if (type === "label") m[x.id] = { text: x.name, group: x.group };
         else if (type === "note") m[x.id] = { name: x.name, legend: hashStr(String(x.legend || "")) };
+        else if (EXT[type]?.project) m[String(idOf(type, x))] = EXT[type].project(x);
         else m[String(idOf(type, x))] = projection(x);
       }
       out[type] = m;
@@ -2153,6 +2168,29 @@
     return env;
   };
 
+  /**
+   * Add an entity type from a bridge-ext/*.js file. It then works in find, inspect, ref
+   * resolution, frame/screenshot targets and the change diff. spec:
+   *   list():          live rows, plain objects {i, name, ...fields}; `i` is the id
+   *   stringIds:       ids are strings (a bare number is never an id)
+   *   alt(x):          extra names that match the row
+   *   fields:          default `find` fields
+   *   project(x):      compact projection for the diff/digest (default: projection(x))
+   *   entity(x):       JSON-safe object for inspect (default: the row)
+   *   relations(x):    inspect relations
+   *   box(x):          {x0,y0,x1,y1,cx,cy} for frame/screenshot, or null
+   *   count():         number of rows; adds counts.<type>s to the map summary (map_info, load_map, sketch counts)
+   * Editing and creating are registered separately (T.mutations.FIELDS / ADD / REMOVE / IDENT).
+   */
+  T.registerType = (type, spec) => {
+    if (typeof spec?.list !== "function") fail("PAGE_ERROR", `registerType(${type}) needs list()`);
+    if (!TYPES.includes(type)) TYPES.push(type);
+    if (!DIFF_TYPES.includes(type)) DIFF_TYPES.push(type);
+    EXT[type] = spec;
+    REF_FIELDS[type] = REF_FIELDS[type] || {};
+    DEFAULT_FIELDS[type] = spec.fields || [];
+  };
+
   T.version = 1;
   T.fns = FNS;
   T.resolve = resolve;
@@ -2181,7 +2219,9 @@
     fieldValue,
     people,
     layerId,
-    LAYERS
+    LAYERS,
+    matchWhere,
+    REF_FIELDS
   };
   T.pure = {
     fold,

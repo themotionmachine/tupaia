@@ -124,6 +124,10 @@ map ("Replace the shared map?"). `public/modules/ui/transform-tool.js` computes 
 `notes` across its `undraw()` so Resample carries them over (it dropped them). Re-check all of these
 after an upstream rebase.
 
+One more one-line guard: `focusOn` in `public/main.js` ignores a `?burg=` id whose record
+is a stub left by the MCP `compact` tool (`{i, removed:true}`, no coordinates) instead of
+zooming to NaN; re-check it after a rebase too.
+
 ## Local smoke test (no Cloudflare account needed)
 
 `wrangler dev --local` runs the Worker against an in-memory R2 + D1 (miniflare):

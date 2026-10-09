@@ -16,6 +16,7 @@ import type { CallScope, ToolContext } from "./context.ts";
 import {
   type AddResolved,
   createdBy,
+  createdLists,
   type DisplayResolved,
   type EditResolved,
   type EvalResolved,
@@ -83,7 +84,15 @@ export function bridgeArgs(tool: string, r: Resolved): Record<string, unknown> {
     case "edit": {
       const e = r as EditResolved;
       const ops = e.ops.map(o => {
-        if (o.remove) return { ref: o.ref, remove: true };
+        if (o.remove) {
+          const extra: Record<string, unknown> = {};
+          if (o.force) extra.force = true;
+          if (o.moveTo !== undefined) extra.moveTo = o.moveTo;
+          if (o.newCapital) extra.newCapital = o.newCapital;
+          if (o.orphanRoutes) extra.orphanRoutes = true;
+          if (o.provinceHeads?.length) extra.provinceHeads = o.provinceHeads;
+          return { ref: o.ref, remove: true, ...extra };
+        }
         return o.ref === undefined ? { set: o.set } : { ref: o.ref, set: o.set };
       });
       return withRedraw({ type: e.type, ops }, e.redraw);
@@ -137,6 +146,9 @@ export function bothChanged(r: EditResolved, plan: Array<Record<string, unknown>
     const now = (row?.before ?? {}) as Record<string, unknown>;
     for (const key of Object.keys(o.set)) {
       if (!(key in o.before) || !(key in now)) continue;
+      // a route group's draw-order anchors are its current neighbours: another group added next to it is
+      // not a competing change to this one (replay still fails if the anchor group is gone)
+      if (r.type === "routeGroup" && (key === "after" || key === "before")) continue;
       const base = o.before[key];
       const mine = o.after[key];
       const cur = now[key];
@@ -338,9 +350,8 @@ export async function replayOps(
       break;
     }
     const applied = op.tool === "eval" ? r : (takeResolved(out) ?? r);
-    if (op.tool === "add" || ext?.created) {
-      const made = (x: Resolved) => (ext?.created ? ext.created(x) : ((x as AddResolved).created ?? []));
-      const unpaired = pairCreated(res.idMap, made(r), made(applied));
+    if (op.tool === "add" || op.tool === "edit" || ext?.created) {
+      const unpaired = pairCreated(res.idMap, createdLists(op.tool, r), createdLists(op.tool, applied));
       if (unpaired.length)
         res.notes.push(
           `op ${op.seq}: the replay did not create a counterpart for ${unpaired.map(c => `${c.type} ${c.i}`).join(", ")}; ops that use them will conflict`

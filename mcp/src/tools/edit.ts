@@ -151,6 +151,7 @@ const ADD_TYPES = [
   "state",
   "marker",
   "route",
+  "routeGroup",
   "zone",
   "label",
   "note",
@@ -207,19 +208,39 @@ export function register(ctx: ToolContext): void {
     {
       title: "Edit or remove entities",
       description:
-        "Batch-edit entities of ONE type: ops [{ref, set:{field: value}} | {ref, remove:true}]. All ops are validated first; if any is invalid nothing changes (unless continueOnError). One auto-undo entry covers the call; redraws are coalesced. dryRun:true returns before/after per op. Fields per type are in tupaia://docs/cheatsheet.md, e.g. burg {name, population (people), group, type, culture, port, lock, move:Place}; state {name, fullName, form, formName, color, capital:burgRef, culture, lock}; marker {type, icon, size, pinned, note:{name, legend}, move}; label {text, move}; biome {name, color (any CSS colour, stored as #rrggbb), habitability 0-9999 (re-ranks that biome's cells), iconsDensity 0-500 (> 0 needs icons), icons {iconName: weight} | [iconName], cost 0-10000}; map (no ref) {name, populationRate, urbanization, year, era, reliefOnLoad (true: saves drop the relief icons and loads redraw them, seeded)}. name can be {generate:{base:<namesbase>}} | {generate:{culture:<ref>}} | {generate:{}} (own culture). A state's capital changes only through edit state {capital}. remove works for burg (not capitals or market centres), state, marker, route, river, zone, note, label; provinces, cultures and religions are REFUSED (repaint their cells with paint_cells instead).",
+        "Batch-edit entities of ONE type: ops [{ref, set:{field: value}} | {ref, remove:true}]. All ops are validated first; if any is invalid nothing changes (unless continueOnError). One auto-undo entry covers the call; redraws are coalesced. dryRun:true returns before/after per op. Fields per type are in tupaia://docs/cheatsheet.md, e.g. burg {name, population (people), group, type, culture, port, lock, move:Place}; state {name, fullName, form, formName, color, capital:burgRef, culture, lock}; marker {type, icon, size, pinned, note:{name, legend}, move}; label {text, move}; route {group, name, lock, points}; routeGroup {id (rename), name, stroke, width, dash, linecap, opacity, after|before}; river {name, type, mainStem, split, merge, reroute}; biome {name, color, habitability, iconsDensity, icons, cost}; map (no ref) {name, populationRate, urbanization, year, era, reliefOnLoad} (river structure, route points, biome values and reliefOnLoad: see ops.set). name can be {generate:{base:<namesbase>}} | {generate:{culture:<ref>}} | {generate:{}} (own culture). A state's capital changes only through edit state {capital}. remove works for burg, state, province, culture, religion, marker, route, river, zone, note, label, routeGroup (as in the editors it ignores lock; bulk with locks honoured: the clear tool). A capital or a market centre is refused unless force:true (per op, or edit {force:true} for all ops; see ops.force); a routeGroup only when empty, or with force:true (its routes move to moveTo, default 'roads'; roads/trails/searoutes stay). orphanRoutes:true also removes routes that served only removed burgs. A province's cells become province-less; a culture's cells, burgs, states and religions fall back to culture 0 (Wildlands); a religion's cells to No religion; a state's provinces go with it. Removing burgs or routes repairs the route links once per call (routeLinksFixed).",
       inputSchema: z.object({
         type: z.enum(EDIT_TYPES),
         ops: z
           .array(
             z.object({
               ref: EntityRef.optional().describe("Entity ref (omit for type 'map')"),
-              set: z.record(z.string(), z.unknown()).optional(),
-              remove: z.boolean().optional()
+              set: z
+                .record(z.string(), z.unknown())
+                .optional()
+                .describe(
+                  "Fields to set. route points:[Place | [x,y,cell]...] replaces the path (links rebuilt; add lock:true to keep an edited generated route on regenerate); route group: a group id or name. routeGroup id renames the group (its routes follow). river: one structural change per op: mainStem:<tributary> (its upper course becomes this river's), split:{at, name?, type?} (the upper part becomes a new river, in created), merge:true (inverse of split), reroute:{cells:[...]} | {from, to:Place|'edge', through?, snap?, edge?} (a stretch, a new mouth/confluence/edge, or a new source; no crossings, climbs warned); ops apply in order. biome: color any CSS colour (stored as #rrggbb), habitability 0-9999 (re-ranks that biome's cells), iconsDensity 0-500 (> 0 needs icons), icons {iconName: weight} | [iconName], cost 0-10000. map reliefOnLoad:true: saves drop the relief icons and loads redraw them (seeded)"
+                ),
+              remove: z.boolean().optional(),
+              force: z
+                .boolean()
+                .optional()
+                .describe(
+                  "burg remove: also remove a state capital or a market centre (dependants are reassigned), and locked orphan routes; routeGroup remove: move its routes to moveTo (default 'roads') instead of refusing"
+                ),
+              moveTo: EntityRef.optional().describe("routeGroup remove with force: the group the routes move to"),
+              newCapital: EntityRef.optional().describe("burg remove with force: the burg that becomes the capital"),
+              orphanRoutes: z
+                .boolean()
+                .optional()
+                .describe(
+                  "burg remove: also remove routes that served only removed burgs (locked ones only with force)"
+                )
             })
           )
           .min(1)
           .max(500),
+        force: z.boolean().optional().describe("type burg or routeGroup: force:true for every remove op"),
         ...Common
       }),
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
@@ -238,10 +259,16 @@ export function register(ctx: ToolContext): void {
     {
       title: "Add entities",
       description:
-        "Create entities of ONE type: items [...]. Validated first (nothing changes on an invalid item unless continueOnError); one auto-undo entry; dryRun:true returns the plan. Item shapes: burg {at:Place, name?, population?, group?, type?, culture?, port?}; state {capital: Place | {burg:ref}, name?, color?, culture?, form?, formName?, expand?} (expand:true re-expands all unlocked states and regenerates provinces); marker {at, type?, icon?, size?, pinned?, note?:{name, legend}}; route {through:[Place, Place, ...], group?:'roads'|'trails'|'searoutes', name?} (pathfinds; NO_PATH explains why, e.g. different landmasses); zone {name?, type?, color?, cells?|select?}; label {at, text, group?}; note {id | entity:{type,ref}, name, legend?}; culture {at, name?, color?, type?, base?, expansionism?, expand?}; religion {at, name?, color?, type?, form?, deity?, expansionism?, expand?}; biome {name, base?:<biome to copy>, color?, habitability?, iconsDensity?, icons?, cost?} (appended as a new id; without base: habitability 50, iconsDensity 0, no icons, cost 50, random colour). name can be {generate:{base}|{culture}|{}}.",
+        "Create entities of ONE type: items [...]. Validated first (nothing changes on an invalid item unless continueOnError); one auto-undo entry; dryRun:true returns the plan. Item shapes: burg {at:Place, name?, population?, group?, type?, culture?, port?}; state {capital: Place | {burg:ref}, name?, color?, culture?, form?, formName?, expand?} (expand:true re-expands all unlocked states and regenerates provinces); marker {at, type?, icon?, size?, pinned?, note?:{name, legend}}; route {through:[Place, Place, ...], group?:'roads'|'trails'|'searoutes'|<custom group>, name?} (pathfinds; NO_PATH explains why, e.g. different landmasses) or {points:[Place...], noPathfind:true, group?, name?, lock?} (freehand: exactly those points, see items); routeGroup {id:'route-...', name?, stroke?, width?, dash?, linecap?, opacity?, after?|before?} (a new group under #routes; usable as group by add/edit route); zone {name?, type?, color?, cells?|select?}; label {at, text, group?}; note {id | entity:{type,ref}, name, legend?}; culture {at, name?, color?, type?, base?, expansionism?, expand?}; religion {at, name?, color?, type?, form?, deity?, expansionism?, expand?}; biome {name, base?:<biome to copy>, color?, habitability?, iconsDensity?, icons?, cost?} (appended as a new id; defaults: see items). name can be {generate:{base}|{culture}|{}}.",
       inputSchema: z.object({
         type: z.enum(ADD_TYPES),
-        items: z.array(z.record(z.string(), z.unknown())).min(1).max(200),
+        items: z
+          .array(z.record(z.string(), z.unknown()))
+          .min(1)
+          .max(200)
+          .describe(
+            "Items of the one type. Freehand route {points, noPathfind:true}: exactly those points, may cross water, locked by default so regenerating routes keeps it; a point may be [x, y, cell] to pin its cell; one cell-to-cell link per consecutive pair, the last route through a pair owns it. routeGroup: drawn last unless after/before. biome without base: habitability 50, iconsDensity 0, no icons, cost 50, random colour"
+          ),
         ...Common
       }),
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },

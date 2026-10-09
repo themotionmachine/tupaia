@@ -16,6 +16,7 @@ import { z } from "zod";
 import type { CallScope, ToolContext } from "../context.ts";
 import { ToolError } from "../result.ts";
 import { compareVersions, type GateFields, type SharedMeta, sha256 } from "../shared-api.ts";
+import { CompactFlag, readMapData } from "./compact.ts";
 import { loadShared } from "./persist.ts";
 import { defineTools } from "./registry.ts";
 import { reliefOnLoadRefusal } from "./relief.ts";
@@ -215,7 +216,7 @@ export function register(ctx: ToolContext): void {
     {
       title: "Save over the LIVE shared map",
       description:
-        "OUTWARD WRITE: replaces the live shared map (map.activationlayer.org, used by other people) with the map in the page. Only when the human explicitly asked in this conversation, and only in a server spawned with TUPAIA_MODE=live. Step 1: call without confirm: returns a preview {wouldOverwrite {version, updated_by, updated_at, editing_by}, lineage, stale, buildCheck, bytes, token, refusalReason?}. Step 2: tell the human what would be overwritten. Step 3: call again with confirm:true and the preview's token (valid 10 min, one use) and the SAME flags. Refusals: STALE when the shared map moved on since it was loaded (force:true overrides, only after the human agreed to that overwrite); LOCKED when someone holds the edit lock (force overrides); LINEAGE when the page map is not derived from the shared map (replaceWithUnrelated:true overrides; force does not); BUILD when the local app VERSION is newer than the deployed one (never overridable), or when the builds cannot be compared (skipBuildCheck:true overrides that case only; force does not); expectVersion:n refuses unless the live version is n. Backs up the current live blob and the outgoing body under TUPAIA_OUT/shared-saves/ first, PUTs with X-Map-Version (never an overwrite header); a 409 from the Worker returns CONFLICT with its body.",
+        "OUTWARD WRITE: replaces the live shared map (map.activationlayer.org, used by other people) with the map in the page. Only when the human explicitly asked in this conversation, and only in a server spawned with TUPAIA_MODE=live. Step 1: call without confirm: returns a preview {wouldOverwrite {version, updated_by, updated_at, editing_by}, lineage, stale, buildCheck, bytes, token, refusalReason?}. Step 2: tell the human what would be overwritten. Step 3: call again with confirm:true and the preview's token (valid 10 min, one use) and the SAME flags. Refusals: STALE when the shared map moved on since it was loaded (force:true overrides, only after the human agreed to that overwrite); LOCKED when someone holds the edit lock (force overrides); LINEAGE when the page map is not derived from the shared map (replaceWithUnrelated:true overrides; force does not); BUILD when the local app VERSION is newer than the deployed one (never overridable), or when the builds cannot be compared (skipBuildCheck:true overrides that case only; force does not); expectVersion:n refuses unless the live version is n. Backs up the current live blob and the outgoing body under TUPAIA_OUT/shared-saves/ first, PUTs with X-Map-Version (never an overwrite header); a 409 from the Worker returns CONFLICT with its body. compact:true (in preview and confirm) saves a compacted copy (see compact); the page is not changed.",
       inputSchema: z.object({
         confirm: z.boolean().optional().describe("true = perform the write (needs token); absent = preview"),
         token: z.string().optional().describe("The token from the preview"),
@@ -230,7 +231,8 @@ export function register(ctx: ToolContext): void {
           .optional()
           .describe(
             "Proceed when the deployed build cannot be verified (human-approved only; never overrides a newer local build)"
-          )
+          ),
+        compact: CompactFlag
       }),
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
       kind: "heavy"
@@ -270,17 +272,15 @@ export async function sharedSave(
     replaceWithUnrelated?: boolean;
     expectVersion?: number;
     skipBuildCheck?: boolean;
+    /** Save a compacted copy (the page is not changed). */
+    compact?: boolean;
     /** Internal (sketch_promote): the call publishes the active sketch itself. */
     viaSketch?: boolean;
   }
 ): Promise<Record<string, unknown>> {
   requireLive(ctx);
   const sk = ctx.sketches.current;
-  const data = await scope.call<{ text: string; customization: number; fileName: string | null }>(
-    "mapData",
-    {},
-    { noAlerts: true }
-  );
+  const data = await readMapData(scope, args.compact);
   if (data.customization) {
     throw new ToolError(
       "REFUSED",
@@ -298,6 +298,7 @@ export async function sharedSave(
   const force = !!args.force;
   const unrelatedOk = !!args.replaceWithUnrelated;
   const skipBuild = !!args.skipBuildCheck;
+  const compact = !!args.compact;
 
   const refusals: Refusal[] = [];
   if (!lin.related && !unrelatedOk) {
@@ -346,7 +347,12 @@ export async function sharedSave(
     subject: bodySha,
     target: ctx.shared.target,
     mode: ctx.mode.mode,
-    flags: JSON.stringify({ force, replaceWithUnrelated: unrelatedOk, skipBuildCheck: skipBuild })
+    flags: JSON.stringify({
+      force,
+      replaceWithUnrelated: unrelatedOk,
+      skipBuildCheck: skipBuild,
+      ...(compact ? { compact } : {})
+    })
   };
   const overrides: string[] = [];
   if (force && stale)
@@ -364,6 +370,7 @@ export async function sharedSave(
     buildCheck: build,
     bytes: body.length,
     sha256: bodySha,
+    ...(data.compacted ? { compacted: data.compacted } : {}),
     name: data.fileName,
     sends: {
       method: "PUT",
@@ -394,7 +401,7 @@ export async function sharedSave(
       ...preview,
       token,
       tokenExpiresAt: expiresAt,
-      next: `Tell the human: this overwrites live v${meta.version} (${meta.name}, saved by ${meta.updated_by} at ${meta.updated_at}). Only after they say yes: shared_save {confirm:true, token:'${token}'${force ? ", force:true" : ""}${unrelatedOk ? ", replaceWithUnrelated:true" : ""}${skipBuild ? ", skipBuildCheck:true" : ""}}.`
+      next: `Tell the human: this overwrites live v${meta.version} (${meta.name}, saved by ${meta.updated_by} at ${meta.updated_at}). Only after they say yes: shared_save {confirm:true, token:'${token}'${force ? ", force:true" : ""}${unrelatedOk ? ", replaceWithUnrelated:true" : ""}${skipBuild ? ", skipBuildCheck:true" : ""}${compact ? ", compact:true" : ""}}.`
     };
   }
 
@@ -446,6 +453,7 @@ export async function sharedSave(
     ...(sketchEnded ? { sketchEnded } : {}),
     overwrote: preview.wouldOverwrite,
     overrides: preview.overrides,
+    ...(data.compacted ? { compacted: data.compacted } : {}),
     backup: backups,
     buildCheck: build.verdict === "ok" ? undefined : build,
     origin: ctx.provenanceView()

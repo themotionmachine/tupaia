@@ -34,7 +34,8 @@ This glossary covers core terminology, data structures, and concepts used throug
 - **Feature**: A special map object (ocean, island, lake, etc.).
 - **River**: A water flow starting from a source cell and following the heightmap down to a lake or ocean.
 - **Lake**: A fresh or salt water body contained entirely within land cells.
-- **Route**: A road, trail, or sea lane connecting burgs.
+- **Route**: A road, trail, or sea lane connecting burgs. A freehand route is drawn along exactly the points given (it may cross water and jump between cells that are not neighbours) instead of being pathfound.
+- **Route group**: A `<g>` under `#routes` that holds the drawn paths of the routes with that `group` and carries their style (stroke, width, dash, line cap, opacity). `roads`, `trails` and `searoutes` are built in; others are custom groups (`route-...`).
 - **Marker**: A specific point of interest placed on the map (e.g., volcano, battlefield, ruin).
 - **Zone**: An arbitrary highlighted area of the map defined for custom purposes (e.g., danger zone, magic zone).
 - **Diplomacy**: The system of political relationships (allies, enemies, neutral, vassals) between different States.
