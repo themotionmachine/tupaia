@@ -1862,6 +1862,21 @@
 
   const SELECT_KEYS = ["cells", "circle", "polygon", "entity", "buffer", "where", "except"];
 
+  /** Distance from point p to the outline of polygon pts ([[x,y]...], closed). */
+  function polygonEdgeDistance(p, pts) {
+    let best = Infinity;
+    for (let k = 0; k < pts.length; k++) {
+      const a = pts[k];
+      const b = pts[(k + 1) % pts.length];
+      const dx = b[0] - a[0];
+      const dy = b[1] - a[1];
+      const L = dx * dx + dy * dy;
+      const t = L ? Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / L)) : 0;
+      best = Math.min(best, Math.hypot(p[0] - (a[0] + t * dx), p[1] - (a[1] + t * dy)));
+    }
+    return best;
+  }
+
   /** Grow (px > 0) or shrink (px < 0) a cell set by centre distance to the set's other side. */
   function bufferCells(list, px) {
     const C = pack.cells;
@@ -1917,11 +1932,20 @@
         if (!Number.isInteger(c) || c < 0 || c >= n) fail("OUT_OF_BOUNDS", `cell ${c} is outside 0..${n - 1}`);
       add(sel.cells);
     }
+    // a positive buffer grows a circle or polygon exactly (every cell whose centre lies within
+    // buffer px of the shape: a polygon holding few cells still grows by the full buffer); the
+    // cells and entity parts grow from their edge cells (bufferCells)
+    const grow = typeof sel.buffer === "number" && Number.isFinite(sel.buffer) && sel.buffer > 0 ? sel.buffer : 0;
+    let exact = null;
     if (sel.circle !== undefined) {
       if (!isObj(sel.circle)) fail("BAD_ARGS", "circle is {at: Place, radius, unit?:'px'|'km'|'mi'}");
       const p = T.place(sel.circle.at);
       const r = radiusPx(sel.circle);
-      add([p.cell, ...findAll(p.x, p.y, r)]);
+      if (grow) {
+        exact = exact || new Set();
+        exact.add(p.cell);
+        for (const c of findAll(p.x, p.y, r + grow)) exact.add(c);
+      } else add([p.cell, ...findAll(p.x, p.y, r)]);
     }
     if (sel.polygon !== undefined) {
       if (!Array.isArray(sel.polygon) || sel.polygon.length < 3) fail("BAD_ARGS", "polygon needs at least 3 places");
@@ -1930,8 +1954,12 @@
         return [p.x, p.y];
       });
       const inside = [];
-      for (let c = 0; c < n; c++) if (d3.polygonContains(pts, C.p[c])) inside.push(c);
-      add(inside);
+      for (let c = 0; c < n; c++)
+        if (d3.polygonContains(pts, C.p[c]) || (grow && polygonEdgeDistance(C.p[c], pts) <= grow)) inside.push(c);
+      if (grow) {
+        exact = exact || new Set();
+        for (const c of inside) exact.add(c);
+      } else add(inside);
     }
     if (sel.entity !== undefined) {
       if (!isObj(sel.entity)) fail("BAD_ARGS", "entity is {type, ref}");
@@ -1943,14 +1971,15 @@
       else fail("BAD_ARGS", `cannot select cells by ${r.type}`);
     }
     let out;
-    if (set) out = [...set];
+    if (set || exact) out = set ? [...set] : [];
     else if (sel.where !== undefined) out = Array.from(C.i);
     else fail("BAD_ARGS", "select needs cells, circle, polygon, entity or where");
     if (sel.buffer !== undefined && sel.buffer !== 0) {
       if (typeof sel.buffer !== "number" || !Number.isFinite(sel.buffer) || Math.abs(sel.buffer) > 5000)
         fail("BAD_ARGS", "select.buffer is map px between -5000 and 5000 (> 0 grows the shapes, < 0 shrinks them)");
-      if (!set) fail("BAD_ARGS", "select.buffer needs cells, circle, polygon or entity to grow");
-      out = bufferCells(out, sel.buffer);
+      if (!set && !exact) fail("BAD_ARGS", "select.buffer needs cells, circle, polygon or entity to grow");
+      if (set) out = bufferCells(out, sel.buffer);
+      if (exact) out = [...new Set([...out, ...exact])];
     }
     if (sel.where !== undefined) {
       const test = cellWhere(sel.where);

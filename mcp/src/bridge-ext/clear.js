@@ -1155,6 +1155,9 @@
     add("river", "river");
     add("burg", "burg");
     add("province", "province");
+    add("zone", "zone");
+    add("culture", "culture");
+    add("religion", "religion");
     for (const r of orphans) ids.add(`route${r}`);
     for (const s of pick.state?.values() || []) {
       ids.add(`stateLabel${s.i}`);
@@ -1307,7 +1310,11 @@
       const ids = new Set(pick.zone.keys());
       pack.zones = pack.zones.filter(z => !ids.has(z.i));
     }
-    each("zone", (_z, id) => document.getElementById(`zone${id}`)?.remove());
+    // a zone's note (id zone<i>) goes with it: a later zone reusing the id must not inherit it
+    each("zone", (_z, id) => {
+      document.getElementById(`zone${id}`)?.remove();
+      noteIds.push(`zone${id}`);
+    });
     each("route", r => noteIds.push(removeRouteData(r)));
     const orphanCount = a.ids !== undefined ? Number(a.orphanCount) || 0 : orphans.size;
     if (orphanCount) cascade.orphanRoutes = orphanCount;
@@ -1362,9 +1369,15 @@
       c.R.add("provinces");
     }
 
-    each("religion", x => removeReligionData(x));
+    each("religion", (x, id) => {
+      removeReligionData(x);
+      noteIds.push(`religion${id}`);
+    });
     if (pick.religion?.size) c.R.add("religions");
-    each("culture", x => bump("religionsToCulture0", removeCultureData(x)));
+    each("culture", (x, id) => {
+      bump("religionsToCulture0", removeCultureData(x));
+      noteIds.push(`culture${id}`);
+    });
     if (pick.culture?.size) c.R.add("cultures");
 
     each("emblem", e => removeEmblem(e.type, e.x));

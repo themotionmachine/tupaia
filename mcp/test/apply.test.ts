@@ -283,11 +283,12 @@ describe("tupaia-mcp apply", () => {
     assert.equal(o.i, pick.O.i, "case-folded name match");
     assert.equal(o.status, "differs");
     const fields = (o.diffs as Obj[]).map(d => d.field);
-    // the name differs only in case (a rename), population differs, x is within 1 px, state is read-only
+    // the name differs only in case (a rename), population differs, x is within 1 px, state is
+    // set by painting the burg's own cell (not read-only: upsert paints it)
     assert.deepEqual(fields.sort(), ["name", "population", "state"]);
     const st = (o.diffs as Obj[]).find(d => d.field === "state") as Obj;
-    assert.equal(st.readOnly, true);
-    assert.equal(st.fix, "paint_cells");
+    assert.equal(st.via, "cell");
+    assert.equal(st.readOnly, undefined);
     const m = rowAt(r, "markers[0]");
     assert.equal(m.diffs[0].field, "note.legend");
     assert.match(String(m.diffs[0].want), /\(edited\)$/, JSON.stringify(m.diffs[0]));
@@ -299,7 +300,8 @@ describe("tupaia-mcp apply", () => {
     assert.match(wet.error.message, /^missing; creating it would fail: .*water/, JSON.stringify(wet));
     assert.equal((r.rows as Obj[])[0].at, "burgs[3]", "errors come first");
     assert.equal(rowAt(r, "burgs[0]"), undefined, "unchanged rows are left out");
-    assert.deepEqual(r.ignored, { states: ["territory"] });
+    assert.equal(r.ignored, undefined, "territory belongs to the paint list, never ignored");
+    assert.match(JSON.stringify(r.notes), /territory not painted .*states '.*' \(prose only\)/);
     assert.equal(await undoCount(), before, "check takes no undo entry");
     const v = await h.ok("apply", { mode: "check", verbose: true, burgs: [{ name: pick.B.name }] });
     assert.equal((v.rows as Obj[]).length, 1, "verbose lists unchanged rows");
@@ -466,7 +468,11 @@ describe("tupaia-mcp apply", () => {
     assert.equal(r.changed, true);
     assert.deepEqual(r.skipped, ["seed"]);
     // distanceScale is a map field since the settings extension (dx/settings), so apply sets it
-    assert.deepEqual(r.ignored, { cultures: ["territory"], labels: ["invented"] });
+    assert.deepEqual(r.ignored, { labels: ["invented"] });
+    assert.match(
+      JSON.stringify(r.notes),
+      /territory not painted \(no paint entry sets it\): cultures 'Specish' \(prose only\)/
+    );
     assert.equal(
       (await h.ok("eval", { readOnly: true, code: "return distanceScale" })).value,
       0.1,
