@@ -837,7 +837,10 @@
     if (op.remove) {
       if (op.set && Object.keys(op.set).length) fail("BAD_ARGS", "an op either sets fields or removes, not both");
       if (NO_REMOVE[type]) fail("REFUSED", NO_REMOVE[type]);
-      REMOVE[type].check?.(r.entity, c);
+      if ((op.force !== undefined || op.moveTo !== undefined) && !REMOVE[type].takesForce)
+        fail("BAD_ARGS", `force and moveTo apply only to removing a routeGroup, not a ${type}`);
+      // check(entity, batch, op) may return plan info (shown by dryRun); op carries force/moveTo
+      const info = REMOVE[type].check?.(r.entity, c, op);
       return {
         index,
         ref: op.ref,
@@ -845,10 +848,13 @@
         name: r.name,
         entity: r.entity,
         remove: true,
+        op,
+        info,
         ident: identOf(type, r.entity)
       };
     }
     if (!isObj(op.set) || !Object.keys(op.set).length) fail("BAD_ARGS", "op needs set:{...} or remove:true");
+    if (op.force !== undefined || op.moveTo !== undefined) fail("BAD_ARGS", "force and moveTo go with remove:true");
     const table = FIELDS[type];
     const fs = [];
     for (const key of Object.keys(op.set)) {
@@ -873,6 +879,7 @@
     if (p.ident) row.ident = p.ident;
     if (p.remove) {
       row.remove = true;
+      if (isObj(p.info)) Object.assign(row, p.info);
       return row;
     }
     row.before = {};
@@ -886,13 +893,16 @@
 
   function applyEditOp(type, p, c) {
     if (p.remove) {
-      REMOVE[type].apply(p.entity, c);
+      // apply(entity, batch, op) may return {row, resolved}: extra result fields and the extra
+      // fields of the replayable form (e.g. a route group's force/moveTo)
+      const extra = REMOVE[type].apply(p.entity, c, p.op) || {};
       return {
         index: p.index,
         i: p.i,
         name: p.name,
         removed: true,
-        _r: { ref: p.i, name: p.name, remove: true, ident: p.ident ?? null }
+        ...(extra.row || {}),
+        _r: { ref: p.i, name: p.name, remove: true, ident: p.ident ?? null, ...(extra.resolved || {}) }
       };
     }
     const before = {};
@@ -1310,7 +1320,14 @@
     route: {
       check(item) {
         const group = item.group ?? "roads";
-        if (!ROUTE_GROUPS.includes(group)) fail("BAD_ARGS", `route group must be one of ${ROUTE_GROUPS.join(", ")}`);
+        // roads, trails, searoutes, or a custom #routes group (bridge-ext/routes.js); custom groups pathfind over land
+        if (
+          typeof group !== "string" ||
+          !(ROUTE_GROUPS.includes(group) || document.querySelector(`#routes > g#${CSS.escape(group)}`))
+        )
+          fail("BAD_ARGS", `unknown route group '${group}'`, {
+            details: [...document.querySelectorAll("#routes > g")].map(g => g.id)
+          });
         if (!Array.isArray(item.through) || item.through.length < 2)
           fail("BAD_ARGS", "through needs at least 2 places");
         if (item.name !== undefined) str("name")(item.name);
@@ -2570,5 +2587,5 @@
     };
   };
 
-  T.mutations = { FIELDS, ADD, selectCells, nameSpec };
+  T.mutations = { FIELDS, ADD, REMOVE, IDENT, TRACKED_TYPES, selectCells, nameSpec, literalPlace };
 })(globalThis);

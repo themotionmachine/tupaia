@@ -146,7 +146,18 @@ function isEmptyResolved(r: Resolved): boolean {
 }
 
 const EDIT_TYPES = [...ENTITY_TYPES.filter(t => t !== "namesbase"), "map"] as const;
-const ADD_TYPES = ["burg", "state", "marker", "route", "zone", "label", "note", "culture", "religion"] as const;
+const ADD_TYPES = [
+  "burg",
+  "state",
+  "marker",
+  "route",
+  "routeGroup",
+  "zone",
+  "label",
+  "note",
+  "culture",
+  "religion"
+] as const;
 
 const Common = {
   dryRun: z.boolean().optional().describe("Validate and return the plan (before/after) without changing anything"),
@@ -196,7 +207,7 @@ export function register(ctx: ToolContext): void {
     {
       title: "Edit or remove entities",
       description:
-        "Batch-edit entities of ONE type: ops [{ref, set:{field: value}} | {ref, remove:true}]. All ops are validated first; if any is invalid nothing changes (unless continueOnError). One auto-undo entry covers the call; redraws are coalesced. dryRun:true returns before/after per op. Fields per type are in tupaia://docs/cheatsheet.md, e.g. burg {name, population (people), group, type, culture, port, lock, move:Place}; state {name, fullName, form, formName, color, capital:burgRef, culture, lock}; marker {type, icon, size, pinned, note:{name, legend}, move}; label {text, move}; map (no ref) {name, populationRate, urbanization, year, era}. name can be {generate:{base:<namesbase>}} | {generate:{culture:<ref>}} | {generate:{}} (own culture). A state's capital changes only through edit state {capital}. remove works for burg (not capitals or market centres), state, marker, route, river, zone, note, label; provinces, cultures and religions are REFUSED (repaint their cells with paint_cells instead).",
+        "Batch-edit entities of ONE type: ops [{ref, set:{field: value}} | {ref, remove:true}]. All ops are validated first; if any is invalid nothing changes (unless continueOnError). One auto-undo entry covers the call; redraws are coalesced. dryRun:true returns before/after per op. Fields per type are in tupaia://docs/cheatsheet.md, e.g. burg {name, population (people), group, type, culture, port, lock, move:Place}; state {name, fullName, form, formName, color, capital:burgRef, culture, lock}; marker {type, icon, size, pinned, note:{name, legend}, move}; label {text, move}; route {group (any #routes group), name, lock, points:[Place...] (replaces the path, links rebuilt)}; routeGroup {id (rename; its routes follow), name, stroke, width, dash, linecap, opacity, after|before (draw order)}; map (no ref) {name, populationRate, urbanization, year, era}. name can be {generate:{base:<namesbase>}} | {generate:{culture:<ref>}} | {generate:{}} (own culture). A state's capital changes only through edit state {capital}. remove works for burg (not capitals or market centres), state, marker, route, river, zone, note, label, routeGroup (only when empty; force:true moves its routes to moveTo, default 'roads'; roads/trails/searoutes stay); provinces, cultures and religions are REFUSED (repaint their cells with paint_cells instead).",
       inputSchema: z.object({
         type: z.enum(EDIT_TYPES),
         ops: z
@@ -204,7 +215,12 @@ export function register(ctx: ToolContext): void {
             z.object({
               ref: EntityRef.optional().describe("Entity ref (omit for type 'map')"),
               set: z.record(z.string(), z.unknown()).optional(),
-              remove: z.boolean().optional()
+              remove: z.boolean().optional(),
+              force: z
+                .boolean()
+                .optional()
+                .describe("routeGroup remove: also move its routes to moveTo (default 'roads') instead of refusing"),
+              moveTo: EntityRef.optional().describe("routeGroup remove with force: the group the routes move to")
             })
           )
           .min(1)
@@ -227,7 +243,7 @@ export function register(ctx: ToolContext): void {
     {
       title: "Add entities",
       description:
-        "Create entities of ONE type: items [...]. Validated first (nothing changes on an invalid item unless continueOnError); one auto-undo entry; dryRun:true returns the plan. Item shapes: burg {at:Place, name?, population?, group?, type?, culture?, port?}; state {capital: Place | {burg:ref}, name?, color?, culture?, form?, formName?, expand?} (expand:true re-expands all unlocked states and regenerates provinces); marker {at, type?, icon?, size?, pinned?, note?:{name, legend}}; route {through:[Place, Place, ...], group?:'roads'|'trails'|'searoutes', name?} (pathfinds; NO_PATH explains why, e.g. different landmasses); zone {name?, type?, color?, cells?|select?}; label {at, text, group?}; note {id | entity:{type,ref}, name, legend?}; culture {at, name?, color?, type?, base?, expansionism?, expand?}; religion {at, name?, color?, type?, form?, deity?, expansionism?, expand?}. name can be {generate:{base}|{culture}|{}}.",
+        "Create entities of ONE type: items [...]. Validated first (nothing changes on an invalid item unless continueOnError); one auto-undo entry; dryRun:true returns the plan. Item shapes: burg {at:Place, name?, population?, group?, type?, culture?, port?}; state {capital: Place | {burg:ref}, name?, color?, culture?, form?, formName?, expand?} (expand:true re-expands all unlocked states and regenerates provinces); marker {at, type?, icon?, size?, pinned?, note?:{name, legend}}; route {through:[Place, Place, ...], group?:'roads'|'trails'|'searoutes'|<custom group>, name?} (pathfinds; NO_PATH explains why, e.g. different landmasses) or {points:[Place...], noPathfind:true, group?, name?, lock?} (exactly those points, may cross water, locked by default so regenerating routes keeps it; a point may be [x, y, cell] to pin its cell; one cell-to-cell link per consecutive pair, the last route through a pair owns it); routeGroup {id:'route-...', name?, stroke?, width?, dash?, linecap?, opacity?, after?|before?} (a new group under #routes, drawn last unless after/before; usable as group by add/edit route); zone {name?, type?, color?, cells?|select?}; label {at, text, group?}; note {id | entity:{type,ref}, name, legend?}; culture {at, name?, color?, type?, base?, expansionism?, expand?}; religion {at, name?, color?, type?, form?, deity?, expansionism?, expand?}. name can be {generate:{base}|{culture}|{}}.",
       inputSchema: z.object({
         type: z.enum(ADD_TYPES),
         items: z.array(z.record(z.string(), z.unknown())).min(1).max(200),
