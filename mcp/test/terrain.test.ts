@@ -224,7 +224,7 @@ describe("set_heights and flow on demo.map", () => {
     assert.ok((r.toLand as number) > 0, "the coast moves out");
     assert.ok(((r.lakes as Obj).formed as number) >= 1, JSON.stringify(r.lakes));
     assert.equal((r.pits as Obj).after, 0, "fill leaves no pits");
-    assert.ok((r.fill as Obj).raised >= 0);
+    assert.ok((r.fill as Obj).cellsRaised >= 0);
     assert.deepEqual(r.options, { rebuild: "risk", erosion: false, keepHeights: true, biomes: "redefine" });
     assert.equal(await digest(), d0, "dry run changed nothing");
   });
@@ -268,6 +268,20 @@ describe("set_heights and flow on demo.map", () => {
     assert.ok(r.changes, "changes are reported");
     assert.ok(!Array.isArray((r.changes as Obj).burg?.modified), "changes are counts only");
     await h.ok("snapshot", { action: "undo", n: 3 }, 240_000);
+    assert.equal(await digest(), d0);
+  });
+
+  test("erosion:true cuts river beds; keepHeights (default) puts the requested heights back", async () => {
+    const d0 = await digest();
+    const packVsGrid =
+      "const C = pack.cells; let d = 0; for (const i of C.i) if (C.h[i] >= 20 && C.h[i] !== grid.cells.h[C.g[i]]) d++; return d;";
+    const kept = await h.ok("set_heights", { grid: base, erosion: true }, 240_000);
+    assert.ok((kept.heightsRestored as number) > 0, "erosion changed some land heights");
+    assert.equal(await ev(packVsGrid), 0, "every land cell has the requested height");
+    await h.ok("snapshot", { action: "undo" }, 240_000);
+    await h.ok("set_heights", { grid: base, erosion: true, keepHeights: false }, 240_000);
+    assert.ok((await ev(packVsGrid)) > 0, "without keepHeights the eroded heights stay");
+    await h.ok("snapshot", { action: "undo" }, 240_000);
     assert.equal(await digest(), d0);
   });
 

@@ -411,8 +411,14 @@
     const ocean = new Set();
     for (const ft of pack.features || []) {
       if (!ft || typeof ft !== "object") continue;
-      if (ft.type === "lake") lakes.set(ft.i, { shoreline: ft.shoreline || [], height: ft.height, name: ft.name });
-      else if (ft.type === "ocean") ocean.add(ft.i);
+      if (ft.type === "lake") {
+        // the height Features.markupPack gives a lake (a saved one holds what the last river run left)
+        const shoreline = ft.shoreline || [];
+        let min = Infinity;
+        for (const s of shoreline) if (C.h[s] < min) min = C.h[s];
+        const height = Number.isFinite(min) ? rn(min - 0.1, 2) : ft.height;
+        lakes.set(ft.i, { shoreline, height, name: ft.name });
+      } else if (ft.type === "ocean") ocean.add(ft.i);
     }
     return { n: C.i.length, c: C.c, p: C.p, h: C.h, b: C.b, t: C.t, f: C.f, lakes, ocean, haven: C.haven, r: C.r };
   }
@@ -633,7 +639,7 @@
     let fill = null;
     if (o.fill) {
       const r = fillDepressions(target, grid.cells.c, grid.cells.b);
-      fill = { raised: r.raised, maxRaise: r.maxRaise };
+      fill = { cellsRaised: r.raised, maxRaise: r.maxRaise };
       target = r.h;
     }
     const stats = heightStats(grid.cells.h, target, grid.cells.c, grid.cells.b);
