@@ -413,7 +413,7 @@ function focusOn() {
 
     if (burgParam) {
       const burg = isNaN(+burgParam) ? pack.burgs.find(burg => burg.name === burgParam) : pack.burgs[+burgParam];
-      if (!burg) return;
+      if (!burg || burg.x === undefined) return; // tupaia-mcp: a compacted removed burg is a stub {i, removed} with no x/y
 
       const { x, y } = burg;
       zoomTo(x, y, scale, 1600);

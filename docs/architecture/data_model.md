@@ -113,6 +113,8 @@ World data is mainly stored in typed arrays within `cells` object in both `grid`
 
 Secondary data available as a part of the `pack` object.
 
+**Removed records may be stubs (Tupaia).** A removed culture, burg, state, province or religion keeps its array slot, but its record is not always whole. The app's own state and province removal already leave `{i, removed: true}`, and the MCP `compact` tool (or `compact: true` on a save) shrinks the other removed records the same way: burgs and religions become `{i, removed: true}` and cultures keep `{i, removed: true, base, center}`. Code that reads a removed record's other fields (`name`, `x`, `cell`, ...) must expect `undefined`. A removed record that live data still points at (a capital, a province's capital, a market centre, a trade deal, origins, a cell) is never compacted. Ids are never renumbered, so the next id is still the array length.
+
 ## Cultures
 
 Cultures (races, language zones) data is stored as an array of objects with strict element order. Element 0 is reserved by the _wildlands_ culture. If culture is removed, the element is not getting removed, but instead a `removed` attribute is added. Object structure:
