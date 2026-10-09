@@ -13,8 +13,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import { z } from "zod";
+import { compactSharedStatus } from "../compact.ts";
 import type { CallScope, ToolContext } from "../context.ts";
-import { ToolError } from "../result.ts";
+import { ToolError, WithText } from "../result.ts";
 import { compareVersions, type GateFields, type SharedMeta, sha256 } from "../shared-api.ts";
 import { CompactFlag, readMapData } from "./compact.ts";
 import { loadShared } from "./persist.ts";
@@ -164,7 +165,13 @@ export function register(ctx: ToolContext): void {
         build: z
           .boolean()
           .optional()
-          .describe("Run the build check (GET /versioning.js and /). Default: true in live mode, false in local mode")
+          .describe("Run the build check (GET /versioning.js and /). Default: true in live mode, false in local mode"),
+        format: z
+          .enum(["json", "compact"])
+          .optional()
+          .describe(
+            "compact = one key=value line (shared version, saver, lock | page lineage, base, stale, opsSince | mode, writes, build), plus a versions line with versions:true (default json)"
+          )
       }),
       annotations: { readOnlyHint: true, openWorldHint: true },
       kind: "read",
@@ -207,7 +214,7 @@ export function register(ctx: ToolContext): void {
       };
       if (!meta) out.note = "the shared map does not exist yet (404)";
       if (args.versions) out.versions = await ctx.shared.versions();
-      return out;
+      return args.format === "compact" ? new WithText(compactSharedStatus(out)) : out;
     }
   );
 
@@ -431,15 +438,18 @@ export async function sharedSave(
     throw e;
   }
   const p = ctx.snapshots.provenance;
-  ctx.snapshots.setProvenance({
-    kind: "shared",
-    seed: p.seed ?? null,
-    mapId: await ctx.pageMapId(),
-    sharedVersion: saved.version,
-    sharedUpdatedBy: saved.updated_by,
-    sharedUpdatedAt: saved.updated_at,
-    fetchedAt: new Date().toISOString()
-  });
+  ctx.snapshots.setProvenance(
+    {
+      kind: "shared",
+      seed: p.seed ?? null,
+      mapId: await ctx.pageMapId(),
+      sharedVersion: saved.version,
+      sharedUpdatedBy: saved.updated_by,
+      sharedUpdatedAt: saved.updated_at,
+      fetchedAt: new Date().toISOString()
+    },
+    { sameMap: true }
+  );
   // a sketch whose changes went live this way is done: a later rebase or promote would apply
   // its adds and paints a second time on top of themselves
   let sketchEnded: string | undefined;

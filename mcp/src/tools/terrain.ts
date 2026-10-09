@@ -282,7 +282,7 @@ export function register(ctx: ToolContext): void {
         legend = o.legend;
         shot = await takeScreenshot(ctx, scope, { target: { bbox: o.bbox } });
       } finally {
-        await scope.call("flowOverlay", { remove: true }, { noAlerts: true }).catch(() => {});
+        await scope.cleanup(() => scope.call("flowOverlay", { remove: true }, { noAlerts: true }).catch(() => {}));
       }
       shot.value = { ...out, screenshot: shot.value, ...(legend ? { legend } : {}) };
       return shot;

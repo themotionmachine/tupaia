@@ -51,6 +51,8 @@ export const Redraw = z
 export async function changesSinceUndo(ctx: ToolContext, scope: CallScope, limit = CHANGES_FULL_MAX): Promise<unknown> {
   const entry = ctx.snapshots.undoStack[ctx.snapshots.undoStack.length - 1];
   if (!entry) return undefined;
+  // the call replaced the map (another epoch): a diff would list the whole old map against the new
+  if (entry.provenance.epoch !== ctx.snapshots.provenance.epoch) return { mapReplaced: true };
   try {
     const d = await scope.call<{ available: boolean; changes?: unknown; empty?: boolean; truncated?: boolean }>(
       "diff",

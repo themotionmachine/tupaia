@@ -1,6 +1,14 @@
 // Read tools: map_info, find, inspect.
 import { z } from "zod";
-import { compactFind, compactInspect, countChanges, cropScreenToMap } from "../compact.ts";
+import {
+  CHANGES_SAMPLE,
+  changeTotal,
+  compactChanges,
+  compactFind,
+  compactInspect,
+  countChanges,
+  cropScreenToMap
+} from "../compact.ts";
 import type { CallScope, ShotRecord, ToolContext } from "../context.ts";
 import { META_TEXT_HEAVY, ToolError, WithText } from "../result.ts";
 import { EntityRef, EntityType, Place, ScreenPlace } from "../schemas.ts";
@@ -43,6 +51,9 @@ export function bridgePlace(ctx: ToolContext, p: unknown): unknown {
 /** Undo points that replace the whole map: diffing against one lists every entity as changed. */
 const WHOLE_MAP_OP = /^(load_map|generate_map|shared_restore|sketch open)/;
 
+/** map_info's default detail lists up to this many changed entities whole; more are counts plus a sample. */
+export const MAP_INFO_FULL_MAX = 25;
+
 interface Since {
   key: string;
   describe: string;
@@ -57,10 +68,11 @@ function sinceKey(ctx: ToolContext, since: string | number | undefined): Since |
     const k = ctx.snapshots.latestBaselineKey();
     if (!k) return { key: "", describe: "no snapshot or undo point yet" };
     const u = ctx.snapshots.undoStack[ctx.snapshots.undoStack.length - 1];
-    if (u && u.baselineKey === k.key && WHOLE_MAP_OP.test(u.op))
+    const top = u && u.baselineKey === k.key;
+    if (top && (WHOLE_MAP_OP.test(u.op) || replacedSince(ctx, k.key)))
       return {
         key: k.key,
-        describe: `${u.op} at ${u.at}; no edits since`,
+        describe: `${u.op} at ${u.at}${WHOLE_MAP_OP.test(u.op) ? "" : " replaced the map"}; no edits since`,
         fresh: true
       };
     return k;
@@ -75,17 +87,29 @@ function sinceKey(ctx: ToolContext, since: string | number | undefined): Since |
   return { key: s.baselineKey, describe: `snapshot ${s.id}${s.label ? ` '${s.label}'` : ""}` };
 }
 
+/**
+ * Does the baseline hold a different map than the page (another epoch: something loaded,
+ * generated or restored a different map since)? An entity diff between them compares two
+ * unrelated maps and lists nearly everything.
+ */
+export function replacedSince(ctx: ToolContext, key: string): boolean {
+  const then = ctx.snapshots.epochOf(key);
+  const now = ctx.snapshots.provenance.epoch;
+  return then !== undefined && now !== undefined && then !== now;
+}
+
 export async function mapInfo(
   ctx: ToolContext,
   scope: CallScope,
   since: string | number | undefined,
-  detail: "summary" | "full" = "summary",
+  detail: "summary" | "list" | "full" = "summary",
   diff: "list" | "counts" = "list",
   overview: boolean = diff !== "counts"
 ): Promise<Record<string, unknown>> {
   const out: Record<string, unknown> = {};
+  let summary: Record<string, unknown> | null = null;
   if (overview) {
-    const summary = await scope.call<Record<string, unknown>>("summary");
+    summary = await scope.call<Record<string, unknown>>("summary");
     Object.assign(out, summary, { origin: ctx.provenanceView(), opsSince: ctx.snapshots.provenance.opsSince });
   } else out.opsSince = ctx.snapshots.provenance.opsSince;
   const sk = sinceKey(ctx, since);
@@ -97,6 +121,12 @@ export async function mapInfo(
     } else if (!sk.key) {
       out.changed = null;
       out.changes = { available: false, reason: "take a snapshot (or make an edit) first" };
+    } else if (replacedSince(ctx, sk.key) && detail === "summary") {
+      // a different map came in since that baseline: say so, with the new map's counts
+      summary ??= await scope.call<Record<string, unknown>>("summary", {}, { noAlerts: true });
+      out.changed = true;
+      out.changes = { mapReplaced: true, counts: summary.counts };
+      out.mapReplaced = `a different map replaced the page since ${sk.describe} (load, generate, restore or sketch open); an entity diff would compare two unrelated maps. detail:'list' or 'full' diffs anyway.`;
     } else {
       const d = await scope.call<{
         available: boolean;
@@ -112,14 +142,24 @@ export async function mapInfo(
         // counts are exact whatever the list cap was; nothing to truncate
         out.changed = !d.empty;
         out.changes = countChanges(d.changes);
+      } else if (detail === "summary") {
+        // counts first: a large diff is per-type counts plus the first few of each list
+        const total = changeTotal(d.changes);
+        out.changed = !d.empty;
+        out.changes = d.empty ? {} : compactChanges(d.changes, { fullMax: MAP_INFO_FULL_MAX });
+        if (total > MAP_INFO_FULL_MAX)
+          out.changesTruncated = `${total} changed entities: per-type counts and the first ${CHANGES_SAMPLE} of each list; detail:'list' lists up to 50 per type, 'full' up to 1000`;
       } else {
         out.changed = !d.empty;
         out.changes = d.changes;
         if (d.truncated) out.changesTruncated = "lists capped; pass detail:'full' for up to 1000 per type";
       }
+      if (replacedSince(ctx, sk.key))
+        out.mapReplaced = `a different map replaced the page since ${sk.describe}: this diff compares two unrelated maps`;
     }
   }
   await scope.call("setBaseline", { key: "checkpoint" }, { noAlerts: true });
+  ctx.snapshots.checkpointEpoch = ctx.snapshots.provenance.epoch;
   return out;
 }
 
@@ -141,16 +181,18 @@ export function register(ctx: ToolContext): void {
     {
       title: "Map overview and changes",
       description:
-        "Overview of the map in the page: name, seed, graph size, cell count, live entity counts (states, burgs, provinces, cultures, religions, rivers, routes, markers, zones, notes, labels), islands by group and lakes, mapCoordinates, the world settings (mapSize, latitude, longitude, temperatures, winds, precipitation, units, heightExponent) with the names of the locked ones, current view, layers on, provenance and ops since load. Also reports what changed since a baseline: since:'snapshot' (default: newest snapshot or auto-undo point, so right after an edit it shows that edit), 'checkpoint' (the previous map_info call; every call sets a new checkpoint), a snapshot index or label, or 'none'. Changes list added/removed/modified entities with old/new field values and changed-cell counts per cell array. diff:'counts' returns just {since, changed, changes:{burg:{added, removed, changed}, ..., cells:{h: n}}} without the overview (overview:true adds it back). Right after load_map or generate_map the default diff is empty (the map was replaced, nothing was edited).",
+        "Overview of the map in the page: name, seed, graph size, cell count, live entity counts (states, burgs, provinces, cultures, religions, rivers, routes, markers, zones, notes, labels), islands by group and lakes, mapCoordinates, the world settings (mapSize, latitude, longitude, temperatures, winds, precipitation, units, heightExponent) with the names of the locked ones, current view, layers on, provenance and ops since load. Also reports what changed since a baseline: since:'snapshot' (default: newest snapshot or auto-undo point, so right after an edit it shows that edit), 'checkpoint' (the previous map_info call; every call sets a new checkpoint), a snapshot index or label, or 'none'. Changes list added/removed/modified entities with old/new field values and changed-cell counts per cell array; more than 25 changed entities come back as per-type counts plus the first 3 of each list (detail:'list' or 'full' for more), and a baseline from a different map (loaded, generated or restored since) gives {mapReplaced:true, counts} instead of a diff. diff:'counts' returns just {since, changed, changes:{burg:{added, removed, changed}, ..., cells:{h: n}}} without the overview (overview:true adds it back). Right after load_map or generate_map the default diff is empty (the map was replaced, nothing was edited).",
       inputSchema: z.object({
         since: z
           .union([z.enum(["snapshot", "checkpoint", "none"]), z.number().int(), z.string()])
           .optional()
           .describe("Baseline: 'snapshot' (default) | 'checkpoint' | snapshot index | snapshot label | 'none'"),
         detail: z
-          .enum(["summary", "full"])
+          .enum(["summary", "list", "full"])
           .optional()
-          .describe("full lists up to 1000 changed entities per type (default 50)"),
+          .describe(
+            "summary (default): up to 25 changed entities whole, else per-type counts plus the first 3 of each list; list: up to 50 per type; full: up to 1000 per type. list/full also diff against a baseline from a different map"
+          ),
         diff: z
           .enum(["list", "counts"])
           .optional()

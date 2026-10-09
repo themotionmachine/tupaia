@@ -374,21 +374,31 @@ export const CHANGES_SAMPLE = 3;
 
 const LISTS = ["added", "removed", "modified"] as const;
 
+/** Changed entities in a bridge diff's `changes` (added + removed + modified over every type). */
+export function changeTotal(changes: Record<string, unknown> | undefined): number {
+  let total = 0;
+  for (const [type, v] of Object.entries(changes ?? {})) {
+    if (type === "cells" || isFieldDiff(v)) continue;
+    const c = (v as TypeChanges).counts;
+    total += (c?.added ?? 0) + (c?.removed ?? 0) + (c?.modified ?? 0);
+  }
+  return total;
+}
+
 /**
  * The `changes` a mutating tool returns: as the bridge diff when small (minus its empty lists),
  * else per type the exact `counts`, the first CHANGES_SAMPLE entries of each list and
  * `more:{list: n}` for the rest. `cells` (already counts) passes through. map_info lists everything.
  * Either way a list that is empty is left out, so the shape does not depend on the size.
  */
-export function compactChanges(changes: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+export function compactChanges(
+  changes: Record<string, unknown> | undefined,
+  opts: { fullMax?: number; sample?: number } = {}
+): Record<string, unknown> | undefined {
   if (!changes) return changes;
-  let total = 0;
-  for (const [type, v] of Object.entries(changes)) {
-    if (type === "cells" || isFieldDiff(v)) continue;
-    const c = (v as TypeChanges).counts;
-    total += (c?.added ?? 0) + (c?.removed ?? 0) + (c?.modified ?? 0);
-  }
-  if (total <= CHANGES_FULL_MAX) {
+  const fullMax = opts.fullMax ?? CHANGES_FULL_MAX;
+  const sample = opts.sample ?? CHANGES_SAMPLE;
+  if (changeTotal(changes) <= fullMax) {
     const whole: Record<string, unknown> = {};
     for (const [type, v] of Object.entries(changes)) {
       if (type === "cells" || isFieldDiff(v)) {
@@ -413,8 +423,8 @@ export function compactChanges(changes: Record<string, unknown> | undefined): Re
     const more: Record<string, number> = {};
     for (const list of LISTS) {
       const items = t[list] ?? [];
-      if (items.length) o[list] = items.slice(0, CHANGES_SAMPLE);
-      const rest = (t.counts?.[list] ?? items.length) - Math.min(items.length, CHANGES_SAMPLE);
+      if (items.length) o[list] = items.slice(0, sample);
+      const rest = (t.counts?.[list] ?? items.length) - Math.min(items.length, sample);
       if (rest > 0) more[list] = rest;
     }
     if (Object.keys(more).length) o.more = more;
@@ -490,6 +500,141 @@ export function cropViewOf(rec: ShotGeometry): CropView {
     y: rec.view.y,
     scale: rec.view.scale
   };
+}
+
+// ---------------------------------------------------------------------------------- status lines
+
+/**
+ * `key=value` pairs in the find/inspect convention: absent, false, null and empty are left out,
+ * true is a bare flag, strings are quoted when they hold separators and cut at `max`.
+ */
+function kvParts(pairs: Array<[string, unknown]>, max = 120): string[] {
+  const out: string[] = [];
+  for (const [k, v] of pairs) {
+    if (!present(v)) continue;
+    out.push(v === true ? k : `${k}=${fmtScalar(v, max)}`);
+  }
+  return out;
+}
+
+/** An origin (ToolContext.provenanceView) in a few characters: `shared v42`, `file demo.map`, `sketch foo`. */
+function originWord(o: unknown): string | null {
+  if (!isObj(o)) return null;
+  const kind = String(o.kind ?? "?");
+  if (kind === "shared" && typeof o.sharedVersion === "number") return `shared v${o.sharedVersion}`;
+  if (kind === "sketch") return `sketch ${String(o.sketchSlug ?? "?")} on v${String(o.sharedVersion ?? "?")}`;
+  if (kind === "file" && typeof o.path === "string") return `file ${o.path.split(/[\\/]/).pop()}`;
+  if (kind === "generated" && o.seed) return `generated seed ${String(o.seed)}`;
+  return kind;
+}
+
+/** session {format:'compact'}: the status object (tools/session.ts) as one line. */
+export function compactSession(s: Obj): string {
+  const map = isObj(s.map) ? s.map : null;
+  const relaunch = isObj(s.lastRelaunch) ? s.lastRelaunch : null;
+  const blocked = isObj(s.blockedRequests) ? s.blockedRequests.count : undefined;
+  const parts = [
+    "session",
+    ...kvParts([
+      ["mode", s.mode],
+      ["droppedFromLive", !!s.modeNote],
+      ["browser", s.browser],
+      ["launches", s.launches],
+      ["app", s.appVersion],
+      ["map", map?.name],
+      ["seed", map?.seed],
+      ["cells", map?.cells],
+      ["origin", originWord(map?.origin)],
+      ["opsSince", map?.opsSince],
+      ["editor", map?.customization || undefined],
+      ["snapshots", s.snapshots],
+      ["undo", s.undoDepth],
+      ["redo", s.redoDepth],
+      ["shots", s.shots],
+      ["consoleErrors", Array.isArray(s.consoleErrors) ? s.consoleErrors.length : undefined],
+      ["outward", Array.isArray(s.outwardRequests) ? s.outwardRequests.length : undefined],
+      ["blocked", blocked],
+      ["serving", typeof s.serving === "string" ? "http" : undefined],
+      ["lastRelaunch", relaunch?.reason],
+      ["warnings", Array.isArray(s.warnings) ? s.warnings.length : undefined]
+    ])
+  ];
+  return parts.join(" ");
+}
+
+/** shared_status {format:'compact'}: the shared map and the page's relation to it, one line (plus versions). */
+export function compactSharedStatus(r: Obj): string {
+  const meta = isObj(r.meta) ? r.meta : null;
+  const local = isObj(r.local) ? r.local : {};
+  const build = isObj(r.build) ? r.build : {};
+  const head = meta
+    ? [
+        `shared v${String(meta.version)}`,
+        ...kvParts([
+          ["name", meta.name],
+          ["by", meta.updated_by],
+          ["at", meta.updated_at],
+          ["lock", meta.editing_by ?? "none"]
+        ])
+      ]
+    : ["shared none (404)"];
+  const page = [
+    "| page",
+    ...kvParts([
+      ["lineage", local.lineage],
+      ["base", typeof local.sharedVersion === "number" ? `v${local.sharedVersion}` : undefined],
+      ["origin", originWord(local.origin) ?? local.originKind],
+      ["stale", local.stale === null ? undefined : local.stale ? true : "no"],
+      ["opsSince", local.opsSince],
+      ["browser", local.browser]
+    ])
+  ];
+  const tail = [
+    "|",
+    ...kvParts([
+      ["mode", r.mode],
+      ["writes", r.writesEnabled ? "on" : "off"],
+      ["build", build.verdict]
+    ])
+  ];
+  const lines = [[...head, ...page, ...tail].join(" ")];
+  const snaps = isObj(r.versions) && Array.isArray(r.versions.snapshots) ? (r.versions.snapshots as Obj[]) : null;
+  if (snaps) {
+    const vs = snaps.slice(0, 10).map(v => `v${String(v.version)} ${String(v.saved_at ?? "")}`.trim());
+    const more = snaps.length - vs.length;
+    lines.push(`versions: ${vs.length ? vs.join(", ") : "none retained"}${more > 0 ? ` +${more} more` : ""}`);
+  } else if (r.versions === null) lines.push("versions: none");
+  return lines.join("\n");
+}
+
+/** sketch {action:'status', format:'compact'}: the sketch view (ops.ts SketchStore.view) as one line; `full` adds the log. */
+export function compactSketchStatus(v: Obj, full = false): string {
+  if (!v.active) return "sketch none active";
+  const base = isObj(v.base) ? v.base : {};
+  const saved = isObj(v.lastSaved) ? v.lastSaved : null;
+  const log = Array.isArray(v.log) ? (v.log as Obj[]) : [];
+  const last = log[log.length - 1];
+  const reasons = Array.isArray(v.blobOnlyReasons) ? v.blobOnlyReasons.length : 0;
+  const parts = [
+    "sketch",
+    fmtString(String(v.slug ?? "?")),
+    v.recording ? "recording" : "stopped",
+    ...kvParts([
+      ["base", base.kind === "shared" ? `shared v${String(base.version)}` : `file ${String(base.path ?? "?")}`],
+      ["ops", v.ops],
+      ["dirty", v.dirty],
+      ["saved", saved ? `v${String(saved.version)}` : "never"],
+      ["blobOnly", reasons ? `${reasons} reason(s)` : undefined],
+      ["suspended", !!v.suspended],
+      ["diverged", !!v.diverged],
+      ["redo", v.redoAvailable || undefined],
+      ["view", v.viewUrl],
+      ["last", last && !full ? `${String(last.seq)}. ${String(last.summary)}` : undefined]
+    ])
+  ];
+  const lines = [parts.join(" ")];
+  if (full) for (const o of log) lines.push(`${String(o.seq)}. ${cut(plainText(String(o.summary)), 200)}`);
+  return lines.join("\n");
 }
 
 /**

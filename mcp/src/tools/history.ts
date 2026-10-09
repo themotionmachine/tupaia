@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { CallScope, ToolContext } from "../context.ts";
 import { resolveWritePath } from "../paths.ts";
 import { META_TEXT_HEAVY, ToolError } from "../result.ts";
+import type { Provenance } from "../snapshots.ts";
 import { defineTools } from "./registry.ts";
 
 function mapIdOf(summary: Record<string, unknown>): number | null {
@@ -12,6 +13,26 @@ function mapIdOf(summary: Record<string, unknown>): number | null {
 
 function brief(summary: Record<string, unknown>): Record<string, unknown> {
   return { name: summary.name, seed: summary.seed, graph: summary.graph, counts: summary.counts };
+}
+
+/**
+ * A history load (undo, redo, restore) failed after it may have changed the page: put the map
+ * from before the attempt back (or have the next call relaunch and restore it) and return the
+ * error to throw, saying what the page holds now. The history stacks were not changed.
+ */
+async function failedLoad(
+  scope: CallScope,
+  action: string,
+  e: unknown,
+  before: string,
+  prov: Provenance
+): Promise<ToolError> {
+  const back = await scope.putBack(before, prov, `the map from before the ${action}`);
+  const err = e instanceof ToolError ? e : new ToolError("PAGE_ERROR", e instanceof Error ? e.message : String(e));
+  err.message = `${action} failed: ${err.message}. ${back.reloaded ? `Nothing changed: ${back.note}.` : `${back.note}.`} The undo/redo history is as it was.`;
+  const d = typeof err.details === "object" && err.details ? err.details : {};
+  err.details = { ...d, pageRestored: back.reloaded ? "now" : "on the next call (relaunch)" };
+  return err;
 }
 
 async function take(ctx: ToolContext, scope: CallScope, label: string | undefined, saveTo: string | undefined) {
@@ -81,8 +102,22 @@ export function register(ctx: ToolContext): void {
             throw new ToolError("NOT_FOUND", `no snapshot '${ref}'`, {
               candidates: snaps.listing().snapshots.map(x => ({ i: x.index, name: x.label }))
             });
-          await scope.pushUndo("snapshot restore", { index: s.id, label: s.label });
-          const summary = await scope.loadMap({ text: s.text }, true);
+          const prov0 = { ...snaps.provenance };
+          const undoId = await scope.pushUndo("snapshot restore", { index: s.id, label: s.label });
+          let summary: Record<string, unknown>;
+          try {
+            summary = await scope.loadMap({ text: s.text }, true);
+          } catch (e) {
+            const before = snaps.undoStack[snaps.undoStack.length - 1]?.text ?? "";
+            const err = await failedLoad(scope, "restore", e, before, prov0);
+            // the restore did not happen: its undo entry goes (and the sketch logs nothing)
+            const key = snaps.popUndo(undoId);
+            if (key) {
+              scope.undoPushed.splice(scope.undoPushed.indexOf(undoId), 1);
+              await scope.cleanup(() => scope.call("dropBaseline", { key }, { noAlerts: true })).catch(() => {});
+            }
+            throw err;
+          }
           // the app stamps a new map id on every load (showStatistics), so re-record it
           snaps.provenance = {
             ...s.provenance,
@@ -100,7 +135,13 @@ export function register(ctx: ToolContext): void {
           const current = await scope.mapText();
           const plan = snaps.planUndo(n, current);
           if (!plan) throw new ToolError("REFUSED", `cannot undo ${n}: the undo stack holds ${snaps.undoStack.length}`);
-          const summary = await scope.loadMap({ text: plan.load.text }, true);
+          const prov0 = { ...snaps.provenance };
+          let summary: Record<string, unknown>;
+          try {
+            summary = await scope.loadMap({ text: plan.load.text }, true);
+          } catch (e) {
+            throw await failedLoad(scope, "undo", e, current, prov0);
+          }
           const dropped = snaps.commitUndo(plan);
           snaps.provenance.mapId = mapIdOf(summary);
           scope.notes.push(...ctx.sketches.onUndo(plan.undone));
@@ -122,12 +163,14 @@ export function register(ctx: ToolContext): void {
           // the first undo entry the redo creates holds the current page state: baseline it now
           const preKey = snaps.nextHistKey;
           await scope.call("setBaseline", { key: preKey }, { noAlerts: true });
+          const prov0 = { ...snaps.provenance };
           let summary: Record<string, unknown>;
           try {
             summary = await scope.loadMap({ text: entries[entries.length - 1].text }, true);
           } catch (e) {
-            await scope.call("dropBaseline", { key: preKey }, { noAlerts: true }).catch(() => {});
-            throw e;
+            const err = await failedLoad(scope, "redo", e, current, prov0);
+            await scope.cleanup(() => scope.call("dropBaseline", { key: preKey }, { noAlerts: true })).catch(() => {});
+            throw err;
           }
           const { dropped, pairs } = snaps.commitRedo(entries, current);
           snaps.provenance.mapId = mapIdOf(summary);

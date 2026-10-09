@@ -52,6 +52,8 @@ const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
 const STUB_HOSTS = /(^|\.)(googletagmanager\.com|google-analytics\.com|openwidget\.com)$/;
 const FONT_HOSTS = /(^|\.)(fonts\.googleapis\.com|fonts\.gstatic\.com)$/;
 const RING_MAX = 300;
+/** How long the next call waits for a page that stalled on a read-only call before relaunching it. */
+export const READ_STALL_PROBE_MS = 10_000;
 const LOG_MAX = 200;
 
 /** Init script #1. Serialised by Playwright, so it must be self-contained. */
@@ -147,6 +149,12 @@ export class BrowserManager {
   lastRelaunch: { reason: string; at: string } | null = null;
   /** Reason the page must be relaunched (and the newest snapshot restored) before the next call. */
   dirty: string | null = null;
+  /**
+   * The dirty mark came only from a read-only call that stalled and did not answer a quick probe:
+   * the page may just have been busy. The next call probes again (READ_STALL_PROBE_MS) and keeps
+   * the page, map and all, when it answers.
+   */
+  dirtyReadOnly = false;
   /** Notes for the next tool result (relaunch notices). */
   pendingNotes: string[] = [];
   readonly outward: RequestLogEntry[] = [];
@@ -215,6 +223,11 @@ export class BrowserManager {
 
   get consoleSeq(): number {
     return this.#seq;
+  }
+
+  /** Mutating bridge calls made so far (a changed count means the page map may have changed). */
+  get writes(): number {
+    return this.#opSeq;
   }
 
   consoleSince(seq: number): string[] {
@@ -423,15 +436,45 @@ export class BrowserManager {
     this.#crashed = null;
     // an explicit relaunch supersedes a pending dirty relaunch (restore is the caller's choice)
     this.dirty = null;
+    this.dirtyReadOnly = false;
     this.lastRelaunch = { reason, at: new Date().toISOString() };
     return this.getPage();
   }
 
-  /** If the page was marked dirty (mutating timeout/hang), relaunch and restore the newest snapshot. */
+  /**
+   * Mark the page untrustworthy: the next call relaunches it and restores the newest state
+   * (context.ts restore point, snapshot or undo point). Overrides a read-only stall mark.
+   */
+  markDirty(reason: string): void {
+    this.dirty = reason;
+    this.dirtyReadOnly = false;
+  }
+
+  /** Does the page run JS again within `ms` (bridge present)? Never launches. */
+  async probe(ms: number): Promise<boolean> {
+    const page = this.#page;
+    if (!page || page.isClosed() || this.#crashed || !this.#browser?.isConnected()) return false;
+    const answer = page.evaluate("typeof globalThis.__tupaia === 'object'").then(
+      v => v === true,
+      () => false
+    );
+    return Promise.race([answer, sleep(ms).then(() => false)]);
+  }
+
+  /**
+   * If the page was marked dirty, relaunch and restore the newest state. A mark from a stalled
+   * read-only call is probed first: a page that answers again keeps its map (nothing relaunched).
+   */
   async ensureHealthy(notes: string[]): Promise<void> {
+    if (this.dirty && this.dirtyReadOnly && (await this.probe(READ_STALL_PROBE_MS))) {
+      notes.push(`the page answers again after: ${this.dirty}. It was not relaunched; the map in the page is intact.`);
+      this.dirty = null;
+      this.dirtyReadOnly = false;
+    }
     if (this.dirty) {
       const reason = this.dirty;
       this.dirty = null;
+      this.dirtyReadOnly = false;
       await this.relaunch(reason);
       let note = `browser relaunched (${reason}).`;
       if (this.#restorer) {
@@ -528,7 +571,7 @@ export class BrowserManager {
 
   async #afterStall(name: string, mutating: boolean, what: string): Promise<string> {
     if (mutating) {
-      this.dirty = `${name} ${what}`;
+      this.markDirty(`${name} ${what}`);
       return "The page state is uncertain: it will be relaunched and the newest snapshot restored before the next call.";
     }
     const page = this.#page;
@@ -543,8 +586,12 @@ export class BrowserManager {
       : false;
     if (alive)
       return "The page still responds. Its result was dropped, but page JS cannot be cancelled: that read-only code may still be running.";
-    this.dirty = `${name} ${what} and the page stopped responding`;
-    return "The page stopped responding: it will be relaunched and the newest snapshot restored before the next call.";
+    // a mutating stall's mark stands; a read-only one is probed again before the next call
+    if (!this.dirty) {
+      this.dirty = `${name} ${what} and the page stopped responding`;
+      this.dirtyReadOnly = true;
+    }
+    return `The page did not answer within 2 s. Before the next call it gets ${READ_STALL_PROBE_MS / 1000} s more: if it answers it is kept as it is (only this read-only call failed); otherwise it is relaunched and the newest state restored.`;
   }
 
   /** Resize the page viewport (the app's svg follows the window size). */

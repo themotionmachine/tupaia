@@ -1,7 +1,8 @@
 // session: server status, one-way drop to local mode, browser restart, console clearing.
 import { z } from "zod";
+import { compactSession } from "../compact.ts";
 import type { CallScope, ToolContext } from "../context.ts";
-import { ToolError } from "../result.ts";
+import { ToolError, WithText } from "../result.ts";
 import { defineTools } from "./registry.ts";
 
 async function status(ctx: ToolContext, scope: CallScope, clear: boolean): Promise<Record<string, unknown>> {
@@ -21,7 +22,15 @@ async function status(ctx: ToolContext, scope: CallScope, clear: boolean): Promi
     };
   }
   const origin = ctx.config.liveOrigin;
-  const consoleErrors = b.consoleRing.slice(-20).map(e => ({ at: e.at, kind: e.kind, text: e.text }));
+  // repeats of one message are one row with a count (the newest time), newest 20 rows
+  const rows = new Map<string, { at: string; kind: string; text: string; count?: number }>();
+  for (const e of b.consoleRing) {
+    const k = `${e.kind}\u0000${e.text}`;
+    const r = rows.get(k);
+    rows.delete(k);
+    rows.set(k, r ? { ...r, at: e.at, count: (r.count ?? 1) + 1 } : { at: e.at, kind: e.kind, text: e.text });
+  }
+  const consoleErrors = [...rows.values()].slice(-20);
   if (clear) b.clearConsole();
   return {
     mode: ctx.mode.mode,
@@ -79,7 +88,13 @@ export function register(ctx: ToolContext): void {
       .describe(
         "restart only: 'latest' (default) reloads the map that was in the page (or, if the page no longer answers, the newest snapshot/undo point); 'none' leaves a fresh random map"
       ),
-    clear: z.boolean().optional().describe("status: clear the captured console errors after reporting them")
+    clear: z.boolean().optional().describe("status: clear the captured console errors after reporting them"),
+    format: z
+      .enum(["json", "compact"])
+      .optional()
+      .describe(
+        "status: compact = one key=value line (mode, browser, map, origin, history and log counts) instead of JSON (default json)"
+      )
   });
 
   ctx.tool(
@@ -117,7 +132,8 @@ export function register(ctx: ToolContext): void {
         return { crashed: true };
       }
       await ctx.browser.ensureHealthy(scope.notes);
-      return status(ctx, scope, !!args.clear);
+      const s = await status(ctx, scope, !!args.clear);
+      return args.format === "compact" ? new WithText(compactSession(s)) : s;
     }
   );
 }
