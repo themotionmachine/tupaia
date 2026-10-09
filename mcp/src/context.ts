@@ -254,6 +254,15 @@ export class CallScope {
 
   /** Take an auto-undo entry for a mutating op. Call before mutating the page. */
   async pushUndo(op: string, args: unknown): Promise<number> {
+    // a stopped rebase holds the page: a change now would land on the partial replay, make the
+    // sketch blob-only and shift the undo count the rebase gave (several agents share a daemon).
+    // A stopped sketch (sketch {action:'stop'}) logs nothing, so it no longer holds calls back.
+    const sk = this.ctx.sketches.current;
+    if (sk?.suspended && sk.recording && this.tool !== "sketch" && this.tool !== "snapshot")
+      throw new ToolError(
+        "SKETCH",
+        `${this.tool || op} refused: the page holds a stopped rebase of sketch '${sk.slug}' (${sk.suspended.reason}), not the sketch. Nothing was changed. Undo the rebase (snapshot {action:'undo', n:${sk.suspended.entries.length}}) to return to the sketch, finish it (sketch {action:'rebase', onConflict:'skip'}), or end recording (sketch {action:'stop'}).`
+      );
     await this.ctx.verifyProvenance();
     if (this.logsToSketch && this.digestBefore === undefined) this.digestBefore = await this.digest();
     const text = this.#reusablePoint() ?? (await this.mapText());

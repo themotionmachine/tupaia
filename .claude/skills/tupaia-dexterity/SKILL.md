@@ -26,6 +26,8 @@ $T call screenshot '{"full":true}'                     # -> IMAGE: /abs/dir/.../
 $T tools ; $T status ; $T stop
 ```
 
+- Use the `mcp/bin/tupaia` of the checkout you are testing: in a worktree, the worktree's bin
+  (the main checkout's bin runs the main checkout's code).
 - Output: the tool's text, then `IMAGE: <path>` lines. A tool error prints `ERROR CODE: message`
   and exits 1; exit 2 is a usage or daemon problem.
 - **One `--out` per task, on every command.** Shell variables do not persist between Bash calls
@@ -39,13 +41,18 @@ $T tools ; $T status ; $T stop
   is atomic, but `snapshot {action:'undo'}` undoes the newest change from ANY agent: take
   labelled snapshots and restore by label.
 - **Mode** comes only from the daemon's spawn environment: local unless `TUPAIA_MODE=live` was
-  set when it started. A caller with another mode only gets a warning; to change it, `stop`
-  and call again. Never start a live daemon unless the human asked for a shared-map write.
+  set when it started. A live daemon refuses (exit 2, nothing runs) a caller whose environment is
+  local or names another `TUPAIA_LIVE_ORIGIN`; `--accept-live` overrides, only when you mean to
+  use that live daemon. A local daemon only warns a live caller; `stop` and call again to change
+  it. Never start a live daemon unless the human asked for a shared-map write; give it its own
+  `--out`. A live daemon loads the shared map into its page on its first launch.
 - Every tool but `apply` refuses unknown top-level arguments (BAD_ARGS lists the allowed ones);
   per-op options such as `orphanRoutes` go inside the op. `tupaia help <tool>` shows them.
 - `--timeout <ms>` is the call's budget once it starts; queueing is extra, so give Bash a timeout
-  that covers both (e.g. 600000 for set_heights or regrid). Slow calls print progress on stderr.
-  A CLI killed while queued skips the call; killed after the start, the call still finishes.
+  that covers both (e.g. 600000 for set_heights, regrid or a sketch rebase). Slow calls print
+  progress on stderr (it says when the daemon has not received the call yet: a loaded machine).
+  `<out>/daemon.log` has each call's daemon time; under load the wall time can be several times
+  that. A CLI killed while queued skips the call; killed after the start, the call still finishes.
 - Paths: prefer absolute. The CLI makes a relative input path (load_map `path`, apply
   `specPath`, set_heights/flow `image.path`) absolute when the file is in your cwd; otherwise the
   server tries its cwd, then the out dir, then the repo root, and results name the file it read.
@@ -106,7 +113,10 @@ Token economy (results are counts first; ask for detail only when needed):
 - `map_info {diff:'counts'}` before any full diff; the default `detail:'summary'` compacts more
   than 25 changed entities to counts plus 3 of each list (`'list'` = 50 per type, `'full'` = 1000).
 - find/inspect `warnings` name fields that do not exist (a typo reads null in every row: check).
-  Culture/religion/state/province cells, area, rural, urban and burgs are live, not stored.
+  Culture/religion/state/province cells, area, rural and urban are live, not stored (and burgs,
+  for states and provinces only). Notes and labels show their id as `i`; where `{i}` matches it.
+- `map_info {overview:false}` returns only the change list. `changes` and diffs show burg
+  population in stored thousands; set/find use people.
 - `shared_status` and `sketch {action:'status'}` take `format:'compact'` too.
 - `consoleErrors` are folded (`msg (xN)`, 8 distinct at most); `session` lists the newest 20.
 - `screenshot {compare, crop:'changed', sideBySide?:true}` instead of a full frame; a note with no
@@ -123,30 +133,47 @@ Token economy (results are counts first; ask for detail only when needed):
   pure reads.
 - `full:true` shows the whole map at the full-map label sizes. `layers:{off:[...]}` isolates
   what you check for that one shot; `labels:'all'` shows every zoom-hidden text label once.
-- The default JPEG (maxSide 1024) keeps results small; the full PNG is on disk (`file`).
-- A compare needs the same frame: do not pass target/zoom with `compare`.
+- The default JPEG (maxSide 1024, at most 2048, never upscaled) keeps results small; the full
+  PNG is on disk (`file`). Labels are rarely hidden at full-map zoom; they are just small in a
+  1024 px JPEG: frame the region to read them.
+- A compare needs the same frame: do not pass target/zoom with `compare`. It reuses the compared
+  shot's frame and layers (unless you pass `layers`) and needs its `scale`. For a legible small
+  change take the baseline framed on the area (`target`/`zoom`), edit, then `screenshot
+  {view:'<id>', compare:'<id>', crop:'changed'}`; a full-map baseline crops a one-label change to
+  about 130 px. `view:'<id>'` repeats a frame across load_map and regrid too. A compare that
+  finds nothing returns no image, just a note.
 
 ## 5. Recipes
 
 **Terraform from a heights grid or an image.**
-1. Get the grid geometry: `eval {code:'return {n: grid.cells.h.length, cellsX: grid.cellsX,
-   spacing: grid.spacing}', readOnly:true}` (`grid.points` gives each cell's [x,y]). Write the
-   heights (one 0-100 per grid cell, sea level 20) as `{"grid":[...]}` in a file.
+1. Get the grid geometry: any `set_heights` dryRun (or a wrong-length grid's error) returns
+   `grid` {cells, cellsX, cellsY, spacing}; `eval` on `grid.points` gives each cell's [x,y]. Write
+   the heights (one 0-100 per grid cell, sea level 20) as `{"grid":[...]}` in a file.
 2. `snapshot {action:'take', label:'pre-terrain'}`.
 3. `set_heights {grid:[...], fill:true, dryRun:true}` (or `image:{path:'/abs/h.png',
    range:[0,80]}`, or sparse `pack:{cellId:h}`): check `landPct`, `lakes`, `pits`,
-   `burgsOnNewWater`, `paintedBiomes`; `detail:true` lists pits.
+   `burgsOnNewWater` (count 0 included), `paintedBiomes`; `detail:true` lists pits. Any
+   set_heights rebuilds the WHOLE map (rivers, biomes map-wide, every burg's economy and state
+   treasury re-roll), even for one cell: for a few cells use `paint_cells {set:{height:{...,
+   rebuild:'keep'}}}` instead.
 4. `flow {from:[{x:840, y:420}, {gridCell:5005}], heights:{grid:[...]}, fill:true}`: key rivers
    should end at `sea` (or `river` whose `goesTo` is the sea); `screenshot:true` draws them.
 5. `set_heights {...}` without dryRun. Read `rivers` (kept/new/gone, `notesOrphaned`) and
-   `carried`. Even an identity import regenerates rivers (ids and names carry over by course).
+   `carried` (field meanings in the cheatsheet, Terrain). Even an identity import regenerates
+   rivers (ids and names carry over by course). Verify: the same dryRun says `changed:0`, and
+   `edit {type:'map', recalculate:'biomes', dryRun:true}` reports `replaces.biomeCellsEdited:0`.
 6. World settings: `edit {type:'map', ops:[{set:{mapSize:1.1, latitude:38.8,
    temperatureEquator:30, temperatureNorthPole:-28, winds:[225,45,45,315,135,315],
    precipitation:150, distanceScale:0.1, distanceUnit:'mi'}, lock:'all'}],
-   recalculate:'climate+biomes', dryRun:true}`, then without dryRun. `recalculate:'climate'`
-   alone leaves rivers and biomes alone; without recalculate read `stale`.
-7. More cells: `regrid {density:6, dryRun:true}` (check `bytes.est`, `atRisk`), then apply and
-   screenshot the coast.
+   recalculate:'climate+biomes', dryRun:true}`, then without dryRun. `lock:'all'` locks 14
+   settings; the builder's frame locked 10 (name them: `lock:['mapSize','latitude',...]`).
+   `recalculate:'climate'` alone leaves rivers and biomes alone; without recalculate read
+   `stale`. `flow` lengths use the current distance scale, so run it after this step to read
+   them in the new units.
+7. More cells: `regrid {density:6, biomes:'redefine', dryRun:true}` (check `bytes.est`,
+   `atRisk`), then apply and screenshot the coast. River gaps are filled
+   (`fixed.riverGapCellsFilled`); `lint {checks:['river-gap']}` and its `fixAll` reroute any left.
+   Without `biomes:'redefine'` the old biome pattern stays (a warning gives the stale count).
 8. `lint` (markers on new water, route links), then `screenshot {full:true}`.
 
 **Wipe the random base and build from a spec.**
@@ -156,7 +183,11 @@ Token economy (results are counts first; ask for detail only when needed):
    dryRun.
 2. `apply {specPath:'/abs/design/build-spec.json', mode:'check'}`: what upsert would do.
 3. `apply {specPath:'/abs/design/build-spec.json'}`: creates and edits; one undo entry.
-4. `apply {..., mode:'check'}` again until the counts show only `unchanged` plus known errors.
+4. `apply {..., mode:'check'}` again until the counts show only `unchanged` plus the known
+   residuals: territory/biome/terrain paints (paint_cells), provinces (UNSUPPORTED: regenerate
+   provinces centres from the spec), rivers (matched, never created), free-standing notes without
+   an id, notes the spec repeats, a curved-path label (eval). `ignored` lists keys apply skips
+   (e.g. markers[].places); zone notes work (`zones[].note`).
 
 The builder's spec needs a mapping (verified in check mode on the shared v7 map):
 
@@ -185,7 +216,9 @@ tolerance:{legend:'contains'}, ignore:{states:['form']}
   the repo root; the result's `specPath` names the file read).
 
 **Quality pass.** `lint {}` (overview: warn and error rows) -> run each `fixAll` call and the
-per-row `fix` calls (ready `edit`/`paint_cells`/`eval` calls) -> `lint {checks:[...]}` to confirm.
+per-row `fix` calls (ready `edit`/`paint_cells`/`eval` calls; read them first: route-end-burg's
+fixAll can remove routes left under 2 points and says which, label duplicates are fixed by
+removing the custom label) -> `lint {checks:[...]}` to confirm.
 `ignore:[{check, type, id}]` for findings the human accepts. Label checks need the labels drawn
 (else `skipped` says how); `atScale` measures one zoom. Opt-in checks (label-marker-overlap,
 marker-near-burg) run only when named.
@@ -197,8 +230,14 @@ marker-near-burg) run only when named.
 3. `compact` (or only the file: `save_map {compact:true}`, `shared_save {compact:true}`).
 4. Relief icons: `edit map {set:{reliefOnLoad:true}}` makes saves drop the icons and loads redraw
    them (seeded); `regenerate {parts:['relief'], relief:{matchIcons:<old count>}}` keeps the
-   count if the switch changed it. Hand edits in the relief editor are lost. The shared map then
-   needs a deployed app with the hook (shared_save refuses with BUILD until then).
+   count if the switch changed it (it changed 30667 -> 41798 on v7). Hand edits in the relief
+   editor are lost. The shared map then needs a deployed app with the hook (shared_save refuses
+   with BUILD until then; `shared_status {build:true}` checks the deploy). A relief dryRun shows
+   settings, not icon counts.
+5. Typical savings on the ~6.7 MB shared map: compact about 0.7 MB, relief density 0.5 with
+   exclusions about 1.7 MB, reliefOnLoad about 0.75 MB. compact stubs burgs, states, provinces,
+   cultures and religions only; removed markers, notes, labels, routes and zones are already
+   gone.
 
 **Propose a change as a sketch.** See section 10; the replay table there says which calls keep
 the sketch rebasable.
@@ -206,9 +245,18 @@ the sketch rebasable.
 **Hand-made state with provinces and arms.** `add {type:'state', items:[{capital:{burg:'X'},
 name:'S'}]}` -> `paint_cells {select, set:{state:'S'}}` (and `{culture}`) ->
 `regenerate {parts:['provinces','emblems'], provinces:{states:['S'], count:3}, emblems:{states:
-['S']}, dryRun:true}` (sizes) -> without dryRun. Locked states need `lockedStates:true`.
+['S']}, dryRun:true}` (sizes) -> without dryRun. Locked states need `lockedStates:true`. A
+Place capital makes a new burg; with `culture` it takes that culture. Every new burg also gets a
+route to its nearest neighbour, as in the app (its row lists `routes`).
 
-**Labels at full-map zoom.** `display {labels:{town:{minSize:0}, capital:{alwaysShow:true}}}` (or
+**Rivers.** `inspect {at:{cell}}` lists a cell's `neighbours` (reroute `{cells}` must be
+neighbours, in order). To move a confluence or end a river earlier: one edit call, three ops
+in order: detour river A off the cells, reroute B through the freed cell, reroute A to its new
+end. A climb is warned; lint river-uphill only flags rises of `riverTol` (12). For the
+builder's rivfix examples load `build/snap-r2-start.map` (v3 and v7 already contain the fixes).
+
+**Labels at full-map zoom.** Usually they are drawn but small: frame a region to check them. To
+show groups the zoom rule hides: `display {labels:{town:{minSize:0}, capital:{alwaysShow:true}}}` (or
 `'*'`); read `labels.groups.<g>.zoom`; `display {labels:'list'}` reads them back; clear with
 `{labels:{'*':null}}`. `'*'` is not sticky for groups made later.
 
@@ -223,11 +271,11 @@ replaces it:
 | Set option inputs, `options.*`, `distanceScale`, then `lock()`/`store()` (frame.js) | `edit {type:'map', ops:[{set:{...}, lock:'all'}], recalculate}` (locks saved in the .map) |
 | 41 freehand routes: pushed `pack.routes`, wrote `cells.routes`, `drawRoute` (add_routes_pts.py) | `add {type:'route', items:[{points, noPathfind:true, group, name}]}` (locked; links kept consistent) |
 | Route-group `<g>` styles by DOM (rgroups.js) | `add/edit {type:'routeGroup'}` (id, stroke, width, dash, linecap, opacity, after/before) |
-| Custom biomes in `biomesData`, polygon painting, edge noise (biomes2.js) | `add/edit {type:'biome'}`, `paint_cells {set:{biome}, feather}`, `regenerate {parts:['biomes'], biomes:{...}}` |
-| Provinces spread from chosen centres with a flat queue (provinces.js) | `regenerate {parts:['provinces'], provinces:{states, centres:[{state, burg, name}]}}` |
-| Emblem shields via `COA.getShield` | `regenerate {parts:['emblems'], emblems:{states, stateCulture:true}}` |
+| Custom biomes in `biomesData`, polygon painting, edge noise (biomes2.js) | `add/edit {type:'biome'}` (saved in the .map since this build: files from before, v3 and shared v6/v7, lost iconsDensity/icons/cost, so re-apply them with `edit biome`, e.g. Glass desert `{iconsDensity:3, icons:{dune:3, cactus:6, deadTree:1}, cost:200}`), `paint_cells {set:{biome}, select:{polygon, buffer, except}, feather:{width:3, unit:'cells'}}`, `regenerate {parts:['biomes'], biomes:{...}}` |
+| Provinces spread from chosen centres with a flat queue (provinces.js) | `regenerate {parts:['provinces'], provinces:{states, centres:[{state, burg, name}], crossForeign:true}}` (`crossForeign:true` is what makes it a flat flood; add `lockedStates:true` for locked states; one call can mix centres and count) |
+| Emblem shields via `COA.getShield` | `regenerate {parts:['emblems'], emblems:{states, stateCulture:true}}` (provinces and burgs default true; `shieldOnly` keeps designs) |
 | River splices, splits, renames, moving notes (rivfix.js, split.py, rename_rivers.py) | `edit {type:'river', ops:[{ref, set:{split\|merge\|mainStem\|reroute\|name\|type}}]}` |
-| Burg labels hidden at full-map zoom | `display {labels:{...}}`, `screenshot {labels:'all'}` |
+| Burg labels hidden at full-map zoom | `display {labels:{...}}`, `screenshot {labels:'all'}` (check first: usually they show, just small) |
 | Relief icon density by hand | `regenerate {parts:['relief'], relief:{density\|matchIcons, perBiome, exclude, nearBurgs}}` |
 | Removed entities bloating the .map | `compact`, `compact:true` on saves; `edit map {reliefOnLoad:true}` |
 | Spec checks by hand (verify.js, placecheck.py, overlaps.py, rivcheck.py) | `apply {specPath, mode:'check'}`, `lint` |
@@ -306,9 +354,12 @@ whatever the shared map is by then, so other people's edits survive.
 4. `sketch {action:'summary'}`: markdown and before/after shots (`shots:false` skips them).
 5. `sketch {action:'save', confirm:true}` (live-mode server; writes only `sketch-<slug>`),
    returns `viewUrl`. Give the human the link and the summary, then stop and wait.
-6. On yes: `sketch {action:'rebase'}` (read `applied`, `skipped`, `conflicts`) ->
-   `sketch_promote {}` (tell the human the version it replaces) -> `sketch_promote
-   {confirm:true, token:'<token>', then:'discard'}` -> report the new version.
+6. On yes: `sketch {action:'rebase'}` (read `applied`, `skipped`, `conflicts`, `replayMs`; it
+   can take minutes on a loaded machine) -> `sketch_promote {}` (tell the human the version it
+   replaces) -> `sketch_promote {confirm:true, token:'<token>', then:'discard'}` -> report the
+   new version. The token is bound to `then`. `then` defaults to 'keep': the kept copy is
+   marked promoted: open says so and rebase and promote refuse it (its adds would run twice).
+   `sketch {action:'status'}` says `rebaseNeeded` when the shared map moved past the base.
    A blob-only sketch: promote directly while `shared_status` still shows its base version;
    if the shared map moved, start a new sketch from it and redo the work.
 7. On no: `sketch {action:'discard', slug, confirm:true}` (live mode). A sketch you never saved:
@@ -316,8 +367,9 @@ whatever the shared map is by then, so other people's edits survive.
    page keeps its map.
 
 Stop and ask instead of working around: a rebase conflict (name each op and its reason; do not
-`onConflict:'skip'` without a yes; while a stopped rebase holds the page, shared_save refuses
-too: undo it as the rebase said); ops.json over 2 MB; a CONFLICT on save (the slug exists);
+`onConflict:'skip'` without a yes; 'skip' drops only the conflicting items, fields or cells:
+`itemsSkipped`, `cellsSkipped`; while a stopped rebase holds the page every mutating call is
+refused with SKETCH, for every agent on the daemon: undo it as the rebase said); ops.json over 2 MB; a CONFLICT on save (the slug exists);
 `diverged` in status; any LOCKED/BUILD/STALE on promote.
 
 Local mode can start, summarise, list, open and rebase sketches and discard an unsaved one;
@@ -337,6 +389,8 @@ save, discarding a saved sketch, and promote need the live-mode server.
 - REFUSED with "customization": an editor is open (`eval {code:"closeDialogs(); customization =
   0"}`).
 - A batch error names the item index (`details.errors`); fix that item and resend the batch.
+- A failed call changed nothing and took no undo entry: do not `snapshot undo` after an error (it
+  would undo the previous successful call).
 
 ## 12. Pitfalls
 
@@ -346,7 +400,12 @@ save, discarding a saved sketch, and promote need the live-mode server.
   (use `routeIds`). An edited generated route needs `lock:true` to survive.
 - After a risk rebuild (set_heights, paint_cells height risk) or regrid, run `lint`: markers can
   sit on new water (route points are re-recorded to their cells: `carried.routePointsRepointed`),
-  and regrid can leave river cell lists with gaps (`river-gap`).
+  and regrid can leave river cell lists with gaps (`river-gap`: its fixAll reroutes them).
+- `paint_cells`: an unknown key in select/where/set is BAD_FIELD, never ignored; select has
+  `buffer` (px) and `except` (another select). A feather narrower than one cell does nothing.
+- Biomes cannot be removed (repaint their cells). `clear` keeps locked entities (freehand routes)
+  and never removes route groups.
+- Population in `changes`/diffs is stored thousands; set and find use people.
 - Biome icon changes show only after `regenerate {parts:['relief']}`.
 - Settings only set inputs: recalculate or read `stale`.
 - Typed arrays come back from eval as plain arrays; large results are capped.

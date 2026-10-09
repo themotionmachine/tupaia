@@ -214,7 +214,10 @@
   const styleField = (field, check) => ({
     check,
     get: g => readAttr(g.el, field),
-    set: (g, v) => writeAttr(g.el, field, v)
+    set: (g, v, c) => {
+      writeAttr(g.el, field, v);
+      c?.R?.drawn?.add("routes");
+    }
   });
 
   /** after/before: move the group in draw order (later groups draw on top). */
@@ -395,7 +398,8 @@
         opacity: q.opacity,
         position: q.after ? `after ${q.after}` : q.before ? `before ${q.before}` : "last (drawn on top)"
       }),
-    apply(q) {
+    apply(q, c) {
+      c?.R?.drawn?.add("routes");
       const anchor = q.after || q.before ? document.getElementById(q.after || q.before) : null;
       if ((q.after || q.before) && !anchor)
         fail(
@@ -476,6 +480,22 @@
   }
 
   const toPoints = pts => pts.map(p => [p.x, p.y, p.cell]);
+
+  /** Notes for pinned points whose cell lies far (over 1.5 cell spacings) from where they are drawn. */
+  function farPins(pts, who) {
+    const C = pack.cells;
+    const spacing = Math.sqrt((graphWidth * graphHeight) / C.i.length);
+    const far = [];
+    pts.forEach((p, k) => {
+      if (!p.pinned) return;
+      const d = Math.hypot(C.p[p.cell][0] - p.x, C.p[p.cell][1] - p.y);
+      if (d > 1.5 * spacing) far.push(`point ${k} (cell ${p.cell}, ${Math.round(d)} px away)`);
+    });
+    if (!far.length) return [];
+    return [
+      `${who}: ${far.length} pinned point(s) name a cell far from where they are drawn: ${far.slice(0, 5).join(", ")}${far.length > 5 ? ", ..." : ""}; the links follow the cells (lint route-point-cell flags them; pin on purpose or drop the cell)`
+    ];
+  }
 
   /** Compact before/after/show form of a points list (token-lean, comparable). */
   function describePoints(pts) {
@@ -567,9 +587,13 @@
   /** Redraw one route's path in place (or draw it when missing); note a hidden routes layer. */
   function redrawRoute(r, c) {
     const el = document.getElementById(`route${r.i}`);
-    if (el) el.setAttribute("d", Routes.getPath(r));
-    else if (layerIsOn("toggleRoutes")) drawRoute(r);
-    else c.R.hidden.add("routes");
+    if (el) {
+      el.setAttribute("d", Routes.getPath(r));
+      c.R.drawn?.add("routes");
+    } else if (layerIsOn("toggleRoutes")) {
+      drawRoute(r);
+      c.R.drawn?.add("routes");
+    } else c.R.hidden.add("routes");
   }
 
   /** Replace a route's points, keeping pack.cells.routes what a rebuild from pack.routes would give. */
@@ -607,6 +631,7 @@
       checkedPts.set(lit, triples);
       if (!pairsOf(triples).size)
         c.notes.add(`route ${r.i}: all points fall into cell ${triples[0][2]}, so the route links no cells`);
+      for (const n of farPins(pts, `route ${r.i}`)) c.notes.add(n);
       if (describePoints(r.points).h === describePoints(triples).h)
         c.notes.add(`route ${r.i}: the points are the same as before; nothing changes`);
       // a generated route becomes hand-drawn, but regenerating routes replaces unlocked routes
@@ -633,6 +658,13 @@
   const FREEHAND_KEYS = ["points", "through", "noPathfind", "group", "name", "lock"];
 
   function freehandCheck(item, c) {
+    for (const k of Object.keys(item))
+      if (!FREEHAND_KEYS.includes(k)) {
+        const near = FREEHAND_KEYS.find(x => x.toLowerCase() === k.toLowerCase());
+        fail("BAD_FIELD", `route items take no field '${k}'${near ? `; did you mean '${near}'?` : ""}`, {
+          details: FREEHAND_KEYS
+        });
+      }
     if (item.noPathfind !== true)
       fail("BAD_ARGS", "points needs noPathfind:true (a route along exactly those points); use through to pathfind");
     if (item.points !== undefined && item.through !== undefined) fail("BAD_ARGS", "pass points or through, not both");
@@ -645,7 +677,12 @@
     const input = item.points ?? item.through;
     const places = checkPlaces(input, "points");
     const name = item.name?.trim();
+    const who = name ? `route '${name}'` : "a new route";
     const warn = [];
+    if (item.through !== undefined)
+      warn.push(
+        `${who}: through with noPathfind:true draws a freehand route along exactly those places (as points; no pathfinding)`
+      );
     if (name) {
       const same = (pack.routes || []).find(r => r && r.name === name);
       if (same) warn.push(`a route named '${name}' already exists (${same.i}); this adds another with the same name`);
@@ -655,7 +692,8 @@
     const pts = toPoints(places);
     // legitimate (a short decorative line), but nothing is connected: say so
     if (!pairsOf(pts).size)
-      warn.push(`all points fall into cell ${pts[0][2]}: the route is drawn, but it links no cells`);
+      warn.push(`${who}: all points fall into cell ${pts[0][2]}: the route is drawn, but it links no cells`);
+    warn.push(...farPins(places, who));
     for (const n of warn) c.notes.add(n);
     // freehand routes are locked by default so that regenerating routes keeps them
     return {
@@ -673,6 +711,12 @@
 
   ADD.route = {
     check(item, c) {
+      // a mis-cased option (noPathFind) is named as such, before the points/through checks
+      for (const k of Object.keys(item)) {
+        const near = FREEHAND_KEYS.find(x => x !== k && x.toLowerCase() === k.toLowerCase());
+        if (near)
+          fail("BAD_FIELD", `route items take no field '${k}'; did you mean '${near}'?`, { details: FREEHAND_KEYS });
+      }
       if (item.noPathfind !== undefined && typeof item.noPathfind !== "boolean")
         fail("BAD_ARGS", "noPathfind must be true or false");
       if (item.noPathfind === true || item.points !== undefined) return freehandCheck(item, c);
@@ -728,8 +772,10 @@
       if (q.lock) route.lock = true;
       pack.routes.push(route);
       const links = linkRoute(route);
-      if (layerIsOn("toggleRoutes")) drawRoute(route);
-      else c.R.hidden.add("routes");
+      if (layerIsOn("toggleRoutes")) {
+        drawRoute(route);
+        c.R.drawn?.add("routes");
+      } else c.R.hidden.add("routes");
       const len = T.pure.polylineAt(
         route.points.map(p => [p[0], p[1]]),
         1

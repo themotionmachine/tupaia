@@ -736,7 +736,7 @@
 
   // ---------------------------------------------------------------- feathered biome paint
 
-  const SHAPE_KEYS = ["cells", "circle", "polygon", "entity"];
+  const SHAPE_KEYS = ["cells", "circle", "polygon", "entity", "buffer"];
 
   function featherOptions(a) {
     const f = a.feather;
@@ -759,12 +759,15 @@
    * (outside), by blobby noise plus per-cell jitter, so the edge frays both ways.
    */
   function featherCells(sel, biomeRef, f) {
-    if (!isObj(sel)) fail("BAD_ARGS", "select is {cells?, circle?, polygon?, entity?, where?}");
+    if (!isObj(sel)) fail("BAD_ARGS", "select is {cells?, circle?, polygon?, entity?, buffer?, where?, except?}");
     const C = pack.cells;
     const P = C.p;
     const n = C.i.length;
-    const shapeKeys = SHAPE_KEYS.filter(k => sel[k] !== undefined);
-    const shapeSel = shapeKeys.length ? Object.fromEntries(shapeKeys.map(k => [k, sel[k]])) : sel;
+    selectCells(sel); // validates every key (unknown ones are BAD_FIELD) before the shape is split off
+    const shapeKeys = SHAPE_KEYS.filter(k => sel[k] !== undefined && k !== "buffer");
+    const shapeSel = shapeKeys.length
+      ? Object.fromEntries([...shapeKeys, "buffer"].filter(k => sel[k] !== undefined).map(k => [k, sel[k]]))
+      : sel;
     const shape = selectCells(shapeSel);
     const inShape = new Uint8Array(n);
     for (const c of shape) inShape[c] = 1;
@@ -817,7 +820,11 @@
         if (!inside) added++;
       } else if (inside) dropped++;
     }
-    const cellsOut = shapeKeys.length && sel.where !== undefined ? selectCells({ cells: out, where: sel.where }) : out;
+    // where and except (when the shape came from cells/circle/polygon/entity) filter the frayed result
+    const post = {};
+    if (shapeKeys.length && sel.where !== undefined) post.where = sel.where;
+    if (sel.except !== undefined && sel.except !== null) post.except = sel.except;
+    const cellsOut = Object.keys(post).length && out.length ? selectCells({ cells: out, ...post }) : out;
     return {
       cells: cellsOut,
       stats: {
@@ -841,11 +848,16 @@
     const { feather: _feather, ...rest } = a;
     const out = await basePaint({ ...rest, select: { cells: lit.cells } }, meta);
     const res = { ...out, feather: lit.stats };
+    const spacing = Math.sqrt((graphWidth * graphHeight) / pack.cells.i.length);
     if (!lit.stats.band) {
-      const spacing = Math.sqrt((graphWidth * graphHeight) / pack.cells.i.length);
       res.notes = [
         ...(Array.isArray(out.notes) ? out.notes : []),
-        `feather width ${lit.stats.width} px is below the cell spacing (~${Math.round(spacing)} px), so no cell fell in the band and the edge stayed hard; use a wider width or unit:'cells'`
+        `feather width ${lit.stats.width} px is below the cell spacing (~${Math.round(spacing)} px), so no cell fell in the band and the edge stayed hard; use a wider width or unit:'cells' (2-4 cells frays visibly)`
+      ];
+    } else if (!lit.stats.addedOutside && !lit.stats.droppedInside) {
+      res.notes = [
+        ...(Array.isArray(out.notes) ? out.notes : []),
+        `feather width ${lit.stats.width} px is about one cell spacing (~${Math.round(spacing)} px): ${lit.stats.band} cell(s) were in the band but none flipped, so the edge stayed hard; use unit:'cells' with width 2-4`
       ];
     }
     return res;

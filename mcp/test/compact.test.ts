@@ -983,9 +983,10 @@ describe("compact:true on shared_save, sketch save and sketch_promote (live mode
     assert.match(errorBody(plainConfirm).error.message, /flags differ/);
     assert.deepEqual(fake.writes(), []);
     const done = await h.ok("sketch_promote", { confirm: true, token: pp.token as string, compact: true });
+    // then:'keep' (default) marks the saved sketch's ops.json as promoted
     assert.deepEqual(
       fake.writes().map(q => `${q.method} ${q.path}`),
-      ["PUT /api/map/shared"]
+      ["PUT /api/map/shared", "PUT /api/map/sketch-slim/ops"]
     );
     assert.equal(fake.writes()[0].headers["x-map-version"], "4");
     assert.equal((done.saved as Obj).version, 5);

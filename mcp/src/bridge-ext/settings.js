@@ -672,6 +672,7 @@
       }
     });
     const redrawn = [];
+    const skippedHidden = [];
     if (draw) {
       if (has("climate") && layerIsOn("toggleTemperature")) {
         drawTemperature();
@@ -689,9 +690,11 @@
       if (layers.length) {
         const r = await T.redraw({ layers });
         redrawn.push(...r.redrawn);
+        skippedHidden.push(...(r.skippedHidden || []));
       }
     }
     const report = { mode, done, redrawn, ms: Math.round(performance.now() - t0) };
+    if (skippedHidden.length) report.skippedHidden = skippedHidden;
     if (has("biomes")) report.biomeCellsChanged = biomeCellsChanged;
     if (Object.keys(kept).length) report.kept = kept;
     return report;
@@ -863,9 +866,11 @@
         settingsChanged.some(k => GEOMETRY.has(k)),
         draw
       );
-      const { redrawn: drawn, ...report } = r;
+      const { redrawn: drawn, skippedHidden: hidden, ...report } = r;
       out.recalculated = report;
       redrawn.push(...drawn);
+      // a hidden layer is recomputed but not drawn: say so where every redraw result does
+      if (hidden?.length) out.skippedHidden = [...new Set([...(out.skippedHidden || []), ...hidden])];
       out.resolved.recalculate = mode;
       if (derived !== null) out.resolved.derived = derived;
       out.notes = out.notes || [];
@@ -1017,5 +1022,5 @@
     return out;
   };
 
-  T.settings = { SETTINGS, NAMES, STAGES, settingsNow, lockedNames, isLockedSetting, recalculate };
+  T.settings = { SETTINGS, NAMES, STAGES, settingsNow, lockedNames, isLockedSetting, recalculate, replacesReport };
 })(globalThis);

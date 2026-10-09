@@ -92,13 +92,22 @@ reload reset biome icon density, relief icons and movement cost to the defaults 
 to 0, none and 50). `src/io/save.ts` appends a 4th `|` field to the biome line (JSON
 `{iconsDensity, icons, cost}`, from `src/io/biome-extras.ts`) and `src/io/load.ts` applies it when
 present; files without it load as before, and older clients read only the first three fields (a
-re-save by an older client drops the 4th). Re-check all four after an upstream rebase.
+re-save by an older client drops the 4th). `biome-extras.ts` applies the stored `icons` list only
+when every name is a plain symbol id (letters, digits, `_`, `-`), so a crafted file cannot put markup
+into the relief `<use>` elements; a list with any other name keeps the default icons. One more
+save/load pair: upstream's load turns the Trade button on whenever `#tradeAnimation` exists and
+is not hidden (every map a current client saved), so each save switched Trade on for everyone;
+`prepareMapData` in `src/io/save.ts` now marks the saved group `data-layer-off="1"` when Trade is
+off and `src/io/load.ts` leaves the button off for it (files without the attribute, and older
+clients, behave as before). Re-check all of these after an upstream rebase.
 
 Relief icons (MCP `regenerate {parts:['relief']}` and `edit map {set:{reliefOnLoad}}`) add one
 new file and five marked hooks. `src/renderers/relief-settings.ts` reads map-level settings from
 attributes of `#terrain` (`data-seed`, `data-scale`, `data-biomes`, `data-min-height`,
 `data-exclude`, `data-near-burgs`, `data-regenerate`) and exposes its helpers as the page global
-`ReliefSettings` (the MCP bridge uses them); `src/renderers/draw-relief-icons.ts` applies them
+`ReliefSettings` (the MCP bridge uses them; its reader clamps each value to a sane range: scale and
+per-biome multipliers 0 to 2, min height 0 to 100, near-burg distance 0 to 10000, so a crafted file
+cannot make a draw hang); `src/renderers/draw-relief-icons.ts` applies them
 (with none set it draws as upstream; a seeded draw swaps `Math.random` per cell and
 `drawReliefIcons` puts it back; below a multiplier of 1 a cell keeps its icons with odds that keep
 the count going with the square of the multiplier, instead of always keeping one). With

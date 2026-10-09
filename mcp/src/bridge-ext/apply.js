@@ -41,6 +41,13 @@
 
   // Types whose entries own a note through the `note` shorthand (a marker's note is the field
   // FIELDS.marker.note); value: the note id of an entity of that type.
+  // how to make what apply cannot create (an UNSUPPORTED row says it)
+  const CREATE_HOW = {
+    province:
+      "make them with regenerate {parts:['provinces'], provinces:{states, centres:[{state, burg|at, name}]}} (the spec's nested provinces give the centres), then check again",
+    river: "rivers come from the terrain: edit river (name, reroute, split) shapes the ones the map has",
+    feature: "features come from the heights (set_heights, paint_cells height)"
+  };
   const NOTE_OWNER = {
     burg: x => `burg${x.i}`,
     state: x => `stateLabel${x.i}`,
@@ -49,10 +56,11 @@
     province: x => `province${x.i}`,
     culture: x => `culture${x.i}`,
     religion: x => `religion${x.i}`,
-    label: x => x.id
+    label: x => x.id,
+    zone: x => `zone${x.i}`
   };
   // ADD.note attaches through entity:{type,ref} for these; the others take a literal id.
-  const NOTE_ENTITY_TYPES = ["burg", "marker", "state", "route", "river", "province"];
+  const NOTE_ENTITY_TYPES = ["burg", "marker", "state", "route", "river", "province", "zone"];
 
   // Keys used only to create an entity (not compared on an existing one, not reported ignored).
   const CREATE_ONLY = {
@@ -702,8 +710,9 @@
     const fixable = Object.keys(cmp.set).length > 0 || !!row.zoneCells;
     if (cmp.writeOnly?.length) row.writeOnly = cmp.writeOnly;
     if (cmp.blocked) {
-      row.status = mode === "check" ? "differs" : "error";
-      if (mode !== "check") row.error = cmp.blocked;
+      // check previews what upsert does: a field the page refuses is an error in both modes
+      row.status = "error";
+      row.error = cmp.blocked;
     } else if (fixable && mode !== "check") {
       row.act = "update";
       row.status = "update";
@@ -813,7 +822,11 @@
       row.error = { code, message: ctx.mode === "check" ? `missing; ${message}` : message };
       return row;
     };
-    if (!ADD[type]) return cannot("NOT_FOUND", `apply cannot create ${type}s (this build has no add type '${type}')`);
+    if (!ADD[type])
+      return cannot(
+        "UNSUPPORTED",
+        `apply cannot create ${type}s (no add type '${type}')${CREATE_HOW[type] ? `: ${CREATE_HOW[type]}` : ""}`
+      );
     if (type === "route" && e.points !== undefined && !FIELDS.route?.points)
       return cannot(
         "BAD_ARGS",

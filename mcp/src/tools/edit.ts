@@ -212,37 +212,57 @@ const Common = {
     )
 };
 
+const SelectShape = {
+  cells: z.array(z.number().int().min(0)).optional().describe("Pack cell ids"),
+  circle: z
+    .looseObject({
+      at: Place,
+      radius: z.number().positive(),
+      unit: z.enum(["px", "km", "mi"]).optional().describe("Radius unit (default px; km/mi use the map scale)")
+    })
+    .optional(),
+  polygon: z.array(Place).min(3).optional().describe("Polygon vertices (places)"),
+  entity: EntityTarget.optional().describe("Cells of a state/province/culture/religion/feature/zone/river"),
+  buffer: z
+    .number()
+    .min(-5000)
+    .max(5000)
+    .optional()
+    .describe(
+      "Map px: > 0 grows the union of cells/circle/polygon/entity by every cell whose centre lies within that distance of it (a polygon or territory offset outward); < 0 shrinks it. Applied before where and except"
+    ),
+  where: z
+    .looseObject({
+      land: z.boolean().optional(),
+      water: z.boolean().optional(),
+      hMin: z.number().optional(),
+      hMax: z.number().optional(),
+      biome: z.union([z.string(), z.number(), z.array(z.union([z.string(), z.number()]))]).optional(),
+      state: z.union([EntityRef, z.array(EntityRef)]).optional(),
+      province: z.union([EntityRef, z.array(EntityRef)]).optional(),
+      culture: z.union([EntityRef, z.array(EntityRef)]).optional(),
+      religion: z.union([EntityRef, z.array(EntityRef)]).optional(),
+      feature: z.union([EntityRef, z.array(EntityRef)]).optional(),
+      burg: z.boolean().optional(),
+      river: z.boolean().optional()
+    })
+    .optional()
+    .describe("Filter; alone it scans every cell. An unknown key is BAD_FIELD (never ignored)")
+};
+
 export const SelectSchema = z
-  .object({
-    cells: z.array(z.number().int().min(0)).optional().describe("Pack cell ids"),
-    circle: z
-      .object({
-        at: Place,
-        radius: z.number().positive(),
-        unit: z.enum(["px", "km", "mi"]).optional().describe("Radius unit (default px; km/mi use the map scale)")
-      })
-      .optional(),
-    polygon: z.array(Place).min(3).optional().describe("Polygon vertices (places)"),
-    entity: EntityTarget.optional().describe("Cells of a state/province/culture/religion/feature/zone/river"),
-    where: z
-      .object({
-        land: z.boolean().optional(),
-        water: z.boolean().optional(),
-        hMin: z.number().optional(),
-        hMax: z.number().optional(),
-        biome: z.union([z.string(), z.number(), z.array(z.union([z.string(), z.number()]))]).optional(),
-        state: z.union([EntityRef, z.array(EntityRef)]).optional(),
-        province: z.union([EntityRef, z.array(EntityRef)]).optional(),
-        culture: z.union([EntityRef, z.array(EntityRef)]).optional(),
-        religion: z.union([EntityRef, z.array(EntityRef)]).optional(),
-        feature: z.union([EntityRef, z.array(EntityRef)]).optional(),
-        burg: z.boolean().optional(),
-        river: z.boolean().optional()
-      })
+  .looseObject({
+    ...SelectShape,
+    except: z
+      .looseObject(SelectShape)
       .optional()
-      .describe("Filter; alone it scans every cell")
+      .describe(
+        "A selection of its own (same keys; may nest except) whose cells are left out, e.g. {where:{biome:'Glacier'}} for 'not Glacier' or {circle:{...}} for 'polygon minus circle'"
+      )
   })
-  .describe("Cells: union of cells/circle/polygon/entity, then filtered by where");
+  .describe(
+    "Cells: union of cells/circle/polygon/entity, grown by buffer, filtered by where, minus except. Unknown keys are BAD_FIELD"
+  );
 
 export function register(ctx: ToolContext): void {
   ctx.tool(
@@ -373,10 +393,10 @@ export function register(ctx: ToolContext): void {
     {
       title: "Paint cells",
       description:
-        "Assign cells to a state/province/culture/religion/biome/zone, or change their height. select picks cells (union of cells, circle {at, radius, unit?}, polygon [Place...], entity {type,ref}; then filtered by where {land, water, hMin, hMax, biome, state, ...}). Painting skips water cells and never moves a state's or province's centre cell or a capital; provinces are re-fitted after state painting. height {value|delta|smooth, rebuild}: rebuild 'keep' (default) changes land heights only (20..100) and refuses any change that crosses height 20; 'risk' rebuilds the coastline, lakes, rivers and climate while keeping burgs, states and other data (cell ids change; erosion:true also re-runs river erosion); 'erase' regenerates every entity and needs confirmErase:true. Paint height in its own call. feather {width, unit?:'px'|'cells', seed?} (with set:{biome} only) dithers the edge: cells within width/2 of the selection boundary are painted with a probability falling from 1 inside to 0 outside (blobby noise plus jitter, deterministic per seed), so biome edges fray instead of following the selection; the result reports feather {width px, seed, shape: cells selected, band: cells within width/2 of the boundary, addedOutside / droppedInside: band cells painted outside / left unpainted inside the selection, cells: painted}; the op is logged as the literal cells painted. dryRun:true counts what would change. One auto-undo entry.",
+        "Assign cells to a state/province/culture/religion/biome/zone, or change their height. select picks cells (union of cells, circle {at, radius, unit?}, polygon [Place...], entity {type,ref}; grown by buffer px; filtered by where {land, water, hMin, hMax, biome, state, ...}; minus except:<select>). Unknown keys in select, where or set are BAD_FIELD. Painting skips water cells and never moves a state's or province's centre cell or a capital; provinces are re-fitted after state painting. height {value|delta|smooth, rebuild}: rebuild 'keep' (default) changes land heights only (20..100) and refuses any change that crosses height 20; 'risk' rebuilds the coastline, lakes, rivers and climate while keeping burgs, states and other data (cell ids change; erosion:true also re-runs river erosion); 'erase' regenerates every entity and needs confirmErase:true. Paint height in its own call. feather {width, unit?:'px'|'cells', seed?} (with set:{biome} only) dithers the edge: cells within width/2 of the selection boundary are painted with a probability falling from 1 inside to 0 outside (blobby noise plus jitter, deterministic per seed), so biome edges fray instead of following the selection; the result reports feather {width px, seed, shape: cells selected, band: cells within width/2 of the boundary, addedOutside / droppedInside: band cells painted outside / left unpainted inside the selection, cells: painted}; the op is logged as the literal cells painted. dryRun:true counts what would change. One auto-undo entry.",
       inputSchema: z.object({
         select: SelectSchema,
-        set: z.object({
+        set: z.looseObject({
           state: EntityRef.optional(),
           province: EntityRef.optional(),
           culture: EntityRef.optional(),
@@ -387,7 +407,7 @@ export function register(ctx: ToolContext): void {
             .optional()
             .describe("Zone ref (adds cells) or {ref, op:'add'|'remove'}"),
           height: z
-            .object({
+            .looseObject({
               value: z.number().min(0).max(100).optional(),
               delta: z.number().min(-100).max(100).optional(),
               smooth: z.number().int().min(1).max(10).optional().describe("Smoothing passes"),

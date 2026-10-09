@@ -163,6 +163,12 @@ export interface PaintResolved {
   graph?: string;
   /** height rebuild:'risk': the cell graph the rebuild produced (replay compares its own). */
   graphAfter?: string;
+  /**
+   * Per painted key (state, province, culture, religion, biome): the values the cells held
+   * before the paint, run-length encoded ([[value, count], ...]) and aligned with select.cells.
+   * Replay compares them with the target map: a cell someone else changed since is a conflict.
+   */
+  base?: Record<string, Array<[unknown, number]>>;
   redraw?: unknown;
 }
 
@@ -249,7 +255,13 @@ export interface Sketch {
   /** Builder-2 bookkeeping (save): the rev and blob version last saved. */
   saved: { rev: number; version: number | null; at: string } | null;
   lastRebase: Record<string, unknown> | null;
+  /** Promoted to the shared map (this session, or recorded in a kept copy's ops.json). */
+  promoted?: { to: number; at: string };
+  /** Its Worker copy was deleted (discard) while it stayed active. */
+  workerDeleted?: boolean;
 }
+
+const SUSPENDED_OP = (seq: number, tool: string) => `op ${seq} (${tool})`;
 
 export function blobOnlyReasons(sk: Sketch): string[] {
   const out = [...sk.blockers];
@@ -320,7 +332,7 @@ export class SketchStore {
     const full: OpRecord = { seq: this.nextSeq(), ...rec };
     if (sk.suspended) {
       sk.blockers.push(
-        `op ${full.seq} (${full.tool}) was made while the page held a stopped rebase (a partial replay), not the sketch`
+        `${SUSPENDED_OP(full.seq, full.tool)} was made while the page held a stopped rebase (a partial replay), not the sketch`
       );
     }
     sk.ops.push(full);
@@ -363,6 +375,8 @@ export class SketchStore {
           const o = sk.ops.pop() as OpRecord;
           sk.redo.push(o);
           taken.push(o);
+          // the op is out of the log, so the blob-only reason it caused goes too
+          sk.blockers = sk.blockers.filter(b => !b.startsWith(`${SUSPENDED_OP(o.seq, o.tool)}`));
         }
         sk.rev++;
         const what =
@@ -762,7 +776,8 @@ const NOTE_PREFIX: Array<[string, string]> = [
   ["route", "route"],
   ["river", "river"],
   ["culture", "culture"],
-  ["religion", "religion"]
+  ["religion", "religion"],
+  ["zone", "zone"]
 ];
 
 export class Rewriter {
@@ -888,6 +903,17 @@ export function rewriteResolved(tool: string, resolved: Resolved, rw: Rewriter):
         if (k in p.set) p.set[k] = rw.id(k, p.set[k]);
       const z = p.set.zone as { ref: unknown; op?: string } | undefined;
       if (z) p.set.zone = { ...z, ref: rw.id("zone", z.ref) };
+      // base values may name entities an earlier op of the sketch created
+      if (p.base)
+        for (const [k, runs] of Object.entries(p.base))
+          p.base[k] = runs.map(([v, n]) => {
+            try {
+              return [rw.id(k, v), n] as [unknown, number];
+            } catch (e) {
+              if (e instanceof Unmapped) return [v, n] as [unknown, number];
+              throw e;
+            }
+          });
       return p;
     }
     default: {

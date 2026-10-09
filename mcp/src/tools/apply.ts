@@ -104,7 +104,9 @@ export function shapeResult(
     const rest: Row[] = [];
     for (const r of res.rows) {
       if (r.status === "unchanged") continue;
-      if (r.status === "created" && !r.diffs?.length && !r.error && !r.note) {
+      if (r.status === "created") {
+        // every created entity is listed here; one with diffs (a read-only field another tool
+        // sets, e.g. a burg's state), an error or a note also keeps its row
         created[listOf(r)] ??= {};
         const list = created[listOf(r)];
         // a row keyed by its id (a note, a route group) is listed by its name
@@ -114,7 +116,7 @@ export function shapeResult(
         const base = k;
         while (k in list) k = `${base} #${n++}`;
         list[k] = r.i ?? r.key ?? null;
-        continue;
+        if (!r.diffs?.length && !r.error && !r.note) continue;
       }
       rest.push(r);
     }
@@ -122,12 +124,22 @@ export function shapeResult(
     rest.sort(
       (a, b) => LIST_ORDER.indexOf(a.status) - LIST_ORDER.indexOf(b.status) // stable: entry order within a status
     );
-    // identical errors (same code and message): one row with a count and the first entries
+    // identical errors (same code and message), and identical differs rows (same list and the
+    // same field changes, e.g. 33 markers whose size is 22 and should be 30): one row with a
+    // count and the first entries
+    const groupKey = (r: Row): string | null => {
+      if (r.status === "error") {
+        const e = (r.error ?? {}) as ErrorBody;
+        return `error|${e.code}|${e.message}`;
+      }
+      if (r.status === "differs" && r.diffs?.length && !r.note)
+        return `differs|${listOf(r)}|${JSON.stringify(r.diffs)}`;
+      return null;
+    };
     const groups = new Map<string, Row[]>();
     for (const r of rest) {
-      if (r.status !== "error") continue;
-      const e = (r.error ?? {}) as ErrorBody;
-      const k = `${e.code}|${e.message}`;
+      const k = groupKey(r);
+      if (k === null) continue;
       const g = groups.get(k);
       if (g) g.push(r);
       else groups.set(k, [r]);
@@ -135,26 +147,21 @@ export function shapeResult(
     shown = [];
     const emitted = new Set<string>();
     for (const r of rest) {
-      if (r.status !== "error") {
-        shown.push(r);
-        continue;
-      }
-      const e = (r.error ?? {}) as ErrorBody;
-      const k = `${e.code}|${e.message}`;
-      const g = groups.get(k) ?? [r];
-      if (g.length < 3) {
+      const k = groupKey(r);
+      const g = k === null ? [r] : (groups.get(k) ?? [r]);
+      if (k === null || g.length < 3) {
         shown.push(r);
         continue;
       }
       if (emitted.has(k)) continue;
       emitted.add(k);
       shown.push({
-        status: "error",
+        status: r.status,
         count: g.length,
         at: g.slice(0, 3).map(x => x.at),
         keys: g.slice(0, 3).map(x => x.key ?? null),
         ...(g.length > 3 ? { more: g.length - 3 } : {}),
-        error: r.error
+        ...(r.status === "error" ? { error: r.error } : { diffs: r.diffs })
       });
     }
   }
@@ -162,7 +169,11 @@ export function shapeResult(
   out.rows = shown.slice(0, limit);
   if (shown.length > limit)
     out.moreRows = `${shown.length - limit} more rows; raise limit (max 2000) or narrow with only`;
-  if (Object.keys(res.ignored ?? {}).length) out.ignored = res.ignored;
+  if (Object.keys(res.ignored ?? {}).length) {
+    out.ignored = res.ignored;
+    const keys = Object.entries(res.ignored).map(([list, ks]) => `${list}: ${ks.join(", ")}`);
+    out.ignoredNote = `keys apply does not apply, so they were left out (not checked, not set): ${keys.join("; ")}`;
+  }
   if (res.unsupported?.length) out.unsupported = res.unsupported;
   if (opts.skipped?.length) out.skipped = opts.skipped;
   if (Object.keys(res.also ?? {}).length) out.alsoCreated = res.also;
@@ -180,7 +191,7 @@ export function register(ctx: ToolContext): void {
     {
       title: "Apply or check a spec",
       description:
-        "Bring the map in line with a spec in one call, or check it. Lists burgs, markers, labels, zones, routes, notes, states, provinces, cultures, religions, rivers, features, biomes, routeGroups (any list whose singular is an edit/add type) and map {name, year, era, ...}; inline or specPath (JSON file). Entries are keyed by name (labels: text; notes: id | entity:{type,name} | entity:'Name' (an entity, else a note of that title) | name), by id (types with string ids, e.g. route groups) or by ref. Found (exact, then case/diacritic-folded name; several of that name: the one at the entry's x,y, else an AMBIGUOUS error row with candidates) -> only differing fields are edited; missing -> created. mode 'upsert' (default) | 'update' (no creates) | 'check' (read-only: reports what upsert would do). Row status: unchanged | updated | created | differs | missing | error, with diffs [{field, have, want}] (readOnly + fix: another tool sets it, e.g. a burg's state; pending: created by this spec). Two entries for one entity or note: CONFLICT. Tolerance: places 1 px, numbers exact, colours case-insensitive, legends HTML-decoded; tolerance {px, number, fields:{population: 50}, legend:'contains'}. Shapes: x,y or at:[x,y]; routes through:[burg names or [x,y]] (pathfound) or draw:'points' (freehand, may go in a routeGroups group); rivers: name/type (structure via edit river); zones shape/select {polygon:[[x,y]], circle:[x,y,r], where}; an entry's note (string or {name, legend}) becomes its note; states[].provinces are checked as provinces. mapping {lists:{a:'b'}, keys:{burgs:{type:'group'}}, values:{burgs:{group:{'tunnel town':'town'}}, routes:{group:{roads:'roads', '*':'route-{}'}}, labels:{group:'lbl_{}'}}} renames first; ignore {burgs:['note'], '*':[...]} leaves keys out. One auto-undo entry, none when nothing changes; replayable in sketches. Result: counts; rows most actionable first, identical errors grouped (verbose: every row); created {list: {key: id}}.",
+        "Bring the map in line with a spec in one call, or check it. Lists burgs, markers, labels, zones, routes, notes, states, provinces, cultures, religions, rivers, features, biomes, routeGroups (any list whose singular is an edit/add type) and map {name, year, era, ...}; inline or specPath (JSON file). Entries are keyed by name (labels: text; notes: id | entity:{type,name} | entity:'Name' (an entity, else a note of that title) | name), by id (types with string ids, e.g. route groups) or by ref. Found (exact, then case/diacritic-folded name; several of that name: the one at the entry's x,y, else an AMBIGUOUS error row with candidates) -> only differing fields are edited; missing -> created. mode 'upsert' (default) | 'update' (no creates) | 'check' (read-only: reports what upsert would do). Row status: unchanged | updated | created | differs | missing | error, with diffs [{field, have, want}] (readOnly + fix: another tool sets it, e.g. a burg's state; pending: created by this spec). Two entries for one entity or note: CONFLICT. Tolerance: places 1 px, numbers exact, colours case-insensitive, legends HTML-decoded; tolerance {px, number, fields:{population: 50}, legend:'contains'}. Shapes: x,y or at:[x,y]; routes through:[burg names or [x,y]] (pathfound) or draw:'points' (freehand, may go in a routeGroups group); rivers: name/type (structure via edit river); zones shape/select {polygon:[[x,y]], circle:[x,y,r], where}; an entry's note (string or {name, legend}) becomes its note; states[].provinces are checked as provinces. mapping {lists:{a:'b'}, keys:{burgs:{type:'group'}}, values:{burgs:{group:{'tunnel town':'town'}}, routes:{group:{roads:'roads', '*':'route-{}'}}, labels:{group:'lbl_{}'}}} renames first; ignore {burgs:['note'], '*':[...]} leaves keys out. One auto-undo entry, none when nothing changes; replayable in sketches. Result: counts; rows most actionable first, 3+ identical errors or differs rows grouped (verbose: every row); created {list: {key: id}}.",
       inputSchema: z
         .object({
           specPath: z

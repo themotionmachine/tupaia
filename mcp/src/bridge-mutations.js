@@ -41,7 +41,13 @@
       notes: new Set(),
       claimed: new Set(),
       // hidden: layers drawn directly by an op (not through redraw) that were skipped as hidden
-      R: { add: (layer, ids) => req.push(ids ? { layer, ids } : layer), list: req, hidden: new Set() },
+      // drawn: layers an op drew or patched in place itself (a route path, a label), listed in redrawn
+      R: {
+        add: (layer, ids) => req.push(ids ? { layer, ids } : layer),
+        list: req,
+        hidden: new Set(),
+        drawn: new Set()
+      },
       used(type) {
         if (!usedCache[type]) usedCache[type] = new Set(I.liveList(type).map(x => fold(I.nameOf(type, x))));
         return usedCache[type];
@@ -51,11 +57,13 @@
 
   async function finishRedraw(a, R) {
     const direct = [...(R.hidden || [])];
-    if (a.redraw === false) return { redrawn: [], skippedHidden: direct };
+    const drawn = [...(R.drawn || [])].filter(l => !direct.includes(l));
+    if (a.redraw === false) return { redrawn: drawn, skippedHidden: direct };
     const layers = Array.isArray(a.redraw) ? a.redraw : R.list;
-    if (!layers.length) return { redrawn: [], skippedHidden: direct };
+    if (!layers.length) return { redrawn: drawn, skippedHidden: direct };
     const out = await T.redraw({ layers });
     for (const l of direct) if (!out.skippedHidden.includes(l)) out.skippedHidden.push(l);
+    for (const l of drawn) if (!out.redrawn.includes(l)) out.redrawn.push(l);
     return out;
   }
 
@@ -286,9 +294,10 @@
 
   const FIELDS = {
     burg: {
-      name: nameField("burg", (b, n) => {
+      name: nameField("burg", (b, n, c) => {
         b.name = n;
         drawBurgLabel(b);
+        c?.R?.drawn?.add("burgLabels");
       }),
       population: {
         check: num("population (people)", 0),
@@ -549,8 +558,16 @@
     },
 
     river: {
-      name: nameField("river", (r, n) => {
+      name: nameField("river", (r, n, c) => {
+        const old = r.name;
         r.name = n;
+        // the river's note keeps its own title: follow the rename when the title names the river
+        const note = old ? notes.find(x => x.id === `river${r.i}`) : null;
+        if (note && typeof note.name === "string" && note.name.includes(old)) {
+          note.name = note.name.split(old).join(n);
+          c?.notes?.add("a renamed river's note title follows the new name (where it held the old one)");
+        } else if (note)
+          c?.notes?.add(`river ${r.i}'s note keeps its title '${note.name}' (edit {type:'note'} changes it)`);
       }),
       type: { check: str("type"), get: r => r.type ?? null, set: (r, v) => (r.type = v) }
     },
@@ -568,8 +585,10 @@
         set: (r, v, c) => {
           r.group = v;
           document.getElementById(`route${r.i}`)?.remove();
-          if (layerIsOn("toggleRoutes")) drawRoute(r);
-          else c.R.hidden.add("routes");
+          if (layerIsOn("toggleRoutes")) {
+            drawRoute(r);
+            c.R.drawn?.add("routes");
+          } else c.R.hidden.add("routes");
         }
       },
       name: { check: str("name"), get: r => r.name ?? null, set: (r, v) => (r.name = v) },
@@ -642,7 +661,10 @@
           return v;
         },
         get: l => (l.el.textContent || "").trim(),
-        set: (l, v) => setLabelText(l.el, v)
+        set: (l, v, c) => {
+          setLabelText(l.el, v);
+          c?.R?.drawn?.add("labels");
+        }
       },
       move: {
         check: (v, l) => {
@@ -658,11 +680,12 @@
           const m = /^M\s*(-?[\d.]+)[ ,](-?[\d.]+)\s*h\s*(-?[\d.]+)/.exec(d);
           return m ? { x: rn(+m[1] + +m[3] / 2), y: rn(+m[2]) } : null;
         },
-        set: (l, p) => {
+        set: (l, p, c) => {
           const path = document.getElementById(`textPath_${l.id}`);
           const m = /^M\s*(-?[\d.]+)[ ,](-?[\d.]+)\s*h\s*(-?[\d.]+)/.exec(path.getAttribute("d"));
           const w = +m[3];
           path.setAttribute("d", `M${rn(p.x - w / 2)},${rn(p.y)} h${w}`);
+          c?.R?.drawn?.add("labels");
         }
       }
     },
@@ -1088,6 +1111,20 @@
     return { px: rn(px, 1), [unit]: rn(px * distanceScale, 1) };
   }
 
+  /** Burgs.add links a new burg to its nearest neighbour with a route (as the app's burg tool does): say so. */
+  function addBurgConnected(xy, c) {
+    const before = (pack.routes || []).length;
+    const id = Burgs.add(xy);
+    const made = (pack.routes || []).slice(before).filter(r => r && !r.removed);
+    if (made.length) {
+      c.notes.add(
+        "a new burg is linked to the nearest route by a new route (its row's routes), as the app's burg tool does; edit {type:'route', ops:[{ref, remove:true}]} removes one"
+      );
+      c.R?.drawn?.add("routes");
+    }
+    return { id, routes: made.map(r => r.i) };
+  }
+
   const ADD = {
     burg: {
       check(item, c) {
@@ -1109,7 +1146,7 @@
       },
       plan: (q, row) => Object.assign(row, { x: q.p.x, y: q.p.y, cell: q.p.cell }),
       apply(q, c, item) {
-        const id = Burgs.add([q.p.x, q.p.y]);
+        const { id, routes } = addBurgConnected([q.p.x, q.p.y], c);
         const b = pack.burgs[id];
         applyFields(q.fs, b, c, item);
         // literal name, population and group: Burgs.add draws them at random
@@ -1126,6 +1163,7 @@
           cell: b.cell,
           state: b.state,
           group: b.group,
+          ...(routes.length ? { routes } : {}),
           _r: lit
         };
       }
@@ -1186,12 +1224,16 @@
         const burgs = pack.burgs;
         const center = q.center;
         let bid = q.burgId;
+        let routes = [];
         if (!bid) {
-          bid = Burgs.add([q.p.x, q.p.y]);
-          if (q.capitalName) {
-            burgs[bid].name = q.capitalName;
-            drawBurgLabel(burgs[bid]);
+          ({ id: bid, routes } = addBurgConnected([q.p.x, q.p.y], c));
+          // the new capital takes the state's culture (Burgs.add gives it the cell's), and a name in it
+          if (q.culture !== undefined && burgs[bid].culture !== q.culture) {
+            burgs[bid].culture = q.culture;
+            if (!q.capitalName) burgs[bid].name = Names.getCulture(q.culture);
           }
+          if (q.capitalName) burgs[bid].name = q.capitalName;
+          drawBurgLabel(burgs[bid]);
         }
         const oldState = C.state[center];
         const oldProvince = C.province[center];
@@ -1290,6 +1332,7 @@
           name: s.name,
           fullName: s.fullName,
           capital: { i: bid, name: burgs[bid].name },
+          ...(routes.length ? { routes } : {}),
           center,
           cells: s.cells,
           x: rn(C.p[center][0]),
@@ -1412,8 +1455,10 @@
           if (!links[b]) links[b] = {};
           links[b][a] = id;
         }
-        if (layerIsOn("toggleRoutes")) drawRoute(route);
-        else c.R.hidden.add("routes");
+        if (layerIsOn("toggleRoutes")) {
+          drawRoute(route);
+          c.R.drawn?.add("routes");
+        } else c.R.hidden.add("routes");
         const len =
           polylineAt(
             points.map(pt => [pt[0], pt[1]]),
@@ -1546,9 +1591,11 @@
             state: "stateLabel",
             route: "route",
             river: "river",
-            province: "province"
+            province: "province",
+            zone: "zone"
           }[r.type];
-          if (!prefix) fail("BAD_ARGS", `notes attach to burg, marker, state, route, river or province, not ${r.type}`);
+          if (!prefix)
+            fail("BAD_ARGS", `notes attach to burg, marker, state, route, river, province or zone, not ${r.type}`);
           id = `${prefix}${r.i}`;
           owner = { type: r.type, ref: r.i };
         }
@@ -1781,7 +1828,14 @@
   function cellWhere(where) {
     if (!isObj(where)) fail("BAD_ARGS", "where is an object");
     for (const k of Object.keys(where))
-      if (!CELL_WHERE.includes(k)) fail("BAD_ARGS", `unknown cell filter '${k}'`, { details: CELL_WHERE });
+      if (!CELL_WHERE.includes(k))
+        fail(
+          "BAD_FIELD",
+          `unknown cell filter '${k}' in where; allowed: ${CELL_WHERE.join(", ")} (to leave cells out use select.except)`,
+          {
+            details: { unknown: k, allowed: CELL_WHERE }
+          }
+        );
     const C = pack.cells;
     const tests = [];
     if (where.land !== undefined) tests.push(c => C.h[c] >= 20 === !!where.land);
@@ -1806,9 +1860,50 @@
     return c => tests.every(t => t(c));
   }
 
-  /** Pack cell ids for a selection {cells?, circle?, polygon?, entity?, where?} (union, then where). */
+  const SELECT_KEYS = ["cells", "circle", "polygon", "entity", "buffer", "where", "except"];
+
+  /** Grow (px > 0) or shrink (px < 0) a cell set by centre distance to the set's other side. */
+  function bufferCells(list, px) {
+    const C = pack.cells;
+    const inSet = new Uint8Array(C.i.length);
+    for (const c of list) inSet[c] = 1;
+    const r = Math.abs(px);
+    const edge = list.filter(c => C.c[c].some(j => !inSet[j]));
+    if (px > 0) {
+      const out = new Set(list);
+      for (const c of edge) for (const j of findAll(C.p[c][0], C.p[c][1], r)) out.add(j);
+      return [...out];
+    }
+    const drop = new Set();
+    for (const c of edge)
+      for (const j of C.c[c])
+        if (!inSet[j]) for (const k of findAll(C.p[j][0], C.p[j][1], r)) if (inSet[k]) drop.add(k);
+    for (const c of edge) drop.add(c);
+    return list.filter(c => !drop.has(c));
+  }
+
+  /**
+   * Pack cell ids for a selection {cells?, circle?, polygon?, entity?, buffer?, where?, except?}:
+   * the union of the shapes, grown/shrunk by buffer px, filtered by where, minus the cells of
+   * except (a selection of its own). Unknown keys are refused, so a typo never widens a paint.
+   */
   function selectCells(sel) {
-    if (!isObj(sel)) fail("BAD_ARGS", "select is {cells?, circle?, polygon?, entity?, where?}");
+    if (!isObj(sel)) fail("BAD_ARGS", "select is {cells?, circle?, polygon?, entity?, buffer?, where?, except?}");
+    for (const k of Object.keys(sel))
+      if (!SELECT_KEYS.includes(k))
+        fail("BAD_FIELD", `select does not take '${k}'; allowed: ${SELECT_KEYS.join(", ")}`, {
+          details: { unknown: k, allowed: SELECT_KEYS }
+        });
+    for (const [k, allowed] of [
+      ["circle", ["at", "radius", "unit"]],
+      ["entity", ["type", "ref"]]
+    ])
+      if (isObj(sel[k]))
+        for (const x of Object.keys(sel[k]))
+          if (!allowed.includes(x))
+            fail("BAD_FIELD", `select.${k} does not take '${x}'; allowed: ${allowed.join(", ")}`, {
+              details: { unknown: x, allowed }
+            });
     const C = pack.cells;
     const n = C.i.length;
     let set = null;
@@ -1851,9 +1946,19 @@
     if (set) out = [...set];
     else if (sel.where !== undefined) out = Array.from(C.i);
     else fail("BAD_ARGS", "select needs cells, circle, polygon, entity or where");
+    if (sel.buffer !== undefined && sel.buffer !== 0) {
+      if (typeof sel.buffer !== "number" || !Number.isFinite(sel.buffer) || Math.abs(sel.buffer) > 5000)
+        fail("BAD_ARGS", "select.buffer is map px between -5000 and 5000 (> 0 grows the shapes, < 0 shrinks them)");
+      if (!set) fail("BAD_ARGS", "select.buffer needs cells, circle, polygon or entity to grow");
+      out = bufferCells(out, sel.buffer);
+    }
     if (sel.where !== undefined) {
       const test = cellWhere(sel.where);
       out = out.filter(test);
+    }
+    if (sel.except !== undefined && sel.except !== null) {
+      const minus = new Set(selectCells(sel.except));
+      out = out.filter(c => !minus.has(c));
     }
     return out.sort((a, b) => a - b);
   }
@@ -1868,6 +1973,12 @@
 
   function prepareHeight(h) {
     if (!isObj(h)) fail("BAD_ARGS", "height is {value|delta|smooth, rebuild:'keep'|'risk'|'erase'}");
+    const HEIGHT_KEYS = ["value", "delta", "smooth", "rebuild", "clamp", "erosion", "confirmErase"];
+    for (const k of Object.keys(h))
+      if (!HEIGHT_KEYS.includes(k))
+        fail("BAD_FIELD", `height does not take '${k}'; allowed: ${HEIGHT_KEYS.join(", ")}`, {
+          details: { unknown: k, allowed: HEIGHT_KEYS }
+        });
     const modes = ["value", "delta", "smooth"].filter(k => h[k] !== undefined);
     if (modes.length !== 1) fail("BAD_ARGS", "height takes exactly one of value, delta, smooth");
     const rebuild = h.rebuild ?? "keep";
@@ -1889,7 +2000,10 @@
     const set = a.set;
     if (!isObj(set) || !Object.keys(set).length) fail("BAD_ARGS", `set needs one or more of ${PAINT_KEYS.join(", ")}`);
     for (const k of Object.keys(set))
-      if (!PAINT_KEYS.includes(k)) fail("BAD_ARGS", `cannot paint '${k}'`, { details: PAINT_KEYS });
+      if (!PAINT_KEYS.includes(k))
+        fail("BAD_FIELD", `cannot paint '${k}'; set takes: ${PAINT_KEYS.join(", ")}`, {
+          details: { unknown: k, allowed: PAINT_KEYS }
+        });
     if (set.height !== undefined && Object.keys(set).length > 1)
       fail("BAD_ARGS", "paint height in its own call: rebuilding the heightmap renumbers cells");
     const cellsSel = selectCells(a.select);
@@ -2609,6 +2723,27 @@
     return stats;
   }
 
+  const PAINT_VALUE_KEYS = ["state", "province", "culture", "religion", "biome"];
+
+  function rleValues(values) {
+    const out = [];
+    for (const v of values) {
+      const last = out[out.length - 1];
+      if (last && last[0] === v) last[1]++;
+      else out.push([v, 1]);
+    }
+    return out;
+  }
+
+  /** Current values of some cells for the paint keys (sketch replay's both-painted check). */
+  FNS.cellValues = a => {
+    const cells = Array.isArray(a.cells) ? a.cells : [];
+    const out = {};
+    for (const k of Array.isArray(a.keys) ? a.keys : [])
+      if (PAINT_VALUE_KEYS.includes(k)) out[k] = cells.map(c => pack.cells[k][c] ?? null);
+    return out;
+  };
+
   FNS.paint = async a => {
     const P = preparePaint(a);
     // the graph the literal cell list refers to (taken before a height rebuild renumbers it)
@@ -2620,6 +2755,11 @@
     }
     const c = batchContext(a);
     if (P.state !== undefined) c.internals = await stateInternals();
+    // the values the cells held before (run-length encoded): replay finds cells someone else
+    // painted since and reports them as a conflict instead of overwriting them
+    const base = {};
+    for (const k of PAINT_VALUE_KEYS)
+      if (P[k] !== undefined) base[k] = rleValues(P.cells.map(cell => pack.cells[k][cell]));
     const out = await paintApply(P, true, c);
     T.resetMemo?.();
     const rd = await finishRedraw(a, c.R);
@@ -2628,6 +2768,7 @@
     if (P.zone) set.zone = { ref: P.zone.i, op: P.zone.op };
     if (P.height) set.height = clone(P.height);
     const resolved = { select: { cells: P.cells.slice() }, set };
+    if (Object.keys(base).length) resolved.base = base;
     if (graph) resolved.graph = graph;
     // a risk rebuild is deterministic (the app reseeds from the map seed): replay checks its graph
     if (P.height?.rebuild === "risk") resolved.graphAfter = T.cellGraph?.() ?? null;

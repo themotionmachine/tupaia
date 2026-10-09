@@ -194,6 +194,20 @@ function pickFields(r: Record<string, unknown>, fields: string[]): Record<string
   return Object.fromEntries(Object.entries(r).filter(([k]) => PLACE_HEAD.includes(k) || keep.has(k)));
 }
 
+/** Entity keys whose long lists (a burg's ~100 production and deal rows) JSON inspect shows as a count unless named in fields. */
+const BULK_KEYS = ["production", "deals"];
+
+/** r with each BULK_KEYS list of more than 10 items in r.entity replaced by "[N items]" (fields:[key] reads it whole). */
+export function elideBulk(r: Record<string, unknown>): Record<string, unknown> {
+  const e = r.entity as Record<string, unknown> | undefined;
+  if (!e || typeof e !== "object") return r;
+  const cut = BULK_KEYS.filter(k => Array.isArray(e[k]) && (e[k] as unknown[]).length > 10);
+  if (!cut.length) return r;
+  const entity = { ...e };
+  for (const k of cut) entity[k] = `[${(e[k] as unknown[]).length} items: fields:['${k}'] lists them]`;
+  return { ...r, entity };
+}
+
 export function register(ctx: ToolContext): void {
   ctx.tool(
     "map_info",
@@ -304,7 +318,7 @@ export function register(ctx: ToolContext): void {
       const warnings = args.fields?.length ? unknownInspectFields(r, args.fields) : [];
       if (args.format === "compact")
         return new WithText([compactInspect(r, args.fields), ...warnings.map(w => `warning: ${w}`)].join("\n"));
-      const out = args.fields?.length ? pickFields(r, args.fields) : r;
+      const out = args.fields?.length ? pickFields(r, args.fields) : elideBulk(r);
       return warnings.length ? { ...out, warnings } : out;
     }
   );

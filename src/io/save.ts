@@ -96,6 +96,11 @@ export function prepareMapData(): string {
   if (cloneRuler) cloneRuler.innerHTML = ""; // always remove rulers
   const cloneTradeAnimation = cloneEl.querySelector("#tradeAnimation");
   if (cloneTradeAnimation) cloneTradeAnimation.innerHTML = ""; // always remove transient trade animations
+  // tupaia-mcp: the group is always there and visible, so load.ts turned Trade on for every saved map; record the button state
+  if (cloneTradeAnimation) {
+    if (layerIsOn("toggleTrade")) cloneTradeAnimation.removeAttribute("data-layer-off");
+    else cloneTradeAnimation.setAttribute("data-layer-off", "1");
+  }
   const cloneTerrain = cloneEl.querySelector("#terrain");
   if (cloneTerrain?.hasAttribute("data-regenerate")) cloneTerrain.innerHTML = ""; // tupaia-mcp: redrawn on load (relief-settings.ts)
 

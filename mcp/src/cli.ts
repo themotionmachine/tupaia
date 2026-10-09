@@ -67,6 +67,8 @@ Options:
   --port <n>      port for a daemon this command starts (default TUPAIA_HTTP_PORT, else the port
                   this TUPAIA_OUT's daemon used last, else any free port)
   --out <dir>     same as TUPAIA_OUT=<dir>: which daemon (one per output directory)
+  --accept-live   call (or print headers for) a live-mode daemon although your environment is
+                  local, or asks for another live origin (refused otherwise: exit 2)
 
 Environment: TUPAIA_OUT picks the daemon and where files go; TUPAIA_MODE and the other TUPAIA_*
 variables apply when this command starts the daemon (the mode never changes afterwards);
@@ -90,6 +92,8 @@ interface Opts {
   timeout?: number;
   port?: string;
   out?: string;
+  /** Use a live daemon although this caller's environment is local (or names another origin). */
+  acceptLive?: boolean;
   positional: string[];
 }
 
@@ -112,6 +116,7 @@ function parseArgs(argv: string[]): Opts {
     };
     if (flag === "--json") o.json = true;
     else if (flag === "--names") o.names = true;
+    else if (flag === "--accept-live") o.acceptLive = true;
     else if (flag === "-h" || flag === "--help") o.help = true;
     else if (flag === "--timeout") {
       const n = Number(take());
@@ -134,7 +139,13 @@ const note = (s: string) => process.stderr.write(`tupaia: ${s}\n`);
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 const mcpUrlOf = (st: DaemonState) => st.mcpUrl ?? `${st.url}/mcp`;
 
-type Health = Record<string, unknown> & { mode?: string; repoRoot?: string; pid?: number; active?: number };
+type Health = Record<string, unknown> & {
+  mode?: string;
+  repoRoot?: string;
+  pid?: number;
+  active?: number;
+  liveOrigin?: string | null;
+};
 type Probe = { health: Health } | { err: "refused" | "unauthorized" | "timeout" | "other"; detail: string };
 
 async function probe(st: DaemonState, timeoutMs = 5000): Promise<Probe> {
@@ -282,6 +293,7 @@ async function startDaemon(cfg: Config, opts: Opts, soonMs?: number): Promise<Fo
   let child: ReturnType<typeof spawn> | null = null;
   let up = false;
   let leaveRunning = false;
+  let tokenFile: string | null = null;
   try {
     const again = await findDaemon(cfg, true);
     if (again) return again;
@@ -293,7 +305,11 @@ async function startDaemon(cfg: Config, opts: Opts, soonMs?: number): Promise<Fo
     const portArgs = where.port ? [where.strict ? "--port" : "--prefer-port", String(where.port)] : [];
     const token = crypto.randomBytes(32).toString("base64url");
     // the daemon runs from mcp/: path variables are made absolute against the caller's cwd
-    const env: NodeJS.ProcessEnv = { ...process.env, TUPAIA_OUT: cfg.outDir, TUPAIA_HTTP_TOKEN: token };
+    // the token goes through a 0600 file the daemon reads and deletes, not the environment (ps eww shows that)
+    tokenFile = path.join(cfg.outDir, `daemon.token.${process.pid}.${crypto.randomBytes(6).toString("hex")}`);
+    fs.writeFileSync(tokenFile, token, { mode: 0o600, flag: "wx" });
+    const env: NodeJS.ProcessEnv = { ...process.env, TUPAIA_OUT: cfg.outDir, TUPAIA_HTTP_TOKEN_FILE: tokenFile };
+    delete env.TUPAIA_HTTP_TOKEN;
     if (process.env.TUPAIA_DIST) env.TUPAIA_DIST = cfg.distDir;
     child = spawn(process.execPath, [SERVER, "--http", ...portArgs], {
       detached: true,
@@ -328,7 +344,7 @@ async function startDaemon(cfg: Config, opts: Opts, soonMs?: number): Promise<Fo
             up = true;
             writePortPref(cfg.outDir, { port: st.port, registered: false });
             note(
-              `started a daemon: pid ${st.pid}, ${mcpUrlOf(st)}, mode ${st.mode}, TUPAIA_OUT ${cfg.outDir} (log ${logFile}). Its page is a fresh random map with no undo history.`
+              `started a daemon: pid ${st.pid}, ${mcpUrlOf(st)}, mode ${st.mode}, TUPAIA_OUT ${cfg.outDir} (log ${logFile}). ${st.mode === "live" ? `Its page loads the shared map from ${st.liveOrigin ?? "the live origin"} (session says which version), with no undo history.` : "Its page is a fresh random map with no undo history."}`
             );
             reportLastExit(cfg);
             return { st, health: p.health };
@@ -355,6 +371,8 @@ async function startDaemon(cfg: Config, opts: Opts, soonMs?: number): Promise<Fo
       }
     }
     fs.closeSync(fd);
+    // the daemon deletes it once read; one that never got that far leaves it behind
+    if (tokenFile && !leaveRunning) fs.rmSync(tokenFile, { force: true });
     if (!leaveRunning) {
       try {
         fs.unlinkSync(lockFile);
@@ -398,6 +416,37 @@ export function mismatchWarnings(
   return w;
 }
 
+/**
+ * Why this caller must not use a live daemon, or null. A live daemon can write the shared map: a
+ * caller whose environment is local (or unset) did not ask for that, and a live caller naming
+ * another origin would write somewhere it did not mean to. `--accept-live` overrides.
+ */
+export function liveRefusal(
+  caller: { envMode: string; liveOrigin: string | null },
+  daemon: { pid: number; mode: string; liveOrigin?: string | null }
+): string | null {
+  if (daemon.mode !== "live") return null;
+  if (caller.envMode !== "live")
+    return `the running daemon (pid ${daemon.pid}) is in live mode (it can write the shared map${daemon.liveOrigin ? ` at ${daemon.liveOrigin}` : ""}) but your environment is ${caller.envMode}: refused, nothing ran. Use another TUPAIA_OUT (or --out) for a local daemon, or pass --accept-live if you mean to use the live one.`;
+  if (daemon.liveOrigin && caller.liveOrigin && daemon.liveOrigin !== caller.liveOrigin)
+    return `the running live daemon (pid ${daemon.pid}) writes to ${daemon.liveOrigin} but your TUPAIA_LIVE_ORIGIN is ${caller.liveOrigin}: refused, nothing ran. Use another TUPAIA_OUT (or --out), 'tupaia stop' it first, or pass --accept-live.`;
+  return null;
+}
+
+function guardLive(cfg: Config, f: Found, opts: Opts): void {
+  const daemon = {
+    pid: f.st.pid,
+    mode: String(f.health.mode ?? f.st.mode),
+    liveOrigin: f.health.liveOrigin ?? f.st.liveOrigin ?? null
+  };
+  const why = liveRefusal({ envMode: cfg.envMode, liveOrigin: cfg.liveOrigin }, daemon);
+  if (!why) return;
+  if (!opts.acceptLive) throw new CliError(why);
+  note(
+    `--accept-live: using the live daemon (pid ${daemon.pid}) although ${why.split(":")[0].replace(/^the running /, "the ")}`
+  );
+}
+
 function warnMismatch(cfg: Config, f: Found, opts: Opts): void {
   const daemon = {
     pid: f.st.pid,
@@ -406,12 +455,15 @@ function warnMismatch(cfg: Config, f: Found, opts: Opts): void {
     mode: String(f.health.mode ?? f.st.mode),
     repoRoot: f.health.repoRoot
   };
-  for (const w of mismatchWarnings({ envMode: cfg.envMode, repoRoot: cfg.repoRoot, port: opts.port }, daemon)) note(w);
+  // a live daemon with a local caller is refused (guardLive) unless --accept-live: no second warning
+  for (const w of mismatchWarnings({ envMode: cfg.envMode, repoRoot: cfg.repoRoot, port: opts.port }, daemon))
+    if (!(daemon.mode === "live" && w.includes("live mode"))) note(w);
 }
 
-async function ensureDaemon(cfg: Config, opts: Opts): Promise<Found> {
+async function ensureDaemon(cfg: Config, opts: Opts, guard = true): Promise<Found> {
   const found = await findDaemon(cfg);
   if (found) {
+    if (guard) guardLive(cfg, found, opts);
     warnMismatch(cfg, found, opts);
     return found;
   }
@@ -509,8 +561,12 @@ async function cmdCall(cfg: Config, opts: Opts): Promise<number> {
     const st = f.st;
     const stopBeat = heartbeat(async () => {
       const h = await probe(st, 3000);
-      const n = "health" in h ? Number(h.health.active ?? 0) : 0;
-      return `${tool} is still queued or running (the daemon has ${n} request(s) in progress)`;
+      if (!("health" in h)) return `${tool}: waiting for the daemon (it does not answer /health: ${h.detail})`;
+      const n = Number(h.health.active ?? 0);
+      // 0: the daemon has not received this call yet (a slow, loaded machine), or is sending its answer
+      return n > 0
+        ? `${tool} is still queued or running (the daemon has ${n} call(s) in progress, this one included)`
+        : `${tool}: the daemon reports no call in progress yet; this machine is slow to deliver the request (or the answer)`;
     });
     let r: { status: number; body: string };
     try {
@@ -558,27 +614,40 @@ type ToolInfo = { name: string; title?: string; description?: string; inputSchem
 type JsonSchema = Record<string, unknown>;
 
 /** A JSON schema as a compact TypeScript-like type (depth-limited). */
-export function schemaType(s: JsonSchema | undefined, root: JsonSchema, depth = 0, seen: string[] = []): string {
+/** Long object types already printed in one help listing (type text -> the argument it was first printed for). */
+export interface TypeMemo {
+  arg: string;
+  long: Map<string, string>;
+}
+
+export function schemaType(
+  s: JsonSchema | undefined,
+  root: JsonSchema,
+  depth = 0,
+  seen: string[] = [],
+  memo?: TypeMemo
+): string {
   if (!s || typeof s !== "object" || Object.keys(s).length === 0) return "any";
   if (typeof s.$ref === "string") {
     const name = s.$ref.split("/").pop() ?? "ref";
     if (seen.includes(name)) return name;
     const defs = (root.$defs ?? root.definitions ?? {}) as Record<string, JsonSchema>;
-    return schemaType(defs[name], root, depth, [...seen, name]);
+    return schemaType(defs[name], root, depth, [...seen, name], memo);
   }
   if (Array.isArray(s.enum)) return s.enum.map(v => JSON.stringify(v)).join("|");
   if ("const" in s) return JSON.stringify(s.const);
   const union = (s.anyOf ?? s.oneOf) as JsonSchema[] | undefined;
   if (Array.isArray(union)) {
-    const parts = [...new Set(union.map(u => schemaType(u, root, depth, seen)))];
+    const parts = [...new Set(union.map(u => schemaType(u, root, depth, seen, memo)))];
     return parts.join(" | ");
   }
-  if (Array.isArray(s.allOf)) return (s.allOf as JsonSchema[]).map(u => schemaType(u, root, depth, seen)).join(" & ");
+  if (Array.isArray(s.allOf))
+    return (s.allOf as JsonSchema[]).map(u => schemaType(u, root, depth, seen, memo)).join(" & ");
   const type = Array.isArray(s.type) ? (s.type as string[]).join("|") : (s.type as string | undefined);
   if (type === "array") {
     if (Array.isArray(s.prefixItems))
-      return `[${(s.prefixItems as JsonSchema[]).map(u => schemaType(u, root, depth + 1, seen)).join(", ")}]`;
-    const item = schemaType(s.items as JsonSchema, root, depth + 1, seen);
+      return `[${(s.prefixItems as JsonSchema[]).map(u => schemaType(u, root, depth + 1, seen, memo)).join(", ")}]`;
+    const item = schemaType(s.items as JsonSchema, root, depth + 1, seen, memo);
     return /[ |&]/.test(item) ? `(${item})[]` : `${item}[]`;
   }
   if (type === "object" || s.properties) {
@@ -587,12 +656,19 @@ export function schemaType(s: JsonSchema | undefined, root: JsonSchema, depth = 
     if (!keys.length) {
       const ap = s.additionalProperties;
       return ap && typeof ap === "object"
-        ? `{[key]: ${schemaType(ap as JsonSchema, root, depth + 1, seen)}}`
+        ? `{[key]: ${schemaType(ap as JsonSchema, root, depth + 1, seen, memo)}}`
         : "object";
     }
     if (depth >= 4) return "{...}";
     const req = new Set((s.required ?? []) as string[]);
-    return `{${keys.map(k => `${k}${req.has(k) ? "" : "?"}: ${schemaType(props[k], root, depth + 1, seen)}`).join(", ")}}`;
+    const text = `{${keys.map(k => `${k}${req.has(k) ? "" : "?"}: ${schemaType(props[k], root, depth + 1, seen, memo)}`).join(", ")}}`;
+    // a long shape repeated in one listing (a select under several arguments) is printed once
+    if (memo && text.length > 160) {
+      const first = memo.long.get(text);
+      if (first !== undefined) return `{...same as in ${first}}`;
+      memo.long.set(text, memo.arg);
+    }
+    return text;
   }
   return type ?? "any";
 }
@@ -607,11 +683,13 @@ export function describeTool(t: ToolInfo): string[] {
   if (!keys.length) lines.push("args: none");
   else {
     lines.push("args:");
+    const memo: TypeMemo = { arg: "", long: new Map() };
     for (const k of keys) {
+      memo.arg = k;
       const p = props[k];
       const desc = typeof p.description === "string" ? `  # ${p.description}` : "";
       const def = p.default !== undefined ? ` = ${JSON.stringify(p.default)}` : "";
-      lines.push(`  ${k}${req.has(k) ? "" : "?"}: ${schemaType(p, schema)}${def}${desc}`);
+      lines.push(`  ${k}${req.has(k) ? "" : "?"}: ${schemaType(p, schema, 0, [], memo)}${def}${desc}`);
     }
   }
   return lines;
@@ -620,7 +698,8 @@ export function describeTool(t: ToolInfo): string[] {
 async function cmdTools(cfg: Config, opts: Opts): Promise<number> {
   const want = opts.positional[1];
   if (opts.positional.length > 2) throw new CliError("usage: tupaia tools [<tool>] [--names] [--json]");
-  const f = await ensureDaemon(cfg, opts);
+  // read-only: listing a live daemon's tools is allowed
+  const f = await ensureDaemon(cfg, opts, false);
   const r = await daemonRequest(f.st.port, f.st.token, "GET", "/tools", undefined, 15_000);
   if (r.status !== 200) throw new CliError(`daemon answered HTTP ${r.status}: ${r.body.slice(0, 500)}`);
   const { tools } = JSON.parse(r.body) as { tools: ToolInfo[] };
@@ -757,13 +836,19 @@ async function cmdStop(cfg: Config): Promise<number> {
 
 async function cmdHeaders(cfg: Config, opts: Opts): Promise<number> {
   // Claude Code passes the registered URL: the daemon must serve its port
-  if (!opts.port && process.env.CLAUDE_CODE_MCP_SERVER_URL) {
+  if (process.env.CLAUDE_CODE_MCP_SERVER_URL) {
+    let u: URL | null = null;
     try {
-      const u = new URL(process.env.CLAUDE_CODE_MCP_SERVER_URL);
-      if (u.port) opts.port = u.port;
+      u = new URL(process.env.CLAUDE_CODE_MCP_SERVER_URL);
     } catch {
       // not a URL: ignore
     }
+    // the token is only ever sent to this machine's daemon
+    if (u && !isLoopbackHost(u.hostname))
+      throw new CliError(
+        `the registered URL ${u.origin} is not 127.0.0.1 or localhost: the daemon listens only on 127.0.0.1, so its token is not printed for another host`
+      );
+    if (u?.port && !opts.port) opts.port = u.port;
   }
   const registered = opts.port ? Number(opts.port) : 0;
   // the registered port is where this TUPAIA_OUT's daemon starts from now on
@@ -786,6 +871,7 @@ async function cmdHeaders(cfg: Config, opts: Opts): Promise<number> {
     out(JSON.stringify({ Authorization: `Bearer ${started.pending.token}` }));
     return 0;
   }
+  guardLive(cfg, started, opts);
   warnMismatch(cfg, started, { ...opts, port: undefined });
   const ports = started.st.ports ?? [started.st.port];
   if (registered && !ports.includes(registered)) {
@@ -805,6 +891,11 @@ async function cmdHeaders(cfg: Config, opts: Opts): Promise<number> {
   }
   out(JSON.stringify({ Authorization: `Bearer ${started.st.token}` }));
   return 0;
+}
+
+/** Hosts `headers` hands the token to: the daemon only listens on 127.0.0.1. */
+export function isLoopbackHost(hostname: string): boolean {
+  return hostname === "127.0.0.1" || hostname === "localhost";
 }
 
 /** The output directory the caller asked for must be usable: never fall back to another one. */

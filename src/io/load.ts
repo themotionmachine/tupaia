@@ -521,7 +521,8 @@ async function parseLoadedData(data: string[], mapVersion: string | null): Promi
       if (isVisible(icons)) turnOn("toggleBurgIcons");
       if (hasChildren(armies) && isVisible(armies)) turnOn("toggleMilitary");
       if (hasChild(markers, "svg")) turnOn("toggleMarkers");
-      if (isVisible(tradeAnimation)) turnOn("toggleTrade");
+      // tupaia-mcp: a map saved with Trade off says so (save.ts); files without the attribute load as before
+      if (isVisible(tradeAnimation) && tradeAnimation.attr("data-layer-off") !== "1") turnOn("toggleTrade");
       if (isVisible(goods) && hasChildren(goods)) turnOn("toggleGoods");
       if (isVisible(markets) && hasChildren(markets)) turnOn("toggleMarketsLayer");
       if (isVisible(ruler)) turnOn("toggleRulers");

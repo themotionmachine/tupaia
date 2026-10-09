@@ -39,6 +39,10 @@ export interface ReplayConflict {
   seq: number;
   reason: string;
   op: OpRecord;
+  /** onConflict 'skip' on a batch op: the items (edit ops / add items) left out; the rest was applied. */
+  itemsSkipped?: number[];
+  /** onConflict 'skip' on a paint: cells someone else painted since, left as they are. */
+  cellsSkipped?: number;
 }
 
 export interface ReplayResult {
@@ -57,6 +61,8 @@ export interface ReplayResult {
   /** Auto-undo entry ids pushed, oldest first (one per applied op). */
   undoEntries: number[];
   notes: string[];
+  /** Wall time per replayed op (ms), in replay order. */
+  timings: Array<{ seq: number; tool: string; ms: number }>;
 }
 
 const BRIDGE_FN: Record<string, string> = {
@@ -127,6 +133,17 @@ export function bridgeArgs(tool: string, r: Resolved): Record<string, unknown> {
 }
 
 const same = (a: unknown, b: unknown): boolean => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+
+/** Run-length encode values ([[value, count], ...]); a paint's base values are mostly runs. */
+export function rle(values: readonly unknown[]): Array<[unknown, number]> {
+  const out: Array<[unknown, number]> = [];
+  for (const v of values) {
+    const last = out[out.length - 1];
+    if (last && same(last[0], v)) last[1]++;
+    else out.push([v, 1]);
+  }
+  return out;
+}
 const show = (v: unknown): string => {
   const s = JSON.stringify(v ?? null);
   return s.length > 60 ? `${s.slice(0, 57)}...` : s;
@@ -225,7 +242,16 @@ export function identityConflicts(
   plan: Array<Record<string, unknown>>,
   isCreated: (k: number) => boolean = () => false
 ): string[] {
-  const out: string[] = [];
+  return identityConflictItems(r, plan, isCreated).map(c => c.message);
+}
+
+/** identityConflicts with the index of the edit op each one is about. */
+export function identityConflictItems(
+  r: EditResolved,
+  plan: Array<Record<string, unknown>>,
+  isCreated: (k: number) => boolean = () => false
+): Array<{ op: number; message: string }> {
+  const out: Array<{ op: number; message: string }> = [];
   r.ops.forEach((o, k) => {
     if (!o.ident || isCreated(k)) return;
     const row = plan.find(p => p.index === k) ?? plan[k];
@@ -238,13 +264,77 @@ export function identityConflicts(
     if (!diff.length) return;
     const fields = diff.map(key => `${key} ${show(o.ident?.[key])} -> ${show(now[key])}`).join(", ");
     if (o.remove)
-      out.push(`removed by the sketch, but ${whoOf(r.type, o)} was changed since by someone else (${fields})`);
+      out.push({
+        op: k,
+        message: `removed by the sketch, but ${whoOf(r.type, o)} was changed since by someone else (${fields})`
+      });
     else
-      out.push(
-        `target ${whoOf(r.type, o)} is not the entity the sketch edited (${fields}): it was removed and its id reused, or someone changed it`
-      );
+      out.push({
+        op: k,
+        message: `target ${whoOf(r.type, o)} is not the entity the sketch edited (${fields}): it was removed and its id reused, or someone changed it`
+      });
   });
   return out;
+}
+
+/** A conflict about one item of a batch op (index) or the whole op (index undefined). */
+export interface ItemConflict {
+  index?: number;
+  message: string;
+}
+
+/** r with only the edit ops / add items whose index is not in `drop` (null when none is left). */
+export function withoutItems(tool: string, r: Resolved, drop: ReadonlySet<number>): Resolved | null {
+  if (tool === "edit") {
+    const e = r as EditResolved;
+    const ops = e.ops.filter((_, k) => !drop.has(k));
+    return ops.length ? { ...e, ops } : null;
+  }
+  if (tool === "add") {
+    const a = r as AddResolved;
+    const keep = a.items.map((_, k) => !drop.has(k));
+    const items = a.items.filter((_, k) => keep[k]);
+    return items.length ? { ...a, items, created: (a.created ?? []).filter((_, k) => keep[k]) } : null;
+  }
+  return null;
+}
+
+/** Run-length decode of a paint's recorded base values ([[value, count], ...]). */
+export function unRle(runs: unknown, max: number): unknown[] | null {
+  // ops.json is replaceable by any Worker caller: a malformed or oversized list is ignored
+  if (!Array.isArray(runs)) return null;
+  const out: unknown[] = [];
+  for (const run of runs) {
+    if (!Array.isArray(run) || !Number.isInteger(run[1]) || run[1] < 1 || out.length + run[1] > max) return null;
+    for (let k = 0; k < run[1]; k++) out.push(run[0]);
+  }
+  return out.length === max ? out : null;
+}
+
+/**
+ * Cells of a paint that someone else changed since the sketch recorded it: the value now is
+ * neither the base value the sketch saw nor the value the sketch paints. `base` and `now` are
+ * per key, aligned with `cells`.
+ */
+export function paintedSince(
+  cells: readonly number[],
+  set: Record<string, unknown>,
+  base: Record<string, unknown[]>,
+  now: Record<string, unknown[]>
+): { cells: Set<number>; byKey: Record<string, number> } {
+  const hit = new Set<number>();
+  const byKey: Record<string, number> = {};
+  for (const key of Object.keys(base)) {
+    const b = base[key];
+    const cur = now[key];
+    if (!Array.isArray(b) || !Array.isArray(cur) || b.length !== cells.length) continue;
+    cells.forEach((c, k) => {
+      if (same(cur[k], b[k]) || same(cur[k], set[key])) return;
+      hit.add(c);
+      byKey[key] = (byKey[key] ?? 0) + 1;
+    });
+  }
+  return { cells: hit, byKey };
 }
 
 export async function replayOps(
@@ -263,7 +353,8 @@ export async function replayOps(
     records: [],
     stopped: false,
     undoEntries: [],
-    notes: []
+    notes: [],
+    timings: []
   };
   // positional: an op sees as "created by the sketch" only ids that EARLIER add ops created, so
   // a pre-existing id that a later add reuses (zones, markers, routes: max id + 1) still means
@@ -285,6 +376,7 @@ export async function replayOps(
   for (const op of ops) {
     if (prev) for (const k of createdBy(prev)) rw.created.add(k);
     prev = op;
+    const opStarted = Date.now();
     if (op.noop) {
       res.noops.push(op.seq);
       continue;
@@ -345,11 +437,16 @@ export async function replayOps(
         if (conflict(op, `${v.error?.code ?? "ERROR"}: ${v.error?.message ?? "validation failed"}`)) break;
         continue;
       }
-      const errs = ((v.value?.errors as ErrRow[] | undefined) ?? []).map(errText);
-      if (errs.length) {
-        if (conflict(op, errs.join("; "))) break;
-        continue;
-      }
+      const errRows = (v.value?.errors as ErrRow[] | undefined) ?? [];
+      // every conflicting item of a batch op is reported (not only the first), and 'skip' leaves
+      // out only those items: the op's other items are still applied
+      const items: ItemConflict[] = errRows.map(e => ({ index: e.index, message: errText(e) }));
+      const isMap = op.tool === "edit" && (r as EditResolved).type === "map";
+      const total =
+        op.tool === "edit" ? (r as EditResolved).ops.length : op.tool === "add" ? (r as AddResolved).items.length : 0;
+      // which item, only when the op has several
+      const itemTag = (k: number) => (total > 1 ? `item ${k}: ` : "");
+      let fields: FieldConflict[] = [];
       if (op.tool === "edit") {
         const plan = (v.value?.plan as Array<Record<string, unknown>>) ?? [];
         const orig = op.resolved as EditResolved;
@@ -357,13 +454,79 @@ export async function replayOps(
           const ref = orig.ops[k]?.ref;
           return ref !== undefined && rw.created.has(`${orig.type}:${ref}`);
         };
-        const hard = [
-          ...identityConflicts(r as EditResolved, plan, created),
-          ...derivedConflicts(r as EditResolved, v.value?.derived)
-        ];
-        const fields = bothChangedFields(r as EditResolved, plan);
-        if (hard.length || (fields.length && !(onConflict === "skip" && (r as EditResolved).type === "map"))) {
-          if (conflict(op, [...hard, ...fields.map(f => f.message)].join("; "))) break;
+        for (const c of identityConflictItems(r as EditResolved, plan, created))
+          items.push({ index: c.op, message: `${itemTag(c.op)}${c.message}` });
+        for (const m of derivedConflicts(r as EditResolved, v.value?.derived)) items.push({ message: m });
+        fields = bothChangedFields(r as EditResolved, plan);
+        if (!isMap) for (const f of fields) items.push({ index: f.op, message: `${itemTag(f.op)}${f.message}` });
+      }
+      if (items.length) {
+        const drop = new Set(items.map(i => i.index).filter((k): k is number => typeof k === "number"));
+        const why = items.map(i => i.message).join("; ");
+        const partial =
+          onConflict === "skip" &&
+          !isMap &&
+          (op.tool === "edit" || op.tool === "add") &&
+          items.every(i => typeof i.index === "number") &&
+          drop.size < total;
+        const rest = partial ? withoutItems(op.tool, r, drop) : null;
+        if (!rest) {
+          if (conflict(op, why)) break;
+          continue;
+        }
+        r = rest;
+        args = bridgeArgs(op.tool, r);
+        const kept = total - drop.size;
+        res.conflicts.push({
+          seq: op.seq,
+          reason: `${why} (item${drop.size > 1 ? "s" : ""} ${[...drop].sort((a, b) => a - b).join(", ")} skipped; the other ${kept} item${kept > 1 ? "s were" : " was"} applied)`,
+          op,
+          itemsSkipped: [...drop].sort((a, b) => a - b)
+        });
+      }
+      if (op.tool === "paint_cells" && (r as PaintResolved).base) {
+        // cells someone else painted since the sketch recorded this op: the sketch's paint would
+        // silently overwrite their work, so it is a conflict ('skip' paints only the other cells)
+        const p = r as PaintResolved;
+        const base: Record<string, unknown[]> = {};
+        for (const [key, runs] of Object.entries(p.base ?? {})) {
+          const vals = unRle(runs, p.select.cells.length);
+          if (vals) base[key] = vals;
+        }
+        const now = await scope
+          .call<Record<string, unknown[]>>(
+            "cellValues",
+            { cells: p.select.cells, keys: Object.keys(base) },
+            { noAlerts: true }
+          )
+          .catch(() => null);
+        const since = now ? paintedSince(p.select.cells, p.set, base, now) : null;
+        if (since?.cells.size) {
+          const what = Object.entries(since.byKey)
+            .map(([k, n]) => `${k} of ${n}`)
+            .join(", ");
+          const why = `someone else changed ${what} of the ${p.select.cells.length} cells this paint sets since the sketch's base; painting would overwrite their work`;
+          const left = p.select.cells.filter(c => !since.cells.has(c));
+          if (onConflict !== "skip" || !left.length) {
+            if (conflict(op, why)) break;
+            continue;
+          }
+          const keepIdx = p.select.cells.map(c => !since.cells.has(c));
+          const cut: Record<string, Array<[unknown, number]>> = {};
+          for (const [key, vals] of Object.entries(base)) cut[key] = rle(vals.filter((_, k) => keepIdx[k]));
+          r = { ...p, select: { cells: left }, base: cut };
+          args = bridgeArgs(op.tool, r);
+          res.conflicts.push({
+            seq: op.seq,
+            reason: `${why} (those ${since.cells.size} cells were left as they are; the other ${left.length} were painted)`,
+            op,
+            cellsSkipped: since.cells.size
+          });
+        }
+      }
+      if (op.tool === "edit" && isMap) {
+        if (fields.length && onConflict !== "skip") {
+          if (conflict(op, fields.map(f => f.message).join("; "))) break;
           continue;
         }
         if (fields.length) {
@@ -433,6 +596,7 @@ export async function replayOps(
         );
     }
     res.applied.push(op.seq);
+    res.timings.push({ seq: op.seq, tool: op.tool, ms: Date.now() - opStarted });
     res.records.push({
       ...op,
       resolved: applied,

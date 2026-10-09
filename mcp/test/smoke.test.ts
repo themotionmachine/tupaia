@@ -257,9 +257,11 @@ describe("tupaia-mcp smoke (core layer)", () => {
     assert.equal(big.format, "image/png");
 
     const same = await h.ok("screenshot", { compare: shotQ });
-    const cmp = same.compare as { changedPct: number; diffFile: string };
+    const cmp = same.compare as { changedPct: number; changedPixels: number; diffFile?: string; note?: string };
     assert.ok(cmp.changedPct < 1, `unchanged view differs by ${cmp.changedPct}%`);
-    assert.ok(fs.existsSync(cmp.diffFile));
+    // nothing changed: no diff image (and no file); a few noise pixels still give one
+    if (cmp.changedPixels) assert.ok(cmp.diffFile && fs.existsSync(cmp.diffFile));
+    else assert.match(String(cmp.note), /nothing changed/);
     // demo.map ships with empty label groups, so hide a layer it does draw: the heightmap
     const noHeight = await h.ok("screenshot", { compare: shotQ, layers: { off: ["heightmap"] } });
     assert.ok((noHeight.compare as { changedPct: number }).changedPct > 0.05, "hiding the heightmap changes pixels");

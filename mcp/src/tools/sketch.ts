@@ -486,9 +486,20 @@ export async function rebaseOnto(
     conflicts: res.conflicts.map(c => ({
       seq: c.seq,
       reason: c.reason,
+      ...(c.itemsSkipped ? { itemsSkipped: c.itemsSkipped } : {}),
+      ...(c.cellsSkipped ? { cellsSkipped: c.cellsSkipped } : {}),
       op: { seq: c.op.seq, tool: c.op.tool, summary: c.op.summary, args: c.op.args }
     })),
     idMap: res.idMap,
+    replayMs: res.timings.reduce((n, t) => n + t.ms, 0),
+    ...(res.timings.some(t => t.ms >= 2000)
+      ? {
+          slowOps: [...res.timings]
+            .sort((a, b) => b.ms - a.ms)
+            .filter(t => t.ms >= 2000)
+            .slice(0, 5)
+        }
+      : {}),
     at: new Date().toISOString()
   };
   if (completed) {
@@ -558,6 +569,11 @@ async function rebase(
 
 /** rebase without `onto`: replay onto the CURRENT shared map (a read-only GET). Does not save. */
 async function rebaseShared(ctx: ToolContext, scope: CallScope, sk: Sketch, onConflict: "stop" | "skip") {
+  if (sk.promoted)
+    throw new ToolError(
+      "REFUSED",
+      `sketch '${sk.slug}' was already promoted to the shared map (v${sk.promoted.to} at ${sk.promoted.at}); a rebase would apply its adds and paints a second time. Start a new sketch from the shared map instead.`
+    );
   if (sk.base.kind !== "shared")
     throw new ToolError(
       "REFUSED",
@@ -732,6 +748,14 @@ async function save(ctx: ToolContext, scope: CallScope, args: { confirm?: boolea
   };
 }
 
+/** A saved sketch's promotion record ({to: shared version, at}), when it went live with then:'keep'. */
+function promotedOf(ops: Record<string, unknown> | null): { to: number; at: string } | null {
+  const p = ops?.promoted as { to?: unknown; at?: unknown } | undefined;
+  return p && Number.isInteger(p.to)
+    ? { to: p.to as number, at: typeof p.at === "string" ? p.at.slice(0, 40) : "" }
+    : null;
+}
+
 function headerOf(ops: Record<string, unknown> | null): Record<string, unknown> | null {
   if (!ops) return null;
   // summaries are rebuilt from the records (the file's own summary text is not trusted)
@@ -745,6 +769,7 @@ function headerOf(ops: Record<string, unknown> | null): Record<string, unknown> 
     ...(Array.isArray(ops.blobOnlyReasons) && ops.blobOnlyReasons.length
       ? { blobOnlyReasons: ops.blobOnlyReasons }
       : {}),
+    ...(promotedOf(ops) ? { promoted: promotedOf(ops) } : {}),
     author: ops.author,
     created: ops.created,
     updated: ops.updated,
@@ -844,6 +869,13 @@ async function open(ctx: ToolContext, scope: CallScope, args: { slug?: string })
   // the stored summary markdown is not trusted either: summary/save rebuild it from the records
   sk.summaryMarkdown = null;
   sk.saved = { rev: sk.rev, version: blob.version, at: typeof header.updated === "string" ? header.updated : "" };
+  const promoted = promotedOf(header);
+  if (promoted) {
+    sk.promoted = promoted;
+    scope.notes.push(
+      `sketch '${args.slug}' was already promoted to the shared map (v${promoted.to} at ${promoted.at}): its changes are live. Rebase and promote refuse it (they would apply its adds twice); read it, or discard it.`
+    );
+  }
   if (old) scope.notes.push(`replaced the stopped sketch '${old.slug}' (${old.ops.length} ops)`);
   return {
     opened: true,
@@ -862,17 +894,18 @@ async function open(ctx: ToolContext, scope: CallScope, args: { slug?: string })
  * local (any mode): the sketch and its log end, the page keeps its map. Preview without confirm.
  */
 function discardLocal(ctx: ToolContext, sk: Sketch, confirm: boolean | undefined) {
+  const why = sk.workerDeleted ? "its Worker copy was already deleted" : "it was never saved";
   if (!confirm)
     return {
       preview: true,
       local: true,
       wouldDiscard: { slug: sk.slug, ops: sk.ops.length, recording: sk.recording, saved: false },
-      next: `Nothing was discarded. sketch {action:'discard', confirm:true} ends the sketch '${sk.slug}' and drops its log of ${sk.ops.length} op(s) (it was never saved, so nothing is deleted on the Worker); the page keeps its map and changes (snapshot undo still works).`
+      next: `Nothing was discarded. sketch {action:'discard', confirm:true} ends the sketch '${sk.slug}' and drops its log of ${sk.ops.length} op(s) (${why}, so nothing is deleted on the Worker); the page keeps its map and changes (snapshot undo still works).`
     };
   ctx.sketches.current = null;
   return {
     discarded: { slug: sk.slug, ops: sk.ops.length, local: true },
-    note: "the sketch was never saved: its log is dropped and no sketch is active; the page keeps its map (snapshot undo still works)"
+    note: `${why}: the sketch's log is dropped and no sketch is active; the page keeps its map (snapshot undo still works)`
   };
 }
 
@@ -902,6 +935,7 @@ async function discard(ctx: ToolContext, args: { slug?: string; confirm?: boolea
   const sk = ctx.sketches.current;
   if (sk?.slug === slug) {
     sk.saved = null;
+    sk.workerDeleted = true;
     return { deleted, note: `the active sketch '${slug}' stays in this session (not on the Worker any more)` };
   }
   return { deleted };
@@ -937,6 +971,11 @@ async function promote(
     );
   }
   const then = args.then ?? "keep";
+  if (sk.promoted)
+    throw new ToolError(
+      "REFUSED",
+      `sketch '${sk.slug}' was already promoted (shared v${sk.promoted.to} at ${sk.promoted.at}); promoting it again would apply its changes twice. Start a new sketch from the shared map for further changes.`
+    );
   const notes: string[] = [];
   if (sk.diverged) notes.push(`the page has changes the sketch log does not (${sk.diverged}); they are promoted too`);
   if (blobOnlyReasons(sk).length) notes.push("blob-only sketch: the page map is promoted as is");
@@ -945,7 +984,9 @@ async function promote(
     token: args.token,
     expectVersion: base,
     compact: args.compact,
-    viaSketch: true
+    viaSketch: true,
+    // the token is bound to what happens to the saved sketch afterwards too
+    extraFlags: { then }
   });
   const sketchInfo = { slug: sk.slug, base, ops: sk.ops.length, then, ...(notes.length ? { notes } : {}) };
   if (!args.confirm) {
@@ -958,13 +999,34 @@ async function promote(
   }
   const saved = res.saved as { version: number };
   const out: Record<string, unknown> = { promoted: { ...sketchInfo, to: saved.version }, ...res };
+  const promotedAt = new Date().toISOString();
+  sk.promoted = { to: saved.version, at: promotedAt };
   if (then === "discard") {
+    if (!sk.saved)
+      out.discarded = { id: sketchId(sk.slug), note: "it was never saved on the Worker; nothing to delete" };
+    else
+      try {
+        out.discarded = await ctx.shared.deleteSketch({ mode: ctx.mode.mode, id: sketchId(sk.slug) });
+      } catch (e) {
+        if (!(e instanceof ToolError && e.code === "NOT_FOUND")) {
+          out.discardError = (e as Error).message;
+        } else out.discarded = { id: sketchId(sk.slug), note: "it was not on the Worker any more; nothing to delete" };
+      }
+  } else if (sk.saved) {
+    // the kept copy says it went live, so list shows it and open + rebase refuses to apply it twice
     try {
-      out.discarded = await ctx.shared.deleteSketch({ mode: ctx.mode.mode, id: sketchId(sk.slug) });
+      const id = sketchId(sk.slug);
+      const header = await ctx.shared.getOps(id);
+      if (header) {
+        await ctx.shared.putSketchOps({
+          mode: ctx.mode.mode,
+          id,
+          json: { ...header, promoted: { to: saved.version, at: promotedAt } }
+        });
+        out.keptMarked = `${id}'s ops.json now records promoted: v${saved.version}`;
+      }
     } catch (e) {
-      if (!(e instanceof ToolError && e.code === "NOT_FOUND")) {
-        out.discardError = (e as Error).message;
-      } else out.discarded = { id: sketchId(sk.slug), note: "it was never saved on the Worker; nothing to delete" };
+      out.keptMarkError = `the kept sketch could not be marked as promoted (${(e as Error).message}); do not rebase or promote it again`;
     }
   }
   ctx.sketches.current = null;
@@ -1026,6 +1088,15 @@ export function register(ctx: ToolContext): void {
           const v = ctx.sketches.view();
           const sk = ctx.sketches.current;
           if (sk && ctx.config.liveOrigin) v.viewUrl = sk.saved ? viewUrl(ctx.config.liveOrigin, sk.slug) : null;
+          if (sk && ctx.config.liveOrigin && sk.base.kind === "shared" && typeof sk.base.version === "number") {
+            // one read-only GET: has the shared map moved past the sketch's base?
+            const meta = await ctx.shared.meta().catch(() => null);
+            if (meta) {
+              v.sharedNow = meta.version;
+              if (meta.version !== sk.base.version)
+                v.rebaseNeeded = `the shared map is now v${meta.version} (base v${sk.base.version}): sketch {action:'rebase'} before promoting`;
+            }
+          }
           if (args.format === "compact") return new WithText(compactSketchStatus(v, !!args.full));
           // full: every record with its resolved form (big: paint records hold their cell lists)
           if (args.full && sk) v.records = sk.ops;

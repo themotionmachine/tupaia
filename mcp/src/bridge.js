@@ -1189,7 +1189,12 @@
     const limit = a.limit === undefined ? 25 : Math.max(0, Math.min(1000, a.limit));
     const offset = Math.max(0, a.offset || 0);
     let items = liveList(type, !!a.includeZero);
-    const where = a.where || {};
+    const where = { ...(a.where || {}) };
+    // note and label rows show their string id as `i`: where {i} means where {id}
+    if ((type === "note" || type === "label") && "i" in where && !("id" in where)) {
+      where.id = where.i;
+      delete where.i;
+    }
     // resolve entity-valued filters once
     const resolvedRefs = {};
     for (const key of Object.keys(where)) {
@@ -1250,7 +1255,7 @@
       });
     }
     const total = rows.length;
-    const warnings = unknownFindFields(type, a);
+    const warnings = unknownFindFields(type, { ...a, where });
     return {
       type,
       total,
@@ -1369,7 +1374,7 @@
     const c = pack.cells;
     const i = p.cell;
     const h = c.h[i];
-    const out = { ...p, height: h, land: h >= 20 };
+    const out = { ...p, height: h, land: h >= 20, neighbours: Array.from(c.c[i] || []) };
     try {
       if (typeof getFriendlyHeight === "function") out.heightLabel = getFriendlyHeight([p.x, p.y]);
     } catch {}

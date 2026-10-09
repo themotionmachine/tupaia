@@ -4,6 +4,11 @@
 // carry a 4th `|` field with this JSON; older clients split the line and read only the first
 // three fields, so they ignore it (and drop it if they re-save the file).
 
+// tupaia-mcp: icon names end up in `<use href="#relief-<name>-1">` markup (draw-relief-icons.ts
+// builds it as a string), and a map that draws its relief on load does so without a click: only
+// plain names are taken from a file, so a crafted name cannot inject markup.
+const ICON_NAME = /^[A-Za-z][A-Za-z0-9_-]{0,40}$/;
+
 export interface BiomeExtras {
   iconsDensity: number[];
   icons: string[][];
@@ -48,7 +53,7 @@ export function applyBiomeExtras(target: BiomeExtras, fields: string[], count: n
       hit = true;
     }
     const ic = icons[i];
-    if (Array.isArray(ic) && ic.every(s => typeof s === "string")) {
+    if (Array.isArray(ic) && ic.every(s => typeof s === "string" && ICON_NAME.test(s))) {
       target.icons[i] = ic.slice();
       hit = true;
     }

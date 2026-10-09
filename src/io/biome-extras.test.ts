@@ -38,11 +38,20 @@ describe("biome extras (4th field of the .map biome line)", () => {
     expect(target).toEqual({ iconsDensity: [0, 5], icons: [[], []], cost: [50, 70] });
   });
 
-  it("survives a '|' inside the JSON", () => {
+  it("survives a '|' inside the JSON, but takes only plain icon names", () => {
     const saved: BiomeExtras = { iconsDensity: [1], icons: [["a|b"]], cost: [2] };
     const fields = ["#a", "0", "Marine", serializeBiomeExtras(saved)].join("|").split("|");
     const target = defaults(1);
     applyBiomeExtras(target, fields, 1);
-    expect(target).toEqual(saved);
+    // the JSON is read whole; the icon name with '|' is not a plain name, so the icons stay
+    expect(target).toEqual({ iconsDensity: [1], icons: [[]], cost: [2] });
+  });
+
+  it("refuses icon names that would inject markup", () => {
+    const evil = 'x"/><image href="data:," onerror="alert(1)"/><use href="';
+    const raw = JSON.stringify({ iconsDensity: [3, 4], icons: [[evil], ["dune", "mountSnow"]], cost: [1, 2] });
+    const target = defaults(2);
+    expect(applyBiomeExtras(target, ["a", "b", "c", raw], 2)).toBe(2);
+    expect(target.icons).toEqual([[], ["dune", "mountSnow"]]);
   });
 });

@@ -770,13 +770,34 @@
       };
     const d = document.getElementById(`textPath_${it.id}`)?.getAttribute("d") || "";
     const m = /^M\s*(-?[\d.]+)[ ,](-?[\d.]+)\s*h\s*(-?[\d.]+)\s*$/.exec(d);
-    if (!m) return { hint: `label ${it.id} follows a curved path; move it with eval` };
+    if (!m)
+      return {
+        hint: `label ${it.id} follows a curved path (edit label move takes straight labels only): edit {type:'label', ops:[{ref:'${it.id}', remove:true}]} then add a straight one, rewrite textPath_${it.id} with eval, or accept it with lint ignore:[{check:'label-overlap', type:'label', id:'${it.id}'}]`
+      };
     const x = Math.max(0, Math.min(cx.gw, Number(m[1]) + Number(m[3]) / 2 + dx));
     const y = Math.max(0, Math.min(cx.gh, Number(m[2]) + dy));
     return editCall("label", [{ ref: it.id, set: { move: { x: rn(x, 1), y: rn(y, 1) } } }]);
   }
 
   const KIND_NAME = { state: "state label", burg: "burg label", label: "custom label" };
+
+  /** Same text after folding, or a near repeat (one or two letters apart, e.g. a misspelt copy). */
+  function sameText(a, b) {
+    const x = fold(String(a || "").trim());
+    const y = fold(String(b || "").trim());
+    if (!x || !y) return false;
+    if (x === y) return true;
+    if (Math.min(x.length, y.length) < 5 || Math.abs(x.length - y.length) > 2) return false;
+    // Levenshtein distance <= 2
+    let prev = Array.from({ length: y.length + 1 }, (_, k) => k);
+    for (let i = 1; i <= x.length; i++) {
+      const cur = [i];
+      for (let j = 1; j <= y.length; j++)
+        cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (x[i - 1] === y[j - 1] ? 0 : 1));
+      prev = cur;
+    }
+    return prev[y.length] <= 2;
+  }
   const atZoom = (cx, S) => (S !== 1 || cx.atScale !== null ? `, at zoom ${rn(S, 2)}` : "");
 
   function checkLabelOffcanvas(cx) {
@@ -862,13 +883,24 @@
     for (const { A, B, frac, p, S } of labelPairs(cx).labels) {
       // a state name runs in an arc across its land and so over burg labels by design: info only
       const stateOverBurg = (A.kind === "state" && B.kind === "burg") || (A.kind === "burg" && B.kind === "state");
+      // a custom label that repeats (or nearly repeats) the burg or state label under it
+      const custom = A.kind === "label" && B.kind !== "label" ? A : B.kind === "label" && A.kind !== "label" ? B : null;
+      const twin = custom ? (custom === A ? B : A) : null;
+      const dup = !!custom && sameText(custom.text, twin.text);
       cx.emit("label-overlap", {
         sev: frac >= 0.5 && !stateOverBurg ? "warn" : "info",
         e: [A.e, B.e],
         at: [p.ix + p.ox / 2, p.iy + p.oy / 2],
-        msg: `${KIND_NAME[A.kind]} ${q(A.text)} overlaps ${KIND_NAME[B.kind]} ${q(B.text)} (${Math.round(frac * 100)}% of the smaller${atZoom(cx, S)})`,
+        msg: dup
+          ? `custom label ${q(custom.text)} duplicates the ${KIND_NAME[twin.kind]} ${q(twin.text)} under it (${Math.round(frac * 100)}% overlap${atZoom(cx, S)})`
+          : `${KIND_NAME[A.kind]} ${q(A.text)} overlaps ${KIND_NAME[B.kind]} ${q(B.text)} (${Math.round(frac * 100)}% of the smaller${atZoom(cx, S)})`,
         score: frac,
         fix: () => {
+          if (dup)
+            return {
+              ...editCall("label", [{ ref: custom.id, remove: true }]),
+              note: `removes the custom label: the ${KIND_NAME[twin.kind]} already shows the name (or keep it: lint ignore:[{check:'label-overlap', type:'label', id:'${custom.id}'}])`
+            };
           // move a custom label out along the thinner overlap axis
           const mover = A.kind === "label" ? A : B.kind === "label" ? B : null;
           if (!mover) return { hint: "neither is a custom label: shorten a name or move a burg" };
@@ -1337,7 +1369,9 @@
     for (const s of liveStates(cx)) {
       const b = pack.burgs[s.capital];
       let msg = null;
-      if (!s.capital || !b || b.removed) msg = `${s.name} has no live capital (capital ${s.capital || "unset"})`;
+      const burgless = !s.capital || !b || b.removed ? !liveBurgs(cx).some(x => x.state === s.i) : false;
+      if (!s.capital || !b || b.removed)
+        msg = `${s.name} has no live capital (capital ${s.capital || "unset"})${burgless ? " and no burg" : ""}`;
       else if (C.state[b.cell] !== s.i) {
         const other = pack.states[C.state[b.cell]];
         msg = `capital ${b.name} (${b.i}) of ${s.name} lies in ${other ? other.name : "no state"} (cell ${b.cell})`;
@@ -1348,6 +1382,8 @@
         e: b && !b.removed ? [ref("state", s), ref("burg", b)] : [ref("state", s)],
         at,
         msg,
+        // a hand-made state left without burgs on purpose is a warning, not an error
+        ...(burgless ? { sev: "warn" } : {}),
         fix: () => {
           const alt = liveBurgs(cx)
             .filter(x => x.state === s.i && C.state[x.cell] === s.i && (!b || x.i !== b.i))
@@ -1366,7 +1402,13 @@
             }
             if (best >= 0) return editCall("burg", [{ ref: b.i, set: { move: { cell: best } } }]);
           }
-          return { hint: "the state has no free land cell for a capital: add a burg inside it first" };
+          if (burgless)
+            return {
+              hint: `the state has no burg: add one inside it (add {type:'burg', items:[{at}]}), then edit {type:'state', ops:[{ref:${s.i}, set:{capital:<burg>}}]}; a state meant to have no burgs: lint ignore:[{check:'capital-outside', type:'state', id:${s.i}}]`
+            };
+          return {
+            hint: "no burg of the state lies inside it and it has no free land cell: add a burg inside it (add burg), then edit state capital"
+          };
         }
       });
     }
@@ -1604,10 +1646,42 @@
     }
   }
 
+  /**
+   * Land cells joining river cells a and b (exclusive), walking greedily toward b; never on a
+   * river (this one or another: a reroute cannot cross one) or water. null when there is none.
+   */
+  function gapBridge(cx, a, b, maxSteps = 64) {
+    const C = cx.C;
+    const [tx, ty] = C.p[b];
+    const path = [];
+    const seen = new Set([a]);
+    let cur = a;
+    while (!(C.c[cur] || []).includes(b)) {
+      if (path.length >= maxSteps) return null;
+      let best = -1;
+      let bd = Infinity;
+      for (const j of C.c[cur] || []) {
+        if (seen.has(j) || C.h[j] < 20 || C.r?.[j]) continue;
+        const d = (C.p[j][0] - tx) ** 2 + (C.p[j][1] - ty) ** 2;
+        if (d < bd) {
+          bd = d;
+          best = j;
+        }
+      }
+      if (best < 0) return null;
+      path.push(best);
+      seen.add(best);
+      cur = best;
+    }
+    return path;
+  }
+
   function checkRiverGap(cx) {
+    const allOps = [];
     for (const r of I.liveList("river")) {
       const cells = r.cells || [];
       if (cells.length < 2) continue;
+      const gaps = [];
       let prev = -1;
       for (let k = 0; k < cells.length; k++) {
         const c = cells[k];
@@ -1615,18 +1689,40 @@
           prev = -1;
           continue;
         }
-        if (prev >= 0 && prev !== c && !(cx.C.c[prev] || []).includes(c)) {
-          cx.emit("river-gap", {
-            e: [ref("river", r)],
-            at: cellPoint(cx, c),
-            msg: `${riverName(r)} jumps from cell ${prev} to ${c}, which are not neighbours (position ${k})`,
-            fix: () => ({ hint: removeRiverHint(r) })
-          });
-          break;
-        }
+        if (prev >= 0 && prev !== c && !(cx.C.c[prev] || []).includes(c)) gaps.push({ a: prev, b: c, k });
         prev = c;
       }
+      if (!gaps.length) continue;
+      // one stretch reroute per gap (ops of one edit call apply in order)
+      const ops = [];
+      for (const g of gaps) {
+        const mid = gapBridge(cx, g.a, g.b);
+        if (!mid) break;
+        ops.push({ ref: r.i, set: { reroute: { cells: [g.a, ...mid, g.b] } } });
+      }
+      const all = ops.length === gaps.length;
+      if (all) allOps.push(...ops);
+      const g = gaps[0];
+      cx.emit("river-gap", {
+        e: [ref("river", r)],
+        at: cellPoint(cx, g.b),
+        msg: `${riverName(r)} jumps from cell ${g.a} to ${g.b}, which are not neighbours (position ${g.k})${gaps.length > 1 ? `; ${gaps.length} gaps in all` : ""}`,
+        fix: () =>
+          all
+            ? {
+                ...editCall("river", ops),
+                note: "fills each gap with the land cells between (a stretch reroute per gap)"
+              }
+            : {
+                hint: `a gap crosses water or another river, so no reroute fills it: edit {type:'map', recalculate:'rivers+biomes'} regenerates every river (new ids and names; biome cells recomputed), or ${removeRiverHint(r)}`
+              }
+      });
     }
+    if (allOps.length > 1)
+      cx.fixAll["river-gap"] = {
+        tool: "edit",
+        args: { type: "river", ops: allOps.slice(0, 500), continueOnError: true }
+      };
   }
 
   // ---------------------------------------------------------------- routes
@@ -1816,7 +1912,7 @@
 
   /** eval text that cuts route ends that stand in the cell of a removed burg (a route left with under 2 points is removed), then relinks. */
   function trimEndsCode(ids) {
-    return `const ids = ${ids ? `new Set(${JSON.stringify(ids)})` : "null"}, C = pack.cells; const ghost = new Set(pack.burgs.filter(b => b && b.removed && Number.isInteger(b.cell) && !C.burg[b.cell]).map(b => b.cell)); let n = 0; for (const r of [...pack.routes]) { if (ids && !ids.has(r.i)) continue; const pts = r.points; while (pts.length >= 2 && ghost.has(pts[0][2])) { pts.shift(); n++; } while (pts.length >= 2 && ghost.has(pts[pts.length - 1][2])) { pts.pop(); n++; } if (pts.length < 2) pack.routes = pack.routes.filter(x => x !== r); } pack.cells.routes = Routes.buildLinks(pack.routes); return n`;
+    return `const ids = ${ids ? `new Set(${JSON.stringify(ids)})` : "null"}, C = pack.cells; const ghost = new Set(pack.burgs.filter(b => b && b.removed && Number.isInteger(b.cell) && !C.burg[b.cell]).map(b => b.cell)); let n = 0; const removed = []; for (const r of [...pack.routes]) { if (ids && !ids.has(r.i)) continue; const pts = r.points; while (pts.length >= 2 && ghost.has(pts[0][2])) { pts.shift(); n++; } while (pts.length >= 2 && ghost.has(pts[pts.length - 1][2])) { pts.pop(); n++; } if (pts.length < 2) { pack.routes = pack.routes.filter(x => x !== r); removed.push(r.i); } } pack.cells.routes = Routes.buildLinks(pack.routes); return { pointsTrimmed: n, routesRemoved: removed, note: removed.length ? removed.length + " route(s) left with under 2 points were removed: " + removed.join(", ") : "no route was removed" }`;
   }
 
   // ---------------------------------------------------------------- notes
@@ -1959,13 +2055,16 @@
       out.msg = row.msg;
       // a check with a fixAll and several rows is repaired by that one call: rows carry no fix of their own
       // (filter to one row with near/bbox/types to get it)
-      if (cx.fixes && row.fix && !(cx.fixAll[id] && counts[id] > 1)) {
+      if (cx.fixes && row.fix) {
+        const covered = !!(cx.fixAll[id] && counts[id] > 1);
         let f = null;
         try {
           f = typeof row.fix === "function" ? row.fix() : row.fix;
         } catch (err) {
           f = { hint: `no automatic fix (${err?.message || err})` };
         }
+        // a row the fixAll cannot repair keeps its hint
+        if (f?.tool && covered) f = null;
         if (f?.tool) {
           out.fix = { tool: f.tool, args: f.args };
           if (f.note) out.fixNote = f.note;

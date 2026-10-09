@@ -45,7 +45,9 @@ export const RegenProvinces = z
       .min(1)
       .max(500)
       .optional()
-      .describe("Explicit centres, one province each; a state's land goes to the nearest centre by travel cost"),
+      .describe(
+        "Explicit centres, one province each; a state's land goes to the nearest centre by travel cost. One call can mix modes: states lists them all, centres covers some, count (else auto) the rest; a state not in states keeps its provinces"
+      ),
     count: z
       .number()
       .int()
@@ -61,7 +63,7 @@ export const RegenProvinces = z
       .max(100)
       .optional()
       .describe(
-        "Auto mode (no centres/count): the generator's provinces ratio 1-100, higher = more and bigger burg provinces (default: the options panel's)"
+        "Auto mode (no centres/count): the options panel's provinces ratio 1-100 (default: the panel's value). Auto mode is random per call, so its dryRun sizes and names are not what the real run makes"
       ),
     keepLocked: z
       .boolean()
@@ -75,7 +77,7 @@ export const RegenProvinces = z
       .boolean()
       .optional()
       .describe(
-        "centres/count: the spread may travel through other states' land, so parts of the state behind it go to the nearest centre over land (default false: inside the state and along its coast only; cells it cannot reach go to the nearest province, reported as fallback)"
+        "centres/count: the spread may travel through other states' land, so parts of the state behind it go to the nearest centre over land (default false: inside the state and along its coast only; cells it cannot reach go to the nearest province, reported as fallback). true is a flat flood over all land from the centres, like a script that assigns every cell to its nearest centre"
       )
   })
   .strict();
@@ -90,7 +92,12 @@ export const RegenEmblems = z
       .describe("Only these states and their provinces/burgs (0 = burgs outside any state); default all"),
     provinces: z.boolean().optional().describe("Also their provinces (default true)"),
     burgs: z.boolean().optional().describe("Also their burgs (default true)"),
-    shieldOnly: z.boolean().optional().describe("Keep the designs; only reset each shield shape to its culture's"),
+    shieldOnly: z
+      .boolean()
+      .optional()
+      .describe(
+        "Keep the designs (charges, tinctures); only reset each shield shape to its culture's. Works on burgs and provinces of locked states; a locked state's own emblem is skipped unless lockedStates"
+      ),
     keepLocked: z.boolean().optional().describe("Default true: locked states, provinces and burgs keep their emblem"),
     lockedStates: z.boolean().optional().describe("Regenerate locked states' own emblems too (default false)"),
     stateCulture: z

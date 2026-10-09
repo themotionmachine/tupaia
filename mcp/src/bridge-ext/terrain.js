@@ -712,12 +712,14 @@
     const C = pack.cells;
     const out = { grid: gridGeometry() };
     const drown = liveBurgs().filter(b => cur[C.g[b.cell]] >= 20 && target[C.g[b.cell]] < 20);
-    if (drown.length)
-      out.burgsOnNewWater = {
-        count: drown.length,
-        burgs: drown.slice(0, 10).map(b => `${b.name} (${b.i})${b.capital ? " capital" : ""}`),
-        effect: "the rebuild keeps each such burg's cell as land at height 20 (an island or a spit)"
-      };
+    // always present (count 0 included): a missing key reads as "not checked"
+    out.burgsOnNewWater = drown.length
+      ? {
+          count: drown.length,
+          burgs: drown.slice(0, 10).map(b => `${b.name} (${b.i})${b.capital ? " capital" : ""}`),
+          effect: "the rebuild keeps each such burg's cell as land at height 20 (an island or a spit)"
+        }
+      : { count: 0 };
     const painted = paintedBiomes();
     if (painted)
       out.paintedBiomes = {

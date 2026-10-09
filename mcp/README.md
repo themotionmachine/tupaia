@@ -200,16 +200,27 @@ node mcp/src/server.ts --http [--port N | --prefer-port N]   # usually started b
 - Security: 127.0.0.1 only; the Host header must name the port the connection arrived on; any
   request with an `Origin` header gets 403; every route needs `Authorization: Bearer <token>`
   (random per start). The bearer token is the trust boundary: anyone holding it can confirm
-  another caller's shared_save preview.
-- Mode works exactly as for stdio: live only from `TUPAIA_MODE=live` in the daemon's spawn
-  environment; nothing over HTTP switches to live; the live-write gate is unchanged.
+  another caller's shared_save preview. The CLI hands it to a daemon it starts through a 0600
+  file (`TUPAIA_HTTP_TOKEN_FILE`, read once and deleted), not the environment, so `ps eww` does
+  not show it. `POST /listen` adds at most 3 ports (4 in all). daemon.log turns control
+  characters in a caller name into spaces, so a caller cannot forge log lines.
+- Mode is set as for stdio: live only from `TUPAIA_MODE=live` in the daemon's spawn
+  environment; nothing over HTTP switches to live; the live-write gate is unchanged. But the
+  first caller's environment sets the mode for every later caller on that TUPAIA_OUT, so the CLI
+  checks: a live daemon refuses `call` and `headers` (exit 2, nothing runs) from a caller whose
+  environment is local (or unset), or that names another `TUPAIA_LIVE_ORIGIN` (daemon.json and
+  /health carry `liveOrigin`), unless `--accept-live`. `tools`, `status` and `stop` still work.
+  Give a live daemon its own `--out`. A live daemon loads the shared map into its page on its
+  first launch.
 - A queued call whose caller disconnects or cancels is skipped; a started call runs to its end.
 - Stopping (`tupaia stop`, idle, or another daemon taking over the TUPAIA_OUT): queued calls
   are refused (they never ran; `tupaia call` reruns them on a fresh daemon), the running call
   finishes (up to 15 s), a changed page is saved to `maps/daemon-exit-<time>.map` and the next
   start prints a `load_map` line for it.
 - Idle shutdown after `TUPAIA_HTTP_IDLE_MIN` (default 120) minutes with no call and no attached
-  MCP client (an open `subscriptions/listen` stream; Claude Code holds one per session).
+  MCP client (an open `subscriptions/listen` stream; Claude Code holds one per session). A live
+  daemon a Claude Code session is attached to therefore stays live for that whole session:
+  `tupaia stop` it once the write is done (after the session detaches).
 - `session` status shows `serving: http daemon ...`.
 
 ### CLI: mcp/bin/tupaia
@@ -221,15 +232,16 @@ tupaia tools [<tool>] [--names] # list tools; with a name: its description and a
 tupaia help <tool>              # same as tupaia tools <tool>
 tupaia status | start | stop    # status exits 1 when not running (and says starting/stopping)
 tupaia headers                  # {"Authorization":"Bearer ..."} for Claude Code's headersHelper
-  --json  --timeout <ms>  --port <n>  --out <dir> (= TUPAIA_OUT)
+  --json  --timeout <ms>  --port <n>  --out <dir> (= TUPAIA_OUT)  --accept-live
 ```
 
-- Use the absolute path `/Users/mgm1/Desktop/code/vespucci/mcp/bin/tupaia` (no package.json
-  `bin` entry).
+- Use the absolute path of the checkout's bin, `/Users/mgm1/Desktop/code/vespucci/mcp/bin/tupaia`
+  (no package.json `bin` entry); in a worktree use the worktree's bin, which runs that tree's
+  code.
 - `call`, `tools` and `headers` start a detached daemon when none serves this TUPAIA_OUT; it
   gets the caller's environment. Concurrent first callers start exactly one.
-- The daemon's mode is fixed at its start. If the caller's `TUPAIA_MODE` differs, the CLI warns
-  and keeps the running daemon: `tupaia stop` first to change mode.
+- The daemon's mode is fixed at its start. A live daemon refuses a local caller (above); a
+  local daemon only warns a live caller and keeps running: `tupaia stop` first to change mode.
 - Paths: the CLI makes a relative `load_map path`, `apply specPath`, `set_heights image.path`,
   `flow heights.image.path` (and `sketch onto.path`) absolute when the file exists from your
   cwd. The server reads a relative path from its own cwd, then TUPAIA_OUT, then the repo root
@@ -237,9 +249,12 @@ tupaia headers                  # {"Authorization":"Bearer ..."} for Claude Code
   `imagePath`). `save_map` and `export` write relative paths under TUPAIA_OUT. Prefer absolute.
 - Large arguments (heights, cell lists) go through stdin: `tupaia call set_heights - < args.json`.
   Plain-JSON args of 32 KB or more are sent to the page as one string (0.9 MB in about 80 ms).
-- Exit codes: 0 ok, 1 tool error (or status: not running), 2 usage or daemon error. An unusable
-  `--out` exits 2 (no fallback directory). Calls or starts slower than 15 s print progress on
-  stderr.
+- Exit codes: 0 ok, 1 tool error (or status: not running), 2 usage or daemon error (or a live
+  daemon refused). An unusable `--out` exits 2 (no fallback directory). Calls or starts slower
+  than 15 s print progress on stderr: the number of calls the daemon has in progress, or that it
+  has none yet (the request has not reached it: a loaded machine). daemon.log has each call's
+  daemon time (`call <tool> <ms> ok [caller]`); under load the CLI's wall time can be several
+  times that. `tupaia help <tool>` prints a long shape repeated under several arguments once.
 
 Several sessions or agents: one TUPAIA_OUT per independent task, so their pages do not collide.
 Callers that pass the same `--out` share one page, undo history and sketch (one agent's undo
@@ -266,8 +281,9 @@ or, once: `claude mcp add-json tupaia-shared '{"type":"http","url":"http://127.0
 - The token is random per daemon start, so use `headersHelper`, not a static header. Claude Code
   reads credential-like env vars as empty in http `headers` and strips TOKEN/KEY/AUTH-named vars
   from the helper's environment.
-- `tupaia headers` reads `CLAUDE_CODE_MCP_SERVER_URL` and makes the daemon for its TUPAIA_OUT
-  serve that port: it starts one there, or asks a daemon a CLI call started on another port to
+- `tupaia headers` reads `CLAUDE_CODE_MCP_SERVER_URL` (it refuses one whose host is not
+  127.0.0.1 or localhost: the token only goes to this machine's daemon) and makes the daemon for
+  its TUPAIA_OUT serve that port: it starts one there, or asks a daemon a CLI call started on another port to
   also listen there (same page). From then on that port is that TUPAIA_OUT's port.
 - Without `TUPAIA_OUT` the daemon uses `<repo>/.tupaia-mcp-out`, so `tupaia call` without
   `--out` shares the registered server's page.
@@ -455,4 +471,7 @@ skipped`.
 
 A write rehearsal against a real Worker: run `wrangler dev --local` with a scratch config and
 `--persist-to` a scratch directory (never the repo's `cloudflare/.wrangler`), then spawn the
-server with `TUPAIA_MODE=live TUPAIA_LIVE_ORIGIN=http://127.0.0.1:<port>`.
+server with `TUPAIA_MODE=live TUPAIA_LIVE_ORIGIN=http://127.0.0.1:<port>` and its own
+`--out`/TUPAIA_OUT (on the default out dir a running production live daemon would serve the
+rehearsal; the CLI refuses that origin mismatch). `test/fake-worker.ts` is a lighter stand-in
+(see `test/sketch.test.ts` for how the tests drive it).

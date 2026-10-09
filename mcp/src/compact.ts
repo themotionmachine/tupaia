@@ -626,6 +626,7 @@ export function compactSketchStatus(v: Obj, full = false): string {
       ["ops", v.ops],
       ["dirty", v.dirty],
       ["saved", saved ? `v${String(saved.version)}` : "never"],
+      ["sharedNow", v.rebaseNeeded ? `v${String(v.sharedNow)} (rebase needed)` : undefined],
       ["blobOnly", reasons ? `${reasons} reason(s)` : undefined],
       ["suspended", !!v.suspended],
       ["diverged", !!v.diverged],

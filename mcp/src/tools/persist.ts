@@ -1,6 +1,7 @@
 // load_map, save_map and export.
 import fs from "node:fs";
 import path from "node:path";
+import zlib from "node:zlib";
 import { z } from "zod";
 import type { CallScope, ToolContext } from "../context.ts";
 import { resolveReadPath, resolveWritePath } from "../paths.ts";
@@ -22,6 +23,36 @@ function brief(s: Record<string, unknown>): Record<string, unknown> {
     features: s.features,
     relief: s.relief // track 'relief': icons and stored settings (bridge-ext/relief.js), when any
   };
+}
+
+/** Biomes every map has (Biomes.getDefault: ids 0-12); higher ids are custom. */
+const STOCK_BIOMES = 13;
+
+/**
+ * A file saved before the biome line got its 4th field (iconsDensity, icons, cost) loads custom
+ * biomes with icon density 0, no icons and cost 50, silently: say so. Plain or gzip text only
+ * (anything else: null, no note).
+ */
+export function oldBiomeNote(bytes: Buffer): string | null {
+  let text: string;
+  try {
+    text = (bytes[0] === 0x1f && bytes[1] === 0x8b ? zlib.gunzipSync(bytes) : bytes).toString("utf8", 0, 4_000_000);
+  } catch {
+    return null;
+  }
+  const lines = text.split(/\r?\n/, 4);
+  if (lines.length < 4 || !/^\d/.test(lines[0])) return null;
+  const fields = lines[3].split("|");
+  if (fields.length !== 3) return null;
+  const names = fields[2].split(",");
+  if (names.length <= STOCK_BIOMES) return null;
+  const custom = names.slice(STOCK_BIOMES);
+  return `this file predates the saved biome extras (its biome line has no 4th field): custom biome${custom.length > 1 ? "s" : ""} ${custom
+    .slice(0, 5)
+    .map((n, k) => `${STOCK_BIOMES + k} '${n}'`)
+    .join(
+      ", "
+    )}${custom.length > 5 ? ` and ${custom.length - 5} more` : ""} loaded with iconsDensity 0, no icons and cost 50, and edited stock biomes with their defaults; set the real values with edit {type:'biome'} before saving (a save now keeps them)`;
 }
 
 export function register(ctx: ToolContext): void {
@@ -52,10 +83,18 @@ export function register(ctx: ToolContext): void {
           seed: (s.seed as string) ?? null,
           mapId: (s.mapId as number) ?? null
         });
-        return { ...brief(s), path: abs, origin: ctx.provenanceView(), bytes: bytes.length, ms: Date.now() - t0 };
+        const note = oldBiomeNote(bytes);
+        return {
+          ...brief(s),
+          path: abs,
+          origin: ctx.provenanceView(),
+          bytes: bytes.length,
+          ...(note ? { note } : {}),
+          ms: Date.now() - t0
+        };
       }
-      const { summary, bytes } = await loadShared(ctx, scope, "load_map");
-      return { ...brief(summary), origin: ctx.provenanceView(), bytes, ms: Date.now() - t0 };
+      const { summary, bytes, note } = await loadShared(ctx, scope, "load_map");
+      return { ...brief(summary), origin: ctx.provenanceView(), bytes, ...(note ? { note } : {}), ms: Date.now() - t0 };
     }
   );
 
@@ -264,7 +303,7 @@ export async function loadShared(
   ctx: ToolContext,
   scope: CallScope,
   op: string
-): Promise<{ summary: Record<string, unknown>; bytes: number; version: number | null }> {
+): Promise<{ summary: Record<string, unknown>; bytes: number; version: number | null; note: string | null }> {
   const blob = await ctx.shared.getMap();
   await scope.pushUndo(op, { source: "shared" });
   const summary = await scope.loadMap({ b64: blob.bytes.toString("base64") });
@@ -277,7 +316,7 @@ export async function loadShared(
     sharedUpdatedAt: blob.updatedAt,
     fetchedAt: new Date().toISOString()
   });
-  return { summary, bytes: blob.bytes.length, version: blob.version };
+  return { summary, bytes: blob.bytes.length, version: blob.version, note: oldBiomeNote(blob.bytes) };
 }
 
 defineTools("persist", register);

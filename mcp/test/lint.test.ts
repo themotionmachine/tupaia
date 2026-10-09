@@ -455,8 +455,13 @@ describe("tupaia-mcp lint (browser)", () => {
       assert.ok(!loop.rows.some(r => hasEntity(r, "river", p.rep)), "a consecutive repeat is harmless");
       const gap = await found("river-gap", 2);
       assert.ok(gap.rows.some(r => hasEntity(r, "river", p.b)));
-      // removing a river (with its tributaries) is the bigger change: a hint, not a ready fix
-      assert.ok(!loop.rows[0].fix && !gap.rows[0].fix, "no automatic fix for a loop or a gap");
+      // removing a river (with its tributaries) is the bigger change: a loop gets a hint, not a
+      // ready fix; a gap gets a reroute through the land cells between when there is one
+      assert.ok(!loop.rows[0].fix, "no automatic fix for a loop");
+      for (const r of gap.rows) {
+        if (r.fix) assert.equal(r.fix.args.type, "river", JSON.stringify(r.fix));
+        else assert.match(r.hint ?? "", /recalculate:'rivers\+biomes'/);
+      }
       assert.match(loop.rows[0].hint ?? "", new RegExp(`edit river \\{ref:${p.a}, remove:true\\}`));
       await h.ok("edit", { type: "river", ops: [{ ref: p.a, remove: true }] });
       await clean("river-loop");
@@ -579,7 +584,11 @@ describe("tupaia-mcp lint (browser)", () => {
       else assert.ok(!mine.fix, "several rows: the fixAll is the fix");
       // a burg with several roads leaves several dangling ends: one call trims them all
       const res = await apply(out.fixAll?.["route-end-burg"]);
-      assert.ok((res.value as number) >= rows.length);
+      const trim = res.value as { pointsTrimmed: number; routesRemoved: number[]; note: string };
+      assert.ok(trim.pointsTrimmed >= rows.length);
+      // a short route left with under 2 points is removed, and the result says which
+      assert.ok(!trim.routesRemoved.includes(p.r), "the long route is trimmed, not removed");
+      assert.match(trim.note, trim.routesRemoved.length ? /removed/ : /no route was removed/);
       await clean("route-end-burg");
       const len = await evalv("return pack.routes.find(r => r.i === args)?.points.length ?? null", p.r);
       assert.ok(len !== null && len < p.n, "the route is trimmed, not removed");

@@ -156,7 +156,8 @@ describe("apply: spec normalization (no browser)", () => {
     const res = { rows, ignored: {}, unsupported: [], steps: [], also: {}, notes: [], wouldChange: 0 };
     const out = shapeResult(res, { mode: "upsert" }) as Record<string, any>;
     assert.deepEqual(out.counts, { created: 3, unchanged: 1, differs: 1, error: 5 });
-    assert.deepEqual(out.created, { burgs: { A: 7 }, "burgs.note": { A: "burg7" } });
+    // every created entity is in created, also one whose row stays for its diffs
+    assert.deepEqual(out.created, { burgs: { A: 7, B: 8 }, "burgs.note": { A: "burg7" } });
     assert.deepEqual(
       out.rows.map((r: Obj) => r.at),
       [["provinces[0]", "provinces[1]", "provinces[2]"], "routes[0]", "states[0]", "burgs[1]"]

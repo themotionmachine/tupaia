@@ -172,6 +172,8 @@
     if (!["keep", "regenerate"].includes(iceMode)) fail("BAD_ARGS", "ice is 'keep' or 'regenerate'");
     const relief = a.relief ?? "keep";
     if (!["keep", "redraw"].includes(relief)) fail("BAD_ARGS", "relief is 'keep' or 'redraw'");
+    const biomes = a.biomes ?? "keep";
+    if (!["keep", "redefine"].includes(biomes)) fail("BAD_ARGS", "biomes is 'keep' or 'redefine'");
     if (a.density === undefined) fail("BAD_ARGS", "density is required (1-13 or 1000-100000)");
     const want = targetCells(a.density);
     const shape = gridShape(want);
@@ -199,7 +201,7 @@
       );
     if (want > 50000)
       warnings.push("over 50K cells the app gets slow to draw and edit (the Options slider marks it red)");
-    return { want, shape, heights, iceMode, relief, gridNow, packNow, packEst, warnings };
+    return { want, shape, heights, iceMode, relief, biomes, gridNow, packNow, packEst, warnings };
   }
 
   /**
@@ -1255,6 +1257,7 @@
    * the rivers data grew 60 -> 159 -> 270 KB over 10K -> 30K -> 10K).
    */
   let riverAnchors = null;
+  let riverGapCells = 0;
   function saveRiverAnchors(rivers) {
     riverAnchors = new Map();
     for (const r of rivers || []) {
@@ -1270,11 +1273,77 @@
     }
   }
 
+  /**
+   * Neighbour cells that join cell a to cell b (exclusive), walking greedily toward b's centre (on
+   * a Delaunay graph the greedy walk reaches it); `avoid` cells are never stepped on. null when no
+   * walk within maxSteps exists.
+   */
+  function bridgeCells(a, b, avoid, maxSteps = 64) {
+    const C = pack.cells;
+    const [tx, ty] = C.p[b];
+    const path = [];
+    const seen = new Set([a]);
+    let cur = a;
+    while (!C.c[cur].includes(b)) {
+      if (path.length >= maxSteps) return null;
+      let best = -1;
+      let bd = Infinity;
+      for (const j of C.c[cur]) {
+        if (seen.has(j) || avoid.has(j)) continue;
+        const d = (C.p[j][0] - tx) ** 2 + (C.p[j][1] - ty) ** 2;
+        if (d < bd) {
+          bd = d;
+          best = j;
+        }
+      }
+      if (best < 0) return null;
+      path.push(best);
+      seen.add(best);
+      cur = best;
+    }
+    return path;
+  }
+
+  /**
+   * Fill the gaps of a river's cell list: consecutive cells that are not neighbours (a finer grid
+   * maps two old anchors to new cells further apart) get the neighbour cells between them, each
+   * with a point on the straight line between the two anchors (so the drawn line stays as it was).
+   * Returns the number of cells added; gaps it cannot bridge stay.
+   */
+  function fillRiverGaps(cells, points) {
+    const C = pack.cells;
+    const on = new Set(cells.filter(c => c >= 0));
+    let added = 0;
+    for (let k = 0; k + 1 < cells.length; k++) {
+      const a = cells[k];
+      const b = cells[k + 1];
+      if (a < 0 || b < 0 || a === b || C.c[a].includes(b)) continue;
+      const avoid = new Set(on);
+      avoid.delete(b);
+      const mid = bridgeCells(a, b, avoid);
+      if (!mid?.length) continue;
+      const [x0, y0] = points[k];
+      const [x1, y1] = points[k + 1];
+      const pts = mid.map((_, j) => {
+        const t = (j + 1) / (mid.length + 1);
+        return [rn(x0 + (x1 - x0) * t, 2), rn(y0 + (y1 - y0) * t, 2)];
+      });
+      cells.splice(k + 1, 0, ...mid);
+      points.splice(k + 1, 0, ...pts);
+      for (const c of mid) on.add(c);
+      added += mid.length;
+      k += mid.length;
+    }
+    return added;
+  }
+  T.fillRiverGaps = fillRiverGaps;
+
   /** After Resample.restoreRivers: each river follows its old anchors (one per new cell), as the rivers editor stores it. */
   function reanchorRivers(projection) {
     if (!riverAnchors) return 0;
     const R = pack.cells.r;
     let n = 0;
+    riverGapCells = 0;
     for (const r of pack.rivers || []) {
       const a = riverAnchors.get(r.i);
       if (!a) continue;
@@ -1289,6 +1358,8 @@
         points.push([rn(x, 2), rn(y, 2)]);
       });
       if (cells.filter(c => c >= 0).length < 2) continue; // too short now: keep Resample's line
+      // a finer grid puts anchors more than one new cell apart: join them through the cells between
+      riverGapCells += fillRiverGaps(cells, points);
       for (const c of cells) if (c >= 0 && R && !R[c]) R[c] = r.i;
       Object.assign(r, { cells, points, source: cells[0], mouth: cells.at(-2) ?? cells[0] });
       if (typeof a.length === "number") r.length = a.length;
@@ -1736,6 +1807,7 @@
     const emblemHost = document.getElementById("defs-emblems");
     if (emblemHost) for (const n of keep.emblemDefs) if (!document.getElementById(n.id)) emblemHost.appendChild(n);
     const warnings = [...P.warnings];
+    const fixed = {};
     if (keep.mapId !== null && T.summary().mapId !== keep.mapId) {
       // an app build without the tupaia-mcp Resample change stamps a new id; the map is the same map
       mapId = keep.mapId;
@@ -1775,6 +1847,24 @@
       );
     if (cmp.wet.length)
       warnings.push(`${cmp.wet.length} marker(s) on land before now sit on water (the coast moved): ${names(cmp.wet)}`);
+    if (riverGapCells) fixed.riverGapCellsFilled = riverGapCells;
+    if (after.feats.oceans > before.feats.oceans)
+      warnings.push(
+        `${after.feats.oceans - before.feats.oceans} new ocean feature(s) (${before.feats.oceans} -> ${after.feats.oceans}): heights interpolated next to the map edge or a coast dipped under 20; find {type:'feature', where:{type:'ocean'}} lists them, paint_cells height fills a sliver`
+      );
+    // biomes move with the cells (each new cell takes its old cell's biome), not from the climate
+    let biomeNote;
+    if (P.biomes === "redefine" && T.settings?.recalculate) {
+      const r = await T.settings.recalculate("biomes", false, true);
+      biomeNote = `biomes re-derived from the climate on the new cells (${r.biomeCellsChanged ?? 0} cells changed; custom-biome cells kept, hand-painted standard-biome cells replaced)`;
+      regenerated.push(biomeNote);
+    } else {
+      const stale = T.settings?.replacesReport?.("biomes")?.replaces?.biomeCellsEdited;
+      if (stale)
+        warnings.push(
+          `biomes were carried over by position, so ${stale} cell(s) differ from what the climate gives on the new cells (old cell edges show at the finer grid, and hand-painted cells count too): regrid {biomes:'redefine'} next time, or edit {type:'map', recalculate:'biomes', dryRun:true} then without dryRun (replaces hand-painted standard-biome cells; custom biomes kept)`
+        );
+    }
     if (report.newLakesNamed?.length)
       regenerated.push(
         `${report.newLakesNamed.length} new lake(s) with no old counterpart, named: ${names(report.newLakesNamed, 5)}`
@@ -1792,7 +1882,6 @@
       warnings.push(
         `layer(s) on but not drawn before were kept undrawn so the map looks the same: ${layers.keptEmpty.join(", ")} (toggling the layer draws it)`
       );
-    const fixed = {};
     for (const [k, v] of [
       ["burgsRehoused", report.burgsRehoused],
       ["portsMovedToCoast", report.portsMovedToCoast],

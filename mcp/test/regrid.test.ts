@@ -194,9 +194,11 @@ describe("regrid on demo.map (local)", () => {
     assert.equal(now.relief, before0.relief, "relief icons are kept as drawn (relief:'keep' default)");
     // rivers keep their anchors (Resample stored the meandered line, so every regrid multiplied points)
     assert.equal(now.riversAligned, true);
+    // (gap cells inserted on the finer grid, so river cells stay neighbours, add anchors of their own)
+    const filled = Number((applied.fixed as Obj | undefined)?.riverGapCellsFilled ?? 0);
     assert.ok(
-      now.riverAnchors <= before0.riverAnchors * 1.05 && now.riverAnchors >= before0.riverAnchors * 0.9,
-      `${before0.riverAnchors} -> ${now.riverAnchors}`
+      now.riverAnchors <= before0.riverAnchors * 1.05 + filled && now.riverAnchors >= before0.riverAnchors * 0.9,
+      `${before0.riverAnchors} -> ${now.riverAnchors} (${filled} gap cells filled)`
     );
     // layers that were on but undrawn stay undrawn
     const undrawn = await ok(h, "eval", {

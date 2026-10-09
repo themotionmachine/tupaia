@@ -294,6 +294,8 @@ export async function sharedSave(
     compact?: boolean;
     /** Internal (sketch_promote): the call publishes the active sketch itself. */
     viaSketch?: boolean;
+    /** Internal (sketch_promote): more flags the token is bound to (its `then`). */
+    extraFlags?: Record<string, unknown>;
   }
 ): Promise<Record<string, unknown>> {
   requireLive(ctx);
@@ -369,7 +371,8 @@ export async function sharedSave(
       force,
       replaceWithUnrelated: unrelatedOk,
       skipBuildCheck: skipBuild,
-      ...(compact ? { compact } : {})
+      ...(compact ? { compact } : {}),
+      ...(args.extraFlags ?? {})
     })
   };
   const overrides: string[] = [];

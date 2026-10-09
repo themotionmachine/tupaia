@@ -708,7 +708,8 @@ describe("token savers over the server (demo.map)", () => {
     assert.ok(!/^population=/m.test(t), "no second, thousands-based population");
     assert.ok(/^production=\[\d+ items\]$/m.test(t));
     assert.ok(!t.includes('{"'), "no nested JSON");
-    assert.ok(t.length < JSON.stringify(j).length * 0.35, `${t.length} vs ${JSON.stringify(j).length}`);
+    // JSON inspect now shortens production/deals past 10 items too, so the gap is smaller than it was
+    assert.ok(t.length < JSON.stringify(j).length * 0.6, `${t.length} vs ${JSON.stringify(j).length}`);
 
     const place = textOf(await call("inspect", { at: { x: 216.9, y: 585.1 }, format: "compact" }));
     assert.match(place, /^place at=\(216\.9,585\.1\) cell=\d+/);

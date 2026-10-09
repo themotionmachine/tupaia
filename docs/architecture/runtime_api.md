@@ -402,7 +402,8 @@ no tool covers the change.
   - `data-seed` (deterministic draw, one stream per cell), `data-scale` (multiplier on the style
     density; the icon count goes with its square, down to 0), `data-biomes` (`"biomeId:k,..."`),
     `data-min-height`, `data-near-burgs` (px), `data-exclude` (`"<gridKey>:<ranges>[;<g.e>,...]"`,
-    ignored on another grid).
+    ignored on another grid). The reader clamps what a file holds: scale and each biome's k
+    0..2, min height 0..100, near-burgs 0..10000 (a crafted value cannot make a draw hang).
   - `data-regenerate`: `prepareMapData` (`src/io/save.ts:100`) empties `#terrain` in the saved
     copy, so every save drops the icons, and `restoreReliefOnLoad()` (called from
     `src/io/load.ts:779`) draws them again after a load. Manual relief-editor edits are lost on
@@ -414,6 +415,17 @@ no tool covers the change.
   JSON `{iconsDensity:[], icons:[[]], cost:[]}`, written by `save.ts` and applied by `load.ts:342`
   when present. Upstream keeps only `color|habitability|name`, so custom biomes lost their icon
   density, icons and cost on reload. An older client ignores the field and drops it on re-save.
+  Icon names end up in `<use href="#relief-<name>-1">` markup that a `data-regenerate` map draws
+  on load, so `applyBiomeExtras` takes a biome's icon list only when every name is a plain id
+  (`/^[A-Za-z][A-Za-z0-9_-]{0,40}$/`); otherwise that biome keeps its default icons. Files saved
+  before this field (the shared map up to v7) carry no extras: the MCP `load_map` says so in a
+  `note` when the file has custom biomes.
+- **Trade layer state** (`src/io/save.ts`, `src/io/load.ts`). Upstream turned the Trade button
+  on for every loaded map whose `#tradeAnimation` group exists and is not `display:none`, which
+  is every map saved by a current client, so each save switched Trade on for the next viewer.
+  `prepareMapData` now marks the saved group `data-layer-off="1"` when Trade is off, and the load
+  leaves the button off for such a group. Files without the attribute load as before; an older
+  client ignores it.
 - **Label visibility attributes** (`invokeActiveZooming`, `public/main.js:566` and `:584`). A
   `#labels` or `#emblems` group may carry `data-min-size` (replaces the lower bound: 6 for labels,
   25 for emblems), `data-max-size` (replaces 60 / 300) and `data-always-show` (`1`: skip both).

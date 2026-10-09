@@ -30,6 +30,25 @@ describe("relief settings", () => {
     expect(readReliefSettings(null, () => "100-x").scale).toBe(1);
   });
 
+  it("clamps stored values to the limits the MCP writes (a load draws them without a click)", () => {
+    const s = readReliefSettings(
+      attrs({
+        "data-scale": "100",
+        "data-biomes": "6:50,8:-1",
+        "data-min-height": "500",
+        "data-near-burgs": "1e9"
+      }),
+      () => "100-x"
+    );
+    expect(s.scale).toBe(2);
+    expect([...s.biomes]).toEqual([
+      [6, 2],
+      [8, 0]
+    ]);
+    expect(s.minHeight).toBe(100);
+    expect(s.nearBurgs).toBe(10000);
+  });
+
   it("reads the stored settings", () => {
     const s = readReliefSettings(
       attrs({

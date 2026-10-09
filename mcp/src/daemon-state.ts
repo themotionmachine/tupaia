@@ -29,6 +29,8 @@ export interface DaemonState {
   ports: number[];
   /** Mode from the daemon's spawn environment (TUPAIA_MODE); /health reports the current one. */
   mode: Mode;
+  /** The origin a live daemon writes to (TUPAIA_LIVE_ORIGIN); absent in files from older daemons. */
+  liveOrigin?: string | null;
   startedAt: string;
   /** tupaia-mcp package version. */
   version: string;

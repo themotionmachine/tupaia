@@ -128,7 +128,15 @@ export const ScreenshotInput = z.object({
   hideUi: z.boolean().optional().describe("Hide UI overlays and dialogs (default true)"),
   format: z.enum(["jpeg", "png"]).optional().describe("Returned image format (default jpeg)"),
   quality: z.number().min(0.3).max(1).optional().describe("JPEG quality (default 0.85)"),
-  maxSide: z.number().int().min(256).max(2048).optional().describe("Longest side of the returned image (default 1024)"),
+  maxSide: z
+    .number()
+    .int()
+    .min(256)
+    .max(2048)
+    .optional()
+    .describe(
+      "Longest side of the returned image, 256..2048 (default 1024; never upscales). The saved PNG (file) keeps the full resolution: a bigger full-map shot is shrunk to 2048 in the returned image only"
+    ),
   scale: z.number().min(1).max(3).optional().describe("Render resolution multiplier for the saved PNG (default 1)"),
   saveTo: z
     .string()
@@ -138,7 +146,9 @@ export const ScreenshotInput = z.object({
   compare: z
     .string()
     .optional()
-    .describe("shotId to diff against; returns a diff image and changedPct (same view by default)"),
+    .describe(
+      "shotId to diff against; returns a diff image and changedPct (same view and, unless layers is given, the same layers as that shot, for this capture only; nothing changed = no image). Pass the same scale and full as that shot. For a legible small change, take the baseline zoomed in (target/zoom) and compare with view:<that shot>; crop:'changed' is the lean default"
+    ),
   threshold: z
     .number()
     .int()
@@ -212,11 +222,24 @@ export async function takeScreenshot(
   let labelsRevealed: number | undefined;
   let exactView = false;
   let layerChange: { changed: unknown[]; previous: { on: string[]; off: string[] } } | null = null;
+  // compare without layers: capture with the compared shot's layers (temporarily), else the diff is all layer changes
+  let layersFromCompare: { on: string[]; off: string[] } | null = null;
+  let capturedLayers: string[] = [];
   let png: Buffer;
   let view: ViewInfo;
   let frozen = false;
   try {
-    if (args.layers && (args.layers.on?.length ?? 0) + (args.layers.off?.length ?? 0) > 0) {
+    if (compareRec && !args.layers && compareRec.layersOn.length) {
+      const now = await scope.call<string[]>("layersOn", {}, { noAlerts: true });
+      const on = compareRec.layersOn.filter(l => !now.includes(l));
+      const off = now.filter(l => !compareRec.layersOn.includes(l));
+      if (on.length || off.length) {
+        layersFromCompare = { on, off };
+      }
+    }
+    if (layersFromCompare) {
+      layerChange = await scope.call("setLayers", layersFromCompare);
+    } else if (args.layers && (args.layers.on?.length ?? 0) + (args.layers.off?.length ?? 0) > 0) {
       // kept layer changes are part of the saved map (the SVG), so they are undoable like display
       if (args.keepLayers) await scope.pushUndo("screenshot keepLayers", { layers: args.layers });
       layerChange = await scope.call("setLayers", { on: args.layers.on ?? [], off: args.layers.off ?? [] });
@@ -276,6 +299,7 @@ export async function takeScreenshot(
       }
       png = await ctx.browser.screenshotMap({ hideUi, scale, timeoutMs: scope.remainingMs });
     }
+    capturedLayers = await scope.call<string[]>("layersOn", {}, { noAlerts: true }).catch(() => []);
   } finally {
     // undone in the reverse order of setup: thaw (set last), then the labels:'all' style, then
     // layers; in cleanup(), so a cancelled or out-of-budget shot still puts the page back
@@ -293,7 +317,7 @@ export async function takeScreenshot(
             "labels:'all' could not be undone in the page (its temporary style may remain); the next screenshot retries, or reload the page"
           );
       }
-      if (layerChange && !args.keepLayers) {
+      if (layerChange && (!args.keepLayers || layersFromCompare)) {
         const prev = layerChange.previous;
         if (prev.on.length || prev.off.length)
           await scope.call("setLayers", { on: prev.on, off: prev.off }).catch(() => {});
@@ -302,6 +326,11 @@ export async function takeScreenshot(
   }
 
   const size = pngSize(png);
+  if (compareRec && (size.width !== compareRec.pngW || size.height !== compareRec.pngH))
+    throw new ToolError(
+      "BAD_ARGS",
+      `shot ${compareRec.id} is ${compareRec.pngW}x${compareRec.pngH} px but this capture is ${size.width}x${size.height}: pass the same scale${compareRec.full ? " (and full:true)" : ""} as shot ${compareRec.id} (or the viewport changed since)`
+    );
   const pngB64 = png.toString("base64");
   const cssW = full ? view.graphWidth : view.svgWidth;
   const cssH = full ? view.graphHeight : view.svgHeight;
@@ -408,7 +437,17 @@ export async function takeScreenshot(
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, png);
 
-  if (compareRec && plainDiff) {
+  if (compareRec && plainDiff && plainDiff.changed === 0) {
+    // an all-grey diff says nothing: no image, one line (the capture is still saved in file)
+    const hint = redrawHint(ctx, compareRec);
+    returned = { width: size.width, height: size.height };
+    compare = {
+      with: compareRec.id,
+      changedPct: 0,
+      changedPixels: 0,
+      note: `nothing changed vs ${compareRec.id}: 0 of ${plainDiff.total} pixels differ; no image returned${hint ? `; ${hint}` : ""}`
+    };
+  } else if (compareRec && plainDiff) {
     const diffFile = path.join(
       ctx.config.outDir,
       "shots",
@@ -451,10 +490,13 @@ export async function takeScreenshot(
     cssH,
     imgW: returned.width,
     imgH: returned.height,
-    layersOn: [],
+    layersOn: capturedLayers,
     ...(cropGeometry ? { crop: cropGeometry } : {})
   };
   ctx.shots.add(rec);
+
+  if (compare && layersFromCompare)
+    compare.layers = `captured with shot ${compareRec?.id}'s layers (this shot only): on [${layersFromCompare.on.join(", ")}], off [${layersFromCompare.off.join(", ")}]`;
 
   if (cropped) {
     // changed-region result: no repeat of the view metadata, the shot is already known
@@ -475,20 +517,21 @@ export async function takeScreenshot(
     {
       shotId: id,
       file,
-      width: returned.width,
-      height: returned.height,
-      format: images[0].mimeType,
+      ...(images.length ? { width: returned.width, height: returned.height, format: images[0].mimeType } : {}),
       png: { width: size.width, height: size.height },
       full,
       view: full ? undefined : { x: view.x, y: view.y, scale: view.scale },
       mapBboxShown: full ? [0, 0, view.graphWidth, view.graphHeight] : view.mapBboxShown,
       target: view.target,
       labels: args.labels === "all" ? { mode: "all", revealed: labelsRevealed } : undefined,
-      layersChanged: layerChange?.changed.length
-        ? { changed: layerChange.changed, reverted: !args.keepLayers }
-        : undefined,
+      layersChanged:
+        layerChange?.changed.length && !layersFromCompare
+          ? { changed: layerChange.changed, reverted: !args.keepLayers }
+          : undefined,
       compare,
-      pixelHint: `inspect {at:{screen:[px,py], shot:'${id}'}} maps a pixel of this ${returned.width}x${returned.height} image to the map`
+      pixelHint: images.length
+        ? `inspect {at:{screen:[px,py], shot:'${id}'}} maps a pixel of this ${returned.width}x${returned.height} image to the map`
+        : undefined
     },
     images
   );

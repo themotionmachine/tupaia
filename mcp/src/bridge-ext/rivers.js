@@ -677,7 +677,11 @@
       if (b === -1) {
         if (!C.b[a]) fail("BAD_ARGS", `-1 (off the map edge) must follow a border cell; cell ${a} is not one`);
       } else if (!C.c[a].includes(b))
-        fail("BAD_ARGS", `cells ${a} and ${b} are not neighbours; reroute cells must be contiguous`);
+        fail(
+          "BAD_ARGS",
+          `cells ${a} and ${b} are not neighbours; reroute cells must be contiguous. Cell ${a}'s neighbours: ${Array.from(C.c[a]).join(", ")}; cell ${b}'s: ${Array.from(C.c[b]).join(", ")} (inspect {at:{cell}} lists them too)`,
+          { details: { neighbours: { [a]: Array.from(C.c[a]), [b]: Array.from(C.c[b]) } } }
+        );
     }
     const xc = x.cells;
     const n = xc.length;

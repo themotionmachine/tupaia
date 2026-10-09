@@ -195,6 +195,13 @@ function rpcOf(body: Buffer | undefined): { method?: string; id?: RpcId; tool?: 
   }
 }
 
+/** A caller-supplied string as one log line: control characters (newlines too) become spaces. */
+export function logSafe(s: string): string {
+  return s.replace(/[\p{Cc}\u2028\u2029]/gu, " ");
+}
+
+/** The first port plus at most 3 added by POST /listen (each registration adds one). */
+const MAX_LISTENERS = 4;
 const ROUTES = "POST /mcp (MCP Streamable HTTP), POST /call, GET /tools, GET /health, POST /shutdown, POST /listen";
 
 function listenOn(server: http.Server, port: number): Promise<number> {
@@ -232,8 +239,20 @@ export async function startHttpDaemon(o: HttpOptions): Promise<HttpDaemon> {
   }
 
   // the CLI that starts a daemon makes its token (so `tupaia headers` can print it early)
-  const given = process.env.TUPAIA_HTTP_TOKEN;
+  // through a 0600 file (TUPAIA_HTTP_TOKEN_FILE, read once and deleted): an environment variable
+  // stays visible in the process's initial environment (ps eww) for as long as the daemon runs
+  let given = process.env.TUPAIA_HTTP_TOKEN;
+  const tokenFile = process.env.TUPAIA_HTTP_TOKEN_FILE;
   delete process.env.TUPAIA_HTTP_TOKEN; // never passed on to the browser
+  delete process.env.TUPAIA_HTTP_TOKEN_FILE;
+  if (tokenFile) {
+    try {
+      given = fs.readFileSync(tokenFile, "utf8").trim();
+    } catch (e) {
+      log(`cannot read the token file ${tokenFile}: ${(e as Error).message}; using a new token`);
+    }
+    fs.rmSync(tokenFile, { force: true });
+  }
   const token = given && /^[A-Za-z0-9_-]{32,}$/.test(given) ? given : crypto.randomBytes(32).toString("base64url");
   const expectedAuth = Buffer.from(`Bearer ${token}`);
   const authOk = (h: string | undefined): boolean => {
@@ -324,7 +343,8 @@ export async function startHttpDaemon(o: HttpOptions): Promise<HttpDaemon> {
     const t = body.timeoutMs;
     const timeoutMs =
       typeof t === "number" && Number.isFinite(t) ? Math.round(Math.min(TIMEOUT_CAP_MS, Math.max(500, t))) : undefined;
-    const who = typeof body.caller === "string" && body.caller ? ` [${body.caller.slice(0, 120)}]` : "";
+    // control characters stripped: a caller name cannot forge daemon.log lines
+    const who = typeof body.caller === "string" && body.caller ? ` [${logSafe(body.caller).slice(0, 120)}]` : "";
     const t0 = Date.now();
     let skipped = false;
     const r = await ctx.callTool(body.name, body.args ?? {}, {
@@ -436,6 +456,10 @@ export async function startHttpDaemon(o: HttpOptions): Promise<HttpDaemon> {
     if (typeof want !== "number" || !Number.isInteger(want) || want < 1 || want > 65535)
       return sendJson(res, 400, { error: "body must be {port: 1..65535}" });
     if (!servers.has(want)) {
+      if (servers.size >= MAX_LISTENERS)
+        return sendJson(res, 409, {
+          error: `already listening on ${servers.size} ports (${[...servers.keys()].join(", ")}); the cap is ${MAX_LISTENERS}`
+        });
       const extra = makeListener();
       try {
         await listenOn(extra, want);
@@ -458,6 +482,7 @@ export async function startHttpDaemon(o: HttpOptions): Promise<HttpDaemon> {
     ports: [...servers.keys()],
     mode: ctx.mode.mode,
     envMode: config.envMode,
+    liveOrigin: config.liveOrigin,
     version: o.version,
     appVersion: readDistVersion(config.distDir),
     startedAt,
@@ -548,6 +573,7 @@ export async function startHttpDaemon(o: HttpOptions): Promise<HttpDaemon> {
     mcpUrl: `${url}/mcp`,
     ports: [port],
     mode: config.envMode,
+    liveOrigin: config.liveOrigin,
     startedAt,
     version: o.version,
     appVersion: readDistVersion(config.distDir),

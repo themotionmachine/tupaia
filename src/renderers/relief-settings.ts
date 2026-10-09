@@ -127,6 +127,10 @@ export function packCellKey(
   return `${g}.?`;
 }
 
+// tupaia-mcp: a map with data-regenerate draws its relief on load, without a click, so values from a
+// file are clamped to what the MCP itself writes (a crafted data-scale of 100 would draw millions of icons)
+const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+
 export function readReliefSettings(
   el: { getAttribute(name: string): string | null } | null,
   currentGridKey: () => string
@@ -135,7 +139,7 @@ export function readReliefSettings(
   const biomes = new Map<number, number>();
   for (const pair of (attr("data-biomes") || "").split(",")) {
     const [id, k] = pair.split(":").map(Number);
-    if (Number.isInteger(id) && Number.isFinite(k)) biomes.set(id, Math.max(0, k));
+    if (Number.isInteger(id) && Number.isFinite(k)) biomes.set(id, clamp(k, 0, 2));
   }
   let exclude: ReliefExclusion | null = null;
   const excluded = attr("data-exclude");
@@ -144,11 +148,11 @@ export function readReliefSettings(
     exclude = parseExclusion(excluded.slice(colon + 1));
   return {
     seed: attr("data-seed"),
-    scale: Math.max(0, toNumber(attr("data-scale"), 1)),
+    scale: clamp(toNumber(attr("data-scale"), 1), 0, 2),
     biomes,
-    minHeight: toNumber(attr("data-min-height"), 0),
+    minHeight: clamp(toNumber(attr("data-min-height"), 0), 0, 100),
     exclude,
-    nearBurgs: Math.max(0, toNumber(attr("data-near-burgs"), 0))
+    nearBurgs: clamp(toNumber(attr("data-near-burgs"), 0), 0, 10000)
   };
 }
 
