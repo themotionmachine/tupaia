@@ -257,10 +257,17 @@ export class ToolContext {
   readonly sketches = new SketchStore();
   /**
    * What the newest edit/add/paint_cells call redrew (screenshot compares use it to explain a
-   * 'no change' result). `suppressed`: the caller passed redraw:false or [].
+   * 'no change' result). `suppressed`: the caller passed redraw:false or []. `ops`: the
+   * provenance op count right after it, so a later mutation, undo or load makes it stale.
    */
-  lastRedraw: { tool: string; at: number; redrawn: string[]; skippedHidden: string[]; suppressed: boolean } | null =
-    null;
+  lastRedraw: {
+    tool: string;
+    at: number;
+    ops: number;
+    redrawn: string[];
+    skippedHidden: string[];
+    suppressed: boolean;
+  } | null = null;
   server!: McpServer;
   readonly toolNames: string[] = [];
 

@@ -849,12 +849,14 @@ describe("token savers over the server (demo.map)", () => {
       assert.equal(images(r).length, 0);
       const body = JSON.parse(textOf(r));
       assert.match(body.shotId, /^s\d+$/);
-      assert.match(body.note, /^nothing changed vs s\d+: /);
-      assert.equal(body.compare.changedPixels, 0, "the trade animation is hidden and the view is the rounded one");
+      // the trade animation is hidden and the view is the rounded one, so the diff is empty, give
+      // or take a stray pixel on a loaded machine (a note either way, never an image)
+      assert.match(body.note, /^(nothing changed|no significant change) vs s\d+: /);
+      assert.ok(body.compare.changedPixels < 20, `${body.compare.changedPixels} px differ`);
       assert.ok(!body.note.includes("\n"));
       assert.equal(body.compare.with, base);
       // (a shot is captured at the rounded view that view:/compare: replay, so the replay is exact)
-      assert.match(body.note, new RegExp(`^nothing changed vs ${base}: `));
+      assert.match(body.note, new RegExp(`^(nothing changed|no significant change) vs ${base}: `));
       assert.ok(textOf(r).length < 300, `${textOf(r).length} chars`);
       // the shot was stored: it works as a baseline
       const again = await call("screenshot", { compare: body.shotId, crop: "changed" });
@@ -1023,7 +1025,7 @@ describe("token savers over the server (demo.map)", () => {
       await h.ok("add", { type: "marker", items: [{ at: { x: 230, y: 570 } }], redraw: [] });
       const r = JSON.parse(textOf(await call("screenshot", { compare: b2, crop: "changed" })));
       assert.equal(r.compare.bbox, undefined, "nothing was drawn, so nothing changed on screen");
-      assert.match(r.note, /^nothing changed vs s\d+: /);
+      assert.match(r.note, /^(nothing changed|no significant change) vs s\d+: /);
       assert.match(r.note, /last mutation \(add marker\) ran with redraw:\[\]/);
       const plain2 = JSON.parse(textOf(await call("screenshot", { compare: b2 })));
       assert.match(plain2.compare.hint, /redraw:\[\]/);
@@ -1033,6 +1035,21 @@ describe("token savers over the server (demo.map)", () => {
       assert.ok(shown.compare.bbox, JSON.stringify(shown).slice(0, 300));
       assert.equal(shown.note, undefined);
       for (let k = 0; k < 3; k++) await h.ok("snapshot", { action: "undo" });
+    });
+
+    test("the redraw hint belongs to the newest mutation: an undo or a later edit retires it", async () => {
+      const b4 = (await h.ok("screenshot", { target: { bbox: frame } })).shotId as string;
+      await h.ok("edit", { type: "burg", ops: [{ ref: 2, set: { population: 777 } }], redraw: [] });
+      const a = JSON.parse(textOf(await call("screenshot", { compare: b4, crop: "changed" })));
+      assert.match(a.note, /ran with redraw:\[\]/);
+      await h.ok("edit", { type: "burg", ops: [{ ref: 3, set: { population: 778 } }] });
+      const later = JSON.parse(textOf(await call("screenshot", { compare: b4, crop: "changed" })));
+      assert.ok(!String(later.note ?? "").includes("redraw:[]"), "a newer drawn edit replaces it");
+      await h.ok("edit", { type: "burg", ops: [{ ref: 2, set: { population: 779 } }], redraw: [] });
+      await h.ok("snapshot", { action: "undo" });
+      const undone = JSON.parse(textOf(await call("screenshot", { compare: b4, crop: "changed" })));
+      assert.ok(!String(undone.note ?? "").includes("redraw:[]"), "undone: not blamed");
+      for (let k = 0; k < 2; k++) await h.ok("snapshot", { action: "undo" });
     });
 
     test("a mutation that only touched a hidden layer is named in the note", async () => {

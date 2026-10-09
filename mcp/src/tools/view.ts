@@ -78,7 +78,7 @@ function assertSameFrame(rec: ShotRecord, view: ViewInfo, full: boolean): void {
 /** Why a compare found nothing visible, when the newest edit explains it. */
 function redrawHint(ctx: ToolContext, rec: ShotRecord): string | null {
   const lr = ctx.lastRedraw;
-  if (!lr || lr.at <= Date.parse(rec.at)) return null;
+  if (!lr || lr.at <= Date.parse(rec.at) || lr.ops !== ctx.snapshots.provenance.opsSince) return null;
   if (lr.suppressed)
     return `the last mutation (${lr.tool}) ran with redraw:[] so its changes are not drawn; redraw the layers it touched, then compare again`;
   if (!lr.redrawn.length && lr.skippedHidden.length)
@@ -299,7 +299,7 @@ export async function takeScreenshot(
       compare = { with: compareRec.id, changedPct: d.changedPct, changedPixels: d.changed };
       cropped = {
         note: d.changed
-          ? `no significant change vs ${compareRec.id}: only ${d.changed} scattered pixel${d.changed === 1 ? "" : `s${pct}`} differ, treated as render noise (drop crop to see them)${hint ? `; ${hint}` : ""}`
+          ? `no significant change vs ${compareRec.id}: only ${d.changed} scattered pixel${d.changed === 1 ? " differs" : `s${pct} differ`}, treated as render noise (drop crop to see them)${hint ? `; ${hint}` : ""}`
           : `nothing changed vs ${compareRec.id}: 0 of ${d.total} pixels differ${hint ? `; ${hint}` : ""}`
       };
     } else {

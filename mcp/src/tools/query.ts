@@ -60,7 +60,7 @@ function sinceKey(ctx: ToolContext, since: string | number | undefined): Since |
     if (u && u.baselineKey === k.key && WHOLE_MAP_OP.test(u.op))
       return {
         key: k.key,
-        describe: `${u.op} at ${u.at}: the map was replaced, no edits since (snapshot or since:'none' to compare otherwise)`,
+        describe: `${u.op} at ${u.at}; no edits since`,
         fresh: true
       };
     return k;

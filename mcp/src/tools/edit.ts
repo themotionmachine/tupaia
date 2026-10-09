@@ -112,6 +112,7 @@ export async function runPhased(
   ctx.lastRedraw = {
     tool: op,
     at: Date.now(),
+    ops: ctx.snapshots.provenance.opsSince,
     redrawn: Array.isArray(out.redrawn) ? (out.redrawn as string[]) : [],
     skippedHidden: Array.isArray(out.skippedHidden) ? (out.skippedHidden as string[]) : [],
     suppressed: rd === false || (Array.isArray(rd) && rd.length === 0)
