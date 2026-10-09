@@ -17,7 +17,8 @@ import {
   ToolError,
   type ToolOutput,
   unwrap,
-  WithImages
+  WithImages,
+  WithText
 } from "./result.ts";
 import { TIMEOUTS } from "./schemas.ts";
 import { SharedApi } from "./shared-api.ts";
@@ -401,7 +402,7 @@ export class ToolContext {
   tool<S extends z.ZodType>(
     name: string,
     spec: ToolSpec<S>,
-    impl: (args: z.infer<S>, scope: CallScope) => Promise<WithImages | Record<string, unknown>>
+    impl: (args: z.infer<S>, scope: CallScope) => Promise<WithImages | WithText | Record<string, unknown>>
   ): void {
     this.toolNames.push(name);
     this.server.registerTool(
@@ -421,7 +422,7 @@ export class ToolContext {
     spec: { kind?: ToolKind; launch?: boolean; name?: string },
     sctx: ServerContext | undefined,
     args: A,
-    impl: (args: A, scope: CallScope) => Promise<WithImages | Record<string, unknown>>
+    impl: (args: A, scope: CallScope) => Promise<WithImages | WithText | Record<string, unknown>>
   ): Promise<CallToolResult> {
     return this.browser.exclusive(async () => {
       const kind = spec.kind ?? "read";
@@ -440,7 +441,11 @@ export class ToolContext {
         await this.#sketchFallback(scope, args, null);
         await new Promise(r => setImmediate(r)); // let late console events land
         const normalized: ToolOutput =
-          out instanceof WithImages ? { value: out.value, images: out.images } : { value: out };
+          out instanceof WithImages
+            ? { value: out.value, images: out.images }
+            : out instanceof WithText
+              ? { value: {}, text: out.text }
+              : { value: out };
         return okResult(normalized, this.#extras(scope));
       } catch (e) {
         await this.#sketchFallback(scope, args, e).catch(() => {});

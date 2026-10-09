@@ -2,6 +2,7 @@
 // (nothing changes when validation fails), then takes one auto-undo entry, applies the ops and
 // coalesces the redraws. dryRun stops after validation and returns the plan.
 import { z } from "zod";
+import { CHANGES_FULL_MAX, compactChanges } from "../compact.ts";
 import type { CallScope, ToolContext } from "../context.ts";
 import {
   type AddResolved,
@@ -41,8 +42,13 @@ export const Redraw = z
   .optional()
   .describe("Override the computed redraw: false = redraw nothing, or the exact layers to redraw");
 
-/** Diff of the page against the undo point this call just pushed. */
-export async function changesSinceUndo(ctx: ToolContext, scope: CallScope, limit = 20): Promise<unknown> {
+/**
+ * Diff of the page against the undo point this call just pushed. Small diffs are listed in full;
+ * a large one (more than CHANGES_FULL_MAX changed entities) comes back as exact per-type counts
+ * plus the first few entries (compactChanges), so a 200-burg batch does not echo 200 changes.
+ * map_info lists the rest (same baseline).
+ */
+export async function changesSinceUndo(ctx: ToolContext, scope: CallScope, limit = CHANGES_FULL_MAX): Promise<unknown> {
   const entry = ctx.snapshots.undoStack[ctx.snapshots.undoStack.length - 1];
   if (!entry) return undefined;
   try {
@@ -52,7 +58,7 @@ export async function changesSinceUndo(ctx: ToolContext, scope: CallScope, limit
       { noAlerts: true }
     );
     if (!d.available) return undefined;
-    return d.empty ? {} : d.changes;
+    return d.empty ? {} : compactChanges(d.changes as Record<string, unknown> | undefined);
   } catch {
     return undefined;
   }

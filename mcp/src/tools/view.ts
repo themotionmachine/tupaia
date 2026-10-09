@@ -3,6 +3,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { z } from "zod";
+import { boxToMap, type CropView, pngPerMap } from "../compact.ts";
 import type { CallScope, ShotRecord, ToolContext } from "../context.ts";
 import { resolveWritePath } from "../paths.ts";
 import { type ImageBlock, ToolError, WithImages } from "../result.ts";
@@ -27,6 +28,17 @@ interface Encoded {
   mime: string;
   width: number;
   height: number;
+}
+
+/** What the bridge's diffRegion returns: pixel boxes are [x0,y0,x1,y1] in the capture's pixels. */
+interface RegionDiff {
+  changed: number;
+  total: number;
+  changedPct: number;
+  speckle: number;
+  box: [number, number, number, number] | null;
+  cropBox?: [number, number, number, number];
+  crop?: Encoded;
 }
 
 export function pngSize(buf: Buffer): { width: number; height: number } {
@@ -75,7 +87,25 @@ export const ScreenshotInput = z.object({
     .min(0)
     .max(255)
     .optional()
-    .describe("Per-channel difference that counts as changed (default 32)")
+    .describe("Per-channel difference that counts as changed (default 32)"),
+  crop: z
+    .enum(["changed"])
+    .optional()
+    .describe(
+      "With compare: return only the changed region of the new shot (cropped, not the diff image) with its bbox in map px; nothing changed = no image and a one-line note"
+    ),
+  pad: z
+    .number()
+    .min(0)
+    .max(5000)
+    .optional()
+    .describe(
+      "crop:'changed': context around the changed region in map px (default 10% of the region, at least 12 screenshot px)"
+    ),
+  sideBySide: z
+    .boolean()
+    .optional()
+    .describe("crop:'changed': return before | after in one image instead of just the new shot")
 });
 
 export async function takeScreenshot(
@@ -83,6 +113,13 @@ export async function takeScreenshot(
   scope: CallScope,
   args: z.infer<typeof ScreenshotInput>
 ): Promise<WithImages> {
+  if ((args.crop || args.pad !== undefined || args.sideBySide) && !args.compare)
+    throw new ToolError(
+      "BAD_ARGS",
+      "crop/pad/sideBySide need compare:<shotId> (the shot to measure the change against)"
+    );
+  if ((args.pad !== undefined || args.sideBySide) && !args.crop)
+    throw new ToolError("BAD_ARGS", "pad and sideBySide apply to crop:'changed'");
   const compareRec = args.compare ? ctx.shots.get(args.compare) : null;
   const full = args.full ?? (compareRec ? compareRec.full : false);
   const viewRec = args.view ? ctx.shots.get(args.view) : compareRec && !args.target && !args.zoom ? compareRec : null;
@@ -155,7 +192,63 @@ export async function takeScreenshot(
   const images: ImageBlock[] = [];
   let compare: Record<string, unknown> | undefined;
   let returned: { width: number; height: number };
-  if (compareRec) {
+  let cropped: Record<string, unknown> | null = null;
+  if (compareRec && args.crop === "changed") {
+    if (!fs.existsSync(compareRec.file))
+      throw new ToolError("NOT_FOUND", `the file of shot ${compareRec.id} is gone: ${compareRec.file}`);
+    const before = fs.readFileSync(compareRec.file).toString("base64");
+    const cv: CropView = {
+      full,
+      pngW: size.width,
+      pngH: size.height,
+      cssW: full ? view.graphWidth : view.svgWidth,
+      cssH: full ? view.graphHeight : view.svgHeight,
+      graphWidth: view.graphWidth,
+      graphHeight: view.graphHeight,
+      x: view.x,
+      y: view.y,
+      scale: view.scale
+    };
+    const d = await scope.call<RegionDiff>(
+      "diffRegion",
+      {
+        a: before,
+        b: pngB64,
+        threshold: args.threshold ?? 32,
+        padPx: args.pad === undefined ? undefined : args.pad * pngPerMap(cv),
+        sideBySide: !!args.sideBySide,
+        format,
+        quality: args.quality,
+        maxSide
+      },
+      { noAlerts: true }
+    );
+    returned = { width: size.width, height: size.height };
+    if (!d.box || !d.crop || !d.cropBox) {
+      const pct = d.changedPct >= 0.001 ? ` (${d.changedPct}%)` : "";
+      const why = d.changed
+        ? `only ${d.changed} scattered pixel${d.changed === 1 ? " differs" : `s${pct} differ`}, treated as render noise (drop crop to see them)`
+        : `0 of ${d.total} pixels differ`;
+      compare = { with: compareRec.id, changedPct: d.changedPct, changedPixels: d.changed };
+      cropped = { note: `nothing changed vs ${compareRec.id}: ${why}` };
+    } else {
+      images.push({ data: d.crop.b64, mimeType: d.crop.mime });
+      compare = {
+        with: compareRec.id,
+        changedPct: d.changedPct,
+        changedPixels: d.changed,
+        bbox: boxToMap(d.box, cv),
+        shown: boxToMap(d.cropBox, cv),
+        ...(args.sideBySide ? { sideBySide: "left = before, right = after" } : {}),
+        ...(d.speckle ? { ignoredSpeckle: d.speckle } : {})
+      };
+      cropped = {
+        width: d.crop.width,
+        height: d.crop.height,
+        format: d.crop.mime
+      };
+    }
+  } else if (compareRec) {
     if (!fs.existsSync(compareRec.file))
       throw new ToolError("NOT_FOUND", `the file of shot ${compareRec.id} is gone: ${compareRec.file}`);
     const before = fs.readFileSync(compareRec.file).toString("base64");
@@ -208,6 +301,11 @@ export async function takeScreenshot(
   };
   ctx.shots.add(rec);
 
+  if (cropped) {
+    // changed-region result: no repeat of the view metadata, the shot is already known
+    return new WithImages({ shotId: id, ...(images.length ? { file } : {}), ...cropped, compare }, images);
+  }
+
   return new WithImages(
     {
       shotId: id,
@@ -236,7 +334,7 @@ export function register(ctx: ToolContext): void {
     {
       title: "Screenshot the map",
       description:
-        "See the map. Frames target {entity:{type,ref}} | {bbox:[x0,y0,x1,y1]} | {at:Place} at an optional zoom (1-20; default fits the target, 8 for a point), or reuses an earlier shot's exact view (view:'last'|shotId), or keeps the current view. full:true rasterises the whole map instead. layers:{on,off} apply only for this shot (keepLayers:true keeps them). Returns a JPEG (maxSide 1024 by default) plus {shotId, file (full-resolution PNG), view, mapBboxShown}. compare:shotId diffs against that shot at the same view and returns the diff image (red = changed) with changedPct. Take one after any visual change, framed on what changed; skip it after pure reads.",
+        "See the map. Frames target {entity:{type,ref}} | {bbox:[x0,y0,x1,y1]} | {at:Place} at an optional zoom (1-20; default fits the target, 8 for a point), or reuses an earlier shot's exact view (view:'last'|shotId), or keeps the current view. full:true rasterises the whole map instead. layers:{on,off} apply only for this shot (keepLayers:true keeps them). Returns a JPEG (maxSide 1024 by default) plus {shotId, file (full-resolution PNG), view, mapBboxShown}. compare:shotId diffs against that shot at the same view and returns the diff image (red = changed) with changedPct. Add crop:'changed' to get only the changed region of the new shot instead (pad in map px; sideBySide = before | after in one image) with compare.bbox (changed box) and compare.shown (the cropped box, which the image maps onto) in map px; nothing changed returns no image and a one-line note. Take one after any visual change, framed on what changed; skip it after pure reads.",
       inputSchema: ScreenshotInput,
       annotations: { readOnlyHint: true, openWorldHint: false },
       kind: "view"

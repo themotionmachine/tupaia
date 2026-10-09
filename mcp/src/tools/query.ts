@@ -1,7 +1,8 @@
 // Read tools: map_info, find, inspect.
 import { z } from "zod";
+import { compactFind, compactInspect, countChanges } from "../compact.ts";
 import type { CallScope, ShotRecord, ToolContext } from "../context.ts";
-import { META_TEXT_HEAVY, ToolError } from "../result.ts";
+import { META_TEXT_HEAVY, ToolError, WithText } from "../result.ts";
 import { EntityRef, EntityType, Place, ScreenPlace } from "../schemas.ts";
 import { defineTools } from "./registry.ts";
 
@@ -51,7 +52,8 @@ export async function mapInfo(
   ctx: ToolContext,
   scope: CallScope,
   since: string | number | undefined,
-  detail: "summary" | "full" = "summary"
+  detail: "summary" | "full" = "summary",
+  diff: "list" | "counts" = "list"
 ): Promise<Record<string, unknown>> {
   const summary = await scope.call<Record<string, unknown>>("summary");
   const out: Record<string, unknown> = {
@@ -72,10 +74,14 @@ export async function mapInfo(
         changes?: Record<string, unknown>;
         empty?: boolean;
         truncated?: boolean;
-      }>("diff", { key: sk.key, limit: detail === "full" ? 1000 : 50 });
+      }>("diff", { key: sk.key, limit: diff === "counts" ? 1 : detail === "full" ? 1000 : 50 });
       if (!d.available) {
         out.changed = null;
         out.changes = { available: false, reason: d.reason };
+      } else if (diff === "counts") {
+        // counts are exact whatever the list cap was; nothing to truncate
+        out.changed = !d.empty;
+        out.changes = countChanges(d.changes);
       } else {
         out.changed = !d.empty;
         out.changes = d.changes;
@@ -87,13 +93,25 @@ export async function mapInfo(
   return out;
 }
 
+/** inspect {fields} in JSON mode: keep only the named keys of entity and relations (or of a place). */
+function pickFields(r: Record<string, unknown>, fields: string[]): Record<string, unknown> {
+  const keep = new Set(fields);
+  const pick = (o: unknown) =>
+    o && typeof o === "object" && !Array.isArray(o)
+      ? Object.fromEntries(Object.entries(o as Record<string, unknown>).filter(([k]) => keep.has(k)))
+      : o;
+  if (r.kind === "entity") return { ...r, entity: pick(r.entity), relations: pick(r.relations) };
+  const head = ["kind", "x", "y", "cell", "lat", "lon", "via"];
+  return Object.fromEntries(Object.entries(r).filter(([k]) => head.includes(k) || keep.has(k)));
+}
+
 export function register(ctx: ToolContext): void {
   ctx.tool(
     "map_info",
     {
       title: "Map overview and changes",
       description:
-        "Overview of the map in the page: name, seed, graph size, cell count, live entity counts (states, burgs, provinces, cultures, religions, rivers, routes, markers, zones, notes, labels), islands by group and lakes, mapCoordinates, current view, layers on, provenance and ops since load. Also reports what changed since a baseline: since:'snapshot' (default: newest snapshot or auto-undo point, so right after an edit it shows that edit), 'checkpoint' (the previous map_info call; every call sets a new checkpoint), a snapshot index or label, or 'none'. Changes list added/removed/modified entities with old/new field values and changed-cell counts per cell array.",
+        "Overview of the map in the page: name, seed, graph size, cell count, live entity counts (states, burgs, provinces, cultures, religions, rivers, routes, markers, zones, notes, labels), islands by group and lakes, mapCoordinates, current view, layers on, provenance and ops since load. Also reports what changed since a baseline: since:'snapshot' (default: newest snapshot or auto-undo point, so right after an edit it shows that edit), 'checkpoint' (the previous map_info call; every call sets a new checkpoint), a snapshot index or label, or 'none'. Changes list added/removed/modified entities with old/new field values and changed-cell counts per cell array; diff:'counts' returns only {burg:{added, removed, changed}, ..., cells:{h: n}} (cheap after a big batch).",
       inputSchema: z.object({
         since: z
           .union([z.enum(["snapshot", "checkpoint", "none"]), z.number().int(), z.string()])
@@ -102,12 +120,16 @@ export function register(ctx: ToolContext): void {
         detail: z
           .enum(["summary", "full"])
           .optional()
-          .describe("full lists up to 1000 changed entities per type (default 50)")
+          .describe("full lists up to 1000 changed entities per type (default 50)"),
+        diff: z
+          .enum(["list", "counts"])
+          .optional()
+          .describe("counts: per entity type {added, removed, changed} instead of listing each change (default list)")
       }),
       annotations: { readOnlyHint: true, openWorldHint: false },
       _meta: META_TEXT_HEAVY
     },
-    async (args, scope) => mapInfo(ctx, scope, args.since, args.detail)
+    async (args, scope) => mapInfo(ctx, scope, args.since, args.detail, args.diff)
   );
 
   ctx.tool(
@@ -115,7 +137,7 @@ export function register(ctx: ToolContext): void {
     {
       title: "Find entities",
       description:
-        "List and filter entities of one type: burg, state, province, culture, religion, river, route, marker, zone, feature (islands, lakes, oceans), note, label, namesbase. name: exact or case/diacritic-folded matches win, otherwise substring matches; nothing matching gives NOT_FOUND with ranked candidates. where: generic field equality on any entity field ({group:'city'}, {type:'island'}, {capital:true}), arrays mean any-of, <field>Min/<field>Max give numeric bounds (burg population is in people), and entity-valued fields (state, culture, religion, province, burg, capital, base) accept names or ids. near: a Place, with radius in map px; rows then carry distance and sort by it. sort: field name, '-field' for descending, or 'distance'. fields: which fields to return (ref fields add <field>Name). limit default 25 (0 = count only), offset for paging. Rows include i, name, x, y, lat, lon.",
+        "List and filter entities of one type: burg, state, province, culture, religion, river, route, marker, zone, feature (islands, lakes, oceans), note, label, namesbase. name: exact or case/diacritic-folded matches win, otherwise substring matches; nothing matching gives NOT_FOUND with ranked candidates. where: generic field equality on any entity field ({group:'city'}, {type:'island'}, {capital:true}), arrays mean any-of, <field>Min/<field>Max give numeric bounds (burg population is in people), and entity-valued fields (state, culture, religion, province, burg, capital, base) accept names or ids. near: a Place, with radius in map px; rows then carry distance and sort by it. sort: field name, '-field' for descending, or 'distance'. fields: which fields to return (ref fields add <field>Name). limit default 25 (0 = count only), offset for paging. Rows include i, name, x, y, lat, lon. format:'compact' returns plain text instead of JSON, about half the size: a header, one line per row (burg 12 Agamathel pop=61419 state=3 capital at=(812,440); population is pop, true booleans are bare flags, null/false fields are left out, port=0 too, at is x,y rounded), a names: legend of the entity names behind the ids, and a +N more (offset=..) line.",
       inputSchema: z.object({
         type: EntityType,
         name: z.string().optional(),
@@ -138,12 +160,20 @@ export function register(ctx: ToolContext): void {
         fields: z.array(z.string()).optional(),
         limit: z.number().int().min(0).max(1000).optional(),
         offset: z.number().int().min(0).optional(),
-        includeZero: z.boolean().optional().describe("Include Neutrals/Wildlands/No religion (id 0)")
+        includeZero: z.boolean().optional().describe("Include Neutrals/Wildlands/No religion (id 0)"),
+        format: z
+          .enum(["json", "compact"])
+          .optional()
+          .describe("compact: plain-text lines instead of JSON rows (default json)")
       }),
       annotations: { readOnlyHint: true, openWorldHint: false },
       _meta: META_TEXT_HEAVY
     },
-    async (args, scope) => scope.call<Record<string, unknown>>("find", args)
+    async (args, scope) => {
+      const { format, ...bridgeArgs } = args;
+      const r = await scope.call<Record<string, unknown>>("find", bridgeArgs);
+      return format === "compact" ? new WithText(compactFind(r)) : r;
+    }
   );
 
   ctx.tool(
@@ -151,18 +181,29 @@ export function register(ctx: ToolContext): void {
     {
       title: "Inspect an entity or a place",
       description:
-        "Everything about one entity, or about one place. {entity:{type, ref}}: the full object plus relations (a burg's state/province/culture/religion/feature/note/routes and population in people; a state's capital, provinces, neighbours with diplomacy, burg count; a route's length and end burgs; a feature's bbox; ...) and x, y, lat, lon, cell. {at: Place} gives the cell under that place: height and label, land, biome, state, province, culture, religion, burg, river, feature, population, routes, zones, markers. {at:{screen:[px,py], shot:'s3'}} maps a pixel of a returned screenshot (coordinates in the returned image) to the map first.",
+        "Everything about one entity, or about one place. {entity:{type, ref}}: the full object plus relations (a burg's state/province/culture/religion/feature/note/routes and population in people; a state's capital, provinces, neighbours with diplomacy, burg count; a route's length and end burgs; a feature's bbox; ...) and x, y, lat, lon, cell. {at: Place} gives the cell under that place: height and label, land, biome, state, province, culture, religion, burg, river, feature, population, routes, zones, markers. {at:{screen:[px,py], shot:'s3'}} maps a pixel of a returned screenshot (coordinates in the returned image) to the map first. format:'compact' returns key=value lines (a header, [entity] and [relations] sections; refs as 3 (Name), nested data reduced to its shape such as coa={t1,division} or production=[50 items]) at a fraction of the JSON size; fields limits the entity and relation keys (population is the stored unit, thousands; relations.people is people).",
       inputSchema: z.object({
         entity: z.object({ type: EntityType, ref: EntityRef }).optional(),
-        at: z.union([Place, ScreenPlace]).optional()
+        at: z.union([Place, ScreenPlace]).optional(),
+        format: z
+          .enum(["json", "compact"])
+          .optional()
+          .describe("compact: key=value lines instead of JSON (default json)"),
+        fields: z
+          .array(z.string())
+          .optional()
+          .describe("Entity/relation keys to keep (all by default); for a place, the attributes to keep")
       }),
       annotations: { readOnlyHint: true, openWorldHint: false },
       _meta: META_TEXT_HEAVY
     },
     async (args, scope) => {
       if (!args.entity && !args.at) throw new ToolError("BAD_ARGS", "pass entity:{type,ref} or at:Place");
-      if (args.at) return scope.call<Record<string, unknown>>("inspect", { at: bridgePlace(ctx, args.at) });
-      return scope.call<Record<string, unknown>>("inspect", { entity: args.entity });
+      const r = args.at
+        ? await scope.call<Record<string, unknown>>("inspect", { at: bridgePlace(ctx, args.at) })
+        : await scope.call<Record<string, unknown>>("inspect", { entity: args.entity });
+      if (args.format === "compact") return new WithText(compactInspect(r, args.fields));
+      return args.fields?.length ? pickFields(r, args.fields) : r;
     }
   );
 }
