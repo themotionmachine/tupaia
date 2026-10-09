@@ -83,24 +83,25 @@ describe("tupaia-mcp relief icons", () => {
   });
 
   test("regenerate relief is seeded: the same settings draw the same icons", async () => {
+    // relief layer off: the settings are stored, nothing is drawn (the layer toggle draws them)
     const r = await relief();
     assert.deepEqual(r.ran, ["relief"]);
     const rel = r.relief as Obj;
-    assert.ok(rel.icons > 500, `icons drawn: ${rel.icons}`);
-    assert.equal(rel.settings.seed, mapSeed);
+    assert.deepEqual([rel.icons, rel.hidden, rel.settings.seed], [0, true, mapSeed]);
     assert.match(JSON.stringify(r.notes), /relief layer is off/);
+    await h.ok("display", { on: ["relief"] });
     base = await terrain();
     assert.equal(base.attrs["data-seed"], mapSeed);
-    assert.equal(base.icons, rel.icons);
+    assert.ok(base.icons > 500, `icons drawn: ${base.icons}`);
+    assert.equal(base.on, true);
     const again = await relief();
     assert.equal((again.relief as Obj).icons, base.icons);
+    assert.equal((again.relief as Obj).hidden, undefined);
     assert.equal((await terrain()).hash, base.hash, "identical icons");
-    // the app's own redraw paths (layer toggle, drawLayers) read the same settings
-    await h.ok("display", { on: ["relief"] });
+    // the app's own redraw (style panel, drawLayers) reads the same settings
     await h.ok("eval", { code: "drawReliefIcons(); return 1;" });
     const t = await terrain();
     assert.equal(t.hash, base.hash);
-    assert.equal(t.on, true);
     // another seed draws other icons
     await relief({ seed: "other" });
     assert.notEqual((await terrain()).hash, base.hash);

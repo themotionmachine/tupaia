@@ -254,11 +254,23 @@
     set(ATTR.onLoad, s.onLoad ? "1" : null);
   }
 
-  function draw() {
+  /**
+   * Draw the icons when the relief layer is shown. When it is hidden, clear them instead: the
+   * layer toggle draws them (with the stored settings) when it is shown, and hidden icons would
+   * only make saves bigger.
+   */
+  function refresh() {
+    if (typeof layerIsOn === "function" && !layerIsOn("toggleRelief")) {
+      terrainEl().replaceChildren();
+      return { icons: 0, ms: 0, hidden: true };
+    }
     const t0 = performance.now();
     drawReliefIcons();
     return { icons: terrainEl().childElementCount, ms: Math.round(performance.now() - t0) };
   }
+
+  const HIDDEN_NOTE =
+    "the relief layer is off: no icons are drawn now; display {on:['relief']} draws them with these settings";
 
   const ON_LOAD_NOTE =
     "saves now drop the relief icons and a load draws them again from the stored seed and settings; a build without this hook (e.g. an older deployed app) shows no relief until the Relief layer is toggled, so deploy before saving such a map to shared";
@@ -270,16 +282,21 @@
     if (a.phase === "validate") return { phase: "validate", before: view(cur), after: view(next) };
     const iconsBefore = terrainEl().childElementCount;
     write(next);
-    const drawn = draw();
+    const drawn = refresh();
     const notes = [];
-    if (typeof layerIsOn === "function" && !layerIsOn("toggleRelief"))
-      notes.push("the relief layer is off; display {on:['relief']} shows the icons");
+    if (drawn.hidden) notes.push(HIDDEN_NOTE);
     if (next.onLoad && !cur.onLoad) notes.push(ON_LOAD_NOTE);
     if (a.relief?.exclude && next.excludeGrid === null)
       notes.push("relief.exclude selected no cells; nothing is excluded");
     return {
       resolved: { parts: ["relief"], relief: lit },
-      relief: { icons: drawn.icons, iconsBefore, ms: drawn.ms, settings: view(next) },
+      relief: {
+        icons: drawn.icons,
+        iconsBefore,
+        ms: drawn.ms,
+        ...(drawn.hidden ? { hidden: true } : {}),
+        settings: view(next)
+      },
       notes
     };
   };
@@ -325,9 +342,11 @@
       c.notes.add(ON_LOAD_NOTE);
       if (el.childElementCount) {
         // what a reload will draw: seeded, so the page shows it now (manual relief edits are lost)
-        const drawn = draw();
+        const drawn = refresh();
         c.notes.add(
-          `relief icons redrawn from seed '${el.getAttribute(ATTR.seed)}' (${drawn.icons} icons) to match what a load draws`
+          drawn.hidden
+            ? HIDDEN_NOTE
+            : `relief icons redrawn from seed '${el.getAttribute(ATTR.seed)}' (${drawn.icons} icons) to match what a load draws`
         );
       }
     }
