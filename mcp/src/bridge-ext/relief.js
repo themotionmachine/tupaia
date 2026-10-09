@@ -43,7 +43,19 @@
     return el;
   }
 
-  const gridCount = () => grid.cells.i.length;
+  /**
+   * Key of the page's grid: cell count and a hash of the grid points. Same algorithm as gridKey
+   * in src/renderers/relief-settings.ts (the renderer ignores an exclusion with another key).
+   */
+  function gridKey() {
+    const points = grid.points;
+    let h = 0x811c9dc5;
+    for (let k = 0; k < points.length; k++) {
+      h = Math.imul(h ^ Math.round(points[k][0] * 100), 0x01000193);
+      h = Math.imul(h ^ Math.round(points[k][1] * 100), 0x01000193);
+    }
+    return `${points.length}-${(h >>> 0).toString(36)}`;
+  }
 
   // ---------------------------------------------------------------- grid cell ranges
 
@@ -58,13 +70,13 @@
     return parts.join(",");
   }
 
-  /** {cells, count} of a stored "n:ranges" exclusion; count = ids in it. */
+  /** {key, cells, count, max} of a stored "<grid key>:<ranges>" exclusion; count = ids in it. */
   function rangesInfo(text) {
-    const m = /^(\d+):([\d,-]*)$/.exec(String(text));
+    const m = /^((\d+)-[0-9a-z]+):([\d,-]*)$/.exec(String(text));
     if (!m) return null;
     let count = 0;
     let max = -1;
-    for (const part of m[2].split(",")) {
+    for (const part of m[3].split(",")) {
       if (!part) continue;
       const [a, b] = part.split("-").map(Number);
       const last = Number.isInteger(b) ? b : a;
@@ -72,7 +84,7 @@
       count += last - a + 1;
       max = Math.max(max, last);
     }
-    return { cells: +m[1], count, max };
+    return { key: m[1], cells: +m[2], count, max };
   }
 
   // ---------------------------------------------------------------- settings
@@ -129,7 +141,7 @@
     if (s.excludeGrid) {
       const info = rangesInfo(s.excludeGrid);
       exclude = info ? { gridCells: info.count } : { invalid: true };
-      if (info && info.cells !== gridCount()) exclude.stale = `recorded on a grid of ${info.cells} cells; ignored`;
+      if (info && info.key !== gridKey()) exclude.stale = "recorded on another grid (another map or a regrid); ignored";
     }
     return {
       density: s.density,
@@ -174,17 +186,17 @@
       fail("BAD_ARGS", "relief.exclude is a selection or a list of 1-50 selections");
     const ids = new Set();
     for (const sel of sels) for (const c of M.selectCells(sel)) ids.add(pack.cells.g[c]);
-    return ids.size ? `${gridCount()}:${encodeRanges(ids)}` : null;
+    return ids.size ? `${gridKey()}:${encodeRanges(ids)}` : null;
   }
 
   function literalGrid(v) {
     if (v === null) return null;
     const info = typeof v === "string" ? rangesInfo(v) : null;
-    if (!info) fail("BAD_ARGS", "relief.excludeGrid is '<grid cell count>:<ranges>'");
-    if (info.cells !== gridCount())
+    if (!info) fail("BAD_ARGS", "relief.excludeGrid is '<grid key>:<ranges>'");
+    if (info.key !== gridKey())
       fail(
         "REFUSED",
-        `the exclusion was recorded on a grid of ${info.cells} cells; this map's grid has ${gridCount()}`
+        `the exclusion was recorded on another grid (${info.key}; this map's grid is ${gridKey()}): its cells would not be the same places`
       );
     if (info.max >= info.cells) fail("OUT_OF_BOUNDS", `grid cell ${info.max} is outside 0..${info.cells - 1}`);
     return v;

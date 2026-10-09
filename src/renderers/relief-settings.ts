@@ -5,7 +5,8 @@
 //   data-scale       multiplier on the style density (icon spacing); 0 draws nothing
 //   data-biomes      per-biome multipliers "biomeId:k,...", on top of data-scale
 //   data-min-height  no icons on cells lower than this
-//   data-exclude     "<grid cell count>:<ranges>": grid cells without icons, e.g. "9916:3-7,12"
+//   data-exclude     "<grid key>:<ranges>": grid cells without icons, e.g. "9916-1x2k3j:3-7,12"; ignored on
+//                    another grid (the key is gridKey: cell count and a hash of the grid points)
 //   data-near-burgs  no icons within this many px of a burg
 //   data-regenerate  saves drop the icons (save.ts) and a load draws them again (load.ts)
 
@@ -38,6 +39,19 @@ export function parseRanges(text: string): number[] {
   return ids;
 }
 
+/**
+ * Key of a grid: its cell count and a hash of its points. A new map (or a regrid) has other
+ * points, so an exclusion recorded on one grid is not applied to another one of the same size.
+ */
+export function gridKey(points: ArrayLike<readonly [number, number]>): string {
+  let h = 0x811c9dc5;
+  for (let k = 0; k < points.length; k++) {
+    h = Math.imul(h ^ Math.round(points[k][0] * 100), 0x01000193);
+    h = Math.imul(h ^ Math.round(points[k][1] * 100), 0x01000193);
+  }
+  return `${points.length}-${(h >>> 0).toString(36)}`;
+}
+
 /** Ranges string of integer ids (any order, duplicates allowed). */
 export function encodeRanges(ids: Iterable<number>): string {
   const sorted = [...new Set(ids)].sort((a, b) => a - b);
@@ -52,7 +66,7 @@ export function encodeRanges(ids: Iterable<number>): string {
 
 export function readReliefSettings(
   el: { getAttribute(name: string): string | null } | null,
-  gridCells: number
+  currentGridKey: () => string
 ): ReliefSettings {
   const attr = (name: string) => el?.getAttribute(name) ?? null;
   const biomes = new Map<number, number>();
@@ -63,7 +77,7 @@ export function readReliefSettings(
   let exclude: Set<number> | null = null;
   const excluded = attr("data-exclude");
   const colon = excluded ? excluded.indexOf(":") : -1;
-  if (excluded && colon > 0 && Number(excluded.slice(0, colon)) === gridCells)
+  if (excluded && colon > 0 && excluded.slice(0, colon) === currentGridKey())
     exclude = new Set(parseRanges(excluded.slice(colon + 1)));
   return {
     seed: attr("data-seed"),

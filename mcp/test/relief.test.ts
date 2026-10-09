@@ -178,7 +178,7 @@ describe("tupaia-mcp relief icons", () => {
     });
     const exSettings = (ex.relief as Obj).settings;
     assert.ok(exSettings.exclude.gridCells > 50, JSON.stringify(exSettings.exclude));
-    assert.match((await terrain()).attrs["data-exclude"], /^\d+:\d/);
+    assert.match((await terrain()).attrs["data-exclude"], /^\d+-[0-9a-z]+:\d/);
     const excludedGrid = new Set([
       ...pick.stateOf.flatMap((s, c) => (s === pick.state ? [pick.g[c]] : [])),
       ...pick.zoneCells.map(c => pick.g[c])
@@ -320,5 +320,21 @@ describe("tupaia-mcp relief icons", () => {
     const other = await h.ok("eval", { readOnly: true, code: `pack.burgs.some(b => b && b.name === "Otherton")` });
     assert.equal(other.value, true, "their edit survives");
     await h.ok("sketch", { action: "stop" });
+  });
+
+  test("a new map keeps the relief settings (like the style density) but not the exclusion", async () => {
+    // the page still holds the replayed sketch: exclusion, onLoad and the rest are set
+    const before = await terrain();
+    assert.ok(before.attrs["data-exclude"]);
+    await h.ok("generate_map", { seed: "relief-new-map" }, 240_000);
+    const dry = await relief({}, { dryRun: true });
+    const exclude = (dry.before as Obj).exclude;
+    assert.match(exclude.stale, /another grid/, JSON.stringify(exclude));
+    // a recorded exclusion of another grid is refused (sketch replay onto another map)
+    const r = await h.ok("eval", {
+      readOnly: true,
+      code: `try { await __tupaia.fns.relief({ relief: { excludeGrid: document.getElementById("terrain").getAttribute("data-exclude") }, phase: "validate" }); return "accepted"; } catch (e) { return e.code; }`
+    });
+    assert.equal(r.value, "REFUSED");
   });
 });

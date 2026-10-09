@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cellRandom, encodeRanges, hashString, parseRanges, readReliefSettings } from "./relief-settings";
+import { cellRandom, encodeRanges, gridKey, hashString, parseRanges, readReliefSettings } from "./relief-settings";
 
 const attrs = (values: Record<string, string>) => ({ getAttribute: (name: string) => values[name] ?? null });
 
@@ -12,10 +12,10 @@ describe("relief settings", () => {
   });
 
   it("reads nothing from a plain #terrain (upstream behaviour)", () => {
-    const s = readReliefSettings(attrs({ density: "0.4", set: "simple" }), 100);
+    const s = readReliefSettings(attrs({ density: "0.4", set: "simple" }), () => "100-x");
     expect(s).toMatchObject({ seed: null, scale: 1, minHeight: 0, exclude: null, nearBurgs: 0 });
     expect(s.biomes.size).toBe(0);
-    expect(readReliefSettings(null, 100).scale).toBe(1);
+    expect(readReliefSettings(null, () => "100-x").scale).toBe(1);
   });
 
   it("reads the stored settings", () => {
@@ -25,10 +25,10 @@ describe("relief settings", () => {
         "data-scale": "0.5",
         "data-biomes": "6:0,8:1.5,bad",
         "data-min-height": "35",
-        "data-exclude": "100:3-5,9",
+        "data-exclude": "100-x:3-5,9",
         "data-near-burgs": "12"
       }),
-      100
+      () => "100-x"
     );
     expect(s.seed).toBe("abc");
     expect(s.scale).toBe(0.5);
@@ -42,7 +42,14 @@ describe("relief settings", () => {
   });
 
   it("ignores an exclusion recorded on another grid", () => {
-    expect(readReliefSettings(attrs({ "data-exclude": "99:3-5" }), 100).exclude).toBeNull();
+    expect(readReliefSettings(attrs({ "data-exclude": "100-y:3-5" }), () => "100-x").exclude).toBeNull();
+    const a: [number, number][] = [
+      [1.5, 2.25],
+      [10, 20]
+    ];
+    expect(gridKey(a)).toBe(gridKey(a.map(p => [p[0], p[1]] as [number, number])));
+    expect(gridKey(a)).toMatch(/^2-[0-9a-z]+$/);
+    expect(gridKey([a[0], [10, 20.01]])).not.toBe(gridKey(a));
   });
 
   it("gives each cell position its own repeatable stream", () => {

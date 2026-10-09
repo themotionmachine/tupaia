@@ -1,6 +1,6 @@
 import { extent, polygonContains, quadtree } from "d3";
 import { minmax, rand, rn } from "../utils";
-import { cellRandom, hashString, readReliefSettings } from "./relief-settings";
+import { cellRandom, gridKey, hashString, readReliefSettings } from "./relief-settings";
 
 interface ReliefIcon {
   i: string;
@@ -26,7 +26,7 @@ const reliefIconsRenderer = (): void => {
   const relief: ReliefIcon[] = [];
 
   // tupaia-mcp: map-level settings on #terrain (relief-settings.ts); none set = upstream behaviour
-  const settings = readReliefSettings(terrain.node(), grid.cells.i.length);
+  const settings = readReliefSettings(terrain.node(), () => gridKey(grid.points));
   const seedHash = settings.seed === null ? null : hashString(settings.seed);
   const burgs = settings.nearBurgs ? pack.burgs.filter(b => b?.i && !b.removed) : [];
   const burgTree = burgs.length
