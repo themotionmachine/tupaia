@@ -17,6 +17,38 @@ import type { HistoryEntry } from "./snapshots.ts";
 export const REPLAYABLE_TOOLS = ["edit", "add", "paint_cells", "display", "eval"] as const;
 export type ReplayableTool = (typeof REPLAYABLE_TOOLS)[number];
 
+/**
+ * Replay support for tools added after the core five. A tool module registers its spec at
+ * import time (registerReplayable) instead of editing the switches here and in replay.ts.
+ * The bridge function must follow the phased protocol (phase 'validate' mutates nothing and
+ * returns {phase:'validate', errors?}; phase 'apply' applies and returns {resolved, ...}),
+ * unless `phased` is false (then it is called once, like display).
+ */
+export interface ReplaySpec {
+  /** Bridge FNS name replay calls. */
+  bridgeFn: string;
+  /** Bridge arguments for a (rewritten) resolved form; default: the resolved form as-is. */
+  bridgeArgs?: (r: Resolved) => Record<string, unknown>;
+  /** Map sketch-created ids through the rewriter; default: nothing to rewrite. Throws Unmapped. */
+  rewrite?: (r: Resolved, rw: Rewriter) => Resolved;
+  /** One plain sentence for the log. */
+  summarize?: (r: Resolved | null, out: Record<string, unknown> | null, args?: unknown) => string;
+  /** Why this particular resolved form cannot be replayed, or null. */
+  unreplayable?: (r: Resolved | null) => string | null;
+  /** Entities the op created, per op, for the replay id map (like AddResolved.created). */
+  created?: (r: Resolved) => CreatedRef[][];
+  /** Default true: validate then apply with phase 'apply'. */
+  phased?: boolean;
+  /** Timeout class for replay (default 'edit'). */
+  timeout?: "edit" | "heavy";
+}
+
+export const REPLAY_EXT: Record<string, ReplaySpec> = {};
+
+export function registerReplayable(tool: string, spec: ReplaySpec): void {
+  REPLAY_EXT[tool] = spec;
+}
+
 /** Why a logged call cannot be replayed, by tool. */
 export const NOT_REPLAYABLE: Record<string, string> = {
   regenerate: "regenerate re-runs random generators (states reseeds Math.random), so it cannot be replayed",
@@ -36,6 +68,8 @@ export const NOT_REPLAYABLE: Record<string, string> = {
  * recording, when opening a saved log, and again by replay.
  */
 export function unreplayableReason(tool: string, resolved: Resolved | null): string | null {
+  const ext = REPLAY_EXT[tool];
+  if (ext) return ext.unreplayable ? ext.unreplayable(resolved) : null;
   if (!(REPLAYABLE_TOOLS as readonly string[]).includes(tool))
     return NOT_REPLAYABLE[tool] ?? `${tool} is not replayable`;
   if (tool === "paint_cells" && resolved) {
@@ -487,6 +521,8 @@ export function summarizeOp(tool: string, resolved: Resolved | null, out: Row | 
         return `Ran eval (unsafe, replayed verbatim): ${code.length > 80 ? `${code.slice(0, 77)}...` : code}`;
       }
       default: {
+        const ext = REPLAY_EXT[tool];
+        if (ext?.summarize) return ext.summarize(resolved, out, args);
         let a = "";
         try {
           a = JSON.stringify(args) ?? "";
@@ -518,9 +554,12 @@ export class Unmapped extends Error {
 
 /** The entities one op created (as "type:id"). */
 export function createdBy(o: OpRecord): string[] {
-  if (o.tool !== "add" || !o.resolved) return [];
+  if (!o.resolved) return [];
+  const ext = REPLAY_EXT[o.tool];
+  const lists =
+    o.tool === "add" ? ((o.resolved as AddResolved).created ?? []) : ext?.created ? ext.created(o.resolved) : [];
   const out: string[] = [];
-  for (const list of (o.resolved as AddResolved).created ?? []) for (const c of list) out.push(`${c.type}:${c.i}`);
+  for (const list of lists) for (const c of list) out.push(`${c.type}:${c.i}`);
   return out;
 }
 
@@ -576,7 +615,7 @@ export class Rewriter {
 }
 
 /** Which edit fields hold refs (type) or places, per entity type. */
-const EDIT_REF_FIELDS: Record<string, Record<string, string>> = {
+export const EDIT_REF_FIELDS: Record<string, Record<string, string>> = {
   burg: { culture: "culture", move: "@place" },
   state: { capital: "burg", culture: "culture" },
   province: { capital: "burg" },
@@ -584,7 +623,7 @@ const EDIT_REF_FIELDS: Record<string, Record<string, string>> = {
   label: { move: "@place" }
 };
 
-const ADD_REF_FIELDS: Record<string, Record<string, string>> = {
+export const ADD_REF_FIELDS: Record<string, Record<string, string>> = {
   burg: { at: "@place", culture: "culture" },
   state: { capital: "@capital", culture: "culture" },
   marker: { at: "@place" },
@@ -595,7 +634,7 @@ const ADD_REF_FIELDS: Record<string, Record<string, string>> = {
   religion: { at: "@place" }
 };
 
-function rewriteField(rw: Rewriter, kind: string, v: unknown): unknown {
+export function rewriteField(rw: Rewriter, kind: string, v: unknown): unknown {
   switch (kind) {
     case "@place":
       return rw.place(v);
@@ -650,8 +689,10 @@ export function rewriteResolved(tool: string, resolved: Resolved, rw: Rewriter):
       if (z) p.set.zone = { ...z, ref: rw.id("zone", z.ref) };
       return p;
     }
-    default:
-      return r as unknown as Resolved;
+    default: {
+      const ext = REPLAY_EXT[tool];
+      return ext?.rewrite ? ext.rewrite(r as unknown as Resolved, rw) : (r as unknown as Resolved);
+    }
   }
 }
 

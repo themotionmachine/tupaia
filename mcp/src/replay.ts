@@ -23,6 +23,7 @@ import {
   type OpRecord,
   type PaintResolved,
   pairCreated,
+  REPLAY_EXT,
   type Resolved,
   Rewriter,
   rewriteResolved,
@@ -107,8 +108,11 @@ export function bridgeArgs(tool: string, r: Resolved): Record<string, unknown> {
       const v = r as EvalResolved;
       return { code: v.code, args: v.args, redraw: v.redraw };
     }
-    default:
-      throw new Error(`no replay for tool '${tool}'`);
+    default: {
+      const ext = REPLAY_EXT[tool];
+      if (!ext) throw new Error(`no replay for tool '${tool}'`);
+      return ext.bridgeArgs ? ext.bridgeArgs(r) : { ...(r as unknown as Record<string, unknown>) };
+    }
   }
 }
 
@@ -240,7 +244,9 @@ export async function replayOps(
       if (conflict(op, `not replayable: ${why}`)) break;
       continue;
     }
-    const fn = BRIDGE_FN[op.tool];
+    const ext = REPLAY_EXT[op.tool];
+    const fn = BRIDGE_FN[op.tool] ?? ext?.bridgeFn;
+    const phased = ext ? ext.phased !== false : op.tool !== "display" && op.tool !== "eval";
     if (!fn) {
       if (conflict(op, `no replay for tool '${op.tool}'`)) break;
       continue;
@@ -273,10 +279,10 @@ export async function replayOps(
       continue;
     }
     const args = bridgeArgs(op.tool, r);
-    const timeoutMs = op.tool === "paint_cells" ? TIMEOUTS.heavy : TIMEOUTS.edit;
+    const timeoutMs = op.tool === "paint_cells" || ext?.timeout === "heavy" ? TIMEOUTS.heavy : TIMEOUTS.edit;
 
     // validate (eval has no validation; it is replayed verbatim)
-    if (op.tool !== "eval") {
+    if (op.tool === "display" || (phased && op.tool !== "eval")) {
       const v = await scope.envelope<Record<string, unknown>>(fn, { ...args, phase: "validate" }, { timeoutMs });
       if (!v.ok) {
         if (conflict(op, `${v.error?.code ?? "ERROR"}: ${v.error?.message ?? "validation failed"}`)) break;
@@ -314,7 +320,7 @@ export async function replayOps(
     res.undoEntries.push(undoId);
     // edit/add/paint apply only with phase 'apply' (without it they validate); display and
     // evalUser apply without a phase
-    const applyArgs = op.tool === "display" || op.tool === "eval" ? args : { ...args, phase: "apply" };
+    const applyArgs = phased ? { ...args, phase: "apply" } : args;
     const env = await scope.envelope<Record<string, unknown>>(fn, applyArgs, { mutating: true, timeoutMs });
     ctx.snapshots.noteMutation();
     if (!env.ok) {
@@ -332,8 +338,9 @@ export async function replayOps(
       break;
     }
     const applied = op.tool === "eval" ? r : (takeResolved(out) ?? r);
-    if (op.tool === "add") {
-      const unpaired = pairCreated(res.idMap, (r as AddResolved).created ?? [], (applied as AddResolved).created ?? []);
+    if (op.tool === "add" || ext?.created) {
+      const made = (x: Resolved) => (ext?.created ? ext.created(x) : ((x as AddResolved).created ?? []));
+      const unpaired = pairCreated(res.idMap, made(r), made(applied));
       if (unpaired.length)
         res.notes.push(
           `op ${op.seq}: the replay did not create a counterpart for ${unpaired.map(c => `${c.type} ${c.i}`).join(", ")}; ops that use them will conflict`

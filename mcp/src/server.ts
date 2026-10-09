@@ -4,24 +4,22 @@
 import "./stdout-guard.ts"; // must stay the first import: it guards fd 1 before anything else loads
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { McpServer } from "@modelcontextprotocol/server";
 import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import { loadConfig } from "./config.ts";
 import { ToolContext } from "./context.ts";
 import { protocolOut } from "./stdout-guard.ts";
 import { registerAll } from "./tools/registry.ts";
-// Tool modules: one import line each; they self-register through tools/registry.ts.
-import "./tools/session.ts";
-import "./tools/query.ts";
-import "./tools/view.ts";
-import "./tools/history.ts";
-import "./tools/eval.ts";
-import "./tools/persist.ts";
-import "./tools/edit.ts";
-import "./tools/generate.ts";
-import "./tools/display.ts";
-import "./tools/shared.ts";
-import "./tools/sketch.ts";
+
+// Tool modules: every src/tools/*.ts except registry.ts, in name order; each self-registers
+// through tools/registry.ts at import time (so a new tool is just a new file).
+{
+  const toolsDir = path.join(path.dirname(new URL(import.meta.url).pathname), "tools");
+  for (const f of fs.readdirSync(toolsDir).sort())
+    if (f.endsWith(".ts") && f !== "registry.ts" && !f.endsWith(".d.ts"))
+      await import(pathToFileURL(path.join(toolsDir, f)).href);
+}
 
 export const INSTRUCTIONS = `Tupaia MCP drives the Tupaia fantasy-map app (Azgaar's FMG fork) in headless Chromium.
 - Mode is local unless the server was spawned with TUPAIA_MODE=live; nothing here writes the live shared map (map.activationlayer.org) except shared_save/shared_restore, and only when the human explicitly asks in this conversation: preview first, then confirm with the preview token.

@@ -1,5 +1,6 @@
 // Headless Chromium ownership: lazy launch, one context + one page at /?local, the route
 // firewall, the console ring, the call mutex and the bridge caller with hang/timeout recovery.
+import fs from "node:fs";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { type Browser, type BrowserContext, chromium, type Page, type Route } from "playwright";
@@ -81,11 +82,30 @@ function initSeed(seed: { version: string | null; w: number; h: number }) {
   else addCss();
 }
 
+/**
+ * Extension bridges live in src/bridge-ext/<name>.js: classic scripts injected after bridge.js
+ * and bridge-mutations.js, in name order. Each one extends __tupaia.fns (and, for edit/add,
+ * __tupaia.mutations.FIELDS / ADD) with the same rules as bridge-mutations.js.
+ */
+function listExtBridges(dir: string): string[] {
+  try {
+    return fs
+      .readdirSync(dir)
+      .filter(f => f.endsWith(".js"))
+      .sort()
+      .map(f => path.join(dir, f));
+  } catch {
+    return [];
+  }
+}
+
 export class BrowserManager {
   readonly config: Config;
   readonly modeState: ModeState;
   readonly bridgePath: string;
   readonly mutationsBridgePath: string;
+  /** Extension bridges: every src/bridge-ext/*.js, injected after the core two, in name order. */
+  readonly extBridgePaths: string[];
   readonly appVersion: string | null;
   readonly distEntry: string | null;
 
@@ -119,6 +139,7 @@ export class BrowserManager {
     this.modeState = modeState;
     this.bridgePath = path.join(config.mcpRoot, "src", "bridge.js");
     this.mutationsBridgePath = path.join(config.mcpRoot, "src", "bridge-mutations.js");
+    this.extBridgePaths = listExtBridges(path.join(config.mcpRoot, "src", "bridge-ext"));
     this.viewport = { ...config.viewport };
     this.appVersion = readDistVersion(config.distDir);
     this.distEntry = readDistEntry(config.distDir);
@@ -241,6 +262,7 @@ export class BrowserManager {
     await ctx.addInitScript(initSeed, { version: this.appVersion, w: width, h: height });
     await ctx.addInitScript({ path: this.bridgePath });
     await ctx.addInitScript({ path: this.mutationsBridgePath });
+    for (const p of this.extBridgePaths) await ctx.addInitScript({ path: p });
     await this.#installRoutes(ctx);
     const page = await ctx.newPage();
     page.on("console", msg => {
