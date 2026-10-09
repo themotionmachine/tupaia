@@ -86,20 +86,26 @@ versionless PUT whose 409 dialog offered an `X-Map-Overwrite` button. Re-check a
 an upstream rebase.
 
 Relief icons (MCP `regenerate {parts:['relief']}` and `edit map {set:{reliefOnLoad}}`) add one
-new file and four marked hooks. `src/renderers/relief-settings.ts` reads map-level settings from
+new file and five marked hooks. `src/renderers/relief-settings.ts` reads map-level settings from
 attributes of `#terrain` (`data-seed`, `data-scale`, `data-biomes`, `data-min-height`,
-`data-exclude`, `data-near-burgs`, `data-regenerate`); `src/renderers/draw-relief-icons.ts`
-applies them (with none set it draws as upstream; a seeded draw swaps `Math.random` per cell
-and `drawReliefIcons` puts it back). With `data-regenerate` set, `prepareMapData`
-(`src/io/save.ts`) empties `#terrain` in the saved SVG, so every save path (File > Save, browser
-storage, autosave, the shared map, MCP saves and snapshots) drops the icons, and `src/io/load.ts`
-calls `restoreReliefOnLoad()` after a load to draw the same icons again and turn the Relief button
-on. `public/modules/ui/relief-editor.js` warns that manual relief edits are not saved on such a
-map. Old files load unchanged. A client without these hooks (an older deploy) loading such a file
-shows no relief and the Relief button off; turning Relief on draws unseeded icons at the style
-density, and its next save stores them again. Deploy the app before saving a map with
-`data-regenerate` to `shared`. Re-check after an upstream rebase (upstream has a
-`relief-webgl-renderer` branch).
+`data-exclude`, `data-near-burgs`, `data-regenerate`) and exposes its helpers as the page global
+`ReliefSettings` (the MCP bridge uses them); `src/renderers/draw-relief-icons.ts` applies them
+(with none set it draws as upstream; a seeded draw swaps `Math.random` per cell and
+`drawReliefIcons` puts it back; below a multiplier of 1 a cell keeps its icons with odds that keep
+the count going with the square of the multiplier, instead of always keeping one). With
+`data-regenerate` set, `prepareMapData` (`src/io/save.ts`) empties `#terrain` in the saved SVG, so
+every save path (File > Save, browser storage, autosave, the shared map, MCP saves and snapshots)
+drops the icons, and `src/io/load.ts` calls `restoreReliefOnLoad()` after a load to draw the same
+icons again and turn the Relief button on. `generate()` in `public/main.js` clears the settings,
+so a new map starts as upstream. `public/modules/ui/relief-editor.js` warns that manual relief
+edits are not saved on such a map. Old files load unchanged. A client without these hooks (an
+older deploy) loading such a file shows no relief and the Relief button off; turning Relief on
+draws unseeded icons at the style density, and its next save stores them again. So MCP
+`shared_save` and `sketch_promote` refuse (BUILD) a `data-regenerate` map unless the deployed
+build is the local one or its entry chunk contains the hook. Deploy the app before saving such a
+map to `shared` by hand. In-app edits that change what relief is drawn from (the biomes editor,
+heightmap tools) do not redraw the icons on a `data-regenerate` map until its next load; MCP
+calls do. Re-check after an upstream rebase (upstream has a `relief-webgl-renderer` branch).
 
 ## Local smoke test (no Cloudflare account needed)
 

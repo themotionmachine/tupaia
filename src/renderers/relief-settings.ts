@@ -2,21 +2,45 @@
 // carries them; the Tupaia MCP server writes them (mcp/src/bridge-ext/relief.js) and the relief
 // renderer reads them on every draw. With none of them set the renderer behaves as upstream.
 //   data-seed        seed of a deterministic draw (each cell gets its own stream, keyed by its position)
-//   data-scale       multiplier on the style density (icon spacing); 0 draws nothing
+//   data-scale       multiplier on the style density; the icon count goes with its square, down to 0
 //   data-biomes      per-biome multipliers "biomeId:k,...", on top of data-scale
 //   data-min-height  no icons on cells lower than this
-//   data-exclude     "<grid key>:<ranges>": grid cells without icons, e.g. "9916-1x2k3j:3-7,12"; ignored on
-//                    another grid (the key is gridKey: cell count and a hash of the grid points)
+//   data-exclude     "<grid key>:<ranges>[;<g.e>,...]": cells without icons. The ranges are grid cells
+//                    whose pack cells are all excluded; a "g.e" item is one pack cell of a coastal grid
+//                    cell g (reGraph adds extra cells there): e = g for the cell at the grid point, else
+//                    the neighbour e whose midpoint it is. Ignored on another grid (the key is gridKey:
+//                    cell count and a hash of the grid points)
 //   data-near-burgs  no icons within this many px of a burg
 //   data-regenerate  saves drop the icons (save.ts) and a load draws them again (load.ts)
+// A new map (generate) clears them all (main.js).
+
+/** Every #terrain attribute this file defines. */
+export const RELIEF_ATTRS = [
+  "data-seed",
+  "data-scale",
+  "data-biomes",
+  "data-min-height",
+  "data-exclude",
+  "data-near-burgs",
+  "data-regenerate"
+] as const;
+
+export interface ReliefExclusion {
+  /** Grid cells whose pack cells are all excluded. */
+  cells: Set<number>;
+  /** Single pack cells of other grid cells, by packCellKey ("g.e"). */
+  parts: Set<string>;
+  /** Grid cells that have an item in `parts`. */
+  partGrids: Set<number>;
+}
 
 export interface ReliefSettings {
   seed: string | null;
   scale: number;
   biomes: Map<number, number>;
   minHeight: number;
-  /** Excluded grid cells; null when unset or recorded on another grid. */
-  exclude: Set<number> | null;
+  /** Excluded cells; null when unset or recorded on another grid. */
+  exclude: ReliefExclusion | null;
   nearBurgs: number;
 }
 
@@ -64,6 +88,45 @@ export function encodeRanges(ids: Iterable<number>): string {
   return parts.join(",");
 }
 
+/** The cells of a stored exclusion "<grid key>:<ranges>[;<g.e>,...]" (key check left to the caller). */
+export function parseExclusion(body: string): ReliefExclusion {
+  const semi = body.indexOf(";");
+  const cells = new Set(parseRanges(semi < 0 ? body : body.slice(0, semi)));
+  const parts = new Set<string>();
+  const partGrids = new Set<number>();
+  if (semi >= 0)
+    for (const item of body.slice(semi + 1).split(",")) {
+      const m = /^(\d+)\.(\d+)$/.exec(item);
+      if (!m) continue;
+      parts.add(item);
+      partGrids.add(Number(m[1]));
+    }
+  return { cells, parts, partGrids };
+}
+
+/**
+ * Identity of a pack cell that does not depend on pack cell numbering: "g.g" for the cell at grid
+ * point g, "g.e" for an extra coastal cell reGraph put at the midpoint of g and its neighbour e.
+ */
+export function packCellKey(
+  g: number,
+  x: number,
+  y: number,
+  points: ArrayLike<readonly [number, number]>,
+  neighbours: ArrayLike<ArrayLike<number>> | undefined
+): string {
+  const near = (ax: number, ay: number) => Math.abs(ax - x) < 0.06 && Math.abs(ay - y) < 0.06;
+  const [gx, gy] = points[g];
+  if (near(gx, gy)) return `${g}.${g}`;
+  const around = neighbours?.[g];
+  if (around)
+    for (let k = 0; k < around.length; k++) {
+      const e = around[k];
+      if (near((gx + points[e][0]) / 2, (gy + points[e][1]) / 2)) return `${g}.${e}`;
+    }
+  return `${g}.?`;
+}
+
 export function readReliefSettings(
   el: { getAttribute(name: string): string | null } | null,
   currentGridKey: () => string
@@ -74,11 +137,11 @@ export function readReliefSettings(
     const [id, k] = pair.split(":").map(Number);
     if (Number.isInteger(id) && Number.isFinite(k)) biomes.set(id, Math.max(0, k));
   }
-  let exclude: Set<number> | null = null;
+  let exclude: ReliefExclusion | null = null;
   const excluded = attr("data-exclude");
   const colon = excluded ? excluded.indexOf(":") : -1;
   if (excluded && colon > 0 && excluded.slice(0, colon) === currentGridKey())
-    exclude = new Set(parseRanges(excluded.slice(colon + 1)));
+    exclude = parseExclusion(excluded.slice(colon + 1));
   return {
     seed: attr("data-seed"),
     scale: Math.max(0, toNumber(attr("data-scale"), 1)),
@@ -87,6 +150,23 @@ export function readReliefSettings(
     exclude,
     nearBurgs: Math.max(0, toNumber(attr("data-near-burgs"), 0))
   };
+}
+
+/**
+ * Below a multiplier of 1, the odds that a cell keeps its icons at all. The Poisson sampler always
+ * yields the centre of the cell's bbox first, so a cell too small for a second icon at the thinned
+ * spacing would keep one icon however low the multiplier went (a floor of one icon per cell). This
+ * keeps the expected count going with the square of the multiplier: `area` is the cell's area,
+ * `radius` the thinned icon spacing; about 0.49 icons fit per radius^2 (sampler with k = 3).
+ */
+export function keepOdds(k: number, area: number, radius: number): number {
+  if (!(k < 1)) return 1;
+  return Math.min(1, Math.max(k * k, (0.49 * area) / (radius * radius)));
+}
+
+/** Remove every relief setting from #terrain (a new map starts with upstream behaviour). */
+export function clearReliefSettings(el: Element | null): void {
+  for (const name of RELIEF_ATTRS) el?.removeAttribute(name);
 }
 
 /** 32-bit FNV-1a hash of a string. */
@@ -135,3 +215,23 @@ export function restoreReliefOnLoad(): void {
     ERROR && console.error(error);
   }
 }
+
+// tupaia-mcp: the MCP bridge (mcp/src/bridge-ext/relief.js) and main.js use these through a global
+declare global {
+  var ReliefSettings: {
+    attrs: typeof RELIEF_ATTRS;
+    gridKey: typeof gridKey;
+    packCellKey: typeof packCellKey;
+    encodeRanges: typeof encodeRanges;
+    parseExclusion: typeof parseExclusion;
+    clear: () => void;
+  };
+}
+globalThis.ReliefSettings = {
+  attrs: RELIEF_ATTRS,
+  gridKey,
+  packCellKey,
+  encodeRanges,
+  parseExclusion,
+  clear: () => clearReliefSettings(typeof document === "undefined" ? null : document.getElementById("terrain"))
+};

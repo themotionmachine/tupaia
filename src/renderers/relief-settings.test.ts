@@ -1,5 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { cellRandom, encodeRanges, gridKey, hashString, parseRanges, readReliefSettings } from "./relief-settings";
+import {
+  cellRandom,
+  clearReliefSettings,
+  encodeRanges,
+  gridKey,
+  hashString,
+  keepOdds,
+  packCellKey,
+  parseExclusion,
+  parseRanges,
+  RELIEF_ATTRS,
+  readReliefSettings
+} from "./relief-settings";
 
 const attrs = (values: Record<string, string>) => ({ getAttribute: (name: string) => values[name] ?? null });
 
@@ -25,7 +37,7 @@ describe("relief settings", () => {
         "data-scale": "0.5",
         "data-biomes": "6:0,8:1.5,bad",
         "data-min-height": "35",
-        "data-exclude": "100-x:3-5,9",
+        "data-exclude": "100-x:3-5,9;12.12,12.40,bad",
         "data-near-burgs": "12"
       }),
       () => "100-x"
@@ -37,7 +49,9 @@ describe("relief settings", () => {
       [8, 1.5]
     ]);
     expect(s.minHeight).toBe(35);
-    expect([...(s.exclude ?? [])]).toEqual([3, 4, 5, 9]);
+    expect([...(s.exclude?.cells ?? [])]).toEqual([3, 4, 5, 9]);
+    expect([...(s.exclude?.parts ?? [])]).toEqual(["12.12", "12.40"]);
+    expect([...(s.exclude?.partGrids ?? [])]).toEqual([12]);
     expect(s.nearBurgs).toBe(12);
   });
 
@@ -60,5 +74,37 @@ describe("relief settings", () => {
     expect(take(cellRandom(seed, 10.26, 40.5))).not.toEqual(a);
     expect(take(cellRandom(hashString("other"), 10.25, 40.5))).not.toEqual(a);
     for (const v of a) expect(v >= 0 && v < 1).toBe(true);
+  });
+
+  it("names a pack cell by its grid cell and, on the coast, the neighbour it sits towards", () => {
+    const points: [number, number][] = [
+      [10, 10],
+      [20, 10],
+      [10, 20]
+    ];
+    const neighbours = [[1, 2], [0], [0]];
+    expect(packCellKey(0, 10, 10, points, neighbours)).toBe("0.0");
+    expect(packCellKey(0, 15, 10, points, neighbours)).toBe("0.1"); // reGraph midpoint, rounded to 0.1
+    expect(packCellKey(0, 10, 15.04, points, neighbours)).toBe("0.2");
+    expect(packCellKey(0, 13, 13, points, neighbours)).toBe("0.?");
+    expect(parseExclusion("1-2").cells.size).toBe(2);
+    expect(parseExclusion("").parts.size).toBe(0);
+  });
+
+  it("thins below a multiplier of 1 with no floor of one icon per cell", () => {
+    expect(keepOdds(1, 10, 5)).toBe(1);
+    expect(keepOdds(1.5, 1, 50)).toBe(1);
+    expect(keepOdds(0.5, 1000, 2)).toBe(1); // room for many icons: the sampler thins
+    expect(keepOdds(0.5, 10, 50)).toBe(0.25); // one icon at most: keep it with odds k^2
+    expect(keepOdds(0.1, 10, 50)).toBeCloseTo(0.01);
+    expect(keepOdds(0.5, 2000, 50)).toBeCloseTo(0.392); // between: the expected count at this spacing
+    expect(keepOdds(0.2, 10, 50)).toBeCloseTo(0.04);
+  });
+
+  it("clears every relief attribute", () => {
+    const removed: string[] = [];
+    clearReliefSettings({ removeAttribute: (name: string) => removed.push(name) } as unknown as Element);
+    expect(removed).toEqual([...RELIEF_ATTRS]);
+    expect(globalThis.ReliefSettings.attrs).toBe(RELIEF_ATTRS);
   });
 });
