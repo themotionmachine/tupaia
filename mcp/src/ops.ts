@@ -132,6 +132,13 @@ export interface EditResolved {
   redraw?: unknown;
   /** Structural river edits: fingerprint of the cell graph their literal cell lists refer to. */
   graph?: string;
+  /** type 'map': the refresh that ran after the settings changed ('climate', 'biomes', 'rivers+biomes' or 'climate+biomes'). */
+  recalculate?: string;
+  /**
+   * type 'map' with a rivers/biomes recalculation: fingerprint of the layers it overwrites (biome
+   * cells, rivers, lake names) as the sketch found them. Replay refuses the op when the target's differ.
+   */
+  derived?: string;
 }
 
 export interface CreatedRef {
@@ -165,6 +172,8 @@ export interface DisplayResolved {
   layersPreset?: string;
   stylePreset?: string;
   styleRules?: Record<string, unknown>;
+  /** Per label/emblem group visibility override (literal group ids; null clears the group's override). */
+  labels?: Record<string, { minSize?: number | null; maxSize?: number | null; alwaysShow?: boolean | null } | null>;
 }
 
 export interface EvalResolved {
@@ -516,6 +525,8 @@ const q = (v: unknown): string => {
   return s.length > 40 ? `${s.slice(0, 37)}...` : s;
 };
 
+const sameValue = (a: unknown, b: unknown): boolean => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+
 function listOut(parts: string[], max = 3): string {
   if (parts.length <= max) return parts.join("; ");
   return `${parts.slice(0, max).join("; ")}; and ${parts.length - max} more`;
@@ -576,6 +587,31 @@ function removalDetail(o: EditResolved["ops"][number], row: Row | undefined): st
   return parts.length ? ` (${parts.join("; ")})` : "";
 }
 
+/** What one label group's override says: "min size 0, always shown", or "override cleared". */
+function labelSpecText(spec: NonNullable<DisplayResolved["labels"]>[string]): string {
+  if (!spec || typeof spec !== "object") return "override cleared";
+  const bits: string[] = [];
+  if (spec.minSize !== undefined) bits.push(spec.minSize === null ? "default min size" : `min size ${spec.minSize}`);
+  if (spec.maxSize !== undefined) bits.push(spec.maxSize === null ? "default max size" : `max size ${spec.maxSize}`);
+  if (spec.alwaysShow !== undefined) bits.push(spec.alwaysShow ? "always shown" : "auto-hide");
+  return bits.join(", ") || "override cleared";
+}
+
+/** "city, town min size 0; states always shown": groups with the same override are listed together. */
+function labelsText(labels: NonNullable<DisplayResolved["labels"]>): string {
+  const byText = new Map<string, string[]>();
+  for (const [group, spec] of Object.entries(labels)) {
+    const text = labelSpecText(spec);
+    byText.set(text, [...(byText.get(text) ?? []), group]);
+  }
+  const parts = [...byText].map(([text, groups]) => {
+    const names =
+      groups.length > 5 ? `${groups.length} groups (${groups.slice(0, 3).join(", ")}, ...)` : groups.join(", ");
+    return `${names} ${text}`;
+  });
+  return listOut(parts, 8);
+}
+
 /** One sentence for a recorded call, from the resolved form and the bridge's result rows. */
 export function summarizeOp(tool: string, resolved: Resolved | null, out: Row | null, args?: unknown): string {
   try {
@@ -597,7 +633,10 @@ export function summarizeOp(tool: string, resolved: Resolved | null, out: Row | 
             );
             return;
           }
-          const fields = Object.keys(o.set ?? {}).map(k => {
+          const keys = Object.keys(o.set ?? {});
+          // fields that already had the value (a replay onto a map that holds it) add nothing
+          const moved = keys.filter(k => !(o.before && o.after && k in o.before && sameValue(o.before[k], o.after[k])));
+          const fields = (moved.length ? moved : keys).map(k => {
             const say = EDIT_FIELD_SUMMARIES[r.type]?.[k];
             let said: string | null = null;
             try {
@@ -613,8 +652,11 @@ export function summarizeOp(tool: string, resolved: Resolved | null, out: Row | 
           const made = (o.created ?? []).map(c => `${c.type} ${c.i}`);
           edited.push(`${who}: ${fields.join(", ")}${made.length ? ` (created ${made.join(", ")})` : ""}`);
         });
+        // edit map {recalculate} with no ops is a recalculation alone
+        if (!edited.length && !removed.length && r.recalculate) return `Recalculated the map (${r.recalculate}).`;
         if (!edited.length) return `Removed ${listOut(removed)}.`;
-        return `Edited ${listOut(edited)}${removed.length ? `; removed ${listOut(removed)}` : ""}.`;
+        const recalc = r.recalculate ? ` (recalculated ${r.recalculate})` : "";
+        return `Edited ${listOut(edited)}${removed.length ? `; removed ${listOut(removed)}` : ""}${recalc}.`;
       }
       case "add": {
         const r = resolved as AddResolved;
@@ -648,6 +690,7 @@ export function summarizeOp(tool: string, resolved: Resolved | null, out: Row | 
         }
         if (r.stylePreset) parts.push(`style ${q(r.stylePreset)}`);
         if (r.styleRules) parts.push(`style rules for ${Object.keys(r.styleRules).join(", ")}`);
+        if (r.labels && typeof r.labels === "object") parts.push(`label visibility ${labelsText(r.labels)}`);
         return `Display: ${parts.join("; ") || "no change"}.`;
       }
       case "eval": {

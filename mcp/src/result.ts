@@ -5,6 +5,8 @@
 //   is the same object. Per-call extras are merged into that object: `alerts` (app dialogs
 //   seen and dismissed), `consoleErrors` (page errors that arrived during this call) and
 //   `notes` (server notices such as "browser relaunched").
+// - Compact text (WithText, format:'compact'): content = [one plain-text block], no
+//   structuredContent; extras follow as a trailing JSON line.
 // - Failure: isError:true, text "CODE: message" then a JSON line {error:{code,message,
 //   candidates?,details?}, consoleErrors?, notes?}. Codes: NOT_FOUND, AMBIGUOUS, REMOVED,
 //   OUT_OF_BOUNDS, BAD_ARGS, BAD_PLACE, BAD_REF, BAD_TYPE, BAD_LAYER, REFUSED, MODE, TIMEOUT,
@@ -57,10 +59,11 @@ export interface ImageBlock {
   mimeType: string;
 }
 
-/** Normalised tool output. */
+/** Normalised tool output. `text` (compact formats) replaces the JSON text and structuredContent. */
 export interface ToolOutput {
   value: Record<string, unknown>;
   images?: ImageBlock[];
+  text?: string;
 }
 
 /** Return this from a tool implementation to attach image blocks; otherwise return a plain object. */
@@ -70,6 +73,17 @@ export class WithImages {
   constructor(value: Record<string, unknown>, images: ImageBlock[]) {
     this.value = value;
     this.images = images;
+  }
+}
+
+/**
+ * Return this from a tool implementation to send plain text instead of JSON (format:'compact').
+ * There is no structuredContent then; alerts, consoleErrors and notes follow as one JSON line.
+ */
+export class WithText {
+  text: string;
+  constructor(text: string) {
+    this.text = text;
   }
 }
 
@@ -93,8 +107,11 @@ function withExtras(value: Record<string, unknown>, extras: Extras): Record<stri
 }
 
 export function okResult(out: ToolOutput, extras: Extras = {}): CallToolResult {
-  const value = withExtras(out.value, extras);
-  const text = JSON.stringify(value);
+  const value = withExtras(out.text !== undefined ? {} : out.value, extras);
+  let text: string;
+  if (out.text !== undefined) {
+    text = Object.keys(value).length ? `${out.text}\n${JSON.stringify(value)}` : out.text;
+  } else text = JSON.stringify(value);
   if (text.length > MAX_TEXT_CHARS) {
     return errorResult(
       new ToolError(
@@ -107,7 +124,7 @@ export function okResult(out: ToolOutput, extras: Extras = {}): CallToolResult {
   const content: CallToolResult["content"] = [];
   for (const img of out.images ?? []) content.push({ type: "image", data: img.data, mimeType: img.mimeType });
   content.push({ type: "text", text });
-  return { content, structuredContent: value };
+  return out.text !== undefined ? { content } : { content, structuredContent: value };
 }
 
 export function errorResult(err: unknown, extras: Extras = {}): CallToolResult {

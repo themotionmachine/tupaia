@@ -6,6 +6,9 @@ declare global {
   var removeBurgLabel: (burgId: number) => void;
 }
 
+// tupaia-mcp: attributes the MCP `display {labels}` writes on a label group (read in invokeActiveZooming)
+const VISIBILITY_OVERRIDE_ATTRS = ["data-min-size", "data-max-size", "data-always-show"];
+
 const burgLabelsRenderer = (): void => {
   TIME && console.time("drawBurgLabels");
   createLabelGroups();
@@ -81,7 +84,11 @@ function createLabelGroups(): void {
   const sortedGroups = [...options.burgs.groups].sort((a, b) => a.order - b.order);
   for (const { name } of sortedGroups) {
     const group = burgLabels.append("g");
-    const styles = style.burgLabels[name] || defaultStyle;
+    // tupaia-mcp: a new group copies the town style but not its MCP label-visibility override
+    // (data-min-size / data-max-size / data-always-show), which belongs to the town group only
+    const styles =
+      style.burgLabels[name] ||
+      Object.fromEntries(Object.entries(defaultStyle).filter(([key]) => !VISIBILITY_OVERRIDE_ATTRS.includes(key)));
     Object.entries(styles).forEach(([key, value]) => {
       group.attr(key, value);
     });

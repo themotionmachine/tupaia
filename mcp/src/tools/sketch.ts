@@ -13,6 +13,7 @@ import type { CallScope, ToolContext } from "../context.ts";
 import {
   type AddResolved,
   blobOnlyReasons,
+  type DisplayResolved,
   type EditResolved,
   type PaintResolved,
   REPLAY_EXT,
@@ -366,6 +367,11 @@ async function summary(ctx: ToolContext, scope: CallScope, args: { shots?: boole
   lines.push("", "## Changes", "");
   if (!sk.ops.length) lines.push("(none yet)");
   for (const o of sk.ops) lines.push(`${o.seq}. ${o.summary}${o.unsafe ? " [unsafe]" : ""}`);
+  if (sk.ops.some(o => o.tool === "display" && (o.resolved as DisplayResolved | null)?.labels))
+    lines.push(
+      "",
+      "Label visibility depends on the zoom: the screenshots below are of the full-map view, where an override can change nothing. `display {labels:'list'}` shows each group's zoom range; zoom a screenshot in to see the difference."
+    );
   lines.push("", "## Counts vs base", "", "| | base | now | change |", "| --- | --- | --- | --- |");
   const changed = counts.filter(c => c.base !== c.now);
   for (const c of changed)

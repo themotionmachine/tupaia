@@ -49,6 +49,11 @@ async function status(ctx: ToolContext, scope: CallScope, clear: boolean): Promi
     redoDepth: ctx.snapshots.redoStack.length,
     shots: ctx.shots.count,
     outDir: ctx.config.outDir,
+    ...(ctx.serving.transport === "http"
+      ? {
+          serving: `http daemon ${ctx.serving.url} (pid ${ctx.serving.pid}): page, undo and sketch shared by every caller`
+        }
+      : {}),
     consoleErrors,
     consoleCleared: clear || undefined,
     outwardRequests: b.outward.slice(-50),

@@ -128,6 +128,15 @@ One more one-line guard: `focusOn` in `public/main.js` ignores a `?burg=` id who
 is a stub left by the MCP `compact` tool (`{i, removed:true}`, no coordinates) instead of
 zooming to NaN; re-check it after a rebase too.
 
+One more hook, in `public/main.js` `invokeActiveZooming` (two `// tupaia-mcp:` blocks, labels
+and emblems): a label or emblem group may carry `data-min-size` (replaces the lower bound of the
+automatic hiding, 6 for labels and 25 for emblems), `data-max-size` (replaces the upper bound, 60
+and 300) and `data-always-show` (`1` skips both bounds). The MCP `display {labels}` writes them on
+the SVG groups, so they ride in the `.map` file; a group without them behaves exactly as upstream,
+and an older client ignores them. A matching small filter in `src/renderers/draw-burg-labels.ts`
+`createLabelGroups` keeps a new burg group, which copies the `town` style, from inheriting them.
+Re-check both after an upstream rebase.
+
 ## Local smoke test (no Cloudflare account needed)
 
 `wrangler dev --local` runs the Worker against an in-memory R2 + D1 (miniflare):

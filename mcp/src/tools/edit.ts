@@ -2,6 +2,7 @@
 // (nothing changes when validation fails), then takes one auto-undo entry, applies the ops and
 // coalesces the redraws. dryRun stops after validation and returns the plan.
 import { z } from "zod";
+import { CHANGES_FULL_MAX, compactChanges } from "../compact.ts";
 import type { CallScope, ToolContext } from "../context.ts";
 import {
   type AddResolved,
@@ -41,8 +42,13 @@ export const Redraw = z
   .optional()
   .describe("Override the computed redraw: false = redraw nothing, or the exact layers to redraw");
 
-/** Diff of the page against the undo point this call just pushed. */
-export async function changesSinceUndo(ctx: ToolContext, scope: CallScope, limit = 20): Promise<unknown> {
+/**
+ * Diff of the page against the undo point this call just pushed. Small diffs are listed in full;
+ * a large one (more than CHANGES_FULL_MAX changed entities) comes back as exact per-type counts
+ * plus the first few entries (compactChanges), so a 200-burg batch does not echo 200 changes.
+ * map_info lists the rest (same baseline).
+ */
+export async function changesSinceUndo(ctx: ToolContext, scope: CallScope, limit = CHANGES_FULL_MAX): Promise<unknown> {
   const entry = ctx.snapshots.undoStack[ctx.snapshots.undoStack.length - 1];
   if (!entry) return undefined;
   try {
@@ -52,7 +58,7 @@ export async function changesSinceUndo(ctx: ToolContext, scope: CallScope, limit
       { noAlerts: true }
     );
     if (!d.available) return undefined;
-    return d.empty ? {} : d.changes;
+    return d.empty ? {} : compactChanges(d.changes as Record<string, unknown> | undefined);
   } catch {
     return undefined;
   }
@@ -73,7 +79,7 @@ export async function runPhased(
   toolArgs: Record<string, unknown>,
   fn: string,
   bridgeArgs: Record<string, unknown>,
-  opts: { dryRun?: boolean; continueOnError?: boolean; timeoutMs?: number }
+  opts: { dryRun?: boolean; continueOnError?: boolean; timeoutMs?: number; rows?: "full" | "ids" }
 ): Promise<Record<string, unknown>> {
   const timeoutMs = opts.timeoutMs ?? TIMEOUTS.edit;
   const plan = await scope.call<ValidateResult>(fn, { ...bridgeArgs, phase: "validate" }, { timeoutMs });
@@ -102,6 +108,15 @@ export async function runPhased(
     throw e;
   }
   ctx.snapshots.noteMutation();
+  const rd = bridgeArgs.redraw;
+  ctx.lastRedraw = {
+    tool: op,
+    at: Date.now(),
+    ops: ctx.snapshots.provenance.opsSince,
+    redrawn: Array.isArray(out.redrawn) ? (out.redrawn as string[]) : [],
+    skippedHidden: Array.isArray(out.skippedHidden) ? (out.skippedHidden as string[]) : [],
+    suppressed: rd === false || (Array.isArray(rd) && rd.length === 0)
+  };
   // the sketch log gets the concrete form of what was applied (also for an aborted batch: the
   // ops before the failing one were applied)
   const resolved = takeResolved(out as Record<string, unknown>);
@@ -133,14 +148,33 @@ export async function runPhased(
   const result: Record<string, unknown> = { ...rest };
   // the apply phase re-validates, so out.errors already holds the skipped invalid ops
   if (!out.errors?.length) delete result.errors;
+  if (opts.rows === "ids") idsOnly(result);
   const changes = await changesSinceUndo(ctx, scope);
   if (changes !== undefined) result.changes = changes;
   result.undo = "snapshot {action:'undo'} reverts this whole call";
   return result;
 }
 
+/** rows:'ids': the per-op `applied` rows and the `created` rows become lists of ids. */
+function idsOnly(result: Record<string, unknown>): void {
+  const ids = (rows: unknown[]) =>
+    rows.map(r => {
+      const row = r as { i?: unknown; index?: unknown };
+      return row.i ?? row.index ?? null;
+    });
+  if (Array.isArray(result.applied)) {
+    result.appliedIds = ids(result.applied);
+    delete result.applied;
+  }
+  if (Array.isArray(result.created)) {
+    result.createdIds = ids(result.created);
+    delete result.created;
+  }
+}
+
 function isEmptyResolved(r: Resolved): boolean {
-  if ("ops" in r) return !(r as EditResolved).ops.length;
+  // a map edit with no rows but a recalculation (the recalculate-only call) still did something
+  if ("ops" in r) return !(r as EditResolved).ops.length && !(r as EditResolved).recalculate;
   if ("items" in r) return !(r as AddResolved).items.length;
   return false;
 }
@@ -167,7 +201,13 @@ const Common = {
     .optional()
     .describe("Apply the valid ops and report the invalid ones instead of refusing the whole call"),
   redraw: Redraw,
-  timeoutMs: TimeoutMs
+  timeoutMs: TimeoutMs,
+  rows: z
+    .enum(["full", "ids"])
+    .optional()
+    .describe(
+      "ids: answer with the ids only (appliedIds / createdIds) instead of one row per op (applied / created with before/after); far smaller for big batches"
+    )
 };
 
 export const SelectSchema = z
@@ -208,7 +248,7 @@ export function register(ctx: ToolContext): void {
     {
       title: "Edit or remove entities",
       description:
-        "Batch-edit entities of ONE type: ops [{ref, set:{field: value}} | {ref, remove:true}]. All ops are validated first; if any is invalid nothing changes (unless continueOnError). One auto-undo entry covers the call; redraws are coalesced. dryRun:true returns before/after per op. Fields per type are in tupaia://docs/cheatsheet.md, e.g. burg {name, population (people), group, type, culture, port, lock, move:Place}; state {name, fullName, form, formName, color, capital:burgRef, culture, lock}; marker {type, icon, size, pinned, note:{name, legend}, move}; label {text, move}; route {group, name, lock, points}; routeGroup {id (rename), name, stroke, width, dash, linecap, opacity, after|before}; river {name, type, mainStem, split, merge, reroute}; biome {name, color, habitability, iconsDensity, icons, cost}; map (no ref) {name, populationRate, urbanization, year, era, reliefOnLoad} (river structure, route points, biome values and reliefOnLoad: see ops.set). name can be {generate:{base:<namesbase>}} | {generate:{culture:<ref>}} | {generate:{}} (own culture). A state's capital changes only through edit state {capital}. remove works for burg, state, province, culture, religion, marker, route, river, zone, note, label, routeGroup (as in the editors it ignores lock; bulk with locks honoured: the clear tool). A capital or a market centre is refused unless force:true (per op, or edit {force:true} for all ops; see ops.force); a routeGroup only when empty, or with force:true (its routes move to moveTo, default 'roads'; roads/trails/searoutes stay). orphanRoutes:true also removes routes that served only removed burgs. A province's cells become province-less; a culture's cells, burgs, states and religions fall back to culture 0 (Wildlands); a religion's cells to No religion; a state's provinces go with it. Removing burgs or routes repairs the route links once per call (routeLinksFixed).",
+        "Batch-edit entities of ONE type: ops [{ref, set:{field: value}} | {ref, remove:true}]. All ops are validated first; if any is invalid nothing changes (unless continueOnError). One auto-undo entry covers the call; redraws are coalesced. dryRun:true returns before/after per op. Fields per type are in tupaia://docs/cheatsheet.md, e.g. burg {name, population (people), group, type, culture, port, lock, move:Place}; state {name, fullName, form, formName, color, capital:burgRef, culture, lock}; marker {type, icon, size, pinned, note:{name, legend}, move}; label {text, move}; route {group, name, lock, points}; routeGroup {id (rename), name, stroke, width, dash, linecap, opacity, after|before}; river {name, type, mainStem, split, merge, reroute}; biome {name, color, habitability, iconsDensity, icons, cost}; map (no ref) {name, populationRate, urbanization, year, era, reliefOnLoad} plus world settings (mapSize, latitude, longitude, temperatures, winds, precipitation, units: a value or {value, lock}; ops may lock/unlock; recalculate refreshes derived data, then ops may be omitted; the result lists stale layers). River structure, route points, biome values, world settings and reliefOnLoad: see ops.set. name can be {generate:{base:<namesbase>}} | {generate:{culture:<ref>}} | {generate:{}} (own culture). A state's capital changes only through edit state {capital}. remove works for burg, state, province, culture, religion, marker, route, river, zone, note, label, routeGroup (as in the editors it ignores lock; bulk with locks honoured: the clear tool). A capital or a market centre is refused unless force:true (per op, or edit {force:true} for all ops; see ops.force); a routeGroup only when empty, or with force:true (its routes move to moveTo, default 'roads'; roads/trails/searoutes stay). orphanRoutes:true also removes routes that served only removed burgs. Removing burgs or routes repairs the route links once per call (routeLinksFixed).",
       inputSchema: z.object({
         type: z.enum(EDIT_TYPES),
         ops: z
@@ -219,9 +259,22 @@ export function register(ctx: ToolContext): void {
                 .record(z.string(), z.unknown())
                 .optional()
                 .describe(
-                  "Fields to set. route points:[Place | [x,y,cell]...] replaces the path (links rebuilt; add lock:true to keep an edited generated route on regenerate); route group: a group id or name. routeGroup id renames the group (its routes follow). river: one structural change per op: mainStem:<tributary> (its upper course becomes this river's), split:{at, name?, type?} (the upper part becomes a new river, in created), merge:true (inverse of split), reroute:{cells:[...]} | {from, to:Place|'edge', through?, snap?, edge?} (a stretch, a new mouth/confluence/edge, or a new source; no crossings, climbs warned); ops apply in order. biome: color any CSS colour (stored as #rrggbb), habitability 0-9999 (re-ranks that biome's cells), iconsDensity 0-500 (> 0 needs icons), icons {iconName: weight} | [iconName], cost 0-10000. map reliefOnLoad:true: saves drop the relief icons and loads redraw them (seeded)"
+                  "Fields to set. route points:[Place | [x,y,cell]...] replaces the path (links rebuilt; add lock:true to keep an edited generated route on regenerate); route group: a group id or name. routeGroup id renames the group (its routes follow). river: one structural change per op: mainStem:<tributary> (its upper course becomes this river's), split:{at, name?, type?} (the upper part becomes a new river, in created), merge:true (inverse of split), reroute:{cells:[...]} | {from, to:Place|'edge', through?, snap?, edge?} (a stretch, a new mouth/confluence/edge, or a new source; no crossings, climbs warned); ops apply in order. biome: color any CSS colour (stored as #rrggbb), habitability 0-9999 (re-ranks that biome's cells), iconsDensity 0-500 (> 0 needs icons), icons {iconName: weight} | [iconName], cost 0-10000. map reliefOnLoad:true: saves drop the relief icons and loads redraw them (seeded). map world settings: mapSize (% of the world), latitude/longitude (shift 0..100), temperatureEquator/NorthPole/SouthPole (degrees Celsius), winds (6 tier angles north to south, or {tier: degrees}), precipitation (%), distanceScale, distanceUnit, areaUnit, heightUnit, heightExponent, temperatureScale; year is a whole number. A setting takes a value or {value, lock:true|false} (the app's own lock(): generate_map and the options panel keep the value; locks travel in the .map text, so undo, restore, relaunch and save/load keep them). Settings only set inputs: see recalculate"
                 ),
-              remove: z.boolean().optional(),
+              remove: z
+                .boolean()
+                .optional()
+                .describe(
+                  "Remove the entity. A province's cells become province-less; a culture's cells, burgs, states and religions fall back to culture 0 (Wildlands); a religion's cells to No religion; a state's provinces go with it"
+                ),
+              lock: z
+                .union([z.literal("all"), z.array(z.string())])
+                .optional()
+                .describe("type 'map': setting names to lock (['all'] or 'all' = every setting)"),
+              unlock: z
+                .union([z.literal("all"), z.array(z.string())])
+                .optional()
+                .describe("type 'map': setting names to unlock (['all'] or 'all' = every setting)"),
               force: z
                 .boolean()
                 .optional()
@@ -238,9 +291,16 @@ export function register(ctx: ToolContext): void {
                 )
             })
           )
-          .min(1)
-          .max(500),
+          .max(500)
+          .optional()
+          .describe("Required (1+ ops), except type 'map' with recalculate: then omit it to only recalculate"),
         force: z.boolean().optional().describe("type burg or routeGroup: force:true for every remove op"),
+        recalculate: z
+          .enum(["none", "climate", "biomes", "rivers+biomes", "climate+biomes"])
+          .optional()
+          .describe(
+            "type 'map': refresh derived data after settings changed (default none). climate = temperature + precipitation; biomes = biome cells only; rivers+biomes = rivers, lake data, biomes; climate+biomes = all. Rivers (ids, names, edits) and hand-painted biome cells are replaced; lake names and custom-biome cells are kept. dryRun reports the counts"
+          ),
         ...Common
       }),
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
@@ -248,9 +308,28 @@ export function register(ctx: ToolContext): void {
       kind: "edit"
     },
     async (args, scope) => {
-      const { dryRun, timeoutMs, ...rest } = args;
+      const { dryRun, timeoutMs, rows, ...rest } = args;
       const continueOnError = args.continueOnError;
-      return runPhased(ctx, scope, `edit ${args.type}`, args, "edit", rest, { dryRun, continueOnError, timeoutMs });
+      const recalculates = args.recalculate !== undefined && args.recalculate !== "none";
+      if (!args.ops?.length && !(args.type === "map" && recalculates))
+        throw new ToolError("BAD_ARGS", "ops must hold at least one op (only type 'map' with recalculate may omit it)");
+      const result = await runPhased(ctx, scope, `edit ${args.type}`, args, "edit", rest, {
+        dryRun,
+        continueOnError,
+        timeoutMs: timeoutMs ?? (recalculates ? TIMEOUTS.heavy : undefined),
+        rows
+      });
+      // settings are already in `applied` (before/after), and a climate recalculation renumbers rivers:
+      // a map edit reports counts only
+      const diff = result.changes as Record<string, unknown> | undefined;
+      if (args.type === "map" && diff && typeof diff === "object") {
+        const counts: Record<string, unknown> = {};
+        for (const [type, d] of Object.entries(diff))
+          if (type !== "settings" && type !== "map") counts[type] = (d as { counts?: unknown } | null)?.counts ?? d;
+        if (Object.keys(counts).length) result.changes = counts;
+        else delete result.changes;
+      }
+      return result;
     }
   );
 
@@ -276,9 +355,14 @@ export function register(ctx: ToolContext): void {
       kind: "edit"
     },
     async (args, scope) => {
-      const { dryRun, timeoutMs, ...rest } = args;
+      const { dryRun, timeoutMs, rows, ...rest } = args;
       const continueOnError = args.continueOnError;
-      return runPhased(ctx, scope, `add ${args.type}`, args, "add", rest, { dryRun, continueOnError, timeoutMs });
+      return runPhased(ctx, scope, `add ${args.type}`, args, "add", rest, {
+        dryRun,
+        continueOnError,
+        timeoutMs,
+        rows
+      });
     }
   );
 

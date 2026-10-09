@@ -241,6 +241,20 @@ describe("diff", () => {
     assert.deepEqual(d.removed, [2]);
     assert.deepEqual(d.modified, [{ i: 1, fields: { name: ["A", "A2"] } }]);
   });
+  test("diffProjections: float noise is not a change, whole numbers compare exactly", () => {
+    const { T } = load();
+    const { diffProjections } = T.pure;
+    const d = plain(
+      diffProjections(
+        { 1: { rural: 65326.99093171954, pop: 1000000, rate: 0.5 }, 2: { rural: 1.5 } },
+        { 1: { rural: 65326.9900765121, pop: 1000001, rate: 0.5000001 }, 2: { rural: 1.6 } }
+      )
+    );
+    assert.deepEqual(d.modified, [
+      { i: 1, fields: { pop: [1000000, 1000001] } },
+      { i: 2, fields: { rural: [1.5, 1.6] } }
+    ]);
+  });
   test("setBaseline + diff over the fake pack", async () => {
     const { T, world } = load();
     const set = await T.call("setBaseline", { key: "k" });

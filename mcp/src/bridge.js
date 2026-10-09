@@ -212,6 +212,16 @@
   }
 
   /**
+   * Fractions equal to float noise (a sum recomputed in another order): not a change worth
+   * reporting. Integers are compared exactly.
+   */
+  const sameNum = (p, q) =>
+    typeof p === "number" &&
+    typeof q === "number" &&
+    !(Number.isInteger(p) && Number.isInteger(q)) &&
+    Math.abs(p - q) <= 1e-7 * Math.max(1, Math.abs(p), Math.abs(q));
+
+  /**
    * Diff two projection maps {id: projectionObject} (plain objects).
    * Returns {added:[id], removed:[id], modified:[{i, fields:{k:[old,new]|'changed'}}]}.
    */
@@ -229,7 +239,7 @@
       const fields = {};
       let n = 0;
       for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) {
-        if (a[k] === b[k]) continue;
+        if (a[k] === b[k] || sameNum(a[k], b[k])) continue;
         // hashes of arrays/objects are tagged "#arr<n>:..." / "#obj:..."; a colour such as "#3d2b6b" is not one
         const isTag = v => /^#(arr\d|obj:)/.test(String(v));
         const tagged = isTag(a[k]) || isTag(b[k]);
