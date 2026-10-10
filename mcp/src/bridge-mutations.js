@@ -2130,6 +2130,98 @@
     return pack.provinces.map(p => (isLive(p) && p.i ? { state: p.state } : null));
   }
 
+  // ---- state labels across a state paint. The app's own state painting (states editor, "adjust
+  // labels" on) re-fits the label of every touched state; a label placed by hand stays where it
+  // is. Hand-placed: the state is locked (drawStateLabels skips it), or its label carries an edit
+  // the renderer never makes: a transform (dragged), a startOffset other than 50% or a
+  // letter-spacing (labels editor), or a path other than the renderer's three-point curve
+  // (M..C..C; a straight path written by eval, or one reshaped in the labels editor).
+  const AUTO_STATE_LABEL_D = /^M[^A-Za-z]+C[^A-Za-z]+C[^A-Za-z]+$/;
+
+  /** The cell under a label's anchor (its text's middle on the path, after its transform), or null. */
+  function labelAnchorCell(el, path, tp) {
+    try {
+      const len = path.getTotalLength();
+      const so = String(tp?.getAttribute("startOffset") ?? "50%");
+      const at = so.trim().endsWith("%") ? (parseFloat(so) / 100) * len : parseFloat(so);
+      const pt = path.getPointAtLength(Math.max(0, Math.min(len, Number.isFinite(at) ? at : len / 2)));
+      let [x, y] = [pt.x, pt.y];
+      const m = el.transform?.baseVal?.consolidate?.()?.matrix;
+      if (m) [x, y] = [m.a * x + m.c * y + m.e, m.b * x + m.d * y + m.f];
+      return typeof findCell === "function" ? findCell(x, y) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Why a state's label counts as hand-placed (null: drawn by the renderer), and its anchor cell. */
+  function stateLabelInfo(s) {
+    const el = document.getElementById(`stateLabel${s.i}`);
+    const path = document.getElementById(`textPath_stateLabel${s.i}`);
+    if (!el || !path) return null;
+    const tp = el.querySelector("textPath");
+    const d = (path.getAttribute("d") || "").replace(/\s+/g, "");
+    const so = (tp?.getAttribute("startOffset") ?? "50%").trim();
+    let manual = null;
+    if (s.lock) manual = "locked";
+    else if (el.getAttribute("transform")) manual = "moved";
+    else if (so !== "50%" || tp?.getAttribute("letter-spacing")) manual = "edited";
+    else if (!AUTO_STATE_LABEL_D.test(d)) manual = "custom path";
+    const cell = manual ? labelAnchorCell(el, path, tp) : null;
+    return { manual, cell, inside: cell !== null && cell !== undefined && pack.cells.state[cell] === s.i };
+  }
+
+  /** Before a state paint: the labels of the states it can touch (the target and the cells' owners). */
+  function stateLabelsBefore(target, cells) {
+    const ids = new Set([target]);
+    for (const cell of cells) ids.add(pack.cells.state[cell]);
+    const out = new Map();
+    for (const id of ids) {
+      const s = pack.states[id];
+      if (id && isLive(s)) out.set(id, stateLabelInfo(s));
+    }
+    return out;
+  }
+
+  /**
+   * After a state paint: which touched states' labels to re-fit. A hand-placed label is kept
+   * unless its anchor was in its state and no longer is (re-fitted and reported in moved); a
+   * label of a state left without cells stays and is reported.
+   */
+  function stateLabelsAfter(touched, before) {
+    const refit = [];
+    const kept = [];
+    const moved = [];
+    for (const id of touched) {
+      const s = pack.states[id];
+      const b = before.get(id);
+      if (!isLive(s) || !s.cells) {
+        if (b) moved.push({ state: nameFor("state", id), why: "the state has no cells now; its label was left" });
+        continue;
+      }
+      if (!b?.manual) {
+        refit.push(id);
+        continue;
+      }
+      if (b.inside && pack.cells.state[b.cell] !== id) {
+        refit.push(id);
+        moved.push({ state: nameFor("state", id), why: `${b.manual} label's anchor left the state; re-fitted` });
+        continue;
+      }
+      kept.push(nameFor("state", id));
+    }
+    return { refit, kept, moved };
+  }
+
+  /** A paint's fill redraw: drawn only where the layer showed something (see bridge.js redraw). */
+  function addFill(c, layer) {
+    c.R.list.push({ layer, ifDrawn: true });
+    if (T.layerShowsNothing?.(layer))
+      c.notes.add(
+        `the ${layer} layer is on but drew nothing before this paint, so it stays empty (display {off:['${layer}']} then {on:['${layer}']} draws it)`
+      );
+  }
+
   async function paintApply(P, write, c) {
     const out = {};
     const C = pack.cells;
@@ -2137,12 +2229,26 @@
       if (P[key] === undefined) continue;
       const info = { affectedStates: new Set(), affectedProvinces: new Set() };
       const provBefore = write && key === "state" ? provinceShape() : null;
+      const labelsBefore = write && key === "state" ? stateLabelsBefore(P.state, P.cells) : null;
+      const polesBefore =
+        write && key === "state"
+          ? pack.states.map(s => (isLive(s) && Array.isArray(s.pole) ? s.pole.slice() : null))
+          : null;
       const r = paintTerritory(key, P[key], P.cells, write, info);
       out[key] = { to: nameFor(key, P[key]), ...r };
       if (!write || !r.changed) continue;
       if (key === "state") {
         States.collectStatistics();
         States.getPoles();
+        const lab = stateLabelsAfter(
+          [...info.affectedStates].filter(s => s > 0),
+          labelsBefore
+        );
+        // a state whose label is not re-fitted keeps its pole (the label anchor the app keeps)
+        const refit = new Set(lab.refit);
+        pack.states.forEach((s, i) => {
+          if (polesBefore[i] && isLive(s) && !refit.has(i)) s.pole = polesBefore[i];
+        });
         c.internals.adjustProvinces([...info.affectedProvinces]);
         Provinces.getPoles?.();
         const after = provinceShape();
@@ -2155,19 +2261,22 @@
           else if (b && x && b.state !== x.state) adj.changedOwner.push(k);
         }
         out.state.provincesAdjusted = adj;
-        c.R.add("states");
-        c.R.add("borders");
-        c.R.add("provinces");
-        c.R.add(
-          "stateLabels",
-          [...info.affectedStates].filter(s => s > 0)
-        );
+        const sl = {};
+        if (lab.refit.length) sl.refit = lab.refit.length;
+        if (lab.kept.length) sl.kept = lab.kept;
+        if (lab.moved.length) sl.moved = lab.moved;
+        if (Object.keys(sl).length) out.state.stateLabels = sl;
+        // apply surfaces its steps' notes, not their results: a moved label is reported there too
+        for (const m of lab.moved) c.notes.add(`state label of ${m.state}: ${m.why}`);
+        addFill(c, "states");
+        addFill(c, "borders");
+        addFill(c, "provinces");
+        if (lab.refit.length) c.R.add("stateLabels", lab.refit);
       } else if (key === "province") {
         Provinces.getPoles?.();
-        c.R.add("borders");
-        c.R.add("provinces");
-      } else if (key === "culture") c.R.add("cultures");
-      else c.R.add("religions");
+        addFill(c, "borders");
+        addFill(c, "provinces");
+      } else addFill(c, key === "culture" ? "cultures" : "religions");
     }
     if (P.biome !== undefined) {
       let changed = 0;
@@ -2185,7 +2294,7 @@
         if (write) C.biome[cell] = P.biome;
       }
       out.biome = { to: biomesData.name[P.biome], changed, byPrevious: by, skipped: { water } };
-      if (write && changed) c.R.add("biomes");
+      if (write && changed) addFill(c, "biomes");
     }
     if (P.zone !== undefined) {
       const z = I.byId("zone", P.zone.i);

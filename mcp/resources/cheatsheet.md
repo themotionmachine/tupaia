@@ -136,12 +136,25 @@ feature, burg, river}`, minus `except:<another select>` ('polygon except circle'
 
 | set | rules |
 | --- | --- |
-| state | land only; never a state centre or a capital's cell; burgs follow; provinces re-fitted |
+| state | land only; never a state centre or a capital's cell; burgs follow; provinces re-fitted; state labels: see below |
 | province | land of the province's own state; never a province centre |
 | culture / religion | land only (culture: burgs follow) |
 | biome | name or id; land only; `feather:{width, unit?:'px'\|'cells', seed?}` frays the edge (use `unit:'cells'`, width 2-4; under one cell spacing it does nothing and a note says so) |
 | zone | ref (adds cells) or `{ref, op:'add'\|'remove'}` |
 | height | alone in its call; `{value \| delta \| smooth:n, rebuild?, clamp?, erosion?, confirmErase?, biomes?}`; the local way to edit a few cells |
+
+State labels across a state paint (also apply's paint list): the touched states' labels the
+renderer drew are re-fitted; a hand-placed one keeps its textPath `d`, font-size, startOffset,
+transform and its state's pole. Hand-placed = the state is locked, or the label was dragged
+(transform), has a startOffset other than 50% or a letter-spacing, or its path is not the
+renderer's `M..C..C` curve (a straight path written by eval, a reshaped one). It is re-fitted
+only when the paint takes its anchor (the text's middle) out of the state, and reported:
+`set.state.stateLabels {refit: n, kept: ['Name (i)'], moved: [{state, why}]}` plus a note
+(apply shows the note). Untouched states keep their pole. No layer is toggled; a fill layer
+(states, provinces, borders, cultures, religions, biomes) whose button is on but which drew
+nothing (a file whose `#provs` held only whitespace loads with Provinces on) stays empty, in
+`skippedHidden` with a note; `display {off:['provinces']}` then `{on:['provinces']}` draws it.
+Lock a state (`edit state set lock:true`) to pin a curved hand-drawn label.
 
 Height `rebuild`: `keep` (default) land only, 20..100, refuses a change across 20 (`clamp:true`
 stops at 20) and is local: the changed cells' temperature, lake levels and biome follow
