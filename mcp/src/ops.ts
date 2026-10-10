@@ -228,6 +228,8 @@ export interface SketchBase {
   at: string;
   /** Size of the base blob (a saved .map file's provenance re-checks it against the retained version). */
   bytes?: number;
+  /** sha256 of the base blob. */
+  sha256?: string;
 }
 
 export interface Sketch {
@@ -263,6 +265,8 @@ export interface Sketch {
   workerDeleted?: boolean;
   /** Node-internal: the undo entry of the load_map that reactivated it from a saved file (undo ends it). */
   reactivatedBy?: number;
+  /** The stopped (empty or Worker-saved) sketch that reactivation replaced: undo says how to reopen it. */
+  replacedSlug?: string;
 }
 
 const SUSPENDED_OP = (seq: number, tool: string) => `op ${seq} (${tool})`;
@@ -367,7 +371,7 @@ export class SketchStore {
         // undoing the load_map that brought the sketch back from a file: the page is not the sketch any more
         this.current = null;
         notes.push(
-          `sketch '${sk.slug}' is no longer active: the undone load_map had reactivated it from a saved file (load the file again to bring it back)`
+          `sketch '${sk.slug}' is no longer active: the undone load_map had reactivated it from a saved file (load the file again to bring it back)${sk.replacedSlug ? `; the sketch it replaced, '${sk.replacedSlug}', was saved to the Worker: sketch {action:'open', slug:'${sk.replacedSlug}'} reopens it` : ""}`
         );
         break;
       }

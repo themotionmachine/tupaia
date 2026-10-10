@@ -62,6 +62,7 @@ async function status(ctx: ToolContext, scope: CallScope, clear: boolean): Promi
     state: {
       dir: ctx.state.dir,
       persists: ctx.state.owner,
+      ...(ctx.state.heldBy ? { heldBy: ctx.state.heldBy } : {}),
       ...(ctx.state.note ? { note: ctx.state.note } : {}),
       ...(ctx.resumed ? { resumed: ctx.resumed } : {})
     },

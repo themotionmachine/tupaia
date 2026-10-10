@@ -94,7 +94,7 @@ export function register(ctx: ToolContext): void {
           ...brief(s),
           path: abs,
           origin: ctx.provenanceView(),
-          ...(fl.file !== "none" ? { lineage: lineageView(fl) } : {}),
+          lineage: lineageView(fl),
           bytes: bytes.length,
           ...(note ? { note } : {}),
           ms: Date.now() - t0
@@ -110,7 +110,7 @@ export function register(ctx: ToolContext): void {
     {
       title: "Save the map to a .map file",
       description:
-        "Write the current map (the app's prepareMapData, same as File > Save) to a .map file on disk, plus one provenance line the app ignores (origin, shared base version, sketch slug and log, ops since, a content hash; signed with this TUPAIA_OUT's key): load_map of the unmodified file restores the lineage. Relative paths go under TUPAIA_OUT (default <repo>/.tupaia-mcp-out); a path in the repo is allowed outside source/config folders; anything else needs allowOutside:true and only when the human asked for that place. Replacing an existing file needs overwrite:true. tests/fixtures is always refused. Refused while an app editor is active (customization != 0). Returns {path, bytes, sha256 (of the map text, the provenance line excluded), lineage}. compact:true writes a compacted copy (removed entities as stubs; see compact) and adds {compacted} with the bytes saved; the page is not changed. This never touches the live shared map (that is shared_save).",
+        "Write the current map (the app's prepareMapData, same as File > Save) to a .map file on disk, plus one provenance line the app ignores (origin, shared base version, sketch slug and log, ops since, a content hash; signed with this TUPAIA_OUT's key): load_map of the unmodified file restores the lineage. Relative paths go under TUPAIA_OUT (default <repo>/.tupaia-mcp-out); a path in the repo is allowed outside source/config folders; anything else needs allowOutside:true and only when the human asked for that place. Replacing an existing file needs overwrite:true. tests/fixtures is always refused. Refused while an app editor is active (customization != 0). Returns {path, bytes, sha256 (of the file), mapSha256 (of the map text without the provenance line: equal for two saves of the same map), lineage}. compact:true writes a compacted copy (removed entities as stubs; see compact) and adds {compacted} with the bytes saved; the page is not changed. This never touches the live shared map (that is shared_save).",
       inputSchema: z.object({
         path: z.string().min(1).optional().describe("Target .map path (default TUPAIA_OUT/maps/<name>-<time>.map)"),
         overwrite: z.boolean().optional(),
@@ -136,14 +136,15 @@ export function register(ctx: ToolContext): void {
         allowOutside: args.allowOutside
       });
       await ctx.verifyProvenance();
-      const block = blockFor(ctx, "save_map");
+      const block = blockFor(ctx, "save_map", { compacted: !!data.compacted });
       const buf = Buffer.from(withTrailer(data.text, block, ctx.provKey), "utf8");
       fs.writeFileSync(file, buf);
       return {
         path: file,
         bytes: buf.length,
-        // the map text's hash (as in the provenance line): two saves of the same map compare equal
-        sha256: sha256(Buffer.from(data.text, "utf8")),
+        sha256: sha256(buf),
+        // the map text's (as in the provenance line): two saves of the same map compare equal
+        mapSha256: sha256(Buffer.from(data.text, "utf8")),
         name: data.fileName,
         lineage: lineageWord(block),
         ...(data.compacted ? { compacted: data.compacted } : {}),
@@ -339,6 +340,7 @@ export async function loadShared(
     sharedUpdatedBy: blob.updatedBy,
     sharedUpdatedAt: blob.updatedAt,
     sharedBytes: blob.bytes.length,
+    sharedSha256: sha256(blob.bytes),
     fetchedAt: new Date().toISOString()
   });
   return { summary, bytes: blob.bytes.length, version: blob.version, note: oldBiomeNote(blob.bytes) };

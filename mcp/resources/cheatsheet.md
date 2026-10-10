@@ -31,7 +31,7 @@ only in a server a human spawned with `TUPAIA_MODE=live`, behind a preview and a
 | `snapshot {action:'take'\|'list'\|'drop'\|'restore'\|'undo'\|'redo', label?, index?, n?, saveTo?}` | named whole-map snapshots and the auto-undo/redo history. |
 | `eval {code, args?, readOnly?, redraw?:[layers]\|false, timeoutMs?}` | escape hatch: JS in the page (read tupaia://docs/runtime-api.md first). |
 | `load_map {path} \| {source:'shared'}` | load a .map file, or the live shared map (a read-only GET); a save_map file brings its lineage back (Files). |
-| `save_map {path?, overwrite?, allowOutside?, compact?}` | write the map as a .map file with its lineage (`compact:true` = compacted copy); `sha256` = the map text's. |
+| `save_map {path?, overwrite?, allowOutside?, compact?}` | write the map as a .map file with its lineage (`compact:true` = compacted copy); `sha256` = the file's, `mapSha256` = the map text's. |
 | `export {format, path?, scale?, ...}` | svg, png, jpeg, json-full, json-minimal, geojson-cells/-routes/-rivers/-markers/-zones. |
 | `shared_status {versions?, build?, format?:'compact'}` | live shared map metadata vs the page map: lineage, stale, build check. |
 | `shared_save {confirm?, token?, force?, replaceWithUnrelated?, expectVersion?, skipBuildCheck?, compact?}` | OUTWARD: overwrite the live shared map (preview, then confirm + token). |
@@ -454,16 +454,20 @@ random stream; `rivers` keeps pack heights; `restoreLayers:true` undoes layer ch
 - export png/jpeg rasterise the whole map at graph size x `scale`; svg `fullMap:false` = the view.
 - save_map (and the exit save) append one `#tupaia-provenance {...}` line after the app's lines
   (the app ignores it): origin, lineage, shared base version, sketch slug + log, opsSince, sha256
-  of the content, HMAC with `TUPAIA_OUT/state/provenance.key`. load_map of the unmodified file
-  restores the lineage (shared base, sketch) after re-checking the base with the server (meta,
-  or the retained version's size); a modified/foreign file or a contradicted base loads as
-  unrelated. Result: `lineage {file, lineage, base, sketch?, baseCheck, note}`.
+  of the content, HMAC with `TUPAIA_OUT/provenance.key`. load_map of the unmodified file
+  restores the lineage (shared base, sketch) after re-checking the base with the server (meta +
+  blob sha256, or the retained version's size); a modified/foreign file or a contradicted base
+  loads as unrelated. Result: `lineage {file, lineage, base, sketch?, baseCheck, note}`
+  (`file:'none'` = no provenance line). save_map: `sha256` (file), `mapSha256` (map text).
 - Screenshot ids continue across servers (after the highest `TUPAIA_OUT/shots/sN*`); default
   shot files and CLI `call-*.jpg` images are never overwritten; `saveTo` needs `overwrite:true`.
 - `TUPAIA_OUT/state/` keeps the page map, undo/redo, snapshots, provenance and the active sketch
   after every call; the next server on that out dir resumes them (first result: `resumed ...`;
   session `state`). Caps: `TUPAIA_SNAPSHOTS_MAX` (40 entries), `TUPAIA_SNAPSHOTS_MAX_MB` (512);
-  `TUPAIA_STATE=off` disables. One writer per out dir (owner.json).
+  `TUPAIA_STATE=off` disables. One writer per out dir (owner.json): a daemon at start, a stdio
+  server on its first call; a server that finds another owner says so (session `state`) and
+  takes over when that one exits (with work of its own: the other's page + sketch go to
+  `maps/takeover-*.map`).
 
 ## Shared map (outward)
 
@@ -525,9 +529,9 @@ environment only; a live daemon refuses a caller whose environment is local (or 
 TUPAIA_LIVE_ORIGIN): exit 2, unless `--accept-live`. A live daemon loads the shared map on its
 first launch. `$TUPAIA_OUT/daemon.log` has each call's daemon time; under load the CLI's wall
 time can be several times that, and stderr progress lines say whether the daemon has the call yet.
-Idle shutdown (`TUPAIA_HTTP_IDLE_MIN`, fractions allowed) waits while a sketch records or is
-unsaved (`/health` and session `idle.idleHeldBy`); a stopped daemon's work resumes from
-`$TUPAIA_OUT/state` on the next start.
+Idle shutdown (`TUPAIA_HTTP_IDLE_MIN`, fractions allowed) waits one more period while a sketch
+records or is unsaved, or until `$TUPAIA_OUT/state` holds it (`/health` and session
+`idle.note`); a stopped daemon's work resumes from `$TUPAIA_OUT/state` on the next start.
 
 ## Recipes
 

@@ -6,7 +6,7 @@
 // it ignores the extra line (old and new builds alike); a save from the app drops it. The block
 // names where the map came from (lineage, shared base version, sketch slug and its ops log, ops
 // since) and carries the sha256 of the map content before the trailer plus an HMAC over the block
-// with this TUPAIA_OUT's key (state/provenance.key, 0600). A file edited after the save fails the
+// with this TUPAIA_OUT's key (TUPAIA_OUT/provenance.key, 0600). A file edited after the save fails the
 // content hash; a copied or hand-written block fails the HMAC: both load as unrelated. A valid
 // block's base is then checked against the shared map server (state.ts has the key).
 import crypto from "node:crypto";
@@ -23,6 +23,8 @@ export interface ProvBase {
   updatedBy: string | null;
   /** Size of the base blob (checked against the retained version's size). */
   bytes?: number;
+  /** sha256 of the base blob (checked while it is the shared map's current version). */
+  sha256?: string;
 }
 
 export interface ProvSketch {
@@ -50,6 +52,8 @@ export interface ProvBlock {
   base: ProvBase | null;
   opsSince: number;
   sketch: ProvSketch | null;
+  /** save_map compact:true: removed records are stubs (counted as one op since the base). */
+  compacted?: boolean;
   /** sha256 of the map content (the file before the trailer line). */
   sha256: string;
   sig?: string;
@@ -133,6 +137,7 @@ export function baseOf(p: Provenance): ProvBase | null {
     version: p.sharedVersion,
     updatedAt: p.sharedUpdatedAt ?? null,
     updatedBy: p.sharedUpdatedBy ?? null,
-    ...(typeof p.sharedBytes === "number" ? { bytes: p.sharedBytes } : {})
+    ...(typeof p.sharedBytes === "number" ? { bytes: p.sharedBytes } : {}),
+    ...(p.sharedSha256 ? { sha256: p.sharedSha256 } : {})
   };
 }

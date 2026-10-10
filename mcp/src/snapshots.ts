@@ -20,6 +20,8 @@ export interface Provenance {
   sharedUpdatedAt?: string | null;
   /** Size of the shared blob at sharedVersion (a saved file's provenance re-checks it). */
   sharedBytes?: number;
+  /** sha256 of that blob (a saved file's provenance re-checks it while it is current). */
+  sharedSha256?: string;
   fetchedAt?: string;
   /**
    * The page's window.mapId when this provenance was recorded. The app stamps a new id on every
@@ -173,6 +175,33 @@ export class SnapshotStore {
       if (old) evicted.push(old.baselineKey);
     }
     return { snap, evicted };
+  }
+
+  /**
+   * Snapshots another server left in the state dir (a late takeover, resume.ts): new ids, their
+   * own provenance, `tag` appended to the label. Returns the new snapshots and evicted baselines.
+   */
+  adopt(list: readonly Snapshot[], tag: string): { added: Snapshot[]; evicted: string[] } {
+    const added: Snapshot[] = [];
+    for (const s of list) {
+      const id = this.#nextId++;
+      const snap: Snapshot = {
+        ...s,
+        id,
+        label: `${s.label ?? `#${s.id}`} (${tag})`,
+        provenance: cloneProv(s.provenance),
+        baselineKey: `snap:${id}`,
+        tick: ++this.#tick
+      };
+      this.#ring.push(snap);
+      added.push(snap);
+    }
+    const evicted: string[] = [];
+    while (this.#ring.length > this.max) {
+      const old = this.#ring.shift();
+      if (old) evicted.push(old.baselineKey);
+    }
+    return { added: added.filter(a => this.#ring.includes(a)), evicted };
   }
 
   /** Find by id (number or numeric string) or label (newest wins). */

@@ -11,26 +11,45 @@
 // A file that names a sketch reactivates it (slug, base, ops log) when no other sketch records.
 import type { CallScope, ToolContext } from "./context.ts";
 import { baseOf, checkTrailer, type ProvBase, type ProvBlock, type ProvSketch, withTrailer } from "./map-provenance.ts";
-import { type OpRecord, type SketchBase, sanitizeRecord } from "./ops.ts";
+import { type OpRecord, type Sketch, type SketchBase, sanitizeRecord } from "./ops.ts";
+import { sha256 } from "./shared-api.ts";
+import type { Provenance } from "./snapshots.ts";
 
 /** The sketch log rides along up to the size the Worker takes for ops.json. */
 const LOG_MAX_BYTES = 2 * 1024 * 1024;
 
+type Block = Omit<ProvBlock, "sha256" | "sig" | "v">;
+
 /** The block for the map in the page (call ctx.verifyProvenance() first). */
-export function blockFor(ctx: ToolContext, by: string): Omit<ProvBlock, "sha256" | "sig" | "v"> {
-  const p = ctx.snapshots.provenance;
+export function blockFor(ctx: ToolContext, by: string, opts: { compacted?: boolean } = {}): Block {
+  return blockOf(ctx.snapshots.provenance, ctx.sketches.current, ctx.config.liveOrigin, by, opts);
+}
+
+/**
+ * The block for a map with provenance `p` while `sk` is the active sketch. A compacted copy
+ * (save_map compact:true) is not the page: one more op since its base, and no sketch log.
+ */
+export function blockOf(
+  p: Provenance,
+  sk: Sketch | null,
+  origin: string | null,
+  by: string,
+  opts: { compacted?: boolean } = {}
+): Block {
   let base: ProvBase | null = baseOf(p);
   let sketch: ProvSketch | null = null;
-  const sk = ctx.sketches.current;
   // the sketch rides along only when the page is its map (not a stopped rebase) on the same base
-  if (base && sk && !sk.suspended && sk.base.kind === "shared" && sk.base.version === base.version) {
+  if (base && sk && !opts.compacted && !sk.suspended && sk.base.kind === "shared" && sk.base.version === base.version) {
     const log = sk.ops.map(({ undoId: _u, ...o }) => o);
     const fits = JSON.stringify(log).length <= LOG_MAX_BYTES;
+    const bytes = sk.base.bytes ?? base.bytes;
+    const hash = sk.base.sha256 ?? base.sha256;
     base = {
       version: base.version,
       updatedAt: sk.base.updatedAt ?? base.updatedAt,
       updatedBy: sk.base.updatedBy ?? base.updatedBy,
-      ...(typeof (sk.base.bytes ?? base.bytes) === "number" ? { bytes: sk.base.bytes ?? base.bytes } : {})
+      ...(typeof bytes === "number" ? { bytes } : {}),
+      ...(hash ? { sha256: hash } : {})
     };
     sketch = {
       slug: sk.slug,
@@ -50,13 +69,14 @@ export function blockFor(ctx: ToolContext, by: string): Omit<ProvBlock, "sha256"
   return {
     savedAt: new Date().toISOString(),
     by,
-    origin: ctx.config.liveOrigin,
+    origin,
     lineage: base ? "shared" : "none",
     kind: p.kind,
     seed: p.seed ?? null,
     base,
-    opsSince: p.opsSince,
-    sketch
+    opsSince: p.opsSince + (opts.compacted && base ? 1 : 0),
+    sketch,
+    ...(opts.compacted ? { compacted: true } : {})
   };
 }
 
@@ -66,9 +86,9 @@ export function withProvenance(ctx: ToolContext, text: string, by: string): stri
 }
 
 /** One line for a result: "shared v8, sketch 'x' (12 ops)" or "unrelated". */
-export function lineageWord(b: Omit<ProvBlock, "sha256" | "sig" | "v">): string {
+export function lineageWord(b: Block): string {
   if (b.lineage !== "shared" || !b.base) return `none (${b.kind})`;
-  return `shared v${b.base.version}${b.sketch ? `, sketch '${b.sketch.slug}' (${b.sketch.ops} ops)` : ""}, ${b.opsSince} op(s) since`;
+  return `shared v${b.base.version}${b.sketch ? `, sketch '${b.sketch.slug}' (${b.sketch.ops} ops)` : ""}, ${b.opsSince} op(s) since${b.compacted ? " (compacted copy)" : ""}`;
 }
 
 export interface FileLineage {
@@ -107,7 +127,22 @@ async function checkBase(ctx: ToolContext, b: ProvBlock & { base: ProvBase }): P
         verdict: "mismatch",
         note: `the shared map's v${n} was saved at ${meta.updated_at} by ${meta.updated_by}, but the file's base v${n} at ${b.base.updatedAt}`
       };
-    return { verdict: "verified", note: `base v${n} is the shared map's current version` };
+    if (!b.base.sha256) return { verdict: "verified", note: `base v${n} is the shared map's current version` };
+    // the blob itself (one read-only GET): same bytes as the base the file was derived from?
+    let blob: Awaited<ReturnType<ToolContext["shared"]["getMap"]>>;
+    try {
+      blob = await ctx.shared.getMap();
+    } catch (e) {
+      return { verdict: "unverifiable", note: `base v${n} NOT verified: ${(e as Error).message}` };
+    }
+    if (blob.version !== null && blob.version !== n)
+      return { verdict: "unverifiable", note: `base v${n} NOT verified: the shared map moved on to v${blob.version}` };
+    if (sha256(blob.bytes) !== b.base.sha256)
+      return {
+        verdict: "mismatch",
+        note: `the shared map's v${n} is not the blob the file's base was (sha256 differs)`
+      };
+    return { verdict: "verified", note: `base v${n} is the shared map's current version (same sha256)` };
   }
   if (meta.version < n)
     return { verdict: "mismatch", note: `the shared map is at v${meta.version}, before the file's base v${n}` };
@@ -133,12 +168,18 @@ async function checkBase(ctx: ToolContext, b: ProvBlock & { base: ProvBase }): P
         note: `base v${n} matches the server's retained copy (the shared map moved on to v${meta.version})`
       }
     : { verdict: "unverifiable", note: `base v${n} is retained but its size was not recorded, so NOT verified` };
+  // (the Worker serves no retained version's bytes or hash: its size is all that can be compared)
 }
 
 /** What a file's trailer says about its lineage, checked (see the header). */
 export async function fileLineage(ctx: ToolContext, bytes: Buffer): Promise<FileLineage> {
   const c = checkTrailer(bytes, ctx.provKey);
-  if (c.status === "none") return { file: "none", lineage: "unrelated", note: "the file carries no provenance" };
+  if (c.status === "none")
+    return {
+      file: "none",
+      lineage: "unrelated",
+      note: "no provenance line (an app save, another tool's file, or a save from before lineage trailers): unrelated to the shared map"
+    };
   if (c.status !== "valid") return { file: c.status, lineage: "unrelated", note: `provenance ignored: ${c.reason}` };
   const b = c.block;
   if (b.lineage !== "shared" || !b.base || typeof b.base.version !== "number")
@@ -157,7 +198,13 @@ export async function fileLineage(ctx: ToolContext, bytes: Buffer): Promise<File
       baseCheck: v.verdict,
       note: `its claimed base v${b.base.version} does not hold: ${v.note}`
     };
-  return { file: "valid", lineage: "shared", block: b, baseCheck: v.verdict, note: v.note };
+  return {
+    file: "valid",
+    lineage: "shared",
+    block: b,
+    baseCheck: v.verdict,
+    note: b.compacted ? `${v.note}; a compacted copy (removed records as stubs, counted as one op)` : v.note
+  };
 }
 
 const sameLog = (ops: readonly OpRecord[], log: readonly unknown[] | null): boolean => {
@@ -191,6 +238,7 @@ export async function bindFileLineage(
     sharedUpdatedBy: b.base.updatedBy,
     sharedUpdatedAt: b.base.updatedAt,
     ...(typeof b.base.bytes === "number" ? { sharedBytes: b.base.bytes } : {}),
+    ...(b.base.sha256 ? { sharedSha256: b.base.sha256 } : {}),
     ...(fsk ? { sketchSlug: fsk.slug } : {}),
     restoredFrom: `file ${abs}`,
     opsSince: b.opsSince
@@ -218,6 +266,13 @@ export async function bindFileLineage(
     );
     return notes;
   }
+  if (cur?.ops.length && !(cur.saved && cur.saved.rev === cur.rev)) {
+    // its log exists nowhere else (never saved to the Worker): never dropped by a load
+    notes.push(
+      `the stopped sketch '${cur.slug}' has ${cur.ops.length} op(s) not saved to the Worker, so the file's sketch '${fsk.slug}' was not reactivated (the page is still the file's map at base v${b.base.version}); save or discard '${cur.slug}', then load the file again`
+    );
+    return notes;
+  }
   const base: SketchBase = {
     kind: "shared",
     id: "shared",
@@ -225,7 +280,8 @@ export async function bindFileLineage(
     updatedBy: b.base.updatedBy,
     updatedAt: b.base.updatedAt,
     at: b.savedAt,
-    ...(typeof b.base.bytes === "number" ? { bytes: b.base.bytes } : {})
+    ...(typeof b.base.bytes === "number" ? { bytes: b.base.bytes } : {}),
+    ...(b.base.sha256 ? { sha256: b.base.sha256 } : {})
   };
   const sk = ctx.sketches.begin({
     slug: fsk.slug,
@@ -245,7 +301,12 @@ export async function bindFileLineage(
   sk.reactivatedBy = scope.undoPushed[scope.undoPushed.length - 1];
   // the load brought the sketch back: it is not an op of it
   scope.opRecorded = true;
-  if (cur) notes.push(`replaced the stopped sketch '${cur.slug}' (${cur.ops.length} ops)`);
+  if (cur) {
+    if (cur.ops.length) sk.replacedSlug = cur.slug;
+    notes.push(
+      `replaced the stopped sketch '${cur.slug}' (${cur.ops.length} op(s)${cur.ops.length ? ", saved to the Worker: sketch open brings it back" : ""})`
+    );
+  }
   notes.push(
     `sketch '${fsk.slug}' is active again from the file (base v${b.base.version}, ${sk.ops.length} op(s), ${sk.recording ? "recording" : "stopped"}); sketch_promote works while v${b.base.version} is the shared map's current version, else rebase first`
   );

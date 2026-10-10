@@ -6,9 +6,14 @@
 //                   and the screenshot counter; HMAC-signed, written atomically (temp + rename)
 //                   after every call that can change any of it
 //   blobs/<sha>.map the map texts it names, content-addressed (written once, pruned when unused)
-//   owner.json      the pid that writes here: one server at a time (a second one, e.g. a stdio
-//                   server sharing the daemon's TUPAIA_OUT, neither resumes nor persists)
-//   provenance.key  0600, the HMAC key of state.json and of .map provenance trailers
+//   owner.json      the pid that writes here: one server at a time. A daemon claims it at start,
+//                   a stdio server on its first tool call (an idle stdio server never holds it);
+//                   one that could not claim it retries on every call and takes over once the
+//                   owner has exited (resume.ts ensureState)
+//
+// TUPAIA_OUT/provenance.key (0600, outside state/ so wiping the state keeps lineage) is the HMAC
+// key of state.json and of .map provenance trailers: a file signed under another TUPAIA_OUT loads
+// as 'foreign' unless that key is copied over.
 //
 // TUPAIA_STATE=off turns persistence and resume off. TUPAIA_SNAPSHOTS_MAX (entries, default 40)
 // and TUPAIA_SNAPSHOTS_MAX_MB (default 512) cap the persisted history; the oldest go first.
@@ -16,6 +21,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { Config } from "./config.ts";
+import type { ShotRecord } from "./context.ts";
 import { pidAlive } from "./daemon-state.ts";
 import { hmac } from "./map-provenance.ts";
 import type { Sketch } from "./ops.ts";
@@ -44,11 +50,24 @@ export function writeAtomic(file: string, data: string | Buffer, mode?: number):
   }
 }
 
+/** This TUPAIA_OUT's HMAC key file (outside state/: deleting the state dir keeps it). */
+export function keyFileOf(outDir: string): string {
+  return path.join(outDir, KEY_FILE);
+}
+
 /** This TUPAIA_OUT's HMAC key (made on first use, 0600). */
 export function provenanceKey(outDir: string): Buffer {
-  const dir = stateDirOf(outDir);
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const file = path.join(dir, KEY_FILE);
+  fs.mkdirSync(outDir, { recursive: true });
+  const file = keyFileOf(outDir);
+  // the first builds kept it in state/: move it out (same key, so earlier files stay valid)
+  const old = path.join(stateDirOf(outDir), KEY_FILE);
+  if (!fs.existsSync(file) && fs.existsSync(old)) {
+    try {
+      fs.renameSync(old, file);
+    } catch {
+      // another process moved it
+    }
+  }
   const read = (): Buffer | null => {
     try {
       const k = Buffer.from(fs.readFileSync(file, "utf8").trim(), "hex");
@@ -89,6 +108,8 @@ interface StateFile {
   };
   sketch: (Omit<Sketch, "baseText"> & { baseBlob: string | null }) | null;
   shotSeq: number;
+  /** The newest screenshot records (compare/view by id after a restart). */
+  shots?: ShotRecord[];
   /** History entries left out by the caps. */
   pruned?: number;
   sig?: string;
@@ -98,6 +119,7 @@ export interface Resumed {
   history: HistoryState;
   sketch: Sketch | null;
   shotSeq: number;
+  shots: ShotRecord[];
   savedAt: string;
   pid: number;
   transport: string;
@@ -114,6 +136,10 @@ export class StateStore {
   owner = false;
   /** Why this process does not persist (or the last persist failed), for session. */
   note: string | null = null;
+  /** The live process that writes the state dir instead of this one (claim() failed), or null. */
+  heldBy: number | null = null;
+  /** claim() was tried at least once. */
+  tried = false;
   readonly #key: Buffer;
   readonly #maxEntries: number;
   readonly #maxBytes: number;
@@ -139,6 +165,8 @@ export class StateStore {
   /** Become the writer of the state dir unless a live process already is. */
   claim(): boolean {
     if (!this.enabled) return false;
+    if (this.owner) return true;
+    this.tried = true;
     fs.mkdirSync(path.join(this.dir, BLOBS), { recursive: true, mode: 0o700 });
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
@@ -147,6 +175,8 @@ export class StateStore {
           mode: 0o600
         });
         this.owner = true;
+        this.heldBy = null;
+        if (this.note?.startsWith("another server")) this.note = null;
         process.once("exit", () => this.release());
         return true;
       } catch (e) {
@@ -163,7 +193,8 @@ export class StateStore {
         return true;
       }
       if (pid && pidAlive(pid)) {
-        this.note = `another server (pid ${pid}) writes ${this.dir}; this one neither resumed nor persists its history (give it its own TUPAIA_OUT)`;
+        this.heldBy = pid;
+        this.note = `another server (pid ${pid}) writes ${this.dir}, so this one does not persist its history or sketch yet; it takes over on its first call after that server exits (or give each server its own TUPAIA_OUT)`;
         return false;
       }
       fs.rmSync(this.#ownerFile, { force: true });
@@ -281,6 +312,7 @@ export class StateStore {
       },
       sketch,
       shotSeq: st.shotSeq ?? 0,
+      shots: Array.isArray(st.shots) ? st.shots : [],
       savedAt: st.savedAt,
       pid: st.pid,
       transport: st.transport,
@@ -318,7 +350,8 @@ export class StateStore {
     history: HistoryState,
     sketch: Sketch | null,
     shotSeq: number,
-    meta: { transport: string; reason?: string }
+    meta: { transport: string; reason?: string },
+    shots: ShotRecord[] = []
   ): boolean {
     if (!this.enabled || !this.owner) return false;
     // the caps: oldest history entries first (redo entries are the newest states)
@@ -375,6 +408,7 @@ export class StateStore {
       },
       sketch: sk,
       shotSeq,
+      ...(shots.length ? { shots } : {}),
       ...(skip.size ? { pruned: skip.size } : {})
     };
     const cmp = JSON.stringify(body);

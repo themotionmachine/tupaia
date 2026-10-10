@@ -11,7 +11,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import { loadConfig } from "./config.ts";
 import { ToolContext } from "./context.ts";
 import { argValue, type HttpDaemon, parseIdleMin, parsePort, startHttpDaemon } from "./http.ts";
-import { resumeState, saveOnExit } from "./resume.ts";
+import { resumeState, retryState, saveOnExit } from "./resume.ts";
 import { protocolOut } from "./stdout-guard.ts";
 import { createServer } from "./surface.ts";
 import { registerAll } from "./tools/registry.ts";
@@ -84,6 +84,7 @@ if (httpMode) {
       preferPort: preferred !== undefined,
       idleMin: parseIdleMin(process.env.TUPAIA_HTTP_IDLE_MIN),
       idleHold: () => ctx.idleHoldReason(),
+      onIdleTick: () => retryState(ctx),
       beforeListen: () => {
         const note = resumeState(ctx);
         if (note) ctx.browser.pendingNotes.push(note);
@@ -98,8 +99,9 @@ if (httpMode) {
     process.exit(1);
   }
 } else {
-  const note = resumeState(ctx);
-  if (note) ctx.browser.pendingNotes.push(note);
+  // a stdio server takes TUPAIA_OUT/state over on its first tool call, not now: every Claude
+  // session in the repo starts one, and an unused one must not keep the daemon from resuming
+  resumeState(ctx, false);
   const server = makeServer();
   await server.connect(new StdioServerTransport(process.stdin, protocolOut));
   server.server.onclose = () => void shutdown("transport closed");

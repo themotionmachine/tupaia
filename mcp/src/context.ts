@@ -25,9 +25,9 @@ import {
   WithImages,
   WithText
 } from "./result.ts";
-import { persistState, resumeLaunch } from "./resume.ts";
+import { ensureState, persistState, resumeLaunch } from "./resume.ts";
 import { TIMEOUTS } from "./schemas.ts";
-import { SharedApi } from "./shared-api.ts";
+import { SharedApi, sha256 } from "./shared-api.ts";
 import { type Provenance, SnapshotStore, summarizeArgs } from "./snapshots.ts";
 import { provenanceKey, StateStore } from "./state.ts";
 
@@ -113,6 +113,16 @@ export class ShotStore {
   add(rec: ShotRecord): void {
     this.#shots.push(rec);
     if (this.#shots.length > 100) this.#shots.shift();
+  }
+  /** The records (persisted with the state, resume.ts). */
+  get records(): readonly ShotRecord[] {
+    return this.#shots;
+  }
+  /** Records a previous server left whose files still exist (compare/view them by id). */
+  adopt(recs: readonly ShotRecord[]): void {
+    const have = new Set(this.#shots.map(s => s.id));
+    const keep = recs.filter(r => r && typeof r.id === "string" && !have.has(r.id) && fs.existsSync(r.file));
+    this.#shots = [...keep, ...this.#shots].slice(-100);
   }
   get(ref: string): ShotRecord {
     const rec = ref === "last" ? this.#shots[this.#shots.length - 1] : this.#shots.find(s => s.id === ref);
@@ -622,6 +632,7 @@ export class ToolContext {
           sharedUpdatedBy: blob.updatedBy,
           sharedUpdatedAt: blob.updatedAt,
           sharedBytes: blob.bytes.length,
+          sharedSha256: sha256(blob.bytes),
           fetchedAt: new Date().toISOString()
         });
         this.browser.pendingNotes.push(`live mode: loaded the shared map v${blob.version ?? "?"} into the page`);
@@ -856,6 +867,8 @@ export class ToolContext {
       if (spec.annotations?.readOnlyHint !== true) this.#lastMutableSeq = scope.seq;
       const writes0 = this.browser.writes;
       try {
+        // take TUPAIA_OUT/state over (first call of a stdio server, or its holder has exited)
+        await ensureState(this, scope.notes);
         if (spec.launch !== false) {
           await this.browser.ensureHealthy(scope.notes);
           // a launch or relaunch (and its restore) has its own budget: the call's starts now
@@ -958,15 +971,18 @@ export class ToolContext {
   }
 
   /**
-   * Why an idle --http daemon must not stop now (its sketch would be cut off mid-work), or null.
-   * A sketch holds it while it records or has changes not saved to the Worker.
+   * Why an idle --http daemon should not stop yet, or null: a sketch that records or has changes
+   * not saved to the Worker. `persisted`: the state dir holds it (this server owns the dir and its
+   * last write worked), so the next start resumes it and the hold is bounded (http.ts).
    */
-  idleHoldReason(): string | null {
+  idleHoldReason(): { why: string; persisted: boolean } | null {
     const sk = this.sketches.current;
     if (!sk) return null;
     const dirty = sk.saved ? sk.saved.rev !== sk.rev : sk.ops.length > 0;
-    if (sk.recording) return `sketch '${sk.slug}' is recording (${sk.ops.length} op(s)${dirty ? ", unsaved" : ""})`;
-    if (dirty) return `sketch '${sk.slug}' has ${sk.ops.length} op(s) not saved to the Worker`;
+    const persisted = this.state.owner && !this.state.note?.startsWith("persisting failed");
+    if (sk.recording)
+      return { why: `sketch '${sk.slug}' is recording (${sk.ops.length} op(s)${dirty ? ", unsaved" : ""})`, persisted };
+    if (dirty) return { why: `sketch '${sk.slug}' has ${sk.ops.length} op(s) not saved to the Worker`, persisted };
     return null;
   }
 

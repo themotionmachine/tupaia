@@ -57,14 +57,22 @@ $T tools ; $T status ; $T stop
   `specPath`, set_heights/flow `image.path`) absolute when the file is in your cwd; otherwise the
   server tries its cwd, then the out dir, then the repo root, and results name the file it read.
   `save_map`/`export` write relative paths under the out dir.
-- The daemon stops after 120 idle minutes, but never while a sketch records or has changes not
-  saved to the Worker (`session` shows `idle.idleHeldBy`; `tupaia status` says "held off").
+- The daemon stops after 120 idle minutes. A sketch that records or has changes not saved to the
+  Worker holds that off for one more period when `<out>/state` holds it (it resumes next start),
+  and for as long as it does not (`session` `idle.note` says which and what releases it: in local
+  mode `tupaia stop`, never `sketch save`; `tupaia status` says "held off").
   Whatever stops it (idle, `stop`, a crash), the page map, undo/redo, snapshots, provenance and
   the active sketch persist under `<out>/state/` after every call, and the next daemon on the
   same `--out` resumes them by itself (its first result has a `resumed ...` note). A changed
   page is also saved to `<out>/maps/daemon-exit-*.map` with its provenance: `load_map` of that
   file restores the lineage and the sketch even if `<out>/state` is gone, so `sketch_promote`
   works without `replaceWithUnrelated` (tests: `mcp/test/persist.test.ts`, "persist item 1").
+- One `<out>` has one state writer. A daemon takes it at start, a stdio server (the one
+  `.mcp.json` starts per Claude session) only on its first tool call. If `tupaia` prints
+  `WARNING, NOT persisting` (or session `state.persists` is false), another live server holds it:
+  this one takes over once that server exits (a server with work of its own keeps it and gets
+  the other's page + sketch as `maps/takeover-*.map`: `load_map` it). Test: "persist item 1:
+  holds, live boots and one TUPAIA_OUT shared".
 - For future sessions, the human can register the daemon as an http MCP server (an entry with
   `"type":"http"`, `"url":"http://127.0.0.1:7392/mcp"` and `"headersHelper":"TUPAIA_MODE=local
   /Users/mgm1/Desktop/code/vespucci/mcp/bin/tupaia headers"`; details in `mcp/README.md`). It
@@ -150,7 +158,8 @@ Token economy (results are counts first; ask for detail only when needed):
   finds nothing returns no image, just a note.
 - Shot ids and files are never reused: a restarted server continues after the highest
   `<out>/shots/sN*` already there (s21 after s1..s20), a default file is never overwritten, and
-  `saveTo` replaces a file only with `overwrite:true`. Cite `file` paths in reports freely
+  `saveTo` replaces a file only with `overwrite:true`; `compare:'sN'` still finds a previous
+  server's shot. Cite `file` paths in reports freely
   (test: `mcp/test/persist.test.ts`, "persist item 3").
 
 ## 5. Recipes
@@ -385,7 +394,10 @@ points (spire.js), ice shapes. Read the runtime API first and pass `redraw`.
   `lineage` says what). `load_map` of that file, unmodified, puts the page back on the shared
   base (`shared_status` lineage `shared`, stale against that base, the sketch active again); an
   edited file, a copied block or another out dir's file stays unrelated, and a base the server
-  contradicts too (result `lineage.note` says why). Never edit a saved .map to keep its lineage
+  contradicts too (result `lineage.note` says why; `foreign` = signed with another out dir's
+  `<out>/provenance.key`, which deleting `<out>/state` does not touch; `file:'none'` = no
+  provenance line, e.g. an exit save from before 2026-10-10). save_map returns `sha256` (the
+  file) and `mapSha256` (the map text). Never edit a saved .map to keep its lineage
   (test: `mcp/test/persist.test.ts`, "persist item 2").
 - `shared_save`, `shared_restore` and `sketch_promote` change the live shared map that other
   people use. Use them ONLY when the human, in this conversation, explicitly asks for the live

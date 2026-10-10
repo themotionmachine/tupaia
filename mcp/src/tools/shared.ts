@@ -464,6 +464,7 @@ export async function sharedSave(
       sharedUpdatedBy: saved.updated_by,
       sharedUpdatedAt: saved.updated_at,
       sharedBytes: body.length,
+      sharedSha256: sha256(body),
       fetchedAt: new Date().toISOString()
     },
     { sameMap: true }
