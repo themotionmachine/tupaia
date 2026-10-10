@@ -37,6 +37,47 @@ export const BiomesRegenOptions = z
         "'warp' (default): read the climate at a noise-displaced point, so edges wiggle and biome totals stay close; 'jitter': add noise to temperature (±4 °C) and moisture (±6), which grows dry biomes"
       ),
     scale: z.number().min(10).max(20000).optional().describe("Noise feature size in map px (default map size / 12)"),
+    rainShadow: z
+      .union([
+        z.literal(true),
+        z.strictObject({
+          strength: z
+            .number()
+            .min(0)
+            .max(5)
+            .optional()
+            .describe("Default 1: a cell loses strength * crossed / 50 of its precipitation (capped at all)"),
+          maxDistance: z.number().positive().max(20000).optional().describe("How far upwind to look (default 15)"),
+          unit: z.enum(["cells", "px"]).optional().describe("maxDistance unit: cells (default, grid spacing) or px"),
+          ridge: z
+            .number()
+            .min(20)
+            .max(100)
+            .optional()
+            .describe("Only ground at least this high blocks the wind (default 50: hills and mountains)"),
+          wind: z
+            .number()
+            .min(0)
+            .max(360)
+            .optional()
+            .describe(
+              "Direction the wind blows towards in degrees (90 = from the west); default: the map's winds setting of each cell's latitude tier"
+            )
+        })
+      ])
+      .optional()
+      .describe(
+        "Rain shadow before the biomes are derived: from each land cell walk upwind up to maxDistance; the highest ridge on the way above the cell (fading with distance) is the height crossed, and the cell loses that share of its precipitation, so lee sides of ranges dry into steppe and desert. Only the biome derivation reads it (the precipitation layer is unchanged). Deterministic; the result reports rainShadow {wind, shadowed, halved, meanCut}"
+      ),
+    smoothClimate: z
+      .strictObject({
+        precipitation: z.number().int().min(0).max(10).optional().describe("Passes of a land-neighbour mean"),
+        temperature: z.number().int().min(0).max(10).optional().describe("Passes of a land-neighbour mean")
+      })
+      .optional()
+      .describe(
+        "Smooth the climate inputs (after rainShadow) before the biomes are derived, so biome edges follow broad climate instead of cell-scale speckle"
+      ),
     smooth: z
       .number()
       .int()
@@ -145,6 +186,12 @@ export const BIOMES_REPLAY: ReplaySpec = {
     const how = [
       o.from === "current" ? "cleaned up current biomes" : "re-derived biomes from the climate",
       o.noise ? `${o.mode ?? "warp"} noise ${o.noise}` : "",
+      o.rainShadow
+        ? `rain shadow${o.rainShadow === true || o.rainShadow.strength === undefined ? "" : ` strength ${o.rainShadow.strength}`}`
+        : "",
+      o.smoothClimate?.precipitation || o.smoothClimate?.temperature
+        ? `climate smoothed (${o.smoothClimate.precipitation ?? 0} precipitation, ${o.smoothClimate.temperature ?? 0} temperature passes)`
+        : "",
       o.smooth ? `${o.smooth} smoothing passes` : "",
       o.minRegion ? `regions under ${o.minRegion} cells merged` : "",
       seed !== undefined ? `seed ${seed}` : ""

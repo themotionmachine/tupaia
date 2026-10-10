@@ -1826,15 +1826,20 @@
     return inMapUnits / distanceScale;
   }
 
+  // where keys added by bridge-ext (where.js: all/any/not, height, flux, slope, riverDist, ...):
+  // key -> (value, cellWhere) => (cell => boolean)
+  const WHERE_EXT = {};
+
   function cellWhere(where) {
     if (!isObj(where)) fail("BAD_ARGS", "where is an object");
+    const allowed = [...CELL_WHERE, ...Object.keys(WHERE_EXT)];
     for (const k of Object.keys(where))
-      if (!CELL_WHERE.includes(k))
+      if (!allowed.includes(k))
         fail(
           "BAD_FIELD",
-          `unknown cell filter '${k}' in where; allowed: ${CELL_WHERE.join(", ")} (to leave cells out use select.except)`,
+          `unknown cell filter '${k}' in where; allowed: ${allowed.join(", ")} (to leave cells out use select.except)`,
           {
-            details: { unknown: k, allowed: CELL_WHERE }
+            details: { unknown: k, allowed }
           }
         );
     const C = pack.cells;
@@ -1858,6 +1863,7 @@
     }
     if (where.burg !== undefined) tests.push(c => !!C.burg[c] === !!where.burg);
     if (where.river !== undefined) tests.push(c => !!C.r[c] === !!where.river);
+    for (const k of Object.keys(WHERE_EXT)) if (where[k] !== undefined) tests.push(WHERE_EXT[k](where[k], cellWhere));
     return c => tests.every(t => t(c));
   }
 
@@ -3370,6 +3376,7 @@
     IDENT,
     TRACKED_TYPES,
     selectCells,
+    WHERE_EXT,
     nameSpec,
     generateName,
     literalPlace,

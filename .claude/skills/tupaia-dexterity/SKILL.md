@@ -286,6 +286,20 @@ marker-near-burg) run only when named.
    cultures and religions only; removed markers, notes, labels, routes and zones are already
    gone.
 
+**Biomes by condition: floodplain, rain-shadow desert, contour bands.** One call each, both
+replayable (literal cells). Floodplain (rivers `R` = the main river and its big tributaries):
+`paint_cells {select:{where:{land:true, any:[{riverDist:{lte:0, rivers:R}}, {all:[{riverDist:
+{lte:4, rivers:R}}, {aboveRiver:{lte:4, rivers:R}}, {height:{lte:38}}]}]}}, set:{biome:'Wetland'},
+feather:{width:4, unit:'cells', seed:11}}` (on polish-final this matched the fork's hand-made
+floodplain at Jaccard 0.72 before feathering, 0.70 painted). A contour band (Badlands):
+`where:{height:{gte:45, lte:53}, noise:{scale:60, seed:31, gte:0.3}}` with `circle` to bound it.
+Rain-shadow desert: `regenerate {parts:['biomes'], biomes:{rainShadow:{ridge:74, maxDistance:336,
+unit:'px', strength:3}, smoothClimate:{precipitation:2, temperature:2}, smooth:1, keepPainted:
+false, select:{where:{height:{lte:58}, biome:['Hot desert','Savanna','Grassland']}}}, dryRun:true}`
+(read `details.biomes.rainShadow`, then apply). It derives biomes with the app's matrix, so it
+will not reproduce a hand-tuned classifier cell for cell (the fork's open-eval made cool dry land
+Grassland). Tests: `mcp/test/condpaint.test.ts`.
+
 **Propose a change as a sketch.** See section 10; the replay table there says which calls keep
 the sketch rebasable.
 
@@ -328,6 +342,7 @@ replaces it:
 | River splices, splits, renames, moving notes (rivfix.js, split.py, rename_rivers.py) | `edit {type:'river', ops:[{ref, set:{split\|merge\|mainStem\|reroute\|end\|joinAt\|name\|type}}]}`; rivfix in two calls: `[{ref:28, set:{end:{at:7437}}}, {ref:14, set:{reroute:{cells:[7141,7289,7437,7586]}}}]` then `[{ref:9, set:{mainStem:8}}, ...renames]` |
 | Burg labels hidden at full-map zoom | `display {labels:{...}}`, `screenshot {labels:'all'}` (check first: usually they show, just small) |
 | Relief icon density by hand | `regenerate {parts:['relief'], relief:{density\|matchIcons, perBiome, exclude, nearBurgs}}` |
+| Floodplain by flux and flatness, rain-shadow deserts, a contour-following Badlands (polish flood-eval, open-eval, bad-eval) | `paint_cells {select:{where:{riverDist, aboveRiver, slope, height, flux, noise, all/any/not}}, feather}`; `regenerate {parts:['biomes'], biomes:{rainShadow, smoothClimate}}` (recipe in section 5) |
 | Removed entities bloating the .map | `compact`, `compact:true` on saves; `edit map {reliefOnLoad:true}` |
 | Territory and biome cell lists by eval (sel.py: feature polygons + buffer_px, except), then paint_cells per culture/state/religion/biome (territory.py, paint_territory.py, paint_biomes.py) | `apply {specPath, paint:[{from:'terrain_paint.Somnean', set:{culture, state}}, {from:'biomes_paint'}, ...]}` (the mapping above); one-off: `paint_cells {select:{polygon, buffer, except}}` |
 | Composite marker legends, map/label notes by id (add_markers.py, add_notes.py) | `markers[].places` and `notes[].entity` through apply (the mapping above) |
