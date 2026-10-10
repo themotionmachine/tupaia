@@ -1821,11 +1821,14 @@
       for (const l of r?.layers || []) pending.push(l);
       return { redrawn: [], skippedHidden: [] };
     };
+    // state labels a paint step queued for that redraw: a later step treats them as the renderer's
+    T.deferredStateLabels = new Set();
     let res;
     try {
       res = await runSpec(a);
     } finally {
       T.redraw = realRedraw;
+      delete T.deferredStateLabels;
       nameIndexes.clear();
     }
     reset();

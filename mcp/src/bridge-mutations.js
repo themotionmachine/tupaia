@@ -2123,6 +2123,7 @@
         burgs.push({ i: b.i, name: b.name });
       }
     }
+    if (info) info.cells = changedCells;
     return { changed: changedCells.length, byPrevious: by, skipped, burgsReassigned: burgs };
   }
 
@@ -2132,11 +2133,10 @@
 
   // ---- state labels across a state paint. The app's own state painting (states editor, "adjust
   // labels" on) re-fits the label of every touched state; a label placed by hand stays where it
-  // is. Hand-placed: the state is locked (drawStateLabels skips it), or its label carries an edit
-  // the renderer never makes: a transform (dragged), a startOffset other than 50% or a
-  // letter-spacing (labels editor), or a path other than the renderer's three-point curve
-  // (M..C..C; a straight path written by eval, or one reshaped in the labels editor).
-  const AUTO_STATE_LABEL_D = /^M[^A-Za-z]+C[^A-Za-z]+C[^A-Za-z]+$/;
+  // is. A label is the renderer's when drawStateLabels, run now for its state, draws exactly it
+  // (path, size, text, attributes; the original nodes are put back): anything else was placed by
+  // hand (dragged, resized, re-texted, reshaped in the labels editor, or a path written by eval),
+  // and so is the label of a locked state. A state without a label gets none.
 
   /** The cell under a label's anchor (its text's middle on the path, after its transform), or null. */
   function labelAnchorCell(el, path, tp) {
@@ -2154,21 +2154,70 @@
     }
   }
 
-  /** Why a state's label counts as hand-placed (null: drawn by the renderer), and its anchor cell. */
-  function stateLabelInfo(s) {
+  /** An element's attributes (id dropped, xlink:href read as href) and its children, comparable. */
+  function labelShape(n) {
+    if (n.nodeType === 3) return n.nodeValue;
+    if (n.nodeType !== 1) return "";
+    const attrs = [...n.attributes]
+      .filter(a => a.name !== "id")
+      .map(
+        a =>
+          `${a.name === "xlink:href" ? "href" : a.name}=${a.name === "d" ? a.value.replace(/\s+/g, "") : a.value.trim()}`
+      )
+      .sort();
+    return { tag: n.localName, attrs, kids: [...n.childNodes].map(labelShape).filter(k => k !== "") };
+  }
+
+  /** How a state's label differs from what the renderer draws for it now (null: it is the renderer's). */
+  function labelEdit(s, el, path) {
+    const ids = [`stateLabel${s.i}`, `textPath_stateLabel${s.i}`];
+    const spots = [el, path].map(n => [n, n.parentNode, n.nextSibling]);
+    let why = "edited";
+    try {
+      drawStateLabels([s.i]);
+      const [nel, npath] = ids.map(id =>
+        [...document.querySelectorAll(`[id="${id}"]`)].find(n => n !== el && n !== path)
+      );
+      if (nel && npath) {
+        const tp = el.querySelector("textPath");
+        const ntp = nel.querySelector("textPath");
+        const text = n => (n?.textContent || "").replace(/\s+/g, " ").trim();
+        if (JSON.stringify(labelShape(path)) !== JSON.stringify(labelShape(npath))) why = "custom path";
+        else if (tp?.getAttribute("font-size") !== ntp?.getAttribute("font-size")) why = "resized";
+        else if (text(el) !== text(nel)) why = "custom text";
+        else if (JSON.stringify(labelShape(el)) === JSON.stringify(labelShape(nel))) why = null;
+      }
+    } catch {
+      // the renderer cannot draw it now: keep it as it is
+    } finally {
+      for (const id of ids)
+        for (const n of document.querySelectorAll(`[id="${id}"]`)) if (n !== el && n !== path) n.remove();
+      for (const [n, parent, next] of spots)
+        if (!n.isConnected && parent) parent.insertBefore(n, next && next.parentNode === parent ? next : null);
+    }
+    return why;
+  }
+
+  /**
+   * A state's label before a paint: null when it has none, else {manual (why it counts as
+   * hand-placed, or null), cell (its anchor), inside (the anchor is in the state), size}. `only`
+   * (a set of cells) skips the renderer check for a label whose anchor is not among them.
+   */
+  function stateLabelInfo(s, only) {
     const el = document.getElementById(`stateLabel${s.i}`);
     const path = document.getElementById(`textPath_stateLabel${s.i}`);
     if (!el || !path) return null;
     const tp = el.querySelector("textPath");
-    const d = (path.getAttribute("d") || "").replace(/\s+/g, "");
-    const so = (tp?.getAttribute("startOffset") ?? "50%").trim();
+    const cell = labelAnchorCell(el, path, tp);
+    const inside = cell !== null && cell !== undefined && pack.cells.state[cell] === s.i;
+    const size = tp?.getAttribute("font-size") ?? null;
     let manual = null;
     if (s.lock) manual = "locked";
     else if (el.getAttribute("transform")) manual = "moved";
-    else if (so !== "50%" || tp?.getAttribute("letter-spacing")) manual = "edited";
-    else if (!AUTO_STATE_LABEL_D.test(d)) manual = "custom path";
-    const cell = manual ? labelAnchorCell(el, path, tp) : null;
-    return { manual, cell, inside: cell !== null && cell !== undefined && pack.cells.state[cell] === s.i };
+    else if (T.deferredStateLabels?.has(s.i))
+      manual = null; // re-fitted at the end of this apply
+    else if (!only || only.has(cell)) manual = labelEdit(s, el, path);
+    return { manual, cell, inside, size };
   }
 
   /** Before a state paint: the labels of the states it can touch (the target and the cells' owners). */
@@ -2183,34 +2232,85 @@
     return out;
   }
 
+  /** dryRun: the hand-placed labels a state paint of `changed` cells to `target` would move or leave. */
+  function stateLabelsPreview(target, changed) {
+    const C = pack.cells;
+    const lose = new Map();
+    for (const cell of changed) lose.set(C.state[cell], (lose.get(C.state[cell]) || 0) + 1);
+    const only = new Set(changed);
+    const out = [];
+    for (const [id, n] of lose) {
+      const s = pack.states[id];
+      if (!id || id === target || !isLive(s)) continue;
+      const b = stateLabelInfo(s, only);
+      if (!b) continue;
+      if (n >= (s.cells || 0))
+        out.push({ state: nameFor("state", id), why: "the state would have no cells; its label would stay" });
+      else if (b.manual && b.inside && only.has(b.cell))
+        out.push({
+          state: nameFor("state", id),
+          why: `${b.manual} label's anchor would leave the state; it would be re-fitted`
+        });
+    }
+    return out;
+  }
+
+  /** Draw a state's label again (a locked one too), no larger than `size` was; true if it was capped. */
+  function refitStateLabel(id, size) {
+    const s = pack.states[id];
+    const locked = s.lock;
+    s.lock = false;
+    try {
+      drawStateLabels([id]);
+    } finally {
+      if (locked) s.lock = true;
+    }
+    const tp = document.querySelector(`#stateLabel${id} textPath`);
+    const was = /%$/.test(String(size || "").trim()) ? parseFloat(size) : NaN;
+    const now = parseFloat(tp?.getAttribute("font-size") ?? "");
+    if (tp && Number.isFinite(was) && Number.isFinite(now) && now > was) {
+      tp.setAttribute("font-size", `${was}%`);
+      return true;
+    }
+    return false;
+  }
+
   /**
-   * After a state paint: which touched states' labels to re-fit. A hand-placed label is kept
-   * unless its anchor was in its state and no longer is (re-fitted and reported in moved); a
-   * label of a state left without cells stays and is reported.
+   * After a state paint: re-fit the renderer's labels of touched states (refit: queued for the
+   * redraw); keep hand-placed ones unless the paint took the label's anchor out of its state
+   * (re-fitted here, no larger than before, and reported in moved; with the labels layer off it
+   * stays and is reported). A label of a state left without cells stays and is reported.
    */
-  function stateLabelsAfter(touched, before) {
+  function stateLabelsAfter(touched, before, labelsOn) {
     const refit = [];
     const kept = [];
     const moved = [];
+    const redrawn = [];
     for (const id of touched) {
       const s = pack.states[id];
       const b = before.get(id);
+      if (!b) continue; // no label before: none is drawn
       if (!isLive(s) || !s.cells) {
-        if (b) moved.push({ state: nameFor("state", id), why: "the state has no cells now; its label was left" });
+        moved.push({ state: nameFor("state", id), why: "the state has no cells now; its label stays" });
         continue;
       }
-      if (!b?.manual) {
+      if (!b.manual) {
         refit.push(id);
         continue;
       }
       if (b.inside && pack.cells.state[b.cell] !== id) {
-        refit.push(id);
-        moved.push({ state: nameFor("state", id), why: `${b.manual} label's anchor left the state; re-fitted` });
+        let why = `${b.manual} label's anchor left the state; `;
+        if (labelsOn) {
+          const capped = refitStateLabel(id, b.size);
+          redrawn.push(id);
+          why += `re-fitted (hand edits dropped${capped ? `, size kept at ${b.size}` : ""})`;
+        } else why += "left as it is (the labels layer is off)";
+        moved.push({ state: nameFor("state", id), why });
         continue;
       }
       kept.push(nameFor("state", id));
     }
-    return { refit, kept, moved };
+    return { refit, kept, moved, redrawn };
   }
 
   /** A paint's fill redraw: drawn only where the layer showed something (see bridge.js redraw). */
@@ -2230,24 +2330,41 @@
       const info = { affectedStates: new Set(), affectedProvinces: new Set() };
       const provBefore = write && key === "state" ? provinceShape() : null;
       const labelsBefore = write && key === "state" ? stateLabelsBefore(P.state, P.cells) : null;
+      // each state's pole and the state of the cell under it
       const polesBefore =
         write && key === "state"
-          ? pack.states.map(s => (isLive(s) && Array.isArray(s.pole) ? s.pole.slice() : null))
+          ? pack.states.map(s => {
+              if (!isLive(s) || !Array.isArray(s.pole)) return null;
+              const cell = typeof findCell === "function" ? findCell(s.pole[0], s.pole[1]) : null;
+              return { pole: s.pole.slice(), cell, owner: cell === null ? null : C.state[cell] };
+            })
           : null;
       const r = paintTerritory(key, P[key], P.cells, write, info);
       out[key] = { to: nameFor(key, P[key]), ...r };
+      if (!write && key === "state" && r.changed) {
+        const would = stateLabelsPreview(P.state, info.cells);
+        if (would.length) out.state.stateLabels = { wouldMove: would };
+      }
       if (!write || !r.changed) continue;
       if (key === "state") {
         States.collectStatistics();
         States.getPoles();
+        const labelsOn = typeof layerIsOn !== "function" || layerIsOn("toggleLabels");
         const lab = stateLabelsAfter(
           [...info.affectedStates].filter(s => s > 0),
-          labelsBefore
+          labelsBefore,
+          labelsOn
         );
-        // a state whose label is not re-fitted keeps its pole (the label anchor the app keeps)
-        const refit = new Set(lab.refit);
+        // a state keeps its pole (the label anchor the app keeps, the emblem's place) unless its
+        // label is re-fitted now or the paint took the pole's cell
+        const fresh = new Set(labelsOn ? [...lab.refit, ...lab.redrawn] : []);
+        const poleMoved = [];
         pack.states.forEach((s, i) => {
-          if (polesBefore[i] && isLive(s) && !refit.has(i)) s.pole = polesBefore[i];
+          const b = polesBefore[i];
+          if (!b || !isLive(s) || fresh.has(i)) return;
+          if (b.cell !== null && C.state[b.cell] !== b.owner) {
+            if (labelsBefore.get(i)) poleMoved.push(nameFor("state", i));
+          } else s.pole = b.pole;
         });
         c.internals.adjustProvinces([...info.affectedProvinces]);
         Provinces.getPoles?.();
@@ -2265,13 +2382,19 @@
         if (lab.refit.length) sl.refit = lab.refit.length;
         if (lab.kept.length) sl.kept = lab.kept;
         if (lab.moved.length) sl.moved = lab.moved;
+        // a kept label whose pole cell was painted: the pole (emblem, a later re-fit) moves, the label stays
+        if (poleMoved.length) sl.poleMoved = poleMoved;
         if (Object.keys(sl).length) out.state.stateLabels = sl;
         // apply surfaces its steps' notes, not their results: a moved label is reported there too
         for (const m of lab.moved) c.notes.add(`state label of ${m.state}: ${m.why}`);
         addFill(c, "states");
         addFill(c, "borders");
         addFill(c, "provinces");
-        if (lab.refit.length) c.R.add("stateLabels", lab.refit);
+        if (lab.refit.length) {
+          c.R.add("stateLabels", lab.refit);
+          if (labelsOn) for (const id of lab.refit) T.deferredStateLabels?.add(id);
+        }
+        if (lab.redrawn.length) c.R.drawn?.add("stateLabels");
       } else if (key === "province") {
         Provinces.getPoles?.();
         addFill(c, "borders");

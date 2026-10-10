@@ -456,12 +456,14 @@ save, discarding a saved sketch, and promote need the live-mode server.
   A river cell list with gaps (`river-gap`, after an eval edit say) has a fixAll that reroutes it.
 - `paint_cells`: an unknown key in select/where/set is BAD_FIELD, never ignored; select has
   `buffer` (px) and `except` (another select). A feather narrower than one cell does nothing.
-- State paints (`paint_cells set:{state}`, apply's paint list) keep hand-placed state labels
-  (locked state, dragged, a straight/custom path, offset or spacing) and their poles; only a
-  label whose anchor the paint takes out of its state is re-fitted, reported in
-  `set.state.stateLabels.moved` and a note. Layers are never toggled, and an on but empty fill
-  layer (v7's whitespace `#provs` loads with Provinces on) stays empty. Lock a state to pin a
-  curved label. Recipe/test: mcp/test/paintlabels.test.ts.
+- State paints (`paint_cells set:{state}`, apply's paint list) re-fit only state labels the
+  renderer would draw as they are; hand-placed ones (locked, dragged, resized, re-texted,
+  reshaped, custom path) keep path, size, text and pole, and a state with no label gets none.
+  Only a label whose anchor the paint takes out of its state is re-fitted (no larger than
+  before), reported in `set.state.stateLabels.moved` and a note; `dryRun:true` shows
+  `wouldMove` first. Layers are never toggled, and an on but empty fill layer (v7's whitespace
+  `#provs` loads with Provinces on) stays empty. State labels have no move tool: hand-place them
+  in the app. Recipe/test: mcp/test/paintlabels.test.ts.
 - Biomes cannot be removed (repaint their cells). `clear` keeps locked entities (freehand routes)
   and never removes route groups.
 - Population in `changes`/diffs is stored thousands; set and find use people.

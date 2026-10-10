@@ -143,18 +143,23 @@ feature, burg, river}`, minus `except:<another select>` ('polygon except circle'
 | zone | ref (adds cells) or `{ref, op:'add'\|'remove'}` |
 | height | alone in its call; `{value \| delta \| smooth:n, rebuild?, clamp?, erosion?, confirmErase?, biomes?}`; the local way to edit a few cells |
 
-State labels across a state paint (also apply's paint list): the touched states' labels the
-renderer drew are re-fitted; a hand-placed one keeps its textPath `d`, font-size, startOffset,
-transform and its state's pole. Hand-placed = the state is locked, or the label was dragged
-(transform), has a startOffset other than 50% or a letter-spacing, or its path is not the
-renderer's `M..C..C` curve (a straight path written by eval, a reshaped one). It is re-fitted
-only when the paint takes its anchor (the text's middle) out of the state, and reported:
-`set.state.stateLabels {refit: n, kept: ['Name (i)'], moved: [{state, why}]}` plus a note
-(apply shows the note). Untouched states keep their pole. No layer is toggled; a fill layer
-(states, provinces, borders, cultures, religions, biomes) whose button is on but which drew
-nothing (a file whose `#provs` held only whitespace loads with Provinces on) stays empty, in
-`skippedHidden` with a note; `display {off:['provinces']}` then `{on:['provinces']}` draws it.
-Lock a state (`edit state set lock:true`) to pin a curved hand-drawn label.
+State labels across a state paint (also apply's paint list): a touched state's label is
+re-fitted only if it is exactly what the renderer draws for that state now (path, size, text,
+attributes); any other label is hand-placed and keeps its textPath `d`, font-size, text,
+startOffset and transform: a locked state's, a dragged one (transform), one edited in the labels
+editor (size, text, spacing, offset, a reshape even with 3 points) or written by eval, and one
+left stale by an earlier edit. A state with no label (removed, or none drawn) gets none. A
+hand-placed label is re-fitted only when the paint takes its anchor (the text's middle) out of
+the state: no larger than its old size, hand edits dropped, and reported (with the labels layer
+off it is left and reported). A state keeps its pole unless its label is re-fitted or the paint
+took the pole's cell (`poleMoved`: the emblem moves, the label stays). Result:
+`set.state.stateLabels {refit: n, kept: ['Name (i)'], moved: [{state, why}], poleMoved}`, a note
+per moved label (apply shows the notes); `dryRun:true` lists `wouldMove`. State labels have no
+move tool (`edit label` takes custom labels only): hand-place one in the app's labels editor.
+No layer is toggled; a fill layer (states, provinces, borders, cultures, religions, biomes)
+whose button is on but which drew nothing (a file whose `#provs` held only whitespace loads with
+Provinces on) stays empty, in `skippedHidden` with a note; `display {off:['provinces']}` then
+`{on:['provinces']}` draws it.
 
 Height `rebuild`: `keep` (default) land only, 20..100, refuses a change across 20 (`clamp:true`
 stops at 20) and is local: the changed cells' temperature, lake levels and biome follow
