@@ -25,7 +25,8 @@ It is a separate Node package. Nothing here is imported by the app or shipped in
   (Playwright 1.60.0) and opens one page at `/?local`.
 - Page side: `src/bridge.js` and `src/bridge-mutations.js` define `globalThis.__tupaia`; every
   `src/bridge-ext/*.js` is injected after them in name order (apply, biomes, clear, compact,
-  labels, lint, regen-replay, regen, regrid, relief, rivers, routes, settings, terrain, tokens).
+  labels, lint, regen-replay, regen, regrid, relief, rivers, rivertrace, routes, settings, terrain,
+  tokens).
   Extensions add FIELDS, types and FNS functions, and some wrap core ones (FNS.edit, regenerate,
   display, summary, loadMap). Every tool goes through one `__tupaia.call(name, args)`.
 - Node side: `src/tools/*.ts` are imported in name order and register through `defineTools`;
@@ -78,9 +79,13 @@ It is a separate Node package. Nothing here is imported by the app or shipped in
 
 What the newer tools and fields replaced (all one undo entry each, all dryRun-able):
 
-- `set_heights {grid|pack|image}` imports a heightmap and rebuilds coast, lakes, climate, rivers
-  and biomes, carrying burgs, routes, markers, regiments and lake/island names to the new cells
-  and keeping river identity by course; with `rebuild:'keep'` it is local (the changed cells'
+- `set_heights {grid|pack|image}` imports a heightmap and rebuilds coast, lakes, climate and
+  biomes, carrying burgs, routes, markers, regiments and lake/island names to the new cells; the
+  rivers are re-traced onto the new heights (`rivers:'retrace'`, default on a map with rivers;
+  `src/bridge-ext/rivertrace.js`, shared with regrid: ids, names, parents, main stems and hand
+  edits kept, climbs the change causes carved, drowned rivers removed and named) or regenerated
+  (`rivers:'regenerate'`, identity kept by course overlap); paint_cells height risk does the
+  same; with `rebuild:'keep'` it is local (the changed cells'
   heights, temperature, biome and lake levels; rivers, economy and far biomes untouched;
   `rivers:'regenerate'` opts into the global river pass), like `paint_cells` height keep; `flow`
   previews drainage on current or proposed heights.
@@ -476,7 +481,8 @@ node --test --test-concurrency=3 "test/**/*.test.ts"
 - One file per feature: `terrain`, `regrid`, `clear`, `compact`, `apply`, `applypaint` (the paint
   list, territory, places, burg cells), `addprov` (add province/river, apply creating them),
   `lint`, `settings`,
-  `routes`, `rivers`, `biomes`, `regen`, `relief`, `labels`, `tokens`, `http`; `fam-a/b/c` and
+  `routes`, `rivers`, `riverkeep` (terrain rebuilds that re-trace the rivers), `biomes`, `regen`,
+  `relief`, `labels`, `tokens`, `http`; `fam-a/b/c` and
   `integrate.test.ts` cross the features (one apply spec over biomes, settings with locks,
   route groups and rivers; a sketch of 8 replayable records rebased onto someone else's v7).
 - `test/sketch.test.ts` and `test/shared.test.ts`: sketches and the shared tools against

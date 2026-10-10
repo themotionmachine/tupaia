@@ -2003,7 +2003,7 @@
 
   function prepareHeight(h) {
     if (!isObj(h)) fail("BAD_ARGS", "height is {value|delta|smooth, rebuild:'keep'|'risk'|'erase'}");
-    const HEIGHT_KEYS = ["value", "delta", "smooth", "rebuild", "clamp", "erosion", "confirmErase", "biomes"];
+    const HEIGHT_KEYS = ["value", "delta", "smooth", "rebuild", "clamp", "erosion", "confirmErase", "biomes", "rivers"];
     for (const k of Object.keys(h))
       if (!HEIGHT_KEYS.includes(k))
         fail("BAD_FIELD", `height does not take '${k}'; allowed: ${HEIGHT_KEYS.join(", ")}`, {
@@ -2030,7 +2030,20 @@
       );
     if (h.biomes !== undefined && rebuild !== "keep")
       fail("BAD_ARGS", "height.biomes goes with rebuild:'keep' (risk and erase recompute every biome)");
-    return { ...h, rebuild };
+    // rivers (risk only): 'retrace' (default without erosion), 'regenerate' (implied by erosion);
+    // 'grid' is how ops logged before rivers existed replay (each river's cells mapped by grid cell)
+    if (h.rivers !== undefined && rebuild !== "risk")
+      fail("BAD_ARGS", "height.rivers goes with rebuild:'risk' ('keep' keeps every river; 'erase' regenerates them)");
+    if (h.rivers !== undefined && !["retrace", "regenerate", "grid"].includes(h.rivers))
+      fail("BAD_ARGS", "height.rivers is 'retrace' (default) or 'regenerate'");
+    if (h.erosion === true && (h.rivers === "retrace" || h.rivers === "grid"))
+      fail(
+        "BAD_ARGS",
+        "erosion cuts the beds of regenerated rivers: pass rivers:'regenerate' with it (rivers:'retrace' carves where a river would climb)"
+      );
+    const out = { ...h, rebuild };
+    if (rebuild === "risk") out.rivers = h.rivers ?? (h.erosion === true ? "regenerate" : "retrace");
+    return out;
   }
 
   function preparePaint(a) {
@@ -2333,7 +2346,11 @@
       h: Uint8Array.from(C.h),
       f: Uint32Array.from(C.f),
       biome: Uint8Array.from(C.biome),
-      features: (pack.features || []).map(f => (f && typeof f === "object" ? { type: f.type, name: f.name } : null)),
+      features: (pack.features || []).map(f =>
+        f && typeof f === "object"
+          ? { type: f.type, name: f.name, ...(f.type === "lake" ? { inlets: f.inlets, outlet: f.outlet } : {}) }
+          : null
+      ),
       stateCenters: (pack.states || []).map(s => s?.center),
       burgCells: (pack.burgs || []).map(b => b?.cell),
       rivers: captureRivers()
@@ -2603,10 +2620,16 @@
 
   /**
    * restoreRiskedData plus the carrying above. opts: {restore (restoreRiskedData's opts),
-   * keepRivers (the app keeps the rivers: map their cells back by grid), keepBiomes}.
+   * keepRivers (the app keeps the rivers: map their cells back by grid), retraceRivers (the app
+   * keeps the rivers, and each is traced again onto the new heights: retraceOnRebuild; restore
+   * must not regenerate them), keepBiomes}.
    */
   function riskRebuild(opts = {}) {
     const old = captureCells();
+    const RT = opts.retraceRivers ? T.riverTrace : null;
+    if (opts.retraceRivers && !RT) fail("PAGE_ERROR", "bridge-ext/rivertrace.js (T.riverTrace) is not loaded");
+    const plan = RT ? RT.capture(pack.rivers) : null;
+    if (plan) plan.climbedBefore = new Set(RT.climbing());
     const riverGrid = opts.keepRivers ? saveRiversAsGrid() : null;
     clearFeatureShapes();
     heightmapInternals().restoreRiskedData(opts.restore);
@@ -2616,11 +2639,143 @@
       if (dropped) info.riversDropped = dropped;
       finishRiskFeatures();
     }
+    if (RT) {
+      remapRiverCells(old);
+      finishRiskFeatures();
+    }
     const features = carryFeatures(old);
+    if (RT) info.rivers = retraceOnRebuild(RT, plan, old, features, opts);
     Object.assign(info, carryCellRefs(old, features, opts));
     if (features.named) info.featureNames = features.named;
-    if (!riverGrid) info.rivers = carryRivers(old.rivers);
+    if (!riverGrid && !RT) info.rivers = carryRivers(old.rivers);
     return info;
+  }
+
+  /**
+   * rivers:'retrace' after the re-pack (the app kept pack.rivers; remapRiverCells moved them to the new
+   * cells): every river traced again along its old line onto the new heights (bridge-ext/
+   * rivertrace.js, as regrid does: ids, names, types, parents, basins and hand-edited courses
+   * kept), then carved where it would climb (a land cell above the lowest upstream land cell of
+   * its river goes down to it, never below 20). Only rivers the new heights can have made climb
+   * are carved: those that did not climb before, and those whose course crosses a changed grid
+   * cell (opts.changedGrid, a Set; absent: all); a river that already climbed away from the
+   * change keeps its heights (counted in climbingLeft). Lakes get their climate data and keep the
+   * inlets/outlet of the old lake they match; with restore.redefineBiomes the cells whose river
+   * or height changed take their climate biome. Returns the river report (bridge-ext/rivertrace
+   * retrace, plus carved, notesOrphaned).
+   */
+  function retraceOnRebuild(RT, plan, old, features, opts) {
+    const C = pack.cells;
+    const r0 = Uint8Array.from(C.r, v => (v ? 1 : 0));
+    const report = {};
+    RT.retrace(plan, report, { rebuild: true, changedGrid: opts.changedGrid });
+    const out = report.rivers || { before: 0, retraced: 0 };
+    const gridBefore = Uint8Array.from(grid.cells.h);
+    const changed = opts.changedGrid;
+    const only = new Set(
+      (pack.rivers || [])
+        .filter(
+          r => !plan.climbedBefore?.has(r.i) || !changed || (r.cells || []).some(x => x >= 0 && changed.has(C.g[x]))
+        )
+        .map(r => r.i)
+    );
+    const cv = RT.carve(only);
+    if (cv.cells) {
+      out.carved = { rivers: cv.rivers, cells: cv.cells, maxDrop: cv.maxDrop };
+      // the grid heights the rivers were traced on (set_heights logs them, so a replay traces
+      // on the same heights and carves the same cells); not enumerable: never in a result
+      Object.defineProperty(out, "gridBeforeCarve", { value: gridBefore, enumerable: false });
+      const lakes = RT.lowerLakes(cv.lowered);
+      if (lakes) out.carved.lakesLowered = lakes;
+    }
+    const left = RT.climbing().length;
+    if (left) out.climbingLeft = left;
+    // lakes: the generator's climate data (flux, temperature, evaporation), and the river ids
+    // of the old lake each matches (ids are kept)
+    const live = new Set((pack.rivers || []).map(r => r.i));
+    const newToOld = new Map([...features.oldToNew].map(([o, nf]) => [nf, o]));
+    if ((pack.features || []).some(f => f?.type === "lake")) {
+      try {
+        Lakes.defineClimateData(C.h);
+      } catch (e) {
+        console.warn("tupaia-mcp: lake climate data after the rebuild failed", e);
+      }
+      pack.features.forEach((f, k) => {
+        if (f?.type !== "lake") return;
+        delete f.outCell;
+        const o = old.features[newToOld.get(k)];
+        const inlets = (o?.inlets || []).filter(x => live.has(x));
+        if (inlets.length) f.inlets = inlets;
+        else delete f.inlets;
+        if (o?.outlet && live.has(o.outlet)) f.outlet = o.outlet;
+        else delete f.outlet;
+      });
+    }
+    if (opts.restore?.redefineBiomes) {
+      const moved = [];
+      for (const i of C.i) if ((C.r[i] ? 1 : 0) !== r0[i] || cv.lowered.has(i)) moved.push(i);
+      const n = localBiomes(moved);
+      if (n) out.biomesChanged = n;
+    }
+    const gone = new Set(old.rivers.filter(r => !live.has(r.i)).map(r => `river${r.i}`));
+    if (gone.size && typeof notes !== "undefined" && Array.isArray(notes)) {
+      const orphaned = notes.filter(nt => nt && gone.has(nt.id)).map(nt => `${nt.id}${nt.name ? ` ${nt.name}` : ""}`);
+      if (orphaned.length) out.notesOrphaned = orphaned;
+    }
+    return out;
+  }
+
+  /**
+   * rivers:'retrace': the app kept pack.rivers on the old cell ids; each river's cells, source
+   * and mouth move to the new cells (cellRemap: the new cell on the same grid cell nearest the
+   * old centre, so an unchanged course maps cell for cell, coastline cells included); consecutive
+   * repeats merged, points kept aligned.
+   */
+  function remapRiverCells(old) {
+    const remap = cellRemap(old);
+    for (const r of pack.rivers || []) {
+      if (!Array.isArray(r.cells)) continue;
+      const aligned = Array.isArray(r.points) && r.points.length === r.cells.length;
+      const cells = [];
+      const points = [];
+      r.cells.forEach((c, k) => {
+        const n = c >= 0 ? remap(c) : c;
+        if (n === undefined || (cells.length && cells[cells.length - 1] === n)) return;
+        cells.push(n);
+        if (aligned) points.push(r.points[k]);
+      });
+      r.cells = cells;
+      if (aligned) r.points = points;
+      else delete r.points;
+      if (r.source >= 0) r.source = remap(r.source);
+      if (r.mouth >= 0) r.mouth = remap(r.mouth);
+    }
+  }
+
+  /** Notes for a rivers:'retrace' report (retraceOnRebuild); shared by paint_cells and set_heights. */
+  function retraceNotes(c, rv) {
+    if (!rv) return;
+    let s = `rivers kept: ${rv.unchanged} of ${rv.before} keep their course (no changed cell on it), ${rv.retraced} were re-traced along their old lines onto the new heights (ids, names, types and parents kept)`;
+    const cv = rv.carved;
+    if (cv)
+      s += `; ${cv.cells} land cells on ${cv.rivers} rivers were lowered (up to ${cv.maxDrop}, none below 20) where the river would climb`;
+    c.notes.add(s);
+    const list = (k, what) => {
+      if (rv[k]?.length) c.notes.add(`${what}: ${rv[k].join(", ")}`);
+    };
+    list("underWater", "rivers whose course is under water now were removed");
+    list("notRetraced", "rivers that could not be re-traced keep their old cells, mapped to the new ones");
+    list("shortened", "rivers that meet the new sea higher up end there");
+    list("orphaned", "tributaries of removed rivers are main rivers now");
+    list("endsInland", "rivers that ended in water have none within reach now and end on land");
+    if (rv.climbingLeft)
+      c.notes.add(
+        `${rv.climbingLeft} rivers already climbed away from the changed cells and were left as they were: lint {checks:['river-uphill']} lists them`
+      );
+    if (rv.notesOrphaned?.length)
+      c.notes.add(
+        `${rv.notesOrphaned.length} notes belong to rivers that are gone: ${rv.notesOrphaned.slice(0, 10).join("; ")}`
+      );
   }
 
   // restoreRiskedData only groups and names features when erosion runs; do it here otherwise
@@ -2859,7 +3014,11 @@
     if (H.rebuild === "keep") {
       const edited = new Set(edits.map(e => e[0]));
       const L = localHeights(edited, { biomes: H.biomes });
-      stats.local = localHeightNotes(L, c, "reroute them with edit river; rebuild:'risk' regenerates rivers");
+      stats.local = localHeightNotes(
+        L,
+        c,
+        "reroute them with edit river; rebuild:'risk' re-traces rivers and carves climbs"
+      );
       c.R.add("heightmap");
       if (L.biomes) c.R.add("biomes");
     } else {
@@ -2872,10 +3031,28 @@
           // Without erosion the app keeps pack.rivers, whose cells/source/mouth are pack ids of
           // the old graph; reGraph renumbers cells, so drawRivers would read p[staleId] and
           // throw: riskRebuild records them as grid ids and maps them back (keepRivers). It also
-          // moves routes, markers and the other cell references to the new cells.
-          const carried = riskRebuild({ keepRivers: !H.erosion });
+          // moves routes, markers and the other cell references to the new cells. rivers:
+          // 'retrace' (default) then traces each river again onto the new heights, 'regenerate'
+          // re-runs the generator (ids carried by course), 'grid' (ops logged before rivers
+          // existed) keeps the mapped cells.
+          const rv = H.rivers ?? (H.erosion ? "regenerate" : "grid");
+          const carried =
+            rv === "retrace"
+              ? riskRebuild({ retraceRivers: true, changedGrid: new Set(edits.map(e => e[0])) })
+              : rv === "regenerate"
+                ? riskRebuild({ restore: { erosion: !!H.erosion, regenerateRivers: true } })
+                : riskRebuild({ keepRivers: true });
           if (carried.riversDropped)
             c.notes.add(`${carried.riversDropped} rivers lost their course in the rebuild and were removed`);
+          if (carried.rivers) {
+            stats.rivers = carried.rivers;
+            delete carried.rivers;
+            if (rv === "retrace") retraceNotes(c, stats.rivers);
+            else
+              c.notes.add(
+                `rivers were regenerated: ${stats.rivers.kept} of ${stats.rivers.before} kept their id, name and type (matched by course), ${stats.rivers.new} are new${stats.rivers.gone ? `, ${stats.rivers.gone} are gone` : ""}`
+              );
+          }
           stats.carried = carried;
           c.notes.add(
             "rebuild:'risk' re-ran features, climate and the pack graph; cell ids changed, burgs were kept (non-capital burgs that ended in water were removed)"
@@ -3382,6 +3559,7 @@
     clearFeatureShapes,
     finishRiskFeatures,
     riskRebuild,
+    retraceNotes,
     captureRivers,
     carryRivers,
     localHeights,

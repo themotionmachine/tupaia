@@ -5,7 +5,7 @@
 // globals by bare name at call time, no locals that shadow app globals. Exposes T.riverTrace:
 //   capture(rivers)              on the old cells: each river's line, flux and how it ends (a plan)
 //   retrace(plan, report, opts?) on the new cells: every river traced again (report.rivers)
-//   carve()                      lower river cells so no river climbs
+//   carve(only?)                 lower river cells so no river climbs
 //   climbing()                   ids of the rivers whose land heights rise downstream
 //   lowerLakes(lowered)          a lake whose shore was carved below its level follows it down
 // retrace without opts is regrid's (behaviour pinned by test/regrid.test.ts); opts.rebuild adds
@@ -19,7 +19,6 @@
     return Math.round(v * m) / m;
   };
   const isLive = x => !!x && typeof x === "object" && !x.removed;
-
 
   /**
    * Neighbour cells that join cell a to cell b (exclusive), walking greedily toward b's centre (on
@@ -366,15 +365,105 @@
     return course;
   }
 
+  /** "Name (id)" of each river id, at most `k` of them (then "+N more"). */
+  function riverTags(ids, byId, k = 25) {
+    const out = ids.slice(0, k).map(id => {
+      const r = byId.get(id);
+      return r?.name ? `${r.name} (${id})` : `river ${id}`;
+    });
+    if (ids.length > k) out.push(`+${ids.length - k} more`);
+    return out;
+  }
+
+  /**
+   * opts.rebuild (the same grid, a new coastline): a river's line fitted to the new cells. Its
+   * course is under water when no point of it is on land now ({drowned}); it ends where it
+   * first meets new sea (an ocean cell where its old course was land: the line is cut there,
+   * {cut} when that drops some of it); a tributary of a river that drowned ends in water too.
+   * {toWater}: it ends in water before its old confluence now.
+   */
+  function fitToCoast(pl, drowned) {
+    const C = pack.cells;
+    const at = pl.pts.map(([x, y]) => findCell(x, y));
+    const first = at.findIndex(c => c !== undefined && C.h[c] >= 20);
+    if (first < 0) return { drowned: true };
+    let out = pl;
+    let toWater = false;
+    if (pl.end === "join" && drowned.has(pl.joinTo)) {
+      out = { ...pl, end: "water", joinTo: 0 };
+      toWater = true;
+    }
+    for (let k = first + 1; k < at.length; k++) {
+      const c = at[k];
+      if (pl.water[k] || c === undefined || !(C.h[c] < 20) || pack.features[C.f[c]]?.type !== "ocean") continue;
+      return {
+        plan: {
+          ...out,
+          pts: pl.pts.slice(0, k + 1),
+          fl: pl.fl.slice(0, k + 1),
+          water: pl.water.slice(0, k + 1),
+          end: "water",
+          joinTo: 0
+        },
+        cut: k < at.length - 1,
+        toWater: toWater || out.end === "join"
+      };
+    }
+    return { plan: out, toWater };
+  }
+
+  /**
+   * opts.rebuild with opts.changedGrid (the grid cells whose height the rebuild changed): the
+   * course of a river none of whose cells changed, as retrace() paths ({c, x, y, f}: its mapped
+   * cells, its old line and flux), when that course still holds on the new cells (one cell per
+   * old cell, consecutive cells neighbours, land and water where they were, its end where it
+   * was: the map edge, or a cell of the river it joins). Else null (the river is traced again).
+   */
+  function unchangedCourse(r, pl, changedGrid, joinCells) {
+    const C = pack.cells;
+    const cs = r.cells;
+    if (!changedGrid || !Array.isArray(cs) || cs.length !== pl.pts.length) return null;
+    const seen = new Set();
+    for (let k = 0; k < cs.length; k++) {
+      const c = cs[k];
+      if (c === -1 && k === cs.length - 1 && pl.end === "edge") continue;
+      if (!(c >= 0) || seen.has(c) || changedGrid.has(C.g[c]) || C.h[c] < 20 !== pl.water[k]) return null;
+      if (k && !C.c[cs[k - 1]]?.includes(c)) return null;
+      seen.add(c);
+    }
+    if (pl.end === "edge" && cs[cs.length - 1] !== -1) return null;
+    if (pl.end === "join" && !joinCells?.has(cs[cs.length - 1])) return null;
+    return cs.map((c, k) => ({ c, x: pl.pts[k][0], y: pl.pts[k][1], f: pl.fl[k] }));
+  }
+
+  /** Distinct land cells among `cells` (pack ids). */
+  const landCount = cells => new Set(cells.filter(c => c >= 0 && pack.cells.h[c] >= 20)).size;
+
   /**
    * After Resample.restoreRivers (identity projection): every river traced again on the new
    * cells, then cells.r, cells.conf and cells.fl rebuilt from the paths. Returns the counts.
+   *
+   * opts.rebuild: after a heightmap rebuild (the same grid, cells re-packed, each river's cells
+   * already mapped to the new cells by grid cell). A river none of whose cells changed height
+   * (opts.changedGrid) keeps its course as it was (unchangedCourse; its source, mouth, length
+   * and width too). Any other river's line is fitted to the new coastline (fitToCoast) and traced
+   * again; a river whose course is under water now (no point of its line on land, or fewer than
+   * two land cells when it cannot be traced) is removed, and a tributary of it becomes a main
+   * river (parent its own id, basins follow); a river that cannot be traced keeps its mapped
+   * cells; widthFactor is kept. report.rivers adds `before`, `unchanged` and, when any, the
+   * rivers by name ("Name (id)"): underWater (removed), notRetraced, shortened (meets the sea
+   * higher up), toWaterNow (ends in water before its old confluence; parent kept), endsInland
+   * (meant to end in water, none within reach), orphaned (tributaries of removed rivers).
    */
-  function retrace(plan, report) {
+  function retrace(plan, report, opts = {}) {
     if (!plan) return;
+    const rebuild = !!opts.rebuild;
     const C = pack.cells;
     const n = C.i.length;
     const byId = new Map((pack.rivers || []).map(r => [r.i, r]));
+    const before = byId.size;
+    const drowned = new Set();
+    const rb = { notRetraced: [], shortened: [], toWaterNow: [], endsInland: [] };
     // a river after the one it flows into
     const order = [];
     const seen = new Set();
@@ -390,15 +479,47 @@
     const stamp = new Int32Array(n);
     const traced = new Map(); // id -> {path, end}
     const st = { retraced: 0, extended: 0, kept: 0 };
+    const unchangedIds = new Set(); // rebuild: rivers that keep their course as it was
     const io = { tick: 0 };
+    const joinCellsOf = pl => {
+      const into = pl.joinTo ? (traced.get(pl.joinTo)?.path.map(p => p.c) ?? byId.get(pl.joinTo)?.cells) : null;
+      return into ? new Set(into.filter(c => c >= 0)) : null;
+    };
     for (const id of order) {
       const r = byId.get(id);
       if (!r) continue;
-      const pl = plan.plans.get(id);
-      const into = pl.joinTo ? (traced.get(pl.joinTo)?.path.map(p => p.c) ?? byId.get(pl.joinTo)?.cells) : null;
-      io.joinCells = into ? new Set(into.filter(c => c >= 0)) : null;
+      let pl = plan.plans.get(id);
+      const same = rebuild ? unchangedCourse(r, pl, opts.changedGrid, joinCellsOf(pl)) : null;
+      if (same) {
+        // nothing on its course changed: it keeps its cells (on the new numbering) and its line
+        const term = pl.end === "water" || pl.end === "join" || pl.end === "edge";
+        for (let k = 0; k < (term ? same.length - 1 : same.length); k++)
+          if (same[k].c >= 0 && !owner[same[k].c]) owner[same[k].c] = id;
+        traced.set(id, { path: same, end: pl.end });
+        unchangedIds.add(id);
+        continue;
+      }
+      if (rebuild) {
+        const fit = fitToCoast(pl, drowned);
+        if (fit.drowned) {
+          drowned.add(id);
+          continue;
+        }
+        if (fit.plan !== pl) {
+          pl = fit.plan;
+          plan.plans.set(id, pl);
+        }
+        if (fit.cut) rb.shortened.push(id);
+        if (fit.toWater) rb.toWaterNow.push(id);
+      }
+      io.joinCells = joinCellsOf(pl);
       const path = traceRiver(pl, plan, owner, stamp, io);
       if (!path) {
+        if (rebuild && landCount(r.cells) < 2) {
+          drowned.add(id);
+          continue;
+        }
+        if (rebuild) rb.notRetraced.push(id);
         // too short to trace now (lowering the density): Resample's line, one point per cell
         st.kept++;
         const keep = r.cells.map((c, k) => k === 0 || c !== r.cells[k - 1]);
@@ -412,8 +533,24 @@
       const bodyLen = term ? path.length - 1 : path.length;
       for (let k = 0; k < bodyLen; k++) if (path[k].c >= 0 && !owner[path[k].c]) owner[path[k].c] = id;
       traced.set(id, { path, end: io.end });
+      if (rebuild && io.end === "water" && C.h[path[path.length - 1].c] >= 20) rb.endsInland.push(id);
       st.retraced++;
       st.extended += io.extended ? 1 : 0;
+    }
+    let underWater = null;
+    if (rebuild) {
+      // a river capture() had no line for (under two cells, or no points): kept as mapped unless
+      // its course is under water now
+      for (const r of byId.values())
+        if (!plan.plans.has(r.i) && !(Array.isArray(r.cells) && landCount(r.cells) >= 2)) drowned.add(r.i);
+      if (drowned.size) {
+        underWater = riverTags(
+          [...drowned].sort((a, b) => a - b),
+          byId
+        );
+        pack.rivers = pack.rivers.filter(r => !drowned.has(r.i));
+        for (const id of drowned) byId.delete(id);
+      }
     }
     // flux: the old flux along each new course; elsewhere on land the nearest old cell off the
     // rivers (Resample copied the old river cells' flux to every new cell near the old course)
@@ -467,10 +604,11 @@
     }
     const scaleW = ((plan.cellsDesired || grid.cellsDesired) / grid.cellsDesired) ** 0.25;
     for (const r of byId.values()) {
-      if (!traced.has(r.i)) continue;
+      // an unchanged course keeps its source, mouth (mapped by grid cell), length and width
+      if (!traced.has(r.i) || unchangedIds.has(r.i)) continue;
       r.source = r.cells[0];
       r.mouth = r.cells.at(-2) ?? r.cells[0];
-      if (typeof r.widthFactor === "number") r.widthFactor = rn(r.widthFactor * scaleW, 2);
+      if (typeof r.widthFactor === "number" && !rebuild) r.widthFactor = rn(r.widthFactor * scaleW, 2);
       try {
         const meandered = Rivers.addMeandering(r.cells, r.points);
         r.length = Rivers.getApproximateLength(meandered.map(([x, y]) => [x, y]));
@@ -492,9 +630,27 @@
       if (p.parent !== undefined) r.parent = p.parent;
       if (p.basin !== undefined) r.basin = p.basin;
     }
-    report.rivers = { retraced: st.retraced };
+    const orphaned = [];
+    if (drowned.size) {
+      // a tributary of a removed river is a main river now; basins follow the parents
+      for (const r of byId.values())
+        if (drowned.has(r.parent)) {
+          r.parent = r.i;
+          orphaned.push(r.i);
+        }
+      const root = (r, depth = 0) =>
+        !r.parent || r.parent === r.i || !byId.has(r.parent) || depth > 64 ? r.i : root(byId.get(r.parent), depth + 1);
+      for (const r of byId.values()) if (drowned.has(r.basin) || orphaned.includes(r.basin)) r.basin = root(r);
+    }
+    report.rivers = rebuild
+      ? { before, unchanged: unchangedIds.size, retraced: st.retraced }
+      : { retraced: st.retraced };
     if (st.extended) report.rivers.extendedToTheirEnd = st.extended;
-    if (st.kept) report.rivers.tooShortKeptAsMapped = st.kept;
+    if (rebuild) {
+      if (underWater) report.rivers.underWater = underWater;
+      for (const [k, ids] of Object.entries(rb)) if (ids.length) report.rivers[k] = riverTags(ids, byId);
+      if (orphaned.length) report.rivers.orphaned = riverTags(orphaned, byId);
+    } else if (st.kept) report.rivers.tooShortKeptAsMapped = st.kept;
   }
 
   // ---------------------------------------------------------------- river carving
@@ -531,8 +687,11 @@
     return out;
   }
 
-  /** Lower river cells so no river climbs; returns {rivers, cells, maxDrop, lowered: Map(pack cell -> old height)}. */
-  function carve() {
+  /**
+   * Lower river cells so no river climbs (only: a Set of the river ids to carve, default all);
+   * returns {rivers, cells, maxDrop, lowered: Map(pack cell -> old height)}.
+   */
+  function carve(only = null) {
     const C = pack.cells;
     const H = C.h;
     const gh = grid.cells.h;
@@ -554,7 +713,7 @@
       }
       if (gh[g] > v) gh[g] = v;
     };
-    const rivers = riverCourses();
+    const rivers = riverCourses().filter(r => !only || only.has(r.i));
     for (let pass = 0; pass < 50; pass++) {
       let changed = false;
       for (const r of rivers) {
