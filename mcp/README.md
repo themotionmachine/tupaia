@@ -124,8 +124,10 @@ What the newer tools and fields replaced (all one undo entry each, all dryRun-ab
 - `apply` (declarative spec, `mode:'check'|'upsert'|'update'`, idempotent; its `paint` list
   paints territory, biomes and heights in order, later entries winning, each entry only its
   differing cells, logged as replayable paint_cells steps; it creates provinces around their
-  capital after the paint and rivers along their from/via/to points) and `lint` (23 checks with
-  ready fix calls).
+  capital after the paint and rivers along their from/via/to points; entries match by `id`, then
+  name, then aliases (declared, or a river's name + type word), never duplicating an alias match;
+  `mode:'baseline'` writes the check's differences as accepted and a check with `baseline` reports
+  only new drift: src/apply-baseline.ts) and `lint` (23 checks with ready fix calls).
 
 Behaviour worth knowing:
 
@@ -475,6 +477,8 @@ node --test --test-concurrency=3 "test/**/*.test.ts"
   every description is at most 2048 chars, the instructions too, and the exact tool list.
 - One file per feature: `terrain`, `regrid`, `clear`, `compact`, `apply`, `applypaint` (the paint
   list, territory, places, burg cells), `addprov` (add province/river, apply creating them),
+  `applyalias` (apply id/alias matching and the baseline; also on the builder's polish-final.map
+  when it is on the machine),
   `lint`, `settings`,
   `routes`, `rivers`, `biomes`, `regen`, `relief`, `labels`, `tokens`, `http`; `fam-a/b/c` and
   `integrate.test.ts` cross the features (one apply spec over biomes, settings with locks,

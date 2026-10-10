@@ -255,11 +255,33 @@ paint:[
   (joined into the legend as the builder wrote them) need nothing. Two duplicates stay CONFLICT
   rows: Wainfolk (cultures[3].note and notes[10]) and Kaisma's road (routes[13].note and
   notes[7]); the builder joined each pair into one legend.
-- apply matches rivers by name and creates a missing one along its from/via/to (`add river`);
-  a river whose first place is already on a river is an error row naming that river. Use
-  `edit river` for structure.
+- apply matches rivers by name, then by name + type word ('Melstone brook' finds Melstone, a
+  Brook) or a declared alias, and creates a missing one along its from/via/to (`add river`); a
+  river whose first place is already on a river is an error row naming that river: give the
+  entry that river as an alias (below). Use `edit river` for structure.
 - `specPath`: absolute (a relative one: your cwd via the CLI, else the server's cwd, the out dir,
   the repo root; the result's `specPath` names the file read).
+
+**Keep checking a polished map against its spec (aliases + baseline).** After hand polish the
+map departs from the spec on purpose (~100 differences on story-polish) and new drift drowns.
+1. Entities whose map name differs: an entry may carry `id` (the map's id) and
+   `aliases:['Map name']`; or keep the spec as is and pass `aliases` beside it:
+   `aliases:{rivers_intended:{'NE hollow brook':'Northeast Hollow', 'Klein river (with the
+   Corvallis gorge)':'Klein', 'The Spire':'Spire', 'Glassward south-face stream':'Glassward',
+   'Unclaimed valley outlet':'Unclaimed Valley'}}` (the other seven rivers match by name + type
+   word). Order: id > name > aliases; neither id nor alias renames; rows say `by`, the result
+   counts `matched`. Upsert never creates an entity matched by alias (two entries reaching one
+   entity: CONFLICT).
+2. `apply {<the call above>, aliases, mode:'baseline', writeBaseline:{path:'/abs/design/
+   apply-baseline.json', allowOutside:true}}` records every difference, missing entry and error
+   as accepted (one JSON item per line: list, key, field, have, want).
+3. `apply {..., mode:'check', baseline:'/abs/design/apply-baseline.json'}`: `clean:true`,
+   `baselined:N`, accepted rows counted as `accepted`. Later checks list only new drift, or an
+   accepted difference whose values changed (its old item counts in `baselineStale`). Re-run
+   step 2 to accept the new state. A baseline filters checks only: upsert refuses it (leave
+   accepted fields out with `ignore`/`only`). Verified on a copy of polish-final.map
+   (test/applyalias.test.ts): 12/12 rivers matched, 124 differences baselined, re-check clean,
+   one burg edit is the one row reported, no river duplicated by upsert.
 
 **Quality pass.** `lint {}` (overview: warn and error rows) -> run each `fixAll` call and the
 per-row `fix` calls (ready `edit`/`paint_cells`/`eval` calls; read them first: route-end-burg's

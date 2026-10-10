@@ -317,9 +317,19 @@
     return row;
   }
 
-  // Per type: {exact, folded} maps from a name (or alt name) to the live entities so named, in
-  // id order. Built once and dropped after every page call (reset), so a spec of n entries on a
-  // map of m entities costs O(n + m) per list, not O(n * m).
+  /**
+   * An entity's name with its type word, a name the alias tier matches: a river 'Melstone' of
+   * type 'Brook' is 'Melstone Brook' (so a spec's 'Melstone brook' finds it). null: none.
+   */
+  function typedName(type, x) {
+    if (type === "river" && typeof x?.name === "string" && x.name && typeof x.type === "string" && x.type.trim())
+      return `${x.name} ${x.type.trim()}`;
+    return null;
+  }
+
+  // Per type: {exact, folded, typed} maps from a name (or alt name; typed: the folded typed name)
+  // to the live entities so named, in id order. Built once and dropped after every page call
+  // (reset), so a spec of n entries on a map of m entities costs O(n + m) per list, not O(n * m).
   const nameIndexes = new Map();
 
   function nameIndex(type) {
@@ -332,6 +342,7 @@
     rows.sort((a, b) => cmpId(a.i, b.i));
     const exact = new Map();
     const folded = new Map();
+    const typed = new Map();
     const put = (m, k, r) => {
       let list = m.get(k);
       if (!list) {
@@ -340,13 +351,16 @@
       }
       if (list[list.length - 1] !== r) list.push(r);
     };
-    for (const r of rows)
+    for (const r of rows) {
       for (const n of [r.name, ...alts(type, r.x, r.i)]) {
         if (typeof n !== "string" || !n) continue;
         put(exact, n, r);
         put(folded, fold(n), r);
       }
-    ix = { exact, folded };
+      const t = typedName(type, r.x);
+      if (t) put(typed, fold(t), r);
+    }
+    ix = { exact, folded, typed };
     nameIndexes.set(type, ix);
     return ix;
   }
@@ -400,17 +414,51 @@
    * `nth`, the nth in id order. One spec entry but several on the map and no place to tell them
    * apart: AMBIGUOUS (with candidates). null: none.
    */
-  function findByName(type, name, nth = 0, dups = 1, at = null, tol = {}) {
-    const hits = allByName(type, name);
+  function findByName(type, name, nth = 0, dups = 1, at = null, tol = {}, aliases = []) {
+    let hits = name !== undefined ? allByName(type, name) : [];
+    // nothing by name: the alias tier (the entry's aliases, typed names), never paired by order
+    const alias = !hits.length;
+    if (alias) hits = aliasHits(type, name, aliases);
     if (hits.length > 1) {
       const near = nearHit(type, hits, at, tol);
       if (near) return near;
     }
-    if (hits.length > 1 && dups === 1)
-      fail("AMBIGUOUS", `${hits.length} ${type}s are named '${name}'; give the entry a ref (id) or its x,y`, {
-        candidates: hits.slice(0, 8).map(h => (h.entity ? candidate(type, h.entity) : { type, i: h.i, name: h.name }))
-      });
-    return hits[nth] ?? null;
+    if (hits.length > 1 && (dups === 1 || alias))
+      fail(
+        "AMBIGUOUS",
+        alias
+          ? `${hits.length} ${type}s match '${name ?? aliases[0]}' by alias (${[...new Set(hits.map(h => h.by))].join(", ")}); give the entry an id or x,y`
+          : `${hits.length} ${type}s are named '${name}'; give the entry a ref (id) or its x,y`,
+        {
+          candidates: hits.slice(0, 8).map(h => (h.entity ? candidate(type, h.entity) : { type, i: h.i, name: h.name }))
+        }
+      );
+    return (alias ? hits[0] : hits[nth]) ?? null;
+  }
+
+  /**
+   * The alias tier, after the name matched nothing: the entry's declared aliases matched as names
+   * (exact, then folded, as a name is), then its name and aliases matched (folded) against the
+   * entities' typed names (typedName: a river's name + type word). One hit per entity, in id
+   * order: [{i, name, entity, alt:true, by}], by = "alias 'X'" | "name+type 'Melstone Brook'".
+   */
+  function aliasHits(type, name, aliases) {
+    const out = new Map();
+    for (const a of aliases)
+      for (const h of allByName(type, a)) if (!out.has(h.i)) out.set(h.i, { ...h, alt: true, by: `alias '${a}'` });
+    let ix = null;
+    try {
+      ix = nameIndex(type);
+    } catch (e) {
+      if (e?.code !== "BAD_TYPE") throw e;
+    }
+    for (const n of [name, ...aliases]) {
+      if (!ix || typeof n !== "string" || !n.trim()) continue;
+      for (const r of ix.typed.get(fold(n)) || [])
+        if (!out.has(r.i))
+          out.set(r.i, { i: r.i, name: r.name, entity: r.x, alt: true, by: `name+type '${typedName(type, r.x)}'` });
+    }
+    return [...out.values()].sort((a, b) => cmpId(a.i, b.i));
   }
 
   function byRef(type, ref) {
@@ -722,16 +770,30 @@
 
   /**
    * The key of an entry: {ref} (explicit, must exist), {ref, byId} (the `id` of an extension
-   * type such as a route group, which may then create it) or {name} (labels: text). A core
-   * type's `id` is not a key (a spec may number its entries its own way): ref is.
+   * type such as a route group, which may then create it) or {id?, name?} (labels: text): a core
+   * type's `id` (the map's id: 12, 'label3') is tried first and, when no live entity has it, the
+   * name; neither renames (ref does).
    */
   function keyOf(type, e) {
     if (e.ref !== undefined) return { ref: e.ref };
     if (!CORE_TYPES.includes(type) && typeof e.id === "string" && e.id.trim()) return { ref: e.id, byId: true };
     const name = type === "label" ? e.text : e.name;
-    if (typeof name === "string" && name.trim()) return { name };
-    return null;
+    const k = {};
+    if (
+      type !== "map" &&
+      type !== "note" &&
+      ((Number.isInteger(e.id) && e.id >= 0) || (typeof e.id === "string" && e.id.trim()))
+    )
+      k.id = e.id;
+    if (typeof name === "string" && name.trim()) k.name = name;
+    return k.id !== undefined || k.name !== undefined ? k : null;
   }
+
+  /** An entry's declared aliases (strings). */
+  const aliasesOf = e =>
+    (Array.isArray(e.aliases) ? e.aliases : typeof e.aliases === "string" ? [e.aliases] : []).filter(
+      a => typeof a === "string" && a.trim()
+    );
 
   /** An entity of `type` the add creates under the id the entry gives (not a core type). */
   const creatableById = type => !CORE_TYPES.includes(type) && !!ADD[type];
@@ -769,7 +831,11 @@
     const row = { status: "unchanged", act: "none", ignored: [] };
     const e = { ...raw };
     const key = keyOf(type, e);
-    row.key = key ? (key.ref ?? key.name) : null;
+    row.key = key ? (key.ref ?? key.name ?? key.id) : null;
+    // matching keys only: never compared, never passed to an add
+    const aliases = aliasesOf(e);
+    delete e.aliases;
+    if (key?.id !== undefined) delete e.id;
     if (!key) {
       row.status = "error";
       row.error = { code: "BAD_ARGS", message: `a ${type} entry needs ${nameField(type)} (or ref)` };
@@ -795,10 +861,22 @@
         row.ownsNote = true;
       } else delete e.note;
     }
-    let found;
+    let found = null;
     try {
-      if (key.ref === undefined) found = findByName(type, key.name, ctx.nth, ctx.dups, e.at, ctx.tol);
-      else
+      if (key.ref === undefined) {
+        // id > name (exact, then folded) > aliases (declared, then name+type word)
+        let idMiss = false;
+        if (key.id !== undefined)
+          try {
+            found = { ...byRef(type, { id: key.id }), alt: true, by: "id" };
+          } catch (err) {
+            if (err?.code !== "NOT_FOUND" && err?.code !== "REMOVED") throw err;
+            idMiss = true;
+          }
+        if (!found && (key.name !== undefined || aliases.length))
+          found = findByName(type, key.name, ctx.nth, ctx.dups, e.at, ctx.tol, aliases);
+        if (found && idMiss) found.by = `${found.by ?? "name"} (no ${type} ${key.id})`;
+      } else
         try {
           found = byRef(type, key.byId ? { id: key.ref } : key.ref);
         } catch (err) {
@@ -815,6 +893,7 @@
       row.i = found.i;
       row.name = found.name;
       row.entity = found.entity;
+      if (found.by) row.by = found.by;
       const F = { ...e };
       delete F.ref;
       if (key.byId) delete F.id;
@@ -1494,6 +1573,7 @@
     out.status = r.status;
     if (r.diffs?.length) out.diffs = r.diffs;
     if (r.error) out.error = r.error;
+    if (r.by) out.by = r.by;
     if (r.noteSkipped) out.note = "skipped: the entity does not exist";
     return out;
   }
@@ -1642,7 +1722,7 @@
             pending.set(type, set);
           }
           const e = entries[k];
-          for (const n of [r.key, e?.name, e?.text, e?.id])
+          for (const n of [r.key, e?.name, e?.text, e?.id, ...(isObj(e) ? aliasesOf(e) : [])])
             if (typeof n === "string" && n) set.add(fold(type === "label" ? n.replace(/\|/g, "") : n));
           // a new state at a place makes its capital burg (capitalName names it)
           if (type === "state" && typeof e?.capitalName === "string" && e.capitalName) {
