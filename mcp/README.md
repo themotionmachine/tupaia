@@ -26,7 +26,7 @@ It is a separate Node package. Nothing here is imported by the app or shipped in
 - Page side: `src/bridge.js` and `src/bridge-mutations.js` define `globalThis.__tupaia`; every
   `src/bridge-ext/*.js` is injected after them in name order (apply, biomes, clear, compact,
   labels, lint, regen-replay, regen, regrid, relief, rivers, rivertrace, routes, settings, terrain,
-  territory, tokens).
+  territory, tokens, where).
   Extensions add FIELDS, types and FNS functions, and some wrap core ones (FNS.edit, regenerate,
   display, summary, loadMap). Every tool goes through one `__tupaia.call(name, args)`.
 - Node side: `src/tools/*.ts` are imported in name order and register through `defineTools`;
@@ -105,8 +105,22 @@ What the newer tools and fields replaced (all one undo entry each, all dryRun-ab
 - `add province {state, centre:{burg}|Place, name, cells|select}` makes a province like the
   provinces editor (grown over the state's nearer cells by default; shield, label, borders).
 - Biomes as entities (`find/inspect/add/edit biome`), `paint_cells feather`, and `regenerate
-  {parts:['biomes'], biomes:{noise, smooth, minRegion, seed, keepPainted, ...}}`. App fix: the
-  biome line's 4th field keeps icon density, icons and cost through save/load.
+  {parts:['biomes'], biomes:{noise, smooth, minRegion, seed, keepPainted, rainShadow,
+  smoothClimate, ...}}`. App fix: the biome line's 4th field keeps icon density, icons and cost
+  through save/load. `rainShadow` walks upwind from each land cell (the map's winds per latitude
+  tier, by grid row exactly as generatePrecipitation, or a fixed `wind`; `spread` fans the look
+  over ±degrees) and cuts its precipitation by the ridge height crossed;
+  `smoothClimate` averages the precipitation/temperature inputs; both only feed the biome
+  derivation (grid climate untouched) and the op still logs literal biome cells.
+- Paint by condition: every select's `where` (src/where.ts schema, src/bridge-ext/where.js) takes
+  ranges `{gte, lte, gt, lt}` on height, flux, precipitation, temperature, x, y, slope (max or
+  mean neighbour difference), riverDist (graph steps to river cells; `rivers`, `tributaries`,
+  `minFlux` pick the sources), aboveRiver (height above that river cell) and seeded noise, and
+  `all`/`any`/`not` over where objects (at most 32 deep, else BAD_ARGS). precipitation and
+  temperature take `smooth` passes, precipitation a `rainShadow` (the value regenerate would
+  read), and `rainShadow` selects on the shadow's cut 0..1. A compiled predicate tree, never an
+  evaluated string; unknown keys are BAD_FIELD. apply's paint entries intersect an entry `where`
+  with the select's where when they share a key. paint_cells logs the literal cells, so it replays as before.
 - `regenerate {parts:['provinces','emblems'], provinces:{states, centres|count}, emblems:{...}}`
   for named states only (hand-made states too); `provinces:{regrow:true, band?}` keeps the
   provinces and redraws their borders along the terrain, each to about its size
@@ -550,7 +564,7 @@ node --test --test-concurrency=3 "test/**/*.test.ts"
   `territory` (regrow borders along the terrain: regrid territories, regenerate provinces regrow),
   `applyalias` (apply id/alias matching and the baseline; also on the builder's polish-final.map
   when it is on the machine),
-  `lint`, `settings`,
+  `lint`, `settings`, `condpaint` (where conditions, rain shadow, climate smoothing),
   `routes`, `rivers`, `riverkeep` (terrain rebuilds that re-trace the rivers), `biomes`, `regen`,
   `relief`, `labels`, `tokens`, `http`; `fam-a/b/c` and
   `integrate.test.ts` cross the features (one apply spec over biomes, settings with locks,

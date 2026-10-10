@@ -1343,8 +1343,25 @@
     state: "state",
     province: "province",
     culture: "culture",
-    religion: "religion"
+    religion: "religion",
+    // tupaia-mcp condpaint: condition keys (bridge-ext/where.js) that read the heights
+    height: "height",
+    slope: "height",
+    temperature: "height",
+    aboveRiver: "height",
+    // the rain shadow walks the heights (and precipitation may take a rainShadow)
+    rainShadow: "height",
+    precipitation: "height"
   };
+
+  /** Painted keys a where reads, through all/any/not too. */
+  function whereDeps(where, out, depth = 0) {
+    // past the depth where.js accepts the select is refused anyway; do not recurse further
+    if (!isObj(where) || depth > 40) return;
+    for (const k of Object.keys(where)) if (WHERE_DEPS[k]) out.add(WHERE_DEPS[k]);
+    for (const k of ["all", "any"]) if (Array.isArray(where[k])) for (const w of where[k]) whereDeps(w, out, depth + 1);
+    if (isObj(where.not)) whereDeps(where.not, out, depth + 1);
+  }
 
   /** Cells of a paint select: paint_cells' selection plus any:[selects] (a union); except may hold any too. */
   function paintCells(sel) {
@@ -1369,7 +1386,7 @@
 
   function depsOf(sel, out = new Set()) {
     if (!isObj(sel)) return out;
-    if (isObj(sel.where)) for (const k of Object.keys(sel.where)) if (WHERE_DEPS[k]) out.add(WHERE_DEPS[k]);
+    whereDeps(sel.where, out);
     if (isObj(sel.entity) && PAINTABLE.includes(sel.entity.type)) out.add(sel.entity.type);
     if (Array.isArray(sel.any)) for (const s of sel.any) depsOf(s, out);
     if (sel.except) depsOf(sel.except, out);

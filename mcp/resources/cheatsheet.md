@@ -134,6 +134,21 @@ feature, burg, river}`, minus `except:<another select>` ('polygon except circle'
 `except:{where:{biome:'Glacier'}}`). An unknown key in select, where, set or height is BAD_FIELD
 (`details {unknown, allowed}`), never ignored.
 
+Conditions (any select's `where`; `where` alone scans every cell): ranges `{gte?, lte?, gt?, lt?}`
+on `height`, `flux`, `precipitation` (raw grid.cells.prec, as Biomes reads it; the cell info
+shows it x100 as mm; +`smooth` passes, +`rainShadow` options: the shadowed value), `temperature`
+(°C, +`smooth`), `rainShadow` (the shadow's cut 0..1, + the rainShadow options), `x`,
+`y` (cell centre px), `slope` (+`mode:'max'|'mean'`: height difference to the neighbours, water
+as 20), `riverDist` (graph steps over land to the nearest river cell, rivers 0; +`rivers:[ref]`,
+`tributaries`, `minFlux` choose the river cells), `aboveRiver` (height above that river cell,
+same options) and `noise` (+`scale` px, `seed`, `octaves`: smooth seeded noise 0..1); `all:[...]`,
+`any:[...]`, `not:{...}` combine where objects (at most 32 deep). Noise values cluster around 0.5
+(gte 0.3 keeps most cells; use 0.5..0.7 for patches). In apply's paint list an entry's `where` on
+a key its select's where also has is intersected (`all`), never replaced. Floodplain: `paint_cells {select:{where:{land:true,
+any:[{riverDist:{lte:0, rivers:R}}, {all:[{riverDist:{lte:4, rivers:R}}, {aboveRiver:{lte:4,
+rivers:R}}, {height:{lte:38}}]}]}}, set:{biome:'Wetland'}, feather:{width:4, unit:'cells'}}`
+(feather frays the condition's edge when `where` is the whole select). Logged as literal cells.
+
 | set | rules |
 | --- | --- |
 | state | land only; never a state centre or a capital's cell; burgs follow; provinces re-fitted; state labels: see below |
@@ -216,8 +231,18 @@ locked routes: read `routeIds {old:new}`. Style presets leave custom groups alon
 palm, swamp, hill, mount, mountSnow, vulcan. New values show after `regenerate
 {parts:['relief']}`. `regenerate {parts:['biomes'], biomes:{from?:'climate'|'current', noise?,
 mode?:'warp'|'jitter', smooth?, minRegion?, seed?, keepPainted?:true|'custom'|false, keepRivers?,
-keep?, exclude?, select?}}`: natural edges; custom biomes and painted cells are kept by default
-(`keepPainted:'custom'` keeps only custom-biome cells). Try seeds with dryRun, then apply once.
+keep?, exclude?, select?, rainShadow?, smoothClimate?}}`: natural edges; custom biomes and painted
+cells are kept by default (`keepPainted:'custom'` keeps only custom-biome cells). Try seeds with
+dryRun, then apply once. `rainShadow:true | {strength?:1, maxDistance?:15, unit?:'cells'|'px',
+ridge?:50, wind?, spread?:0}` (`false` = off; strength is capped at 5; spread fans the upwind
+look over ±spread degrees): each land cell looks upwind (the map's `winds` per latitude tier; `wind`
+fixes the direction the wind blows towards, 90 = from the west) and loses
+`strength * crossed / 50` of its precipitation, crossed = the highest ground >= ridge above it,
+fading to 0 at maxDistance; `smoothClimate:{precipitation?, temperature?}` = passes of a
+land-neighbour mean (0..200; n passes blur ~6*sqrt(n) px at 10 px spacing), after the shadow. Both feed only the biome derivation (the precipitation
+layer stays); the result's `rainShadow {wind:[degrees], windFrom:'map'|'fixed', shadowed, halved, meanCut}`
+says how much dried. The default keepPainted:true keeps painted cells: on a hand-painted map pass
+keepPainted:false or the shadow changes little.
 The .map biome line carries iconsDensity, icons and cost (a 4th field). Files saved before it
 (terraform-v3, shared v6/v7) load custom biomes with 0, none and 50 and edited stock biomes with
 defaults; load_map says so in `note`. Set them again with `edit {type:'biome'}` and save.

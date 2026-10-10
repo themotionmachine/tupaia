@@ -352,6 +352,27 @@ marker-near-burg) run only when named.
    cultures and religions only; removed markers, notes, labels, routes and zones are already
    gone.
 
+**Biomes by condition: floodplain, rain-shadow desert, contour bands.** One call each, both
+replayable (literal cells). Floodplain (rivers `R` = the main river and its big tributaries):
+`paint_cells {select:{where:{land:true, any:[{riverDist:{lte:0, rivers:R}}, {all:[{riverDist:
+{lte:4, rivers:R}}, {aboveRiver:{lte:4, rivers:R}}, {height:{lte:38}}]}]}}, set:{biome:'Wetland'},
+feather:{width:4, unit:'cells', seed:11}}` (on polish-final this matched the fork's hand-made
+floodplain at Jaccard 0.72 before feathering, 0.70 painted). A contour band (Badlands):
+`where:{height:{gte:45, lte:53}, noise:{scale:60, seed:31, gte:0.3}}` with `circle` to bound it.
+Rain-shadow desert, the call measured against the fork's open-eval on polish-final (`S` = the
+fork's scope: `{height:{gte:20, lte:58}}` and `{any:[{biome:['Hot desert','Savanna','Grassland',
+'Tropical seasonal forest','Cold desert']}, {biome:'Wetland', x:{gte:1440}, y:{lte:920}}]}`):
+`paint_cells {select:{where:{all:[...S, {temperature:{gte:18.5, smooth:150}}, {precipitation:
+{lt:0.6, smooth:150, rainShadow:{ridge:74, maxDistance:336, unit:'px', wind:0, spread:30,
+strength:2}}}]}}, set:{biome:'Hot desert'}}`. It matches the fork's classifier without its noise
+at Jaccard 0.65 and the fork's noisy result at 0.22; the fork's own classifier without its noise
+reaches only 0.175 against that result, so the remaining gap is the fork's ±140 px warp noise.
+Precipitation is the raw `grid.cells.prec` (cell info shows x100 mm). `where.rainShadow:{gte:0.5,
+...}` selects the lee itself. `regenerate {parts:['biomes'], biomes:{rainShadow, smoothClimate,
+select, keepPainted:false}}` re-derives with the app's biome matrix instead (Jaccard 0.14 here: the
+fork classified by its own thresholds); `keepPainted` defaults to true, which on a hand-painted
+map keeps most cells, so pass false. Tests: `mcp/test/condpaint.test.ts`.
+
 **Propose a change as a sketch.** See section 10; the replay table there says which calls keep
 the sketch rebasable.
 
@@ -410,6 +431,7 @@ replaces it:
 | River splices, splits, renames, moving notes (rivfix.js, split.py, rename_rivers.py) | `edit {type:'river', ops:[{ref, set:{split\|merge\|mainStem\|reroute\|end\|joinAt\|name\|type}}]}`; rivfix in two calls: `[{ref:28, set:{end:{at:7437}}}, {ref:14, set:{reroute:{cells:[7141,7289,7437,7586]}}}]` then `[{ref:9, set:{mainStem:8}}, ...renames]` |
 | Burg labels hidden at full-map zoom | `display {labels:{...}}`, `screenshot {labels:'all'}` (check first: usually they show, just small) |
 | Relief icon density by hand | `regenerate {parts:['relief'], relief:{density\|matchIcons, perBiome, exclude, nearBurgs}}` |
+| Floodplain by flux and flatness, rain-shadow deserts, a contour-following Badlands (polish flood-eval, open-eval, bad-eval) | `paint_cells {select:{where:{riverDist, aboveRiver, slope, height, flux, noise, all/any/not}}, feather}`; `regenerate {parts:['biomes'], biomes:{rainShadow, smoothClimate}}` (recipe in section 5) |
 | Removed entities bloating the .map | `compact`, `compact:true` on saves; `edit map {reliefOnLoad:true}` |
 | Territory and biome cell lists by eval (sel.py: feature polygons + buffer_px, except), then paint_cells per culture/state/religion/biome (territory.py, paint_territory.py, paint_biomes.py) | `apply {specPath, paint:[{from:'terrain_paint.Somnean', set:{culture, state}}, {from:'biomes_paint'}, ...]}` (the mapping above); one-off: `paint_cells {select:{polygon, buffer, except}}` |
 | Composite marker legends, map/label notes by id (add_markers.py, add_notes.py) | `markers[].places` and `notes[].entity` through apply (the mapping above) |

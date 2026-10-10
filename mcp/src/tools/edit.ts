@@ -14,6 +14,7 @@ import {
 } from "../ops.ts";
 import { META_TEXT_HEAVY, ToolError } from "../result.ts";
 import { ENTITY_TYPES, EntityRef, EntityTarget, Place, RedrawLayer, TIMEOUTS, TimeoutMs } from "../schemas.ts";
+import { WhereConditions } from "../where.ts";
 import { defineTools } from "./registry.ts";
 
 interface ErrRow {
@@ -246,10 +247,13 @@ const SelectShape = {
       religion: z.union([EntityRef, z.array(EntityRef)]).optional(),
       feature: z.union([EntityRef, z.array(EntityRef)]).optional(),
       burg: z.boolean().optional(),
-      river: z.boolean().optional()
+      river: z.boolean().optional(),
+      ...WhereConditions
     })
     .optional()
-    .describe("Filter; alone it scans every cell. An unknown key is BAD_FIELD (never ignored)")
+    .describe(
+      "Filter (every key must hold); alone it scans every cell. Conditions: all/any/not combine where objects (at most 32 deep); height, flux, precipitation, temperature, x, y, slope, riverDist, aboveRiver, rainShadow and noise take ranges {gte, lte, gt, lt}, e.g. {all:[{height:{lte:35}}, {riverDist:{lte:2, minFlux:300}}, {slope:{lte:3}}]}. An unknown key is BAD_FIELD (never ignored)"
+    )
 };
 
 export const SelectSchema = z
@@ -395,7 +399,7 @@ export function register(ctx: ToolContext): void {
     {
       title: "Paint cells",
       description:
-        "Assign cells to a state/province/culture/religion/biome/zone, or change their height. select picks cells (union of cells, circle {at, radius, unit?}, polygon [Place...], entity {type,ref}; grown by buffer px; filtered by where {land, water, hMin, hMax, biome, state, ...}; minus except:<select>). Unknown keys in select, where or set are BAD_FIELD. Painting skips water cells and never moves a state's or province's centre cell or a capital; provinces are re-fitted after state painting. State paints re-fit only renderer-drawn state labels; hand-placed ones (locked, dragged, edited) keep path, size and pole unless the anchor leaves the state (set.state.stateLabels; dryRun wouldMove); no layer toggles, new labels or fills. height {value|delta|smooth, rebuild, biomes?}: rebuild 'keep' (default) changes land heights only (20..100), refuses any change that crosses height 20 and is local: the changed cells' temperature, lake levels and biome (biomes:'keep' keeps it) follow; rivers, other cells and the economy stay (result local: rivers through the cells that now climb); 'risk' rebuilds the coastline, lakes and climate while keeping burgs, states and other data (cell ids change); its rivers:'retrace' (default) re-traces each river onto the new heights (ids, names, parents, hand edits kept; carved where it would climb; set.height.rivers names removed or untraced ones), 'regenerate' re-runs the generator (erosion:true implies it); 'erase' regenerates every entity and needs confirmErase:true. Paint height in its own call. feather {width, unit?, seed?} (set:{biome} only) frays the edge: cells within width/2 of the selection boundary are painted with a probability falling from 1 inside to 0 outside (deterministic per seed); the op is logged as the literal cells painted. dryRun:true counts what would change. One auto-undo entry.",
+        "Assign cells to a state/province/culture/religion/biome/zone, or change their height. select picks cells (union of cells, circle {at, radius, unit?}, polygon [Place...], entity {type,ref}; grown by buffer px; filtered by where {land, water, hMin, hMax, biome, state, ...; conditions: height, flux, slope, riverDist, aboveRiver, precipitation, temperature, x, y, noise as ranges {gte,lte,gt,lt}, combined by all/any/not}; minus except:<select>). Unknown keys in select, where or set are BAD_FIELD. Painting skips water cells and never moves a state's or province's centre cell or a capital; provinces are re-fitted after state painting. State paints re-fit only renderer-drawn state labels; hand-placed ones (locked, dragged, edited) keep path, size and pole unless the anchor leaves the state (set.state.stateLabels; dryRun wouldMove); no layer toggles, new labels or fills. height {value|delta|smooth, rebuild, biomes?}: rebuild 'keep' (default) changes land heights only (20..100), refuses any change that crosses height 20 and is local: the changed cells' temperature, lake levels and biome (biomes:'keep' keeps it) follow; rivers, other cells and the economy stay (result local: rivers through the cells that now climb); 'risk' rebuilds the coastline, lakes and climate while keeping burgs, states and other data (cell ids change); its rivers:'retrace' (default) re-traces each river onto the new heights (ids, names, parents, hand edits kept; carved where it would climb; set.height.rivers names removed or untraced ones), 'regenerate' re-runs the generator (erosion:true implies it); 'erase' regenerates every entity and needs confirmErase:true. Paint height in its own call. feather {width, unit?, seed?} (set:{biome} only) frays the edge: cells within width/2 of the selection boundary are painted with a probability falling from 1 inside to 0 outside (deterministic per seed); the op is logged as the literal cells painted. dryRun:true counts what would change. One auto-undo entry.",
       inputSchema: z.object({
         select: SelectSchema,
         set: z.looseObject({

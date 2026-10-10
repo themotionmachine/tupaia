@@ -445,6 +445,17 @@ export interface PaintNormalized {
   biomes: Entry[];
 }
 
+/**
+ * An entry's where on top of its select's where: both must hold. Keys only one side has merge
+ * flat (the classic hMin + hMax compose); when a key is on both sides (a range like height, or
+ * all/any/not) a flat merge would let one replace the other and widen the paint, so the two are
+ * intersected as {all:[select.where, entry.where]}.
+ */
+export function mergeWhere(a: Entry, b: Entry): Entry {
+  const clash = Object.keys(b).some(k => k in a);
+  return clash ? { all: [a, b] } : { ...a, ...b };
+}
+
 /** One paint entry (possibly a from that expands to several) -> normalized entries. */
 export function normalizePaint(raw: unknown[], root: Record<string, unknown>, shapes: ShapeIndex): PaintNormalized {
   const entries: PaintEntry[] = [];
@@ -457,7 +468,7 @@ export function normalizePaint(raw: unknown[], root: Record<string, unknown>, sh
     const selRaw: Entry = isObj(e.select) ? { ...e.select } : isObj(e.shape) ? { ...e.shape } : {};
     for (const k of SELECT_TOP)
       if (e[k] !== undefined) {
-        if (k === "where" && isObj(selRaw.where) && isObj(e.where)) selRaw.where = { ...selRaw.where, ...e.where };
+        if (k === "where" && isObj(selRaw.where) && isObj(e.where)) selRaw.where = mergeWhere(selRaw.where, e.where);
         else if (k === "except" && selRaw.except !== undefined) selRaw.except = { selects: [selRaw.except, e.except] };
         else selRaw[k] = e[k];
       }
