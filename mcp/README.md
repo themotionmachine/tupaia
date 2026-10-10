@@ -152,6 +152,13 @@ Behaviour worth knowing:
   `warnings`.
 - `add culture` gives the culture a COA shield (the default culture's, a same-base culture's, a
   random one, else heater); `shield` is an editable culture field.
+- A state paint (paint_cells, apply's paint list) re-fits only the state labels that match what
+  the renderer draws for their state now (checked by drawing it and putting the original back);
+  hand-placed ones (locked state, dragged, resized, re-texted, reshaped, custom path) keep path,
+  size, text and pole unless the paint takes their anchor out of the state (then re-fitted no
+  larger than before and reported: `set.state.stateLabels`, a note; dryRun: `wouldMove`). A
+  state without a label gets none. A paint's fill redraw skips a layer whose button is on but
+  which drew nothing, so it never adds fills; layers are never toggled.
 - After a `rebuild:'risk'` (set_heights, paint_cells height) a carried route point whose cell
   moved away from its x,y is re-recorded to the cell under it (`carried.routePointsRepointed`),
   so lint `route-point-cell` stays clean.
