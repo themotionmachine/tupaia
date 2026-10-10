@@ -23,6 +23,8 @@
 // Anything else maps through `mapping` (lists renames, keys renames/drops, values tables or
 // "prefix{}suffix" templates; a table's '*' entry is the default for values it does not list),
 // applied first, and `ignore` ({list: [keys]}, '*' for every list) drops keys from the check.
+// Matching keys: an entry may carry `id` and `aliases` (a string becomes a list); `aliases` beside
+// the spec ({list: {entry name: names | id}}, or a top-level `aliases` in the file) adds them.
 
 /** Plural list key -> edit/add type. Other keys: a trailing 's' is dropped (sibling types). */
 export const LIST_TYPES: Record<string, string> = {
@@ -109,6 +111,13 @@ export interface NormalizedSpec {
 /** Keys to leave out of the check, per list (after renames); '*' applies to every list. */
 export type Ignore = Record<string, string[]>;
 
+/**
+ * Matching keys given beside the spec (the `aliases` argument, or a top-level `aliases` object
+ * in the spec file): per list, per entry name (labels: text), the map names it may go by (strings)
+ * and/or the map's id (a number, or a string id such as 'label3' given as {id}).
+ */
+export type AliasMap = Record<string, Record<string, unknown>>;
+
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 const isNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 const isPair = (v: unknown): v is [number, number] => Array.isArray(v) && v.length >= 2 && isNum(v[0]) && isNum(v[1]);
@@ -177,6 +186,7 @@ export function mapEntry(
 /** Shape normalization of one entry of `type` (see the header). */
 export function normalizeEntry(type: string, raw: Entry): Entry {
   const e: Entry = { ...raw };
+  if (typeof e.aliases === "string") e.aliases = [e.aliases];
   if (e.at === undefined && isNum(e.x) && isNum(e.y)) {
     e.at = { x: e.x, y: e.y };
     delete e.x;
@@ -520,25 +530,58 @@ export interface SpecInput {
 }
 
 /**
+ * An entry with the aliases given for it beside the spec (AliasMap values): strings join its
+ * `aliases`, a number or {id} becomes its `id` (an id the entry gives itself wins).
+ */
+export function withAliases(e: Entry, given: unknown): Entry {
+  const out: Entry = { ...e };
+  const names: unknown[] =
+    typeof out.aliases === "string" ? [out.aliases] : Array.isArray(out.aliases) ? [...out.aliases] : [];
+  for (const v of Array.isArray(given) ? given : [given]) {
+    if (typeof v === "string" && v.trim()) {
+      if (!names.includes(v)) names.push(v);
+    } else if (out.id === undefined && Number.isInteger(v)) out.id = v;
+    else if (out.id === undefined && isObj(v) && (typeof v.id === "string" || Number.isInteger(v.id))) out.id = v.id;
+  }
+  if (names.length) out.aliases = names;
+  return out;
+}
+
+/**
  * Merge, map and normalize. `fileSpec` (from specPath) comes first; inline lists replace the
  * file's list of the same key. `only` keeps just those lists (by their name after or before
- * mapping.lists renames); `ignore` drops keys from entries.
+ * mapping.lists renames); `ignore` drops keys from entries; `aliases` (merged over the file's
+ * top-level `aliases`) adds matching keys to the entries it names (withAliases).
  */
 export function normalizeSpec(
   fileSpec: SpecInput | null,
   inline: SpecInput,
   mapping: Mapping = {},
   only?: string[],
-  ignore?: Ignore
+  ignore?: Ignore,
+  aliases?: AliasMap
 ): NormalizedSpec {
   const notes: string[] = [];
   const skipped: string[] = [];
   const merged: Record<string, unknown> = {};
   const origin = new Map<string, Set<string>>(); // list key after renames -> the keys it came from
   const rename = (k: string) => mapping.lists?.[k] ?? k;
+  // aliases per list (after renames) and entry name: the argument's, then the file's (an id the
+  // argument gives wins)
+  const aliasBy = new Map<string, Map<string, unknown[]>>();
+  const asList = (v: unknown): unknown[] => (Array.isArray(v) ? v : v === undefined ? [] : [v]);
+  for (const src of [isObj(fileSpec?.aliases) ? fileSpec.aliases : {}, aliases ?? {}])
+    for (const [list, byName] of Object.entries(src as Record<string, unknown>)) {
+      if (!isObj(byName)) continue;
+      const m = aliasBy.get(rename(list)) ?? new Map<string, unknown[]>();
+      for (const [n, v] of Object.entries(byName)) m.set(n, [...asList(v), ...(m.get(n) ?? [])]);
+      aliasBy.set(rename(list), m);
+    }
+  const aliasUsed = new Set<string>();
   for (const src of [fileSpec ?? {}, inline])
     for (const [k, v] of Object.entries(src)) {
       if (v === undefined) continue;
+      if (k === "aliases" && isObj(v)) continue;
       const to = rename(k);
       merged[to] = v;
       if (!origin.has(to)) origin.set(to, new Set([to]));
@@ -640,8 +683,14 @@ export function normalizeSpec(
       continue;
     }
     const tType = TERRITORY_TYPES[key];
+    const given = aliasBy.get(key);
     const entries = (v as Entry[]).map(e => {
-      const m = dropKeys(key, mapEntry(e, mapping.keys?.[key], mapping.values?.[key]));
+      let m = dropKeys(key, mapEntry(e, mapping.keys?.[key], mapping.values?.[key]));
+      const nm = type === "label" ? m.text : m.name;
+      if (given && typeof nm === "string" && given.has(nm)) {
+        m = withAliases(m, given.get(nm));
+        aliasUsed.add(`${key}\u0000${nm}`);
+      }
       if (!tType || m.territory === undefined) return normalizeEntry(type, m);
       // territory is painted by the paint list, never set on the entity
       const { territory, ...rest } = m;
@@ -660,6 +709,11 @@ export function normalizeSpec(
     notes.push(
       `territory not painted (no paint entry sets it): ${unpainted.join("; ")}. Paint it with paint entries {select|from, set:{culture|state|religion|province}}`
     );
+  const unusedAliases: string[] = [];
+  for (const [list, m] of aliasBy)
+    for (const n of m.keys())
+      if (!aliasUsed.has(`${list}\u0000${n}`) && wanted(list)) unusedAliases.push(`${list} '${n}'`);
+  if (unusedAliases.length) notes.push(`aliases for entries the spec does not have: ${unusedAliases.join(", ")}`);
   for (const k of skipped)
     if (/paint/i.test(k))
       notes.push(

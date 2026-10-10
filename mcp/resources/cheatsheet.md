@@ -22,7 +22,7 @@ only in a server a human spawned with `TUPAIA_MODE=live`, behind a preview and a
 | `add {type, items:[...], dryRun?, rows?, ...}` | create burgs, states, provinces, markers, routes, routeGroups, zones, labels, notes, cultures, religions, rivers, biomes. |
 | `paint_cells {select, set, feather?, dryRun?}` | assign state/province/culture/religion/biome/zone/height to cells. |
 | `set_heights {grid\|pack\|image, fill?, rebuild?, rivers?, erosion?, keepHeights?, biomes?, dryRun?}` | replace the heightmap; `risk` rebuilds coast, climate, biomes (entities carried over) and re-traces the rivers (`rivers:'regenerate'` makes new ones), `keep` is local. |
-| `apply {<lists>, map?, paint?, specPath?, mode?:'upsert'\|'update'\|'check', mapping?, ignore?, tolerance?, only?}` | bring the map in line with a spec by name (and paint its cells), or check it. Idempotent. |
+| `apply {<lists>, map?, paint?, specPath?, mode?:'upsert'\|'update'\|'check'\|'baseline', mapping?, ignore?, tolerance?, only?, aliases?, baseline?, writeBaseline?}` | bring the map in line with a spec by name (and paint its cells), or check it (against a baseline of accepted differences). Idempotent. |
 | `clear {types, where?, keep?, force?, orphanRoutes?, detail?, dryRun?}` | remove every entity of some types (wipe a random base), with each editor's cascade. |
 | `compact {types?, repointProvinces?, dryRun?, details?, limit?}` | shrink removed records to id-keeping stubs; drop their notes and SVG. |
 | `regrid {density, heights?, ice?, relief?, biomes?, minRegion?, carve?, territories?, territoryBand?, territoryLocked?, details?, dryRun?}` | change the cell density and keep the map (id, names, notes, labels). |
@@ -364,6 +364,28 @@ Rows: unchanged | updated | created | differs | missing | error with diffs {fiel
 identical differs/error rows are grouped (count, at, keys). `created` lists every created entity
 (`<list>.note` its note). Keys apply cannot use come back in `ignored` (with `ignoredNote`); a
 blocked field is an error row. Features are never created (UNSUPPORTED, with how: paint cells).
+Matching: `id` (the map's id) > name (exact, then folded) > aliases: the entry's `aliases:[...]`
+(or `aliases` beside the spec, `{list: {entry name: 'Map name' | [...] | id}}`, also a top-level
+`aliases` in the spec file), then name + type word (a river 'Melstone' of type Brook is
+'Melstone Brook', so 'Melstone brook' finds it). id and alias matches never rename (ref does);
+the row says `by` ('id', "alias 'X'", "name+type 'X'") and the result counts `matched` (not plain
+name matches). An id whose entity goes by another name than the entry's (and its aliases) is an
+ID_MISMATCH error row, never edited; id 0 of states, cultures, religions, burgs, provinces is no
+key (their placeholder). An entry whose id finds its entity leaves the same-name pairing. An
+upsert never creates an entity matched by alias; two entries reaching one entity: CONFLICT.
+Aliases apply to entity lists, not notes or nested states[].provinces (use a provinces list).
+**Baseline** (accepted departures): `mode:'baseline', writeBaseline:'x.json'` (or
+`{path, overwrite, allowOutside}`; .json, relative under TUPAIA_OUT) writes every difference,
+missing entry and error of the check as items {list, key, field, have, want, ...}; `mode:'check',
+baseline:'x.json'` (or the object) then drops those (same values only), counts wholly accepted
+rows as `accepted`, and adds `baselined` (differences accepted), `baselineStale` + `staleItems`
+(accepted items of the lists checked no longer reported: fixed, or their values changed),
+`baselineNotChecked` (items of lists this check left out: only, a smaller spec) and `clean`.
+Paint items key on the entry's label + a hash of its select/set (reordering keeps them); cell-set
+diffs carry a `sig` of which cells differ, so the same counts on other cells is new drift.
+`baseline:'x.json'` in mode 'baseline' replaces only an existing baseline file (else REFUSED:
+writeBaseline {path, overwrite:true}); the spec file itself is never overwritten. Upsert/update
+refuse a baseline (BAD_ARGS).
 
 **apply paint** (territory, biomes, heights): `paint:[{select, set:{state|province|culture|
 religion|biome|height}}]`, or flat `{shape|select|from, where?, except?, culture:'X', ...}`.
