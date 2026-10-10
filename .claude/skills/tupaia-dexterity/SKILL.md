@@ -392,6 +392,14 @@ drew (straight lines, nearest centre):
   Ids, names, capitals, centres, emblems and every burg's province stay; replays in a sketch.
   Tests: `mcp/test/territory.test.ts` (regenerate provinces {regrow:true}).
 
+**Combining the polish tools on one map.** They compose: `set_heights` (rivers re-traced) then
+`regrid {territories:'regrow'}` keeps the same rivers (carved, never climbing) with burgs,
+capitals and provinces inside their territories; a state paint selected by `where` conditions
+(`{all:[{height:{lte:40}}, {not:{riverDist:{lte:0}}}]}`) keeps hand-placed state labels, in
+`paint_cells` and in apply's paint list (an entry's `where` adds to its select's); an apply spec
+with alias-matched entries and such paints takes a baseline like any other (the paint applied
+alone leaves its item stale, not a new row). Tests: `mcp/test/polishintegrate.test.ts`.
+
 **Hand-made state with provinces and arms.** `add {type:'state', items:[{capital:{burg:'X'},
 name:'S'}]}` -> `paint_cells {select, set:{state:'S'}}` (and `{culture}`) ->
 `regenerate {parts:['provinces','emblems'], provinces:{states:['S'], count:3}, emblems:{states:

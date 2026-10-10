@@ -566,8 +566,9 @@ node --test --test-concurrency=3 "test/**/*.test.ts"
   when it is on the machine),
   `lint`, `settings`, `condpaint` (where conditions, rain shadow, climate smoothing),
   `routes`, `rivers`, `riverkeep` (terrain rebuilds that re-trace the rivers), `biomes`, `regen`,
-  `relief`, `labels`, `tokens`, `http`; `fam-a/b/c` and
-  `integrate.test.ts` cross the features (one apply spec over biomes, settings with locks,
+  `relief`, `labels`, `tokens`, `http`; `fam-a/b/c`, `polishintegrate` (rivers retrace then
+  territory regrow, condition paint with hand-placed labels, apply alias + baseline with territory
+  paint) and `integrate.test.ts` cross the features (one apply spec over biomes, settings with locks,
   route groups and rivers; a sketch of 8 replayable records rebased onto someone else's v7).
 - `test/sketch.test.ts` and `test/shared.test.ts`: sketches and the shared tools against
   `test/fake-worker.ts`, an in-process `node:http` fake of the Worker on 127.0.0.1.
