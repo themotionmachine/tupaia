@@ -22,7 +22,7 @@ const REAL_MAP = `${POLISH}/polish-final.map`;
 const V7_MAP = `${POLISH}/v7-backup.map`;
 const V7_HEIGHTS = `${POLISH}/sh.json`;
 
-/** Every river by id: name, type, parent, basin, tributaries, course points; plus gaps, loops and the climbing ids. */
+/** Every river by id: name, type, parent, basin, tributaries, course points, largest climb; plus gaps, loops and the climbing ids. */
 const RIVERS = `
   const C = pack.cells;
   const kids = {};
@@ -31,14 +31,23 @@ const RIVERS = `
   const rows = {};
   for (const r of pack.rivers) {
     const cs = r.cells, seen = new Set();
-    for (let k = 1; k < cs.length; k++) if (cs[k - 1] >= 0 && cs[k] >= 0 && !C.c[cs[k - 1]].includes(cs[k])) gaps++;
-    for (const c of cs) { if (c >= 0 && seen.has(c)) loops++; seen.add(c); }
+    for (let k = 1; k < cs.length; k++) if (cs[k - 1] >= 0 && cs[k] >= 0 && cs[k - 1] !== cs[k] && !C.c[cs[k - 1]].includes(cs[k])) gaps++;
+    // a cell repeated in place (as some loaded courses have) is neither a gap nor a loop (as lint)
+    cs.forEach((c, k) => { if (c >= 0 && seen.has(c) && cs[k - 1] !== c) loops++; seen.add(c); });
     rows[r.i] = { name: r.name, type: r.type, parent: r.parent, basin: r.basin,
       kids: (kids[r.i] || []).sort((a, b) => a - b),
       course: cs.filter(c => c >= 0).map(c => [C.p[c][0], C.p[c][1]]),
-      onLand: cs.filter(c => c >= 0 && C.h[c] >= 20).length };
+      onLand: cs.filter(c => c >= 0 && C.h[c] >= 20).length,
+      rise: __tupaia.riverTrace.riseOf(cs, C.h).max };
   }
   return { rows, gaps, loops, climbing: __tupaia.riverTrace.climbing(), spacing: grid.spacing };`;
+
+/** Rivers of `after` whose largest climb grew compared with `before` ("Name (id) a -> b"). */
+function climbsMore(before: Obj, after: Obj): string[] {
+  return Object.entries(after.rows as Obj)
+    .filter(([id, r]) => r.rise > (before.rows[id]?.rise ?? 0))
+    .map(([id, r]) => `${r.name} (${id}) ${before.rows[id]?.rise ?? "new"} -> ${r.rise}`);
+}
 
 /** Share of the points of `a` that have a point of `b` within `tol` px. */
 function follows(a: number[][], b: number[][], tol: number): number {
@@ -240,13 +249,47 @@ describe("terrain rebuild keeps the rivers (demo.map)", () => {
     assert.equal(await digest(), d0);
   });
 
-  test("dryRun: rivers default to 'retrace' on a map with rivers and name the river the change puts under water", async () => {
+  test("dryRun: rivers default to 'retrace' on a map with rivers and name the river the change puts under water (the apply's list)", async () => {
     const d = await h.ok("set_heights", { grid: change, dryRun: true }, 240_000);
     assert.equal((d.options as Obj).rivers, "retrace");
     const rv = d.rivers as Obj;
     const f = edits.spots.flood;
-    assert.ok((rv.underWater as string[]).includes(`${f.name} (${f.i})`), JSON.stringify(rv));
+    // exactly the river the apply removes (next test), no short river that merely has few cells
+    assert.deepEqual(rv.underWater, [`${f.name} (${f.i})`], JSON.stringify(rv));
     assert.match(rv.effect, /re-traced on apply/);
+    const same = await h.ok(
+      "set_heights",
+      { grid: await ev("return Array.from(grid.cells.h)"), dryRun: true },
+      240_000
+    );
+    assert.equal((same.rivers as Obj).underWater, undefined, "a change that changes nothing puts no river under water");
+    assert.equal((same.rivers as Obj).partlyUnderWater, undefined);
+  });
+
+  test("a rebuild that changes no height keeps every river's course (bar one the re-pack splits), carries routes, markers and burgs", async () => {
+    await h.ok("load_map", { path: base });
+    const consistency = `
+      const C = pack.cells;
+      let badLinks = 0; for (const [k, v] of Object.entries(C.routes)) for (const nb of Object.keys(v)) if (!C.c[+k]?.includes(+nb)) badLinks++;
+      let markers = 0; for (const m of pack.markers) if (Math.hypot(C.p[m.cell][0] - m.x, C.p[m.cell][1] - m.y) > 3 * grid.spacing) markers++;
+      const burgs = pack.burgs.filter(b => b.i && !b.removed);
+      return { badLinks, markers, burgCellsOff: burgs.filter(b => C.burg[b.cell] !== b.i).length };`;
+    const c0 = await ev(consistency);
+    const b = await ev(RIVERS);
+    const r = await h.ok("set_heights", { grid: await ev("return Array.from(grid.cells.h)") }, 240_000);
+    const rv = r.rivers as Obj;
+    assert.equal(rv.underWater, undefined, JSON.stringify(rv));
+    assert.ok(rv.retraced <= 2 && rv.unchanged + rv.retraced === rv.before, JSON.stringify(rv));
+    assert.equal(rv.carved, undefined, "nothing to carve");
+    const a = await ev(RIVERS);
+    assert.deepEqual(identityDiffs(b, a), []);
+    const moved = Object.keys(b.rows).filter(
+      id => JSON.stringify(a.rows[id].course) !== JSON.stringify(b.rows[id].course)
+    );
+    assert.ok(moved.length <= rv.retraced, `${moved.length} courses moved: ${moved.join(", ")}`);
+    assert.deepEqual(climbsMore(b, a), []);
+    assert.deepEqual(await ev(consistency), c0, "routes, markers and burgs line up with the new cells");
+    await h.ok("load_map", { path: base });
   });
 
   test("set_heights rebuild:'risk' keeps ids, names, types, parents, main stems and hand edits; carves the climb it made; removes and names the drowned river; one undo", async () => {
@@ -293,9 +336,8 @@ describe("terrain rebuild keeps the rivers (demo.map)", () => {
       id => JSON.stringify(a.rows[id].course) === JSON.stringify(b.rows[id].course)
     );
     assert.ok(untouched.length >= rv.unchanged * 0.9, `${untouched.length} of ${rv.unchanged}`);
-    // nothing climbs that did not climb before
-    const newClimbs = (a.climbing as number[]).filter(id => !b.climbing.includes(id));
-    assert.deepEqual(newClimbs, []);
+    // nothing climbs more than it did before (by how much, not only which rivers)
+    assert.deepEqual(climbsMore(b, a), []);
     await h.ok("snapshot", { action: "undo" }, 240_000);
     assert.equal(await digest(), d0);
   });
@@ -373,6 +415,166 @@ describe("terrain rebuild keeps the rivers (demo.map)", () => {
   });
 });
 
+describe("retrace edge cases (demo.map): a drained lake, a drowned river with tributaries, a carve at a confluence", () => {
+  let h: Harness;
+  const ev = async (code: string, args?: unknown) => (await h.ok("eval", { readOnly: true, code, args })).value as any;
+  const digest = () => ev("return __tupaia.fns.digest().hash");
+  const tag = (r: Obj, id: number | string) => `${r.name} (${id})`;
+
+  before(async () => {
+    h = await startServer({ TUPAIA_UNDO_DEPTH: "30" });
+    await h.ok("load_map", { path: DEMO_MAP });
+  });
+
+  after(async () => {
+    if (h && alive(h.pid)) await h.close();
+  });
+
+  test("a drained lake: its inflows join the lake's outlet (their parent) or end inland, named in lakeGone; nothing climbs more", async () => {
+    const pick = await ev(`
+      const C = pack.cells;
+      for (const f of pack.features) {
+        if (!f || f.type !== 'lake') continue;
+        const cells = [...C.i].filter(i => C.f[i] === f.i);
+        if (cells.length > 6 || cells.some(i => C.burg[i])) continue;
+        const into = pack.rivers.filter(r => r.cells.length >= 3 && cells.includes(r.cells.at(-1)) && r.parent && r.parent !== r.i);
+        if (into.length) return { cells, into: into.map(r => r.i) };
+      }
+      return null;`);
+    assert.ok(pick, "demo.map has a small lake with an inflow");
+    const d0 = await digest();
+    const b = await ev(RIVERS);
+    const r = await h.ok(
+      "paint_cells",
+      { select: { cells: pick.cells }, set: { height: { value: 30, rebuild: "risk" } } },
+      240_000
+    );
+    const rv = ((r.set as Obj).height as Obj).rivers as Obj;
+    const gone = (rv.lakeGone ?? []) as string[];
+    const a = await ev(RIVERS);
+    for (const id of pick.into as number[]) {
+      const line = gone.find(x => x.startsWith(tag(b.rows[id], id)));
+      assert.ok(line, `${tag(b.rows[id], id)} is named in lakeGone: ${JSON.stringify(rv)}`);
+      const x = a.rows[id];
+      if (/ joins /.test(line as string)) {
+        assert.equal(x.parent, b.rows[id].parent, "it keeps its parent, the lake's outlet");
+        const last = x.course.at(-1);
+        assert.ok(
+          a.rows[x.parent].course.some((p: number[]) => p[0] === last[0] && p[1] === last[1]),
+          "and ends on the parent's course"
+        );
+      } else {
+        assert.match(line as string, /ends inland, a main river now/);
+        assert.equal(x.parent, Number(id));
+      }
+      assert.ok(x.course.length <= b.rows[id].course.length + 6, `${x.name} does not wander off: ${x.course.length}`);
+    }
+    assert.equal(a.gaps, 0);
+    assert.equal(a.loops, 0);
+    assert.deepEqual(climbsMore(b, a), [], "no river climbs more than before (by how much)");
+    assert.deepEqual(
+      identityDiffs(b, a).filter(x => !/ (parent|basin|kids):/.test(x)),
+      []
+    );
+    await h.ok("snapshot", { action: "undo" }, 240_000);
+    assert.equal(await digest(), d0);
+  });
+
+  test("a drowned river with tributaries: removed and named (dryRun names the same), its tributaries main rivers (orphaned, basins follow), its note reported", async () => {
+    const pick = await ev(`
+      const C = pack.cells, R = pack.rivers;
+      for (const r of R) {
+        const kids = R.filter(t => t.parent === r.i && t.i !== r.i && t.cells.length >= 4);
+        if (!kids.length || r.cells.length > 12 || r.cells.length < 3) continue;
+        const keep = new Set();
+        for (const t of kids) for (const c of t.cells.slice(0, -1)) if (c >= 0) keep.add(C.g[c]);
+        if (r.cells.some(c => c >= 0 && keep.has(C.g[c]))) continue;
+        const flood = [...new Set(r.cells.filter(c => c >= 0).map(c => C.g[c]))];
+        if ([...C.i].some(i => C.burg[i] && flood.includes(C.g[i]))) continue;
+        return { r: r.i, kids: kids.map(t => t.i), flood };
+      }
+      return null;`);
+    assert.ok(pick, "demo.map has a short river with a tributary");
+    await h.ok("eval", { code: `notes.push({ id: 'river${pick.r}', name: 'Drowned note', legend: '' }); return 1;` });
+    const d0 = await digest();
+    const b = await ev(RIVERS);
+    const grid0 = (await ev("return Array.from(grid.cells.h)")) as number[];
+    const flood = new Set(pick.flood as number[]);
+    const g = grid0.map((v, i) => (flood.has(i) ? 8 : v));
+    const dry = await h.ok("set_heights", { grid: g, dryRun: true }, 240_000);
+    const r = await h.ok("set_heights", { grid: g }, 240_000);
+    const rv = r.rivers as Obj;
+    assert.ok((rv.underWater as string[]).includes(tag(b.rows[pick.r], pick.r)), JSON.stringify(rv));
+    assert.deepEqual((dry.rivers as Obj).underWater, rv.underWater, "the dryRun names the rivers the apply removes");
+    const a = await ev(RIVERS);
+    assert.equal(a.rows[pick.r], undefined);
+    for (const k of pick.kids as number[]) {
+      assert.ok((rv.orphaned as string[]).includes(tag(b.rows[k], k)), JSON.stringify(rv));
+      assert.equal(a.rows[k].parent, k, "a main river now");
+      assert.equal(a.rows[k].basin, k, "its own basin");
+      for (const kk of a.rows[k].kids) assert.equal(a.rows[kk].basin, k, "its tributaries' basin follows");
+    }
+    assert.ok((rv.notesOrphaned as string[]).includes(`river${pick.r} Drowned note`), JSON.stringify(rv));
+    assert.match(JSON.stringify(r.notes), /tributaries of removed rivers are main rivers now/);
+    assert.equal(a.gaps, 0);
+    assert.deepEqual(climbsMore(b, a), []);
+    await h.ok("snapshot", { action: "undo" }, 240_000);
+    assert.equal(await digest(), d0);
+  });
+
+  test("a carve never makes the river a tributary joins climb (a confluence goes no lower than the parent's land downstream)", async () => {
+    // a tributary's lower course sunk to 21 (its cells and their neighbours off other rivers):
+    // it now climbs into its confluence, which is a cell of its parent
+    const pick = await ev(`
+      const C = pack.cells, R = pack.rivers, T = __tupaia.riverTrace;
+      const onRiver = new Map(); for (const r of R) for (const c of r.cells) if (c >= 0) onRiver.set(c, [...(onRiver.get(c) || []), r.i]);
+      for (const t of R) {
+        const p = R.find(x => x.i === t.parent && x.i !== t.i);
+        if (!p || t.cells.length < 6) continue;
+        const c = t.cells.at(-1), j = p.cells.indexOf(c);
+        if (j < 0 || j > p.cells.length - 4 || C.h[c] < 28 || T.riseOf(p.cells, C.h).max > 1) continue;
+        const low = t.cells.slice(-4, -1);
+        if (low.some(x => C.h[x] < 26 || C.burg[x])) continue;
+        const patch = new Set();
+        for (const x of low) for (const y of [x, ...C.c[x]]) {
+          const on = onRiver.get(y) || [];
+          if (C.h[y] >= 20 && !C.burg[y] && on.every(i => i === t.i) && y !== c) patch.add(y);
+        }
+        const g = new Set([...patch].map(y => C.g[y]));
+        if (p.cells.some(y => y >= 0 && g.has(C.g[y]))) continue;
+        return { t: t.i, p: p.i, cells: [...patch], ph: p.cells.slice(j).map(y => C.h[y]) };
+      }
+      return null;`);
+    assert.ok(pick, "demo.map has a tributary whose parent does not climb");
+    const d0 = await digest();
+    const b = await ev(RIVERS);
+    const r = await h.ok(
+      "set_heights",
+      { pack: Object.fromEntries((pick.cells as number[]).map(c => [c, 21])) },
+      240_000
+    );
+    const rv = r.rivers as Obj;
+    const a = await ev(RIVERS);
+    const ph = await ev(
+      "const C = pack.cells, p = pack.rivers.find(r => r.i === args.p), t = pack.rivers.find(r => r.i === args.t); return p.cells.slice(p.cells.indexOf(t.cells.at(-1))).map(y => C.h[y]);",
+      pick
+    );
+    assert.ok(a.rows[pick.p].rise <= b.rows[pick.p].rise, `the parent does not climb more: ${a.rows[pick.p].rise}`);
+    assert.deepEqual(ph, pick.ph, "the parent's heights from the confluence down are as they were");
+    const more = climbsMore(b, a);
+    assert.ok(
+      more.every(x => x.startsWith(tag(b.rows[pick.t], pick.t))),
+      JSON.stringify(more)
+    );
+    // the tributary climbs into the confluence (more than a cascade step): named, not hidden
+    assert.ok(more.length === 1, `the tributary climbs into its parent: ${JSON.stringify(rv)}`);
+    assert.ok((rv.climbingMore as string[])[0].startsWith(tag(b.rows[pick.t], pick.t)), JSON.stringify(rv));
+    assert.match(JSON.stringify(r.notes), /rivers that climb more than before/);
+    await h.ok("snapshot", { action: "undo" }, 240_000);
+    assert.equal(await digest(), d0);
+  });
+});
+
 describe("the builder's map: a change crossing 20 near the Spire and Ballantine", {
   skip: !fs.existsSync(REAL_MAP)
 }, () => {
@@ -424,7 +626,13 @@ describe("the builder's map: a change crossing 20 near the Spire and Ballantine"
       ch.lakes.every((c: number) => c >= 0),
       JSON.stringify(ch.lakes)
     );
+    const dry = await h.ok("set_heights", { pack: ch.pack, dryRun: true }, 300_000);
     const r = await h.ok("set_heights", { pack: ch.pack }, 300_000);
+    assert.deepEqual(
+      (dry.rivers as Obj).underWater,
+      (r.rivers as Obj).underWater,
+      "the dryRun names what the apply removes"
+    );
     assert.ok((r.toLand as number) > 0 && (r.toWater as number) > 0, "the change crosses height 20 both ways");
     assert.equal((r.options as Obj).rivers, "retrace");
     const rv = r.rivers as Obj;
@@ -453,8 +661,7 @@ describe("the builder's map: a change crossing 20 near the Spire and Ballantine"
       "Ballantine ends on its parent's course"
     );
     assert.equal(a.rows[ch.spire].kids.length, b.rows[ch.spire].kids.length);
-    const newClimbs = (a.climbing as number[]).filter(id => !b.climbing.includes(id));
-    assert.deepEqual(newClimbs, []);
+    assert.deepEqual(climbsMore(b, a), []);
   });
 });
 

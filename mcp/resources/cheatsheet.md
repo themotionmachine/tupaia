@@ -241,13 +241,21 @@ invert?, range?:[lo,hi], channel?}`. Sea level 20. `fill:true` fills pits. `rebu
 (default) re-packs and carries entities. Its rivers: `'retrace'` (default on a map with rivers;
 paint_cells height risk too) traces each river again along its old line onto the new heights,
 as regrid does: ids, names, types, parents, basins, main stems and hand edits (mainStem,
-reroute, name) are kept; a river with no changed cell on its course keeps it cell for cell;
-a land cell where a river would climb after the change is lowered to the lowest land upstream
-of it (never below 20; rivers that already climbed away from the change are left, counted in
-`climbingLeft`); a river meeting new sea higher up ends there; a river whose course is under
-water is removed. Result `rivers {before, unchanged, retraced, carved?:{rivers, cells, maxDrop},
-underWater?, notRetraced?, shortened?, toWaterNow?, endsInland?, orphaned?, climbingLeft?}`
-(lists are "Name (id)"); dryRun lists `rivers.underWater`. `rivers:'regenerate'` (implied by
+reroute, name) are kept; a river with no changed cell on its course keeps it cell for cell
+(one the re-pack splits at the coast is traced again); a river that climbs more than it did
+before the change, or climbs at a changed cell, is carved: its land cells go down to the lowest
+land upstream (never below 20). A carve never makes another river climb: a confluence goes no
+lower than the parent's land downstream of it, or the parent is carved too when the step left
+is at most 5 (a tributary left climbing more than before is named in `climbingMore`); rivers that climb no more than before are left (`climbingLeft`). A
+burg's cell set to water stays land at 20; rivers cross the new water instead. A river meeting
+new sea higher up ends there; an inflow of a lake that is gone joins the lake's outlet (its
+parent) when near, else ends inland as a main river, and an outlet starts where it left the lake
+(`lakeGone`); a river with no point of its line on land is removed (`underWater`) and its
+tributaries become main rivers (`orphaned`). Result `rivers {before, unchanged, retraced,
+carved?:{rivers, cells, maxDrop, most}, underWater?, notRetraced?, shortened?, toWaterNow?,
+endsInland?, lakeGone?, orphaned?, climbingMore?, climbingLeft?}` (lists are "Name (id)";
+`carved.most`: the 5 deepest, "Name (id): n cells, up to -d"); dryRun lists `rivers.underWater`
+by the apply's rule (paint_cells dryRun: `set.height.rivers`). `rivers:'regenerate'` (implied by
 `erosion:true`) re-runs the generator instead (a river overlapping an old course keeps its id,
 name and type; result counts kept/new/gone). The log records the heights the rivers were
 traced on, so a replay carves the same cells. `'keep'` refuses land/water flips and is local, as for

@@ -2622,14 +2622,18 @@
    * restoreRiskedData plus the carrying above. opts: {restore (restoreRiskedData's opts),
    * keepRivers (the app keeps the rivers: map their cells back by grid), retraceRivers (the app
    * keeps the rivers, and each is traced again onto the new heights: retraceOnRebuild; restore
-   * must not regenerate them), keepBiomes}.
+   * must not regenerate them; changedGrid: the grid cells the change edits, a Set), keepBiomes}.
    */
   function riskRebuild(opts = {}) {
     const old = captureCells();
     const RT = opts.retraceRivers ? T.riverTrace : null;
     if (opts.retraceRivers && !RT) fail("PAGE_ERROR", "bridge-ext/rivertrace.js (T.riverTrace) is not loaded");
     const plan = RT ? RT.capture(pack.rivers) : null;
-    if (plan) plan.climbedBefore = new Set(RT.climbing());
+    if (plan) {
+      plan.risesBefore = new Map([...RT.rises()].map(([id, x]) => [id, x.max]));
+      plan.burgGrid = new Set();
+      for (const b of pack.burgs || []) if (b?.i && !b.removed && b.cell >= 0) plan.burgGrid.add(pack.cells.g[b.cell]);
+    }
     const riverGrid = opts.keepRivers ? saveRiversAsGrid() : null;
     clearFeatureShapes();
     heightmapInternals().restoreRiskedData(opts.restore);
@@ -2640,7 +2644,7 @@
       finishRiskFeatures();
     }
     if (RT) {
-      remapRiverCells(old);
+      plan.keptIdx = remapRiverCells(old);
       finishRiskFeatures();
     }
     const features = carryFeatures(old);
@@ -2651,44 +2655,97 @@
     return info;
   }
 
+  /** retraceOnRebuild: the largest step at a confluence for which the river joined is carved too. */
+  const CASCADE = 5;
+
   /**
    * rivers:'retrace' after the re-pack (the app kept pack.rivers; remapRiverCells moved them to the new
    * cells): every river traced again along its old line onto the new heights (bridge-ext/
    * rivertrace.js, as regrid does: ids, names, types, parents, basins and hand-edited courses
-   * kept), then carved where it would climb (a land cell above the lowest upstream land cell of
-   * its river goes down to it, never below 20). Only rivers the new heights can have made climb
-   * are carved: those that did not climb before, and those whose course crosses a changed grid
-   * cell (opts.changedGrid, a Set; absent: all); a river that already climbed away from the
-   * change keeps its heights (counted in climbingLeft). Lakes get their climate data and keep the
-   * inlets/outlet of the old lake they match; with restore.redefineBiomes the cells whose river
-   * or height changed take their climate biome. Returns the river report (bridge-ext/rivertrace
-   * retrace, plus carved, notesOrphaned).
+   * kept), then carved where the change made it climb (a land cell above the lowest upstream land
+   * cell of its river goes down to it, never below 20). A river is carved when its largest climb
+   * grew (it climbs more than before the change, wherever its new course runs), or when it climbs
+   * at a cell the change edited (opts.changedGrid, a Set; absent: every climbing river). A river
+   * whose largest climb did not grow keeps its heights (climbingLeft). Carving never makes another
+   * river climb (protect: a shared cell, a confluence, goes no lower than that river's land
+   * downstream of it), except that a river left climbing a step of at most CASCADE at such a
+   * cell has the river it shares the cell with carved too; a river still climbing more than
+   * before is named (climbingMore). A burg's cell the change set to water is kept as land at 20
+   * by the app: rivers cross the new water instead, and the carve does not take its height as
+   * the lowest upstream. Lakes get their climate data and keep the inlets/outlet of the old lake
+   * they match; with restore.redefineBiomes the cells whose river or height changed take their
+   * climate biome. Returns the river report (bridge-ext/rivertrace retrace, plus carved,
+   * notesOrphaned).
    */
   function retraceOnRebuild(RT, plan, old, features, opts) {
     const C = pack.cells;
     const r0 = Uint8Array.from(C.r, v => (v ? 1 : 0));
     const report = {};
-    RT.retrace(plan, report, { rebuild: true, changedGrid: opts.changedGrid });
+    const changed = opts.changedGrid;
+    // a changed grid cell at 20 that held a burg: the app keeps a burg's cell set to water as land
+    // at 20 (a replay, which sets the logged 20, finds the same cells)
+    const avoidGrid = new Set();
+    for (const g of changed || []) if (grid.cells.h[g] === 20 && plan.burgGrid?.has(g)) avoidGrid.add(g);
+    const byIdNow = () => new Map((pack.rivers || []).map(r => [r.i, r]));
+    RT.retrace(plan, report, { rebuild: true, changedGrid: changed, keptIdx: plan.keptIdx, avoidGrid });
     const out = report.rivers || { before: 0, retraced: 0 };
     const gridBefore = Uint8Array.from(grid.cells.h);
-    const changed = opts.changedGrid;
-    const only = new Set(
-      (pack.rivers || [])
-        .filter(
-          r => !plan.climbedBefore?.has(r.i) || !changed || (r.cells || []).some(x => x >= 0 && changed.has(C.g[x]))
-        )
-        .map(r => r.i)
-    );
-    const cv = RT.carve(only);
+    const before = plan.risesBefore || new Map();
+    const grew = (id, x) => x.max > (before.get(id) ?? 0);
+    const now = RT.rises();
+    const only = new Set();
+    for (const [id, x] of now)
+      if (x.max > 0 && (grew(id, x) || !changed || x.at.some(c => changed.has(C.g[c])))) only.add(id);
+    const acc = {};
+    let cv = RT.carve(only, { protect: true, skipGrid: avoidGrid, acc });
+    // a river the protection left climbing more than before, by a step of at most CASCADE at a
+    // cell it shares with a river not being carved (a confluence): that river is carved too
+    for (let round = 0; round < 4; round++) {
+      const H = C.h;
+      const cellRivers = new Map();
+      for (const r of pack.rivers || [])
+        for (const c of r.cells || []) if (c >= 0) cellRivers.set(c, [...(cellRivers.get(c) || []), r.i]);
+      const add = new Set();
+      const byId = byIdNow();
+      for (const [id, x] of RT.rises()) {
+        if (!grew(id, x)) continue;
+        let mn = Infinity;
+        for (const c of byId.get(id)?.cells || []) {
+          if (!(c >= 0) || H[c] < 20 || avoidGrid.has(C.g[c])) continue;
+          if (H[c] > mn && H[c] - mn <= CASCADE) for (const o of cellRivers.get(c) || []) if (!only.has(o)) add.add(o);
+          mn = Math.min(mn, H[c]);
+        }
+      }
+      if (!add.size) break;
+      for (const o of add) only.add(o);
+      cv = RT.carve(only, { protect: true, skipGrid: avoidGrid, acc });
+    }
     if (cv.cells) {
       out.carved = { rivers: cv.rivers, cells: cv.cells, maxDrop: cv.maxDrop };
+      const byId = new Map((pack.rivers || []).map(r => [r.i, r]));
+      const most = [...cv.perRiver].sort(
+        (a, b) => b[1].maxDrop - a[1].maxDrop || b[1].cells - a[1].cells || a[0] - b[0]
+      );
+      out.carved.most = most.slice(0, 5).map(([id, e]) => {
+        const r = byId.get(id);
+        return `${r?.name ? `${r.name} (${id})` : `river ${id}`}: ${e.cells} cells, up to -${e.maxDrop}`;
+      });
       // the grid heights the rivers were traced on (set_heights logs them, so a replay traces
       // on the same heights and carves the same cells); not enumerable: never in a result
       Object.defineProperty(out, "gridBeforeCarve", { value: gridBefore, enumerable: false });
       const lakes = RT.lowerLakes(cv.lowered);
       if (lakes) out.carved.lakesLowered = lakes;
     }
-    const left = RT.climbing().length;
+    const after = RT.rises();
+    const more = [...after].filter(([id, x]) => grew(id, x)).map(([id]) => id);
+    const left = [...after].filter(([id, x]) => x.max > 0 && !grew(id, x)).length;
+    if (more.length) {
+      const byId = new Map((pack.rivers || []).map(r => [r.i, r]));
+      out.climbingMore = more.slice(0, 25).map(id => {
+        const r = byId.get(id);
+        return `${r?.name ? `${r.name} (${id})` : `river ${id}`} +${after.get(id).max}`;
+      });
+    }
     if (left) out.climbingLeft = left;
     // lakes: the generator's climate data (flux, temperature, evaporation), and the river ids
     // of the old lake each matches (ids are kept)
@@ -2728,28 +2785,57 @@
   /**
    * rivers:'retrace': the app kept pack.rivers on the old cell ids; each river's cells, source
    * and mouth move to the new cells (cellRemap: the new cell on the same grid cell nearest the
-   * old centre, so an unchanged course maps cell for cell, coastline cells included); consecutive
-   * repeats merged, points kept aligned.
+   * old centre, so an unchanged course maps cell for cell, coastline cells included); two old
+   * cells that map to one new cell are merged (a repeat the river had is kept), points kept
+   * aligned. Returns Map(river id -> for each new cell, the index of the old cell it came from).
    */
   function remapRiverCells(old) {
     const remap = cellRemap(old);
+    const idx = new Map();
     for (const r of pack.rivers || []) {
       if (!Array.isArray(r.cells)) continue;
       const aligned = Array.isArray(r.points) && r.points.length === r.cells.length;
       const cells = [];
       const points = [];
+      const from = [];
       r.cells.forEach((c, k) => {
         const n = c >= 0 ? remap(c) : c;
-        if (n === undefined || (cells.length && cells[cells.length - 1] === n)) return;
+        if (n === undefined || (cells.length && cells[cells.length - 1] === n && r.cells[k - 1] !== c)) return;
         cells.push(n);
+        from.push(k);
         if (aligned) points.push(r.points[k]);
       });
       r.cells = cells;
+      idx.set(r.i, from);
       if (aligned) r.points = points;
       else delete r.points;
       if (r.source >= 0) r.source = remap(r.source);
       if (r.mouth >= 0) r.mouth = remap(r.mouth);
     }
+    return idx;
+  }
+
+  /**
+   * A rivers:'retrace' dry run (set_heights, paint_cells height): the rivers the rebuild would
+   * remove as under water (bridge-ext/rivertrace preview: the apply's rule), by name, and how
+   * many lose some land. landAfter(g): grid cell g is land after the change; a burg's cell stays
+   * land (the app keeps it at 20).
+   */
+  function retracePreview(landAfter) {
+    const RT = T.riverTrace;
+    if (!RT) return {};
+    const C = pack.cells;
+    const burgGrid = new Set();
+    for (const b of pack.burgs || []) if (b?.i && !b.removed && b.cell >= 0) burgGrid.add(C.g[b.cell]);
+    const { underWater, partly } = RT.preview(g => landAfter(g) || burgGrid.has(g));
+    const byId = new Map((pack.rivers || []).map(r => [r.i, r]));
+    const tag = id => (byId.get(id)?.name ? `${byId.get(id).name} (${id})` : `river ${id}`);
+    return {
+      ...(underWater.length
+        ? { underWater: underWater.slice(0, 25).map(tag), underWaterCount: underWater.length }
+        : {}),
+      ...(partly ? { partlyUnderWater: partly } : {})
+    };
   }
 
   /** Notes for a rivers:'retrace' report (retraceOnRebuild); shared by paint_cells and set_heights. */
@@ -2758,7 +2844,7 @@
     let s = `rivers kept: ${rv.unchanged} of ${rv.before} keep their course (no changed cell on it), ${rv.retraced} were re-traced along their old lines onto the new heights (ids, names, types and parents kept)`;
     const cv = rv.carved;
     if (cv)
-      s += `; ${cv.cells} land cells on ${cv.rivers} rivers were lowered (up to ${cv.maxDrop}, none below 20) where the river would climb`;
+      s += `; ${cv.cells} land cells on ${cv.rivers} rivers were lowered (up to ${cv.maxDrop}, none below 20) where the change made the river climb (most: ${cv.most.join("; ")})`;
     c.notes.add(s);
     const list = (k, what) => {
       if (rv[k]?.length) c.notes.add(`${what}: ${rv[k].join(", ")}`);
@@ -2768,9 +2854,14 @@
     list("shortened", "rivers that meet the new sea higher up end there");
     list("orphaned", "tributaries of removed rivers are main rivers now");
     list("endsInland", "rivers that ended in water have none within reach now and end on land");
+    list("lakeGone", "rivers whose lake is gone");
+    list(
+      "climbingMore",
+      "rivers that climb more than before (carving them would make the river they join climb; lint {checks:['river-uphill']} shows where)"
+    );
     if (rv.climbingLeft)
       c.notes.add(
-        `${rv.climbingLeft} rivers already climbed away from the changed cells and were left as they were: lint {checks:['river-uphill']} lists them`
+        `${rv.climbingLeft} rivers climb no more than they did before the change and were left as they were: lint {checks:['river-uphill']} lists them`
       );
     if (rv.notesOrphaned?.length)
       c.notes.add(
@@ -3005,6 +3096,15 @@
         }
         stats.becomeLand = toLand;
         stats.becomeWater = toWater;
+        if (H.rebuild === "risk" && (H.rivers ?? "retrace") === "retrace" && !H.erosion) {
+          const after = new Map(edits);
+          stats.rivers = {
+            now: (pack.rivers || []).length,
+            ...retracePreview(g => (after.has(g) ? after.get(g) : gh[g]) >= 20),
+            effect:
+              "re-traced on apply (ids, names, parents, hand edits kept; carved where the change makes one climb); one with no point of its line on land (underWater) is removed"
+          };
+        }
       }
       return stats;
     }
@@ -3560,6 +3660,7 @@
     finishRiskFeatures,
     riskRebuild,
     retraceNotes,
+    retracePreview,
     captureRivers,
     carryRivers,
     localHeights,

@@ -764,23 +764,13 @@
           "kept (rebuild:'keep' is local); rivers that climb after the change are listed on apply; rivers:'regenerate' re-runs the river generator over the whole map"
       };
     } else if (o.rivers === "retrace") {
-      // by grid cell: a river with under two land cells left is removed on apply, one with some
-      // course cells turned to water ends (or starts) where its land does
-      const underWater = [];
-      let wetted = 0;
-      for (const r of pack.rivers || []) {
-        const gs = [...new Set((r.cells || []).filter(x => x >= 0 && C.h[x] >= 20).map(x => C.g[x]))];
-        const land = gs.filter(g => target[g] >= 20).length;
-        if (land < 2) underWater.push(r.name ? `${r.name} (${r.i})` : `river ${r.i}`);
-        else if (land < gs.length) wetted++;
-      }
-      out.rivers = {
-        now: (pack.rivers || []).length,
-        ...(underWater.length ? { underWater: underWater.slice(0, 25), underWaterCount: underWater.length } : {}),
-        ...(wetted ? { partlyUnderWater: wetted } : {}),
+      // the apply's rule (bridge-ext/rivertrace.js preview): a river with no point of its line
+      // on land after the change is removed; a burg's cell set to water stays land
+      out.rivers = { now: (pack.rivers || []).length, ...M.retracePreview(g => target[g] >= 20) };
+      Object.assign(out.rivers, {
         effect:
           "re-traced on apply along their old lines onto the new heights (ids, names, types, parents, main stems and hand edits kept); land cells where a river would climb are lowered (carved, never below 20); a river under water (underWater) is removed; rivers:'regenerate' re-runs the river generator instead"
-      };
+      });
     } else
       out.rivers = {
         now: (pack.rivers || []).length,

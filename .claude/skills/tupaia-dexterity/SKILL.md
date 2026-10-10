@@ -187,16 +187,20 @@ Token economy (results are counts first; ask for detail only when needed):
 rebuild 'risk'; on a map with rivers it re-traces them (`rivers:'retrace'`, the default; for
 `paint_cells` height risk too) instead of regenerating them, so ids, names, types, parents, main
 stems and hand edits (mainStem, reroute, name) survive.
-1. `set_heights {pack:{<cell>:h, ...}, dryRun:true}` (or grid/image): `rivers.underWater` names
-   rivers the change would drown (removed on apply); `toLand`/`toWater` count the flips.
+1. `set_heights {pack:{<cell>:h, ...}, dryRun:true}` (or grid/image; for paint_cells height
+   risk, `set.height.rivers`): `rivers.underWater` names the rivers the apply removes (no point
+   of their line left on land; a burg's cell stays land); `toLand`/`toWater` count the flips.
 2. `set_heights {pack:{...}}`. Read `rivers`: `unchanged` (no changed cell on the course: kept
-   cell for cell), `retraced`, `carved` (land cells lowered where the change made a river climb;
-   `climbingLeft` counts rivers that already climbed elsewhere and were left: lint
-   `river-uphill`), and the named lists `underWater`, `notRetraced`, `shortened` (meets new sea
-   higher up), `toWaterNow`, `endsInland`, `orphaned`. The notes repeat them.
+   cell for cell), `retraced`, `carved` (land cells lowered where a river now climbs more than
+   before; `carved.most` names the deepest), and the named lists `underWater`, `notRetraced`,
+   `shortened` (meets new sea higher up), `toWaterNow`, `endsInland`, `lakeGone` (a drained
+   lake's inflows join its outlet), `orphaned`, `climbingMore` (a tributary the carve could not
+   flatten without making its parent climb: fix it by hand, lint `river-uphill` shows where).
+   `climbingLeft` counts rivers that climb no more than before. The notes repeat them.
 3. Verify: `find {type:'river'}` (or eval over `pack.rivers`) shows the same ids, names and
    parents; `lint {checks:['river-gap','river-uphill']}`. Replays in a sketch (the log keeps the
-   heights the rivers were traced on). Tested in `mcp/test/riverkeep.test.ts` (demo.map, and the
+   heights the rivers were traced on). Tested in `mcp/test/riverkeep.test.ts` (demo.map: hand
+   edits, a no-op, a drained lake, a drowned river with tributaries, a carve at a confluence; the
    builder's polish-final.map with a change near the Spire and Ballantine).
 
 **Wipe the random base and build from a spec.**

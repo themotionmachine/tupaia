@@ -83,7 +83,9 @@ What the newer tools and fields replaced (all one undo entry each, all dryRun-ab
   biomes, carrying burgs, routes, markers, regiments and lake/island names to the new cells; the
   rivers are re-traced onto the new heights (`rivers:'retrace'`, default on a map with rivers;
   `src/bridge-ext/rivertrace.js`, shared with regrid: ids, names, parents, main stems and hand
-  edits kept, climbs the change causes carved, drowned rivers removed and named) or regenerated
+  edits kept, climbs the change causes carved without making another river climb, a drained
+  lake's inflows joined to its outlet, drowned rivers removed and named, the dryRun naming the
+  same ones) or regenerated
   (`rivers:'regenerate'`, identity kept by course overlap); paint_cells height risk does the
   same; with `rebuild:'keep'` it is local (the changed cells'
   heights, temperature, biome and lake levels; rivers, economy and far biomes untouched;
