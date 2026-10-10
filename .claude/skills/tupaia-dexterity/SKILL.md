@@ -200,6 +200,8 @@ Token economy (results are counts first; ask for detail only when needed):
    were (`biomes`: redefined, carriedCustom, carriedPainted), then speckles under `minRegion`
    cells (default 3, 0 = off) merged into their neighbour (`biomes.cleanup`; river and carried
    cells stay); `biomes:'climate'` carries custom only, `'keep'` the old pattern (warns).
+   Add `territories:'regrow'` so state, culture, religion and province borders follow the
+   terrain instead of the old cells' steps (see "Borders along the terrain" below).
 8. `lint` (markers on new water, route links), then `screenshot {full:true}`.
 
 **Change the coastline and keep the rivers.** A terrain change that crosses height 20 needs
@@ -328,6 +330,22 @@ marker-near-burg) run only when named.
 
 **Propose a change as a sketch.** See section 10; the replay table there says which calls keep
 the sketch rebasable.
+
+**Borders along the terrain.** Stepped borders after a density change, or provinces a script
+drew (straight lines, nearest centre):
+- Regrid: `regrid {density:8, territories:'regrow'}` (add `territoryLocked:true` to move locked
+  states too: a `note` and `state.lockedKept` say how many kept their land). States, cultures
+  and religions regrow as one label, so borders that coincide stay together. Read
+  `territories`: each field's `changed` and `maxAreaChangePct` (about its copied area),
+  `province.within15pct`. Every burg keeps its state and culture, capitals stay inside. Before
+  and after: `display {only:['states','borders','rivers','relief']}`, then `screenshot
+  {target:{bbox:[x0,y0,x1,y1]}}` (screenshot takes no `only`). Tests:
+  `mcp/test/territory.test.ts` (regrid ... versus 'copy', and the coinciding-borders case).
+- Provinces only: `regenerate {parts:['provinces'], provinces:{regrow:true, states:['S']},
+  dryRun:true}` (read `within15pct`, `sizes`), then without dryRun; `band:8` reshapes more
+  (sizes are held tightest at the default band 4).
+  Ids, names, capitals, centres, emblems and every burg's province stay; replays in a sketch.
+  Tests: `mcp/test/territory.test.ts` (regenerate provinces {regrow:true}).
 
 **Hand-made state with provinces and arms.** `add {type:'state', items:[{capital:{burg:'X'},
 name:'S'}]}` -> `paint_cells {select, set:{state:'S'}}` (and `{culture}`) ->

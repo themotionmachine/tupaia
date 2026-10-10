@@ -78,7 +78,20 @@ export const RegenProvinces = z
       .optional()
       .describe(
         "centres/count: the spread may travel through other states' land, so parts of the state behind it go to the nearest centre over land (default false: inside the state and along its coast only; cells it cannot reach go to the nearest province, reported as fallback). true is a flat flood over all land from the centres, like a script that assigns every cell to its nearest centre"
-      )
+      ),
+    regrow: z
+      .boolean()
+      .optional()
+      .describe(
+        "Regrow the existing provinces along the terrain instead of replacing them (no centres/count/ratio/crossForeign): each keeps its id, name, capital, emblem and about its area (targets = current areas; result within15pct), only inside its state. The band of cells along the borders (band rings) is spread again from each province's interior, capital, centre and burg cells by terrain cost (slopes, hills, mountains, costly biomes, rivers), so borders settle on ridges and rivers. Default states: every unlocked state with provinces. Cells of a state in no province of it join the nearest. Result: sizes [[id, before, after]] largest change first, maxChangePct. Replays in a sketch (literal cells)"
+      ),
+    band: z
+      .number()
+      .int()
+      .min(1)
+      .max(50)
+      .optional()
+      .describe("regrow: rings of cells along the borders that move (default 4; larger reshapes more)")
   })
   .strict();
 
@@ -141,6 +154,22 @@ interface ProvinceDef {
   runs: number[];
 }
 
+/** A province a regrow kept (same id) with its new cells. */
+interface RegrownRow {
+  i: number;
+  state: number;
+  name?: string | null;
+  center?: number | null;
+  /** Hash of its cells before the op (replay: someone else changed them since -> conflict). */
+  was?: string;
+  n?: number;
+  runs: number[];
+  /** Set by rewrite: created by an earlier op of the sketch (no cell-hash check). */
+  fresh?: boolean;
+  /** Set by rewrite: an unreported province of a state the sketch made (found by state and centre). */
+  locate?: boolean;
+}
+
 interface ReplacedRow {
   i: number;
   state: number;
@@ -158,6 +187,10 @@ export interface RegenResolved {
   /** Cell graph fingerprint the province cells refer to (replay checks it). */
   graph?: string;
   provinces?: {
+    /** 'regrow': the existing provinces kept their ids and got new cells (regrown); else replaced/created. */
+    mode?: "regrow";
+    band?: number;
+    regrown?: RegrownRow[];
     states: number[];
     /** State names at record time (summary only). */
     names?: Array<string | null>;
@@ -188,6 +221,7 @@ function literalShapeOk(x: RegenResolved): boolean {
   if (x.parts.includes("provinces")) {
     const p = x.provinces;
     if (!isObj(p) || !Array.isArray(p.states) || !Array.isArray(p.replaced) || !Array.isArray(p.created)) return false;
+    if (p.mode === "regrow" && !Array.isArray(p.regrown)) return false;
   }
   if (x.parts.includes("emblems")) {
     const e = x.emblems;
@@ -229,14 +263,21 @@ export function regenSummary(r: Resolved | null, _out: Record<string, unknown> |
       p.states.length === 1
         ? `${p.names?.[0] ? `${p.names[0]} ` : "state "}(${p.states[0]})`
         : plural(p.states.length, "state");
+    if (p.mode === "regrow") {
+      const n = Array.isArray(p.regrown) ? p.regrown.length : 0;
+      bits.push(
+        `regrew ${plural(n, "province")} of ${who} along the terrain (ids, capitals and about their sizes kept)`
+      );
+    }
     const names = p.created.slice(0, 3).map(d => d.name);
     const list = names.length ? ` (${names.join(", ")}${p.created.length > 3 ? ", ..." : ""})` : "";
     const kept = p.kept?.length ? `; ${p.kept.length} locked kept` : "";
-    bits.push(
-      p.replaced.length
-        ? `replaced ${plural(p.replaced.length, "province")} of ${who} with ${p.created.length} new${list}${kept}`
-        : `gave ${who} ${p.created.length} new ${p.created.length === 1 ? "province" : "provinces"}${list}${kept}`
-    );
+    if (p.mode !== "regrow")
+      bits.push(
+        p.replaced.length
+          ? `replaced ${plural(p.replaced.length, "province")} of ${who} with ${p.created.length} new${list}${kept}`
+          : `gave ${who} ${p.created.length} new ${p.created.length === 1 ? "province" : "provinces"}${list}${kept}`
+      );
   }
   const e = x?.emblems;
   if (e) {
@@ -275,6 +316,13 @@ export function regenRewrite(r: Resolved, rw: Rewriter): Resolved {
     for (const d of p.created) {
       d.state = rw.id("state", d.state) as number;
       if (d.burg) d.burg = rw.id("burg", d.burg) as number;
+    }
+    for (const row of p.regrown ?? []) {
+      if (rw.created.has(`province:${row.i}`)) row.fresh = true;
+      // a province of a state the sketch made, not reported when it was made: found by state and centre
+      else if (madeState(row.state)) row.locate = true;
+      row.i = rw.id("province", row.i) as number;
+      row.state = rw.id("state", row.state) as number;
     }
   }
   const e = x.emblems;

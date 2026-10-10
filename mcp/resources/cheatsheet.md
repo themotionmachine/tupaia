@@ -25,7 +25,7 @@ only in a server a human spawned with `TUPAIA_MODE=live`, behind a preview and a
 | `apply {<lists>, map?, paint?, specPath?, mode?:'upsert'\|'update'\|'check', mapping?, ignore?, tolerance?, only?}` | bring the map in line with a spec by name (and paint its cells), or check it. Idempotent. |
 | `clear {types, where?, keep?, force?, orphanRoutes?, detail?, dryRun?}` | remove every entity of some types (wipe a random base), with each editor's cascade. |
 | `compact {types?, repointProvinces?, dryRun?, details?, limit?}` | shrink removed records to id-keeping stubs; drop their notes and SVG. |
-| `regrid {density, heights?, ice?, relief?, biomes?, minRegion?, carve?, details?, dryRun?}` | change the cell density and keep the map (id, names, notes, labels). |
+| `regrid {density, heights?, ice?, relief?, biomes?, minRegion?, carve?, territories?, territoryBand?, territoryLocked?, details?, dryRun?}` | change the cell density and keep the map (id, names, notes, labels). |
 | `generate_map {seed, template?, cells?, states?, cultures?, width?, height?, ...}` | new map, deterministic for the same seed and options (`digest`), in any session. |
 | `regenerate {parts:[...], restoreLayers?, biomes?, provinces?, emblems?, relief?, dryRun?}` | partial regeneration; biomes/provinces/emblems/relief take options and replay in sketches. |
 | `snapshot {action:'take'\|'list'\|'drop'\|'restore'\|'undo'\|'redo', label?, index?, n?, saveTo?}` | named whole-map snapshots and the auto-undo/redo history. |
@@ -213,6 +213,13 @@ that gives every land cell its nearest centre, like provinces.js); add `lockedSt
 locked states. dryRun previews centres-mode sizes; auto mode and generated names are random per
 call. emblems: provinces and burgs default true; `stateCulture` gives provinces and burgs the
 state's culture shield; `shieldOnly` keeps the designs. Turns no layer on.
+`provinces:{regrow:true, states?, band?}` keeps the provinces (ids, names, capitals, centres,
+emblems; every burg's province) and redraws their borders along the terrain inside each state:
+a band of `band` rings (default 4) along the borders is spread again by terrain cost from each
+province's interior and pins, each to about its current size (`within15pct`, `sizes [[id,
+before, after]]`, `maxChangePct`); for stepped (regridded) or scripted outlines. Not with
+centres/count/ratio/crossForeign; default states: every unlocked one with provinces. Replays in
+a sketch (literal cells; a province someone else repainted since is a conflict).
 
 **Relief icons**: `regenerate {parts:['relief'], relief:{density?|matchIcons?, perBiome?,
 minHeight?, exclude?|excludeAdd?|excludeRemove?, nearBurgs?:{radius, unit}, seed?, onLoad?}}` draws
@@ -294,6 +301,15 @@ heights, climate and rivers, but a cell whose nearest old cell had a custom or p
 cells (default 3, 0 = off; regenerate biomes' clean-up) join their most common neighbour, a
 region with a river or carried cell staying (`cleanup {minRegion, regions, cells}`). 'climate'
 carries custom only; 'keep' copies every old cell's biome and warns with the stale count. A new ocean (water cut off at the edge) is a warning.
+`territories:'regrow'` (default 'copy': the old cells' steps survive) then regrows states,
+cultures and religions together (one label per state|culture|religion, so borders that coincide
+move as one line, no slivers) along the terrain over `territoryBand` rings (default about 1.5 old
+cells, at least 3), each connected piece from its cores to about its copied area (a hole or an
+exclave stays where it is), then each state's provinces inside it; every burg keeps its state
+and culture, capitals and centres stay inside. A locked state keeps its cells, provinces and the
+cultures and religions on them (`note` says so) unless `territoryLocked:true`. Result
+`territories` (per field changed, maxAreaChangePct of entities with 20+ cells, lockedKept;
+province within15pct).
 
 **clear**: types notes, labels, markers, zones, routes, rivers, burgs, provinces, states,
 religions, cultures, emblems (run in that dependency order). `where` per type

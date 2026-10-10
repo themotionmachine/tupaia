@@ -26,7 +26,7 @@ It is a separate Node package. Nothing here is imported by the app or shipped in
 - Page side: `src/bridge.js` and `src/bridge-mutations.js` define `globalThis.__tupaia`; every
   `src/bridge-ext/*.js` is injected after them in name order (apply, biomes, clear, compact,
   labels, lint, regen-replay, regen, regrid, relief, rivers, rivertrace, routes, settings, terrain,
-  tokens).
+  territory, tokens).
   Extensions add FIELDS, types and FNS functions, and some wrap core ones (FNS.edit, regenerate,
   display, summary, loadMap). Every tool goes through one `__tupaia.call(name, args)`.
 - Node side: `src/tools/*.ts` are imported in name order and register through `defineTools`;
@@ -108,7 +108,9 @@ What the newer tools and fields replaced (all one undo entry each, all dryRun-ab
   {parts:['biomes'], biomes:{noise, smooth, minRegion, seed, keepPainted, ...}}`. App fix: the
   biome line's 4th field keeps icon density, icons and cost through save/load.
 - `regenerate {parts:['provinces','emblems'], provinces:{states, centres|count}, emblems:{...}}`
-  for named states only (hand-made states too).
+  for named states only (hand-made states too); `provinces:{regrow:true, band?}` keeps the
+  provinces and redraws their borders along the terrain, each to about its size
+  (`src/bridge-ext/territory.js`: a quota-capped cost spread over a band along the borders).
 - `regenerate {parts:['relief'], relief:{density|matchIcons, perBiome, exclude, nearBurgs,
   seed}}` and `edit map {set:{reliefOnLoad:true}}` (saves drop the icons, loads redraw them;
   terraform-v3.map 4.75 -> 2.33 MB). App hooks: `src/renderers/relief-settings.ts` and friends;
@@ -126,8 +128,10 @@ What the newer tools and fields replaced (all one undo entry each, all dryRun-ab
   carved where the new heights would make them climb (`carve`, default on: only those cells are
   lowered, never below 20), and biomes re-derived from the climate (custom and painted ones
   carried) with one-biome speckles under `minRegion` cells (default 3) merged into their
-  neighbour, through the same clean-up as regenerate biomes' minRegion. App hook:
-  `Resample.process({keepId})`.
+  neighbour, through the same clean-up as regenerate biomes' minRegion; `territories:'regrow'`
+  regrows states, cultures and religions together (one label per triple, each piece to its
+  copied area) and then provinces along the terrain instead of copying the old cells' steps
+  (burgs keep their state and culture; locked states keep their land unless territoryLocked). App hook: `Resample.process({keepId})`.
 - `apply` (declarative spec, `mode:'check'|'upsert'|'update'`, idempotent; its `paint` list
   paints territory, biomes and heights in order, later entries winning, each entry only its
   differing cells, logged as replayable paint_cells steps; it creates provinces around their
@@ -533,6 +537,7 @@ node --test --test-concurrency=3 "test/**/*.test.ts"
   every description is at most 2048 chars, the instructions too, and the exact tool list.
 - One file per feature: `terrain`, `regrid`, `clear`, `compact`, `apply`, `applypaint` (the paint
   list, territory, places, burg cells), `addprov` (add province/river, apply creating them),
+  `territory` (regrow borders along the terrain: regrid territories, regenerate provinces regrow),
   `lint`, `settings`,
   `routes`, `rivers`, `riverkeep` (terrain rebuilds that re-trace the rivers), `biomes`, `regen`,
   `relief`, `labels`, `tokens`, `http`; `fam-a/b/c` and
