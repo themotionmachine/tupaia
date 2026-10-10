@@ -81,7 +81,9 @@ function baseFromProvenance(ctx: ToolContext, notes: string[]): SketchBase {
       version: p.sharedVersion,
       updatedBy: p.sharedUpdatedBy ?? null,
       updatedAt: p.sharedUpdatedAt ?? null,
-      at
+      at,
+      ...(typeof p.sharedBytes === "number" ? { bytes: p.sharedBytes } : {}),
+      ...(p.sharedSha256 ? { sha256: p.sharedSha256 } : {})
     };
   }
   if (ctx.config.testHooks && p.kind === "file" && p.path) {
@@ -596,7 +598,9 @@ async function rebaseShared(ctx: ToolContext, scope: CallScope, sk: Sketch, onCo
         version,
         updatedBy: blob.updatedBy,
         updatedAt: blob.updatedAt,
-        at: new Date().toISOString()
+        at: new Date().toISOString(),
+        bytes: blob.bytes.length,
+        sha256: sha256(blob.bytes)
       },
       load: async () => {
         const s = await scope.loadMap({ b64: blob.bytes.toString("base64") });
@@ -607,6 +611,8 @@ async function rebaseShared(ctx: ToolContext, scope: CallScope, sk: Sketch, onCo
           sharedVersion: version,
           sharedUpdatedBy: blob.updatedBy,
           sharedUpdatedAt: blob.updatedAt,
+          sharedBytes: blob.bytes.length,
+          sharedSha256: sha256(blob.bytes),
           fetchedAt: new Date().toISOString()
         });
       }
@@ -855,6 +861,8 @@ async function open(ctx: ToolContext, scope: CallScope, args: { slug?: string })
     sharedUpdatedAt: base.updatedAt ?? null,
     sketchSlug: args.slug,
     sketchVersion: blob.version ?? undefined,
+    ...(typeof base.bytes === "number" ? { sharedBytes: base.bytes } : {}),
+    ...(base.sha256 ? { sharedSha256: base.sha256 } : {}),
     fetchedAt: new Date().toISOString()
   });
   const sk = ctx.sketches.begin({

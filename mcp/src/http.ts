@@ -23,8 +23,6 @@ import { type Config, readDistVersion } from "./config.ts";
 import type { ToolContext } from "./context.ts";
 import {
   type DaemonState,
-  LAST_FILE,
-  type LastExit,
   pidAlive,
   probeHealth,
   readStartLock,
@@ -33,6 +31,8 @@ import {
   START_LOCK,
   writeState
 } from "./daemon-state.ts";
+import { writeNew } from "./paths.ts";
+import { saveOnExit } from "./resume.ts";
 import { TIMEOUT_CAP_MS } from "./schemas.ts";
 
 /** Request body limit for /mcp and /call. */
@@ -41,8 +41,6 @@ const BODY_MAX = 32 * 1024 * 1024;
 const DRAIN_MS = 15_000;
 /** How long a stop spends saving the page map (see saveOnExit). */
 const EXIT_SAVE_MS = 15_000;
-/** daemon-exit-*.map files kept in TUPAIA_OUT/maps. */
-const EXIT_SAVES_KEPT = 5;
 export const DEFAULT_IDLE_MIN = 120;
 
 export interface HttpOptions {
@@ -56,6 +54,15 @@ export interface HttpOptions {
   preferPort?: boolean;
   /** Idle shutdown after this many minutes without a call; 0 = never. */
   idleMin: number;
+  /**
+   * Why idle shutdown must wait (an active sketch), or null (ToolContext.idleHoldReason). A hold
+   * whose sketch is `persisted` lasts one extra idle period; one that is not lasts until it is.
+   */
+  idleHold?: () => { why: string; persisted: boolean } | null;
+  /** Each idle tick while a hold is not persisted (retry taking TUPAIA_OUT/state over). */
+  onIdleTick?: () => void;
+  /** Runs once no other daemon serves this TUPAIA_OUT, before the first request (resume the state). */
+  beforeListen?: () => void;
   version: string;
   log: (msg: string) => void;
   /** Ends the process (idle, /shutdown, superseded). */
@@ -237,6 +244,7 @@ export async function startHttpDaemon(o: HttpOptions): Promise<HttpDaemon> {
       `a tupaia daemon already serves ${outDir} (pid ${prev.pid}, ${prev.url}); stop it first (tupaia stop) or use another TUPAIA_OUT`
     );
   }
+  o.beforeListen?.();
 
   // the CLI that starts a daemon makes its token (so `tupaia headers` can print it early)
   // through a 0600 file (TUPAIA_HTTP_TOKEN_FILE, read once and deleted): an environment variable
@@ -318,10 +326,10 @@ export async function startHttpDaemon(o: HttpOptions): Promise<HttpDaemon> {
     for (const c of r.content ?? []) {
       if (c.type === "text") out.text.push(c.text);
       else if (c.type === "image") {
-        const file = path.join(outDir, "shots", `call-${stamp}-${++shotSeq}.${extOf(c.mimeType)}`);
-        fs.mkdirSync(path.dirname(file), { recursive: true });
-        fs.writeFileSync(file, Buffer.from(c.data, "base64"));
-        out.images.push(file);
+        const want = path.join(outDir, "shots", `call-${stamp}-${++shotSeq}.${extOf(c.mimeType)}`);
+        fs.mkdirSync(path.dirname(want), { recursive: true });
+        // a restarted daemon counts from 1 again: never over an earlier daemon's file
+        out.images.push(writeNew(want, Buffer.from(c.data, "base64")));
       } else out.text.push(JSON.stringify(c));
     }
     return out;
@@ -474,6 +482,52 @@ export async function startHttpDaemon(o: HttpOptions): Promise<HttpDaemon> {
     sendJson(res, 200, { ok: true, ports: [...servers.keys()] });
   };
 
+  /** Idle shutdown: when it would happen and what holds it off (health, session). */
+  const idleInfo = (): {
+    idleMin: number;
+    idleS: number;
+    idleHeldBy?: string;
+    idleHoldPersisted?: boolean;
+    idleShutdownInS?: number | null;
+  } => {
+    const busy = active > 0 || attached > 0;
+    const idleS = busy ? 0 : Math.round((Date.now() - lastActivity) / 1000);
+    const held = o.idleHold?.() ?? null;
+    if (o.idleMin <= 0) return { idleMin: o.idleMin, idleS };
+    if (held)
+      return {
+        idleMin: o.idleMin,
+        idleS,
+        idleHeldBy: held.why,
+        idleHoldPersisted: held.persisted,
+        idleShutdownInS: held.persisted && !busy ? Math.max(0, Math.round(2 * o.idleMin * 60 - idleS)) : null
+      };
+    return {
+      idleMin: o.idleMin,
+      idleS,
+      idleShutdownInS: active || attached ? null : Math.max(0, Math.round(o.idleMin * 60 - idleS))
+    };
+  };
+  ctx.idleStatus = () => {
+    const i = idleInfo();
+    // what lets it go now, by mode (sketch save needs live mode)
+    const release =
+      ctx.mode.mode === "live"
+        ? "sketch save (after stop, if done) lets it stop on time; 'tupaia stop' stops it now"
+        : "'tupaia stop' stops it now and saves the page with its sketch to maps/daemon-exit-*.map (load_map restores both)";
+    return {
+      ...i,
+      note:
+        o.idleMin <= 0
+          ? "no idle shutdown (TUPAIA_HTTP_IDLE_MIN=0)"
+          : i.idleHeldBy
+            ? i.idleHoldPersisted
+              ? `idle shutdown is held off one more period while ${i.idleHeldBy}: it stops after ${2 * o.idleMin} min without calls, and the next start resumes the sketch from TUPAIA_OUT/state; ${release}`
+              : `idle shutdown is held off while ${i.idleHeldBy}, because TUPAIA_OUT/state does not hold it (${ctx.state.note ?? "not persisting"}); ${release}`
+            : `stops after ${o.idleMin} min without calls; history, provenance and any sketch persist under TUPAIA_OUT/state and resume on the next start`
+    };
+  };
+
   const health = () => ({
     ok: true,
     pid: process.pid,
@@ -487,8 +541,13 @@ export async function startHttpDaemon(o: HttpOptions): Promise<HttpDaemon> {
     appVersion: readDistVersion(config.distDir),
     startedAt,
     uptimeS: Math.round(process.uptime()),
-    idleMin: o.idleMin,
-    idleS: active || attached ? 0 : Math.round((Date.now() - lastActivity) / 1000),
+    ...idleInfo(),
+    resumed: ctx.resumed,
+    state: {
+      persists: ctx.state.owner,
+      ...(ctx.state.heldBy ? { heldBy: ctx.state.heldBy } : {}),
+      ...(ctx.state.note ? { note: ctx.state.note } : {})
+    },
     active,
     attached,
     requests,
@@ -589,8 +648,11 @@ export async function startHttpDaemon(o: HttpOptions): Promise<HttpDaemon> {
   process.once("exit", () => removeStateIfOwned(outDir, process.pid));
 
   // Idle shutdown, and state-file ownership: if another daemon took this TUPAIA_OUT over, the
-  // older one is undiscoverable, so it stops; a deleted file is written again.
+  // older one is undiscoverable, so it stops; a deleted file is written again. An active sketch
+  // (recording, or with changes not saved to the Worker) holds idle shutdown off: one extra idle
+  // period when TUPAIA_OUT/state holds the sketch (the next start resumes it), else until it does.
   const idleMs = o.idleMin * 60_000;
+  let heldLogged: string | null = null;
   const period = idleMs > 0 ? Math.max(1000, Math.min(60_000, idleMs / 4)) : 60_000;
   const timer = setInterval(() => {
     if (closing) return;
@@ -606,48 +668,23 @@ export async function startHttpDaemon(o: HttpOptions): Promise<HttpDaemon> {
         log(`cannot rewrite the state file in ${outDir}: ${(e as Error).message}`);
       }
     }
-    if (idleMs > 0 && active === 0 && attached === 0 && Date.now() - lastActivity >= idleMs)
-      o.onStop(`idle for ${o.idleMin} min (TUPAIA_HTTP_IDLE_MIN)`);
+    const idleFor = Date.now() - lastActivity;
+    if (idleMs > 0 && active === 0 && attached === 0 && idleFor >= idleMs) {
+      const held = o.idleHold?.() ?? null;
+      if (!held) o.onStop(`idle for ${o.idleMin} min (TUPAIA_HTTP_IDLE_MIN)`);
+      else if (held.persisted && idleFor >= 2 * idleMs)
+        o.onStop(
+          `idle for ${2 * o.idleMin} min (TUPAIA_HTTP_IDLE_MIN, one period more for ${held.why}; TUPAIA_OUT/state holds it)`
+        );
+      else {
+        if (!held.persisted) o.onIdleTick?.();
+        const line = `${held.why}${held.persisted ? `; persisted, stops after ${2 * o.idleMin} min idle` : "; not persisted, held until it is"}`;
+        if (line !== heldLogged) log(`idle shutdown held off: ${line}`);
+        heldLogged = line;
+      }
+    } else heldLogged = null;
   }, period);
   timer.unref();
-
-  /**
-   * The page dies with the daemon (stop, idle, superseded), so a page anyone changed is saved
-   * first to TUPAIA_OUT/maps/daemon-exit-<time>.map; daemon.last.json names it for the next start.
-   */
-  const saveOnExit = async (reason: string): Promise<void> => {
-    const p = ctx.snapshots.provenance;
-    if (!ctx.browser.healthy || (p.kind === "boot" && p.opsSince === 0)) return;
-    const save = ctx.browser.exclusive(async () => {
-      const env = await ctx.browser.callBridge<{ text: string }>(
-        "mapData",
-        {},
-        { timeoutMs: EXIT_SAVE_MS - 1000, noAlerts: true }
-      );
-      if (!env.ok || !env.value?.text) throw new Error(env.error?.message ?? "no map text");
-      const dir = path.join(outDir, "maps");
-      fs.mkdirSync(dir, { recursive: true });
-      const stamp = new Date()
-        .toISOString()
-        .replace(/[-:]/g, "")
-        .replace(/\.\d+Z$/, "");
-      const file = path.join(dir, `daemon-exit-${stamp}.map`);
-      fs.writeFileSync(file, env.value.text);
-      const old = fs
-        .readdirSync(dir)
-        .filter(f => /^daemon-exit-.*\.map$/.test(f))
-        .sort()
-        .slice(0, -EXIT_SAVES_KEPT);
-      for (const f of old) fs.rmSync(path.join(dir, f), { force: true });
-      const last: LastExit = { pid: process.pid, reason, at: new Date().toISOString(), savedMap: file };
-      fs.writeFileSync(path.join(outDir, LAST_FILE), `${JSON.stringify(last)}\n`);
-      log(`saved the page map to ${file}`);
-    });
-    const timeout = new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error(`no map within ${EXIT_SAVE_MS} ms`)), EXIT_SAVE_MS).unref();
-    });
-    await Promise.race([save, timeout]).catch(e => log(`could not save the page map on exit: ${(e as Error).message}`));
-  };
 
   // A stop refuses queued calls at once (nothing runs; the CLI starts a fresh daemon for them)
   // and waits up to DRAIN_MS for the call in progress. The state file stays, marked closing,
@@ -669,7 +706,9 @@ export async function startHttpDaemon(o: HttpOptions): Promise<HttpDaemon> {
       while (active > 0 && Date.now() < end) await new Promise(r => setTimeout(r, 100));
       await mcp.close().catch(() => {});
       for (const s of servers.values()) s.closeAllConnections();
-      await saveOnExit(reason);
+      // the page dies with the daemon: a changed page is saved (maps/daemon-exit-*.map, with its
+      // provenance) and the state dir is written for the next start
+      await saveOnExit(ctx, reason, { prefix: "daemon", timeoutMs: EXIT_SAVE_MS, log });
       log(`http daemon closed (${reason})`);
     })();
     return closing;

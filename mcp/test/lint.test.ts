@@ -137,7 +137,7 @@ describe("tupaia-mcp lint (browser)", () => {
     assert.deepEqual(after.undo, before.undo, "lint pushed no undo entry");
     assert.deepEqual(after.snapshots, before.snapshots);
     const mapAfter = await h.ok("save_map", { path: "lint-after.map", overwrite: true });
-    assert.equal(mapAfter.sha256, mapBefore.sha256, "the map text is byte-identical after lint");
+    assert.equal(mapAfter.mapSha256, mapBefore.mapSha256, "the map text is byte-identical after lint");
   });
 
   test("argument errors: unknown check id, bbox with near, radius without near", async () => {

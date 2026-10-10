@@ -89,6 +89,8 @@ export interface LastExit {
   reason: string;
   at: string;
   savedMap: string;
+  /** "http" (a daemon) or "stdio"; absent in files from older servers. */
+  transport?: string;
 }
 
 export interface PortPref {

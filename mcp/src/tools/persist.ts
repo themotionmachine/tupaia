@@ -4,6 +4,8 @@ import path from "node:path";
 import zlib from "node:zlib";
 import { z } from "zod";
 import type { CallScope, ToolContext } from "../context.ts";
+import { bindFileLineage, blockFor, type FileLineage, fileLineage, lineageWord } from "../file-lineage.ts";
+import { withTrailer } from "../map-provenance.ts";
 import { resolveReadPath, resolveWritePath } from "../paths.ts";
 import { ToolError } from "../result.ts";
 import { TimeoutMs } from "../schemas.ts";
@@ -61,7 +63,7 @@ export function register(ctx: ToolContext): void {
     {
       title: "Load a map",
       description:
-        "Replace the page's map with a .map file from disk ({path}: absolute, else the first that exists of the server's working directory, TUPAIA_OUT, the repo root; the result names it; plain, base64 or gzip) or with the live shared map ({source:'shared'}: a read-only GET from Node, safe in local mode; records the shared version and who last saved it). Undoable (snapshot {action:'undo'}). Take a snapshot first if the current map matters. Fails with APP_ALERT when the app rejects the file (Invalid/Ancient/Newer file).",
+        "Replace the page's map with a .map file from disk ({path}: absolute, else the first that exists of the server's working directory, TUPAIA_OUT, the repo root; the result names it; plain, base64 or gzip) or with the live shared map ({source:'shared'}: a read-only GET from Node, safe in local mode; records the shared version and who last saved it). A file written by save_map or an exit save of this TUPAIA_OUT keeps its lineage: when its provenance line is intact (content hash and signature match) and the shared map server confirms its base (a read-only GET of meta, or of versions), the page is derived from the shared map at that base again (shared_status lineage 'shared'), and the sketch it names is active again; an edited or foreign file stays unrelated (result lineage says why). Undoable (snapshot {action:'undo'}). Take a snapshot first if the current map matters. Fails with APP_ALERT when the app rejects the file (Invalid/Ancient/Newer file).",
       inputSchema: z.object({
         path: z.string().min(1).optional(),
         source: z.enum(["shared"]).optional()
@@ -75,19 +77,24 @@ export function register(ctx: ToolContext): void {
       if (args.path) {
         const abs = resolveReadPath(ctx.config, args.path);
         const bytes = fs.readFileSync(abs);
+        // the provenance line (save_map, exit saves) is checked before the page changes
+        const fl = await fileLineage(ctx, bytes);
         await scope.pushUndo("load_map", { path: args.path });
         const s = await scope.loadMap({ b64: bytes.toString("base64") });
-        ctx.snapshots.setProvenance({
-          kind: "file",
-          path: abs,
-          seed: (s.seed as string) ?? null,
-          mapId: (s.mapId as number) ?? null
-        });
+        if (fl.lineage === "shared") scope.notes.push(...(await bindFileLineage(ctx, scope, fl, abs, s, args)));
+        else
+          ctx.snapshots.setProvenance({
+            kind: "file",
+            path: abs,
+            seed: (s.seed as string) ?? null,
+            mapId: (s.mapId as number) ?? null
+          });
         const note = oldBiomeNote(bytes);
         return {
           ...brief(s),
           path: abs,
           origin: ctx.provenanceView(),
+          lineage: lineageView(fl),
           bytes: bytes.length,
           ...(note ? { note } : {}),
           ms: Date.now() - t0
@@ -103,7 +110,7 @@ export function register(ctx: ToolContext): void {
     {
       title: "Save the map to a .map file",
       description:
-        "Write the current map (the app's prepareMapData, same as File > Save) to a .map file on disk. Relative paths go under TUPAIA_OUT (default <repo>/.tupaia-mcp-out); a path in the repo is allowed outside source/config folders; anything else needs allowOutside:true and only when the human asked for that place. Replacing an existing file needs overwrite:true. tests/fixtures is always refused. Refused while an app editor is active (customization != 0). Returns {path, bytes, sha256}. compact:true writes a compacted copy (removed entities as stubs; see compact) and adds {compacted} with the bytes saved; the page is not changed. This never touches the live shared map (that is shared_save).",
+        "Write the current map (the app's prepareMapData, same as File > Save) to a .map file on disk, plus one provenance line the app ignores (origin, shared base version, sketch slug and log, ops since, a content hash; signed with this TUPAIA_OUT's key): load_map of the unmodified file restores the lineage. Relative paths go under TUPAIA_OUT (default <repo>/.tupaia-mcp-out); a path in the repo is allowed outside source/config folders; anything else needs allowOutside:true and only when the human asked for that place. Replacing an existing file needs overwrite:true. tests/fixtures is always refused. Refused while an app editor is active (customization != 0). Returns {path, bytes, sha256 (of the file), mapSha256 (of the map text without the provenance line: equal for two saves of the same map), lineage}. compact:true writes a compacted copy (removed entities as stubs; see compact) and adds {compacted} with the bytes saved; the page is not changed. This never touches the live shared map (that is shared_save).",
       inputSchema: z.object({
         path: z.string().min(1).optional().describe("Target .map path (default TUPAIA_OUT/maps/<name>-<time>.map)"),
         overwrite: z.boolean().optional(),
@@ -128,13 +135,18 @@ export function register(ctx: ToolContext): void {
         overwrite: args.overwrite,
         allowOutside: args.allowOutside
       });
-      const buf = Buffer.from(data.text, "utf8");
+      await ctx.verifyProvenance();
+      const block = blockFor(ctx, "save_map", { compacted: !!data.compacted });
+      const buf = Buffer.from(withTrailer(data.text, block, ctx.provKey), "utf8");
       fs.writeFileSync(file, buf);
       return {
         path: file,
         bytes: buf.length,
         sha256: sha256(buf),
+        // the map text's (as in the provenance line): two saves of the same map compare equal
+        mapSha256: sha256(Buffer.from(data.text, "utf8")),
         name: data.fileName,
+        lineage: lineageWord(block),
         ...(data.compacted ? { compacted: data.compacted } : {}),
         ms: Date.now() - t0
       };
@@ -191,6 +203,19 @@ function extsFor(format: ExportFormat): string[] {
   if (format === "jpeg") return [".jpg", ".jpeg"];
   if (format.startsWith("geojson")) return [".geojson", ".json"];
   return [".json"];
+}
+
+/** load_map's lineage line: what the file's provenance said and what came of it. */
+function lineageView(fl: FileLineage): Record<string, unknown> {
+  const b = fl.block;
+  return {
+    file: fl.file,
+    lineage: fl.lineage,
+    ...(b?.base ? { base: b.base.version } : {}),
+    ...(b?.sketch ? { sketch: b.sketch.slug, sketchOps: b.sketch.ops } : {}),
+    ...(fl.baseCheck ? { baseCheck: fl.baseCheck } : {}),
+    note: fl.note
+  };
 }
 
 function slug(name: string | null): string {
@@ -314,6 +339,8 @@ export async function loadShared(
     sharedVersion: blob.version ?? undefined,
     sharedUpdatedBy: blob.updatedBy,
     sharedUpdatedAt: blob.updatedAt,
+    sharedBytes: blob.bytes.length,
+    sharedSha256: sha256(blob.bytes),
     fetchedAt: new Date().toISOString()
   });
   return { summary, bytes: blob.bytes.length, version: blob.version, note: oldBiomeNote(blob.bytes) };

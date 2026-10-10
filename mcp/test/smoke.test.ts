@@ -1050,6 +1050,9 @@ describe("tupaia-mcp smoke (persistence)", () => {
     assert.match(text, /^1\.130\.1\|/);
     assert.equal(r.bytes, Buffer.byteLength(text));
     assert.equal(r.sha256, crypto.createHash("sha256").update(text).digest("hex"));
+    // mapSha256 is the map text's, without the provenance line save_map appends
+    const mapText = text.slice(0, text.lastIndexOf("\r\n#tupaia-provenance "));
+    assert.equal(r.mapSha256, crypto.createHash("sha256").update(mapText).digest("hex"));
 
     const before = await h.ok("map_info", { since: "none" });
     const loaded = await h.ok("load_map", { path: file });
