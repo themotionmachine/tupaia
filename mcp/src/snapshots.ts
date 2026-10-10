@@ -18,6 +18,8 @@ export interface Provenance {
   sketchVersion?: number;
   sharedUpdatedBy?: string | null;
   sharedUpdatedAt?: string | null;
+  /** Size of the shared blob at sharedVersion (a saved file's provenance re-checks it). */
+  sharedBytes?: number;
   fetchedAt?: string;
   /**
    * The page's window.mapId when this provenance was recorded. The app stamps a new id on every
@@ -89,6 +91,20 @@ export interface UndoPlan {
   undone: HistoryEntry[];
   /** Redo entries to push (state after each undone op), newest op first. */
   redo: HistoryEntry[];
+}
+
+/** Everything SnapshotStore holds, for the state dir (state.ts); entries are the live objects. */
+export interface HistoryState {
+  ring: Snapshot[];
+  undo: HistoryEntry[];
+  redo: HistoryEntry[];
+  nextId: number;
+  nextHist: number;
+  tick: number;
+  epochSeq: number;
+  provenance: Provenance;
+  restorePoint: RestorePoint | null;
+  checkpointEpoch?: number;
 }
 
 export function cloneProv(p: Provenance): Provenance {
@@ -424,6 +440,35 @@ export class SnapshotStore {
       return { key: s.baselineKey, describe: `snapshot ${s.id}${s.label ? ` '${s.label}'` : ""}` };
     if (!u) return undefined;
     return { key: u.baselineKey, describe: `before '${u.op}' at ${u.at}` };
+  }
+
+  exportState(): HistoryState {
+    return {
+      ring: this.#ring,
+      undo: this.#undo,
+      redo: this.#redo,
+      nextId: this.#nextId,
+      nextHist: this.#nextHist,
+      tick: this.#tick,
+      epochSeq: this.#epochSeq,
+      provenance: this.provenance,
+      restorePoint: this.restorePoint,
+      checkpointEpoch: this.checkpointEpoch
+    };
+  }
+
+  /** Take over a persisted history (a new process resuming TUPAIA_OUT/state). */
+  importState(s: HistoryState): void {
+    this.#ring = s.ring.slice(-this.max);
+    this.#undo = s.undo.slice(-this.undoDepth);
+    this.#redo = s.redo.slice(-this.undoDepth);
+    this.#nextId = Math.max(1, s.nextId);
+    this.#nextHist = Math.max(1, s.nextHist);
+    this.#tick = Math.max(0, s.tick);
+    this.#epochSeq = Math.max(0, s.epochSeq);
+    this.provenance = cloneProv(s.provenance);
+    this.restorePoint = s.restorePoint;
+    this.checkpointEpoch = undefined;
   }
 
   listing() {

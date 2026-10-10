@@ -213,7 +213,7 @@ node mcp/src/server.ts --http [--port N | --prefer-port N]   # usually started b
   `GET /health`, `POST /shutdown`, `POST /listen {port}`.
 - One daemon per `TUPAIA_OUT`. In that directory: `daemon.json` (0600: pid, port, ports, url,
   mcpUrl, mode, token, closing?, ...), `daemon.port.json` (the port the next auto-start uses),
-  `daemon.log`, `maps/daemon-exit-*.map` (last 5) and `daemon.last.json`.
+  `daemon.log`, `maps/daemon-exit-*.map` (last 5), `daemon.last.json` and `state/` (below).
 - Security: 127.0.0.1 only; the Host header must name the port the connection arrived on; any
   request with an `Origin` header gets 403; every route needs `Authorization: Bearer <token>`
   (random per start). The bearer token is the trust boundary: anyone holding it can confirm
@@ -232,13 +232,44 @@ node mcp/src/server.ts --http [--port N | --prefer-port N]   # usually started b
 - A queued call whose caller disconnects or cancels is skipped; a started call runs to its end.
 - Stopping (`tupaia stop`, idle, or another daemon taking over the TUPAIA_OUT): queued calls
   are refused (they never ran; `tupaia call` reruns them on a fresh daemon), the running call
-  finishes (up to 15 s), a changed page is saved to `maps/daemon-exit-<time>.map` and the next
-  start prints a `load_map` line for it.
-- Idle shutdown after `TUPAIA_HTTP_IDLE_MIN` (default 120) minutes with no call and no attached
-  MCP client (an open `subscriptions/listen` stream; Claude Code holds one per session). A live
-  daemon a Claude Code session is attached to therefore stays live for that whole session:
-  `tupaia stop` it once the write is done (after the session detaches).
-- `session` status shows `serving: http daemon ...`.
+  finishes (up to 15 s), a changed page is saved to `maps/daemon-exit-<time>.map` (with its
+  provenance line) and the state dir is written; the next start resumes it and prints where the
+  page was saved.
+- Idle shutdown after `TUPAIA_HTTP_IDLE_MIN` (default 120, fractions allowed) minutes with no
+  call and no attached MCP client (an open `subscriptions/listen` stream; Claude Code holds one
+  per session), and never while a sketch records or has ops not saved to the Worker: the daemon
+  logs `idle shutdown held off: sketch '<slug>' ...` and `/health`, `tupaia status` and session
+  (`idle`) say so. A live daemon a Claude Code session is attached to therefore stays live for
+  that whole session: `tupaia stop` it once the write is done (after the session detaches).
+- `session` status shows `serving: http daemon ...`, `idle` and `state`.
+
+### State across restarts (TUPAIA_OUT/state)
+
+Every server (stdio or `--http`) persists, after each call that can change them: the page map
+as the newest call left it, its provenance and epoch counters, undo/redo, snapshots, the active
+sketch (ops log, base map, saved marks) and the screenshot counter. `state.json` is the index
+(HMAC-signed with `provenance.key`, 0600, written atomically); the map texts are
+`blobs/<sha256>.map`, written once and pruned when unused; `owner.json` names the one process
+that writes there (a second server on the same TUPAIA_OUT, e.g. a stdio server sharing the
+daemon's, neither resumes nor persists, and session says so). On start a server takes the dir
+over and resumes it: the page map is loaded on the first browser launch (before a live daemon's
+shared-map load), and the first result carries a `resumed ...` note. A hand-edited state.json
+is not resumed (kept as `state.json.rejected-*`). Caps: `TUPAIA_SNAPSHOTS_MAX` entries and
+`TUPAIA_SNAPSHOTS_MAX_MB` (oldest first). `TUPAIA_STATE=off` disables it. The stdio server's
+exit (transport closed, a signal) saves `maps/stdio-exit-*.map` like the daemon.
+
+### Lineage in .map files
+
+save_map and the exit saves append one line, `#tupaia-provenance {json}`, after the app's 46
+CRLF lines. The app reads lines by index and ignores it (old and new builds; the app's own save
+drops it). It holds the origin, lineage, shared base (version, updated_at/by, blob size), opsSince,
+the active sketch (slug, note, recording, saved marks, ops log up to 2 MB), the sha256 of the
+content before the line (save_map's `sha256`), and an HMAC over all of it with this TUPAIA_OUT's key. load_map binds
+the page back to the shared map only when the hash and HMAC match and the base holds on the
+server: the current version's updated_at, or the retained version's size (a contradiction keeps
+it unrelated; a check that cannot be made, e.g. `TUPAIA_LIVE_ORIGIN=none`, binds with a
+warning). A file naming a sketch reactivates it unless another sketch records; undoing that
+load_map ends it again.
 
 ### CLI: mcp/bin/tupaia
 
@@ -330,7 +361,10 @@ or, once: `claude mcp add-json tupaia-shared '{"type":"http","url":"http://127.0
 | `TUPAIA_TEST_HOOKS` | off | `1` enables `session {action:'crash'}` and `sketch rebase {onto}` (tests only). |
 | `TUPAIA_BUILD_CACHE_MS` | `300000` | How long the deployed-build check is cached. |
 | `TUPAIA_HTTP_PORT` | CLI: this TUPAIA_OUT's last port, else any free port | Port for `--http` (also `--port N`); strict when set. |
-| `TUPAIA_HTTP_IDLE_MIN` | `120` | Daemon stops after this many idle minutes with no attached client (`0` = never). |
+| `TUPAIA_HTTP_IDLE_MIN` | `120` | Daemon stops after this many idle minutes (fractions allowed) with no attached client and no active unsaved sketch (`0` = never). |
+| `TUPAIA_STATE` | on | `off` stops persisting and resuming `TUPAIA_OUT/state`. |
+| `TUPAIA_SNAPSHOTS_MAX` | `40` | Persisted snapshot/undo/redo entries (oldest dropped first). |
+| `TUPAIA_SNAPSHOTS_MAX_MB` | `512` | Size cap of the persisted entries' map texts. |
 | `TUPAIA_START_TIMEOUT_MS` | `90000` | How long the CLI waits for a daemon start (a timed-out start is killed). |
 | `TUPAIA_CALLER` | `pid N in <cwd>` | Your name in daemon.log. |
 | `TUPAIA_HEADERS_WAIT_MS` | `7000` | `tupaia headers` prints the token by then, even mid-start. |

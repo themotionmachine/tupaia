@@ -58,11 +58,19 @@ async function status(ctx: ToolContext, scope: CallScope, clear: boolean): Promi
     redoDepth: ctx.snapshots.redoStack.length,
     shots: ctx.shots.count,
     outDir: ctx.config.outDir,
+    // history, provenance and the sketch persist here and resume on the next start (resume.ts)
+    state: {
+      dir: ctx.state.dir,
+      persists: ctx.state.owner,
+      ...(ctx.state.note ? { note: ctx.state.note } : {}),
+      ...(ctx.resumed ? { resumed: ctx.resumed } : {})
+    },
     ...(ctx.serving.transport === "http"
       ? {
           serving: `http daemon ${ctx.serving.url} (pid ${ctx.serving.pid}): page, undo and sketch shared by every caller`
         }
       : {}),
+    ...(ctx.idleStatus ? { idle: ctx.idleStatus() } : {}),
     consoleErrors,
     consoleCleared: clear || undefined,
     outwardRequests: b.outward.slice(-50),

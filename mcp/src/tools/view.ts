@@ -5,7 +5,7 @@ import path from "node:path";
 import { z } from "zod";
 import { boxToMap, type CropView, pngPerMap } from "../compact.ts";
 import type { CallScope, ShotRecord, ToolContext } from "../context.ts";
-import { resolveWritePath } from "../paths.ts";
+import { resolveWritePath, writeNew } from "../paths.ts";
 import { type ImageBlock, ToolError, WithImages } from "../result.ts";
 import { EntityRef, EntityType, LayerName, Place } from "../schemas.ts";
 import { defineTools } from "./registry.ts";
@@ -142,7 +142,12 @@ export const ScreenshotInput = z.object({
     .string()
     .optional()
     .describe(".png path for the full-resolution capture (default TUPAIA_OUT/shots/<id>.png)"),
-  overwrite: z.boolean().optional().describe("saveTo: replace an existing file"),
+  overwrite: z
+    .boolean()
+    .optional()
+    .describe(
+      "saveTo: replace an existing file. Default files (TUPAIA_OUT/shots/<id>.png) are never overwritten: shot ids continue after the highest one already there, across server restarts"
+    ),
   compare: z
     .string()
     .optional()
@@ -432,10 +437,22 @@ export async function takeScreenshot(
     returned = { width: plainDiff.width, height: plainDiff.height };
   }
 
-  const id = ctx.shots.nextId();
-  const file = saveTo ?? path.join(ctx.config.outDir, "shots", `${id}.png`);
+  let id = ctx.shots.nextId();
+  let file = saveTo ?? path.join(ctx.config.outDir, "shots", `${id}.png`);
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, png);
+  // never over an existing file unless saveTo + overwrite:true asked for it (shot ids continue
+  // across servers, see ShotStore.init; another process may still have taken this one)
+  for (;;) {
+    try {
+      fs.writeFileSync(file, png, { flag: saveTo && args.overwrite ? "w" : "wx" });
+      break;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      if (saveTo) throw new ToolError("REFUSED", `${file} exists; pass overwrite:true to replace it`);
+      id = ctx.shots.nextId();
+      file = path.join(ctx.config.outDir, "shots", `${id}.png`);
+    }
+  }
 
   if (compareRec && plainDiff && plainDiff.changed === 0) {
     // an all-grey diff says nothing: no image, one line (the capture is still saved in file)
@@ -448,12 +465,10 @@ export async function takeScreenshot(
       note: `nothing changed vs ${compareRec.id}: 0 of ${plainDiff.total} pixels differ; no image returned${hint ? `; ${hint}` : ""}`
     };
   } else if (compareRec && plainDiff) {
-    const diffFile = path.join(
-      ctx.config.outDir,
-      "shots",
-      `${id}-vs-${compareRec.id}.${format === "png" ? "png" : "jpg"}`
+    const diffFile = writeNew(
+      path.join(ctx.config.outDir, "shots", `${id}-vs-${compareRec.id}.${format === "png" ? "png" : "jpg"}`),
+      Buffer.from(plainDiff.b64, "base64")
     );
-    fs.writeFileSync(diffFile, Buffer.from(plainDiff.b64, "base64"));
     images.push({ data: plainDiff.b64, mimeType: plainDiff.mime });
     const hint = plainDiff.changedPct < 0.05 ? redrawHint(ctx, compareRec) : null;
     compare = {

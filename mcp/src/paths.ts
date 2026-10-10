@@ -138,3 +138,18 @@ export function resolveReadPath(cfg: Config, p: string): string {
   if (!fs.statSync(abs).isFile()) throw new ToolError("BAD_ARGS", `${abs} is not a file`);
   return abs;
 }
+
+/** Write `data` to `file`, or to `<name>-2.<ext>`, `-3`, ... when it exists: never over an older file. */
+export function writeNew(file: string, data: Buffer): string {
+  const ext = path.extname(file);
+  const stem = file.slice(0, file.length - ext.length);
+  for (let k = 1; ; k++) {
+    const f = k === 1 ? file : `${stem}-${k}${ext}`;
+    try {
+      fs.writeFileSync(f, data, { flag: "wx" });
+      return f;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST" || k > 999) throw e;
+    }
+  }
+}

@@ -11,6 +11,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import { loadConfig } from "./config.ts";
 import { ToolContext } from "./context.ts";
 import { argValue, type HttpDaemon, parseIdleMin, parsePort, startHttpDaemon } from "./http.ts";
+import { resumeState, saveOnExit } from "./resume.ts";
 import { protocolOut } from "./stdout-guard.ts";
 import { createServer } from "./surface.ts";
 import { registerAll } from "./tools/registry.ts";
@@ -51,9 +52,18 @@ async function shutdown(reason: string, code = 0): Promise<void> {
   if (closing) return;
   closing = true;
   process.stderr.write(`[tupaia-mcp] shutdown: ${reason}\n`);
-  // a daemon drains its running call (15 s) and saves the page map (15 s) first
-  setTimeout(() => process.exit(code), daemon ? 40_000 : 5000).unref();
+  // a daemon drains its running call (15 s) and saves the page map (15 s) first; stdio saves it too
+  setTimeout(() => process.exit(code), daemon ? 40_000 : 20_000).unref();
   if (daemon) await daemon.close(reason).catch(() => {});
+  else {
+    // no new calls once it is going: a changed page is saved like the daemon's (maps/stdio-exit-*.map)
+    ctx.callPolicy.closing = reason;
+    await saveOnExit(ctx, reason, {
+      prefix: "stdio",
+      timeoutMs: 15_000,
+      log: msg => process.stderr.write(`[tupaia-mcp] ${msg}\n`)
+    }).catch(() => {});
+  }
   await ctx.browser.close().catch(() => {});
   process.exit(code);
 }
@@ -73,6 +83,11 @@ if (httpMode) {
       port: parsePort(preferred ?? argValue(argv, "--port") ?? process.env.TUPAIA_HTTP_PORT),
       preferPort: preferred !== undefined,
       idleMin: parseIdleMin(process.env.TUPAIA_HTTP_IDLE_MIN),
+      idleHold: () => ctx.idleHoldReason(),
+      beforeListen: () => {
+        const note = resumeState(ctx);
+        if (note) ctx.browser.pendingNotes.push(note);
+      },
       version: pkg.version,
       log: msg => process.stderr.write(`[tupaia-mcp] ${msg}\n`),
       onStop: reason => void shutdown(reason)
@@ -83,6 +98,8 @@ if (httpMode) {
     process.exit(1);
   }
 } else {
+  const note = resumeState(ctx);
+  if (note) ctx.browser.pendingNotes.push(note);
   const server = makeServer();
   await server.connect(new StdioServerTransport(process.stdin, protocolOut));
   server.server.onclose = () => void shutdown("transport closed");

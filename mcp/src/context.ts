@@ -6,6 +6,8 @@
 // server.ts imports every tools/*.ts. ctx.tool() only records the definition; attach(server)
 // registers the definitions on an McpServer (once for stdio, once per request under --http) and
 // callTool() runs one by name without MCP (the --http JSON API). Both go through the same runner.
+import fs from "node:fs";
+import path from "node:path";
 import type { CallToolResult, McpServer, ServerContext } from "@modelcontextprotocol/server";
 import type { z } from "zod";
 import { BrowserManager, type CallOptions, READ_STALL_PROBE_MS } from "./browser.ts";
@@ -23,9 +25,11 @@ import {
   WithImages,
   WithText
 } from "./result.ts";
+import { persistState, resumeLaunch } from "./resume.ts";
 import { TIMEOUTS } from "./schemas.ts";
 import { SharedApi } from "./shared-api.ts";
 import { type Provenance, SnapshotStore, summarizeArgs } from "./snapshots.ts";
+import { provenanceKey, StateStore } from "./state.ts";
 
 export type ToolKind = keyof typeof TIMEOUTS;
 
@@ -80,8 +84,31 @@ export interface ShotRecord {
 export class ShotStore {
   #shots: ShotRecord[] = [];
   #seq = 0;
+  #dir: string | null = null;
+  /**
+   * Continue numbering after the highest shot already in `dir` (or `persisted`), so a restarted
+   * server never reuses an earlier server's s1, s2, ... file names (resume.ts).
+   */
+  init(dir: string, persisted = 0): void {
+    let max = persisted;
+    try {
+      for (const f of fs.readdirSync(dir)) {
+        const m = /^s(\d+)(?=[-.])/.exec(f);
+        if (m) max = Math.max(max, Number(m[1]));
+      }
+    } catch {
+      // no shots yet
+    }
+    this.#seq = Math.max(this.#seq, max);
+    this.#dir = dir;
+  }
+  get seq(): number {
+    return this.#seq;
+  }
   nextId(): string {
-    return `s${++this.#seq}`;
+    let id = `s${++this.#seq}`;
+    while (this.#dir && fs.existsSync(path.join(this.#dir, `${id}.png`))) id = `s${++this.#seq}`;
+    return id;
   }
   add(rec: ShotRecord): void {
     this.#shots.push(rec);
@@ -536,6 +563,16 @@ export class ToolContext {
   #lastMutableSeq = 0;
   /** How this process is served (session status reports it). */
   serving: { transport: "stdio" } | { transport: "http"; url: string; pid: number } = { transport: "stdio" };
+  /** HMAC key of this TUPAIA_OUT (state.json, .map provenance trailers). */
+  readonly provKey: Buffer;
+  /** TUPAIA_OUT/state: history, provenance and the sketch across restarts (resume.ts). */
+  readonly state: StateStore;
+  /** A resumed page map, loaded on the first browser launch. */
+  resumePage: { text: string; provenance: Provenance; label: string } | null = null;
+  /** What resumeState took over (session and /health report it). */
+  resumed: Record<string, unknown> | null = null;
+  /** --http: the idle-shutdown status (http.ts sets it; session shows it). */
+  idleStatus: (() => Record<string, unknown>) | null = null;
 
   constructor(config: Config) {
     this.config = config;
@@ -543,6 +580,8 @@ export class ToolContext {
     this.browser = new BrowserManager(config, this.mode);
     this.snapshots = new SnapshotStore(config.snapshotsMax, config.undoDepth);
     this.shared = new SharedApi(config, this.browser);
+    this.provKey = provenanceKey(config.outDir);
+    this.state = new StateStore(config, this.provKey);
     this.browser.setRestorer(reason => this.#restoreNewest(reason));
     this.browser.onLaunch(() => this.#afterLaunch());
   }
@@ -550,6 +589,12 @@ export class ToolContext {
   #sharedBootDone = false;
 
   async #afterLaunch(): Promise<void> {
+    if (this.resumePage) {
+      // a resumed server: the saved page (and its lineage) instead of a boot map or the shared map
+      this.#sharedBootDone = true;
+      await resumeLaunch(this);
+      return;
+    }
     // A fresh page holds a random boot map until something is restored or loaded. Set that
     // before anything that can throw, so a failed hook never leaves an older 'shared' provenance.
     this.snapshots.setProvenance({ kind: "boot", seed: null, mapId: null });
@@ -576,6 +621,7 @@ export class ToolContext {
           sharedVersion: blob.version ?? undefined,
           sharedUpdatedBy: blob.updatedBy,
           sharedUpdatedAt: blob.updatedAt,
+          sharedBytes: blob.bytes.length,
           fetchedAt: new Date().toISOString()
         });
         this.browser.pendingNotes.push(`live mode: loaded the shared map v${blob.version ?? "?"} into the page`);
@@ -818,6 +864,7 @@ export class ToolContext {
         const out = await impl(args, scope);
         await this.#sketchFallback(scope, args, null);
         await this.#capturePoint(scope, writes0);
+        persistState(this);
         await new Promise(r => setImmediate(r)); // let late console events land
         const normalized: ToolOutput =
           out instanceof WithImages
@@ -829,6 +876,7 @@ export class ToolContext {
       } catch (e) {
         await this.#sketchFallback(scope, args, e).catch(() => {});
         await this.#capturePoint(scope, writes0);
+        persistState(this);
         await new Promise(r => setImmediate(r));
         return errorResult(e, this.#extras(scope));
       }
@@ -907,6 +955,19 @@ export class ToolContext {
       consoleErrors: summarizeConsole(this.browser.consoleSince(scope.consoleSeq)),
       notes: scope.notes
     };
+  }
+
+  /**
+   * Why an idle --http daemon must not stop now (its sketch would be cut off mid-work), or null.
+   * A sketch holds it while it records or has changes not saved to the Worker.
+   */
+  idleHoldReason(): string | null {
+    const sk = this.sketches.current;
+    if (!sk) return null;
+    const dirty = sk.saved ? sk.saved.rev !== sk.rev : sk.ops.length > 0;
+    if (sk.recording) return `sketch '${sk.slug}' is recording (${sk.ops.length} op(s)${dirty ? ", unsaved" : ""})`;
+    if (dirty) return `sketch '${sk.slug}' has ${sk.ops.length} op(s) not saved to the Worker`;
+    return null;
   }
 
   provenanceView(p: Provenance = this.snapshots.provenance): Record<string, unknown> {

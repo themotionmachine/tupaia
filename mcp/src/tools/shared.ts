@@ -106,7 +106,10 @@ async function lineageOf(ctx: ToolContext) {
   const p = ctx.snapshots.provenance;
   // a sketch opened from the Worker is derived from the shared version it is based on
   const claimsShared = (p.kind === "shared" || p.kind === "sketch") && typeof p.sharedVersion === "number";
-  const via = p.kind === "sketch" ? ` via sketch '${p.sketchSlug ?? "?"}' (its v${p.sketchVersion ?? "?"})` : "";
+  const via =
+    p.kind === "sketch"
+      ? ` via sketch '${p.sketchSlug ?? "?"}'${p.sketchVersion !== undefined ? ` (its v${p.sketchVersion})` : ""}`
+      : "";
   const pageId = claimsShared ? await ctx.pageMapId() : null;
   const idMatches = pageId !== null && p.mapId !== undefined && p.mapId !== null && pageId === p.mapId;
   const related = claimsShared && idMatches;
@@ -460,6 +463,7 @@ export async function sharedSave(
       sharedVersion: saved.version,
       sharedUpdatedBy: saved.updated_by,
       sharedUpdatedAt: saved.updated_at,
+      sharedBytes: body.length,
       fetchedAt: new Date().toISOString()
     },
     { sameMap: true }

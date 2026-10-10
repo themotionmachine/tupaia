@@ -72,7 +72,8 @@ Options:
 
 Environment: TUPAIA_OUT picks the daemon and where files go; TUPAIA_MODE and the other TUPAIA_*
 variables apply when this command starts the daemon (the mode never changes afterwards);
-TUPAIA_HTTP_IDLE_MIN (default 120, 0 = never) stops an idle daemon; TUPAIA_START_TIMEOUT_MS
+TUPAIA_HTTP_IDLE_MIN (default 120, 0 = never; fractions allowed) stops an idle daemon unless a
+sketch is active and unsaved; TUPAIA_STATE=off stops persisting $TUPAIA_OUT/state; TUPAIA_START_TIMEOUT_MS
 (default 90000) bounds a start; TUPAIA_CALLER names you in daemon.log.
 Relative paths: load_map {path} is taken from your cwd when the file is there (else the repo
 root); save_map and export write relative paths under TUPAIA_OUT.
@@ -344,7 +345,7 @@ async function startDaemon(cfg: Config, opts: Opts, soonMs?: number): Promise<Fo
             up = true;
             writePortPref(cfg.outDir, { port: st.port, registered: false });
             note(
-              `started a daemon: pid ${st.pid}, ${mcpUrlOf(st)}, mode ${st.mode}, TUPAIA_OUT ${cfg.outDir} (log ${logFile}). ${st.mode === "live" ? `Its page loads the shared map from ${st.liveOrigin ?? "the live origin"} (session says which version), with no undo history.` : "Its page is a fresh random map with no undo history."}`
+              `started a daemon: pid ${st.pid}, ${mcpUrlOf(st)}, mode ${st.mode}, TUPAIA_OUT ${cfg.outDir} (log ${logFile}). ${p.health.resumed ? `It resumed the previous server's page, history and sketch from ${cfg.outDir}/state (session shows what).` : st.mode === "live" ? `Its page loads the shared map from ${st.liveOrigin ?? "the live origin"} (session says which version), with no undo history.` : "Its page is a fresh random map with no undo history."}`
             );
             reportLastExit(cfg);
             return { st, health: p.health };
@@ -383,7 +384,7 @@ async function startDaemon(cfg: Config, opts: Opts, soonMs?: number): Promise<Fo
   }
 }
 
-/** The previous daemon saved its page when it stopped: say where (once). */
+/** The previous server saved its page when it stopped: say where (once). */
 function reportLastExit(cfg: Config): void {
   const file = path.join(cfg.outDir, LAST_FILE);
   try {
@@ -391,7 +392,7 @@ function reportLastExit(cfg: Config): void {
     fs.unlinkSync(file);
     if (last.savedMap && fs.existsSync(last.savedMap))
       note(
-        `the previous daemon (pid ${last.pid}) stopped at ${last.at} (${last.reason}) and saved its page to ${last.savedMap}; load_map {"path":"${last.savedMap}"} continues from it`
+        `the previous ${last.transport === "stdio" ? "stdio server" : "daemon"} (pid ${last.pid}) stopped at ${last.at} (${last.reason}) and saved its page to ${last.savedMap}; the new daemon resumes that page, its history and any sketch from TUPAIA_OUT/state, and load_map {"path":"${last.savedMap}"} restores its lineage too`
       );
   } catch {
     // none
@@ -753,7 +754,9 @@ async function cmdStatus(cfg: Config, opts: Opts): Promise<number> {
   const h = f.health;
   if (opts.json) out(JSON.stringify({ running: true, ...publicState(f.st), health: h }));
   else {
-    const idle = Number(h.idleMin) ? `idle shutdown after ${h.idleMin} min (idle ${h.idleS} s)` : "no idle shutdown";
+    const idle = Number(h.idleMin)
+      ? `idle shutdown after ${h.idleMin} min (idle ${h.idleS} s${h.idleHeldBy ? `; held off: ${h.idleHeldBy}` : ""})`
+      : "no idle shutdown";
     const extra = (f.st.ports ?? []).filter(p => p !== f.st.port);
     out(
       `running: pid ${f.st.pid}, ${mcpUrlOf(f.st)}${extra.length ? ` (also port ${extra.join(", ")})` : ""}, mode ${h.mode}, browser ${h.browser}, ${h.active} active request(s), ${h.attached ?? 0} attached MCP client(s), up ${h.uptimeS} s, ${idle}`
