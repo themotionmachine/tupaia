@@ -656,14 +656,29 @@
     if (!["redefine", "keep"].includes(biomes)) fail("BAD_ARGS", "biomes is 'redefine' or 'keep'");
     for (const k of ["fill", "erosion", "keepHeights"])
       if (a[k] !== undefined && typeof a[k] !== "boolean") fail("BAD_ARGS", `${k} must be true or false`);
-    if (a.rivers !== undefined && !["keep", "regenerate"].includes(a.rivers))
-      fail("BAD_ARGS", "rivers is 'keep' or 'regenerate'");
+    if (a.rivers !== undefined && !["keep", "regenerate", "retrace"].includes(a.rivers))
+      fail("BAD_ARGS", "rivers is 'keep', 'regenerate' or 'retrace'");
     if (rebuild === "risk" && a.rivers === "keep")
-      fail("BAD_ARGS", "rebuild:'risk' always regenerates the rivers; rivers:'keep' goes with rebuild:'keep'");
-    if (rebuild === "keep" && a.rivers === "keep" && a.erosion === true)
-      fail("BAD_ARGS", "erosion cuts the beds of regenerated rivers: pass rivers:'regenerate' (or drop erosion)");
-    // keep is local unless asked: erosion (a river step) implies regenerating the rivers
-    const rivers = rebuild === "risk" ? "regenerate" : (a.rivers ?? (a.erosion === true ? "regenerate" : "keep"));
+      fail(
+        "BAD_ARGS",
+        "rivers:'keep' goes with rebuild:'keep'; rebuild:'risk' re-traces the rivers onto the new heights (rivers:'retrace') or regenerates them (rivers:'regenerate')"
+      );
+    if (rebuild === "keep" && a.rivers === "retrace")
+      fail(
+        "BAD_ARGS",
+        "rivers:'retrace' goes with rebuild:'risk' (rebuild:'keep' keeps every river where it is: rivers:'keep')"
+      );
+    if ((a.rivers === "keep" || a.rivers === "retrace") && a.erosion === true)
+      fail(
+        "BAD_ARGS",
+        `erosion cuts the beds of regenerated rivers: pass rivers:'regenerate' (or drop erosion)${a.rivers === "retrace" ? "; rivers:'retrace' carves where a river would climb" : ""}`
+      );
+    // keep is local unless asked: erosion (a river step) implies regenerating the rivers. risk
+    // re-traces the map's rivers (their ids, names, parents and hand edits are the map's
+    // content); a map without rivers gets the generator's
+    const hasRivers = (pack.rivers || []).some(r => r?.i && Array.isArray(r.cells) && r.cells.length >= 2);
+    const riskRivers = hasRivers ? "retrace" : "regenerate";
+    const rivers = a.rivers ?? (a.erosion === true ? "regenerate" : rebuild === "risk" ? riskRivers : "keep");
     return {
       rebuild,
       erosion: a.erosion === true,
@@ -748,6 +763,14 @@
         effect:
           "kept (rebuild:'keep' is local); rivers that climb after the change are listed on apply; rivers:'regenerate' re-runs the river generator over the whole map"
       };
+    } else if (o.rivers === "retrace") {
+      // the apply's rule (bridge-ext/rivertrace.js preview): a river with no point of its line
+      // on land after the change is removed; a burg's cell set to water stays land
+      out.rivers = { now: (pack.rivers || []).length, ...M.retracePreview(g => target[g] >= 20) };
+      Object.assign(out.rivers, {
+        effect:
+          "re-traced on apply along their old lines onto the new heights (ids, names, types, parents, main stems and hand edits kept); land cells where a river would climb are lowered (carved, never below 20); a river under water (underWater) is removed; rivers:'regenerate' re-runs the river generator instead"
+      });
     } else
       out.rivers = {
         now: (pack.rivers || []).length,
@@ -777,15 +800,22 @@
 
   function rebuildRisk(target, o, info) {
     const gh = grid.cells.h;
-    for (let g = 0; g < gh.length; g++) gh[g] = target[g];
+    const changedGrid = new Set();
+    for (let g = 0; g < gh.length; g++) {
+      if (gh[g] !== target[g]) changedGrid.add(g);
+      gh[g] = target[g];
+    }
+    const retrace = o.rivers === "retrace";
     return M.riskRebuild({
       restore: {
         erosion: o.erosion,
-        regenerateRivers: true,
+        regenerateRivers: !retrace,
         redefineBiomes: o.biomes === "redefine",
         afterRivers: () => afterRivers(target, o, info)
       },
-      keepBiomes: o.biomes === "keep"
+      keepBiomes: o.biomes === "keep",
+      retraceRivers: retrace,
+      changedGrid
     });
   }
 
@@ -925,12 +955,14 @@
     }
     const graphAfter = T.cellGraph();
     const renumbered = graphAfter !== graphBefore;
-    if (o.rebuild === "risk")
+    if (o.rebuild === "risk") {
+      const what = o.rivers === "retrace" ? "features, climate and lakes" : "features, climate, lakes and rivers";
       c.notes.add(
         renumbered
-          ? "rebuild:'risk' re-ran features, climate, lakes and rivers and re-packed the cells (cell ids changed); burgs, states, cultures, religions, provinces, zones, routes and markers were kept where land remains and moved to the new cells; lake and island names were carried over"
-          : "rebuild:'risk' re-ran features, climate, lakes and rivers; the re-packed cells came out the same (cell ids unchanged)"
+          ? `rebuild:'risk' re-ran ${what} and re-packed the cells (cell ids changed); burgs, states, cultures, religions, provinces, zones, routes and markers were kept where land remains and moved to the new cells; lake and island names were carried over`
+          : `rebuild:'risk' re-ran ${what}; the re-packed cells came out the same (cell ids unchanged)`
       );
+    }
     let local = null;
     if (o.rebuild === "keep") {
       local = M.localHeightNotes(
@@ -959,7 +991,8 @@
           ? `erosion cut river beds into ${info.rebuildChanged} land cells; keepHeights put their requested heights back`
           : `erosion cut river beds into ${info.rebuildChanged} land cells (kept: keepHeights is off)`
       );
-    riverNotes(c, carried?.rivers);
+    if (o.rivers === "retrace") M.retraceNotes(c, carried?.rivers);
+    else riverNotes(c, carried?.rivers);
     if (carried?.portsLost)
       c.notes.add(`${carried.portsLost} port burgs no longer stand by water; their port was cleared`);
     const out = {
@@ -993,7 +1026,10 @@
         );
     }
     const rd = await M.finishRedraw(a, c.R);
-    const enc = await encodeChanges(base, final);
+    // rivers:'retrace' carved some cells after tracing: log the heights it traced on (replay
+    // traces on them and carves the same cells), not the carved ones
+    const traced = carried?.rivers?.gridBeforeCarve;
+    const enc = await encodeChanges(base, traced ?? final);
     const resolved = {
       changes: enc.changes,
       changed: enc.changed,

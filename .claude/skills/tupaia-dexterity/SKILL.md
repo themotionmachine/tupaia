@@ -178,9 +178,10 @@ Token economy (results are counts first; ask for detail only when needed):
    the opt-in global river pass). `paint_cells {set:{height:{...}}}` is the same local keep.
 4. `flow {from:[{x:840, y:420}, {gridCell:5005}], heights:{grid:[...]}, fill:true}`: key rivers
    should end at `sea` (or `river` whose `goesTo` is the sea); `screenshot:true` draws them.
-5. `set_heights {...}` without dryRun. Read `rivers` (kept/new/gone, `notesOrphaned`) and
-   `carried` (field meanings in the cheatsheet, Terrain). Even an identity import with rebuild
-   'risk' regenerates rivers (ids and names carry over by course). Verify: the same dryRun says `changed:0`, and
+5. `set_heights {...}` without dryRun. Read `rivers` and `carried` (field meanings in the
+   cheatsheet, Terrain). On a map with rivers, rebuild 'risk' re-traces them (next recipe); a map
+   without rivers, `erosion:true` or `rivers:'regenerate'` runs the river generator (ids and names
+   carry over by course only; `rivers` kept/new/gone, `notesOrphaned`). Verify: the same dryRun says `changed:0`, and
    `edit {type:'map', recalculate:'biomes', dryRun:true}` reports `replaces.biomeCellsEdited:0`.
 6. World settings: `edit {type:'map', ops:[{set:{mapSize:1.1, latitude:38.8,
    temperatureEquator:30, temperatureNorthPole:-28, winds:[225,45,45,315,135,315],
@@ -200,6 +201,26 @@ Token economy (results are counts first; ask for detail only when needed):
    cells (default 3, 0 = off) merged into their neighbour (`biomes.cleanup`; river and carried
    cells stay); `biomes:'climate'` carries custom only, `'keep'` the old pattern (warns).
 8. `lint` (markers on new water, route links), then `screenshot {full:true}`.
+
+**Change the coastline and keep the rivers.** A terrain change that crosses height 20 needs
+rebuild 'risk'; on a map with rivers it re-traces them (`rivers:'retrace'`, the default; for
+`paint_cells` height risk too) instead of regenerating them, so ids, names, types, parents, main
+stems and hand edits (mainStem, reroute, name) survive.
+1. `set_heights {pack:{<cell>:h, ...}, dryRun:true}` (or grid/image; for paint_cells height
+   risk, `set.height.rivers`): `rivers.underWater` names the rivers the apply removes (no point
+   of their line left on land; a burg's cell stays land); `toLand`/`toWater` count the flips.
+2. `set_heights {pack:{...}}`. Read `rivers`: `unchanged` (no changed cell on the course: kept
+   cell for cell), `retraced`, `carved` (land cells lowered where a river now climbs more than
+   before; `carved.most` names the deepest), and the named lists `underWater`, `notRetraced`,
+   `shortened` (meets new sea higher up), `toWaterNow`, `endsInland`, `lakeGone` (a drained
+   lake's inflows join its outlet), `orphaned`, `climbingMore` (a tributary the carve could not
+   flatten without making its parent climb: fix it by hand, lint `river-uphill` shows where).
+   `climbingLeft` counts rivers that climb no more than before. The notes repeat them.
+3. Verify: `find {type:'river'}` (or eval over `pack.rivers`) shows the same ids, names and
+   parents; `lint {checks:['river-gap','river-uphill']}`. Replays in a sketch (the log keeps the
+   heights the rivers were traced on). Tested in `mcp/test/riverkeep.test.ts` (demo.map: hand
+   edits, a no-op, a drained lake, a drowned river with tributaries, a carve at a confluence; the
+   builder's polish-final.map with a change near the Spire and Ballantine).
 
 **Wipe the random base and build from a spec.**
 1. `clear {types:['labels','markers','zones','routes','burgs','provinces','states','religions',
@@ -368,7 +389,7 @@ points (spire.js), ice shapes. Read the runtime API first and pass `redraw`.
   `restoreLayers:true` turns back layers a part switched on. biomes, provinces, emblems and
   relief take options, are seeded or literal, and replay in sketches.
 - Height edits on part of the map: `paint_cells ... set:{height:{..., rebuild:'keep'}}` (land
-  only, refuses crossing 20, local: rivers and the economy stay), `'risk'` (coastline changes, entities carried), `'erase'` (wipes
+  only, refuses crossing 20, local: rivers and the economy stay), `'risk'` (coastline changes, entities carried, rivers re-traced), `'erase'` (wipes
   every entity; only when asked, with `confirmErase:true`).
 - Names from a culture's language: `set:{name:{generate:{base:'Hawaiian'}}}` or
   `{generate:{culture:<ref>}}`.

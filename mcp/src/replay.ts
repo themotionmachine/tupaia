@@ -109,7 +109,13 @@ export function bridgeArgs(tool: string, r: Resolved): Record<string, unknown> {
     }
     case "paint_cells": {
       const p = r as PaintResolved;
-      return withRedraw({ select: p.select, set: p.set }, p.redraw);
+      // a risk op logged before height.rivers existed: what it did then ('retrace' is the default now)
+      const h = p.set?.height as { rebuild?: string; rivers?: string; erosion?: boolean } | undefined;
+      const set =
+        h && h.rebuild === "risk" && h.rivers === undefined
+          ? { ...p.set, height: { ...h, rivers: h.erosion ? "regenerate" : "grid" } }
+          : p.set;
+      return withRedraw({ select: p.select, set }, p.redraw);
     }
     case "display": {
       const d = r as DisplayResolved;

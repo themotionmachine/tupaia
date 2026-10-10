@@ -38,13 +38,16 @@ export interface SetHeightsResolved {
   baseDigest: string;
   /** Hash of the final heights. */
   heightsDigest: string;
-  /** rivers: absent in ops logged before keep became local (replays as 'keep'). */
+  /**
+   * rivers: absent in ops logged before keep became local (a keep op replays as 'keep', a risk op
+   * as 'regenerate': what it did then).
+   */
   options: {
     rebuild: "risk" | "keep";
     erosion: boolean;
     keepHeights: boolean;
     biomes: "redefine" | "keep";
-    rivers?: "keep" | "regenerate";
+    rivers?: "keep" | "regenerate" | "retrace";
   };
   /** Pack cell graph after the rebuild (bridge cellGraph); replay compares its own. */
   graphAfter: string | null;
@@ -142,7 +145,8 @@ function compactArgs(a: HeightArgs & Record<string, unknown>): Record<string, un
 }
 
 function describeOptions(o: SetHeightsResolved["options"]): string {
-  const rivers = o.rebuild === "keep" ? `, rivers ${o.rivers ?? "keep"}` : "";
+  const rivers =
+    o.rebuild === "keep" ? `, rivers ${o.rivers ?? "keep"}` : o.rivers === "retrace" ? ", rivers retrace" : "";
   return `rebuild ${o.rebuild}${rivers}, erosion ${o.erosion ? "on" : "off"}, biomes ${o.biomes}${o.keepHeights ? "" : ", keepHeights off"}`;
 }
 
@@ -155,6 +159,8 @@ registerReplayable("set_heights", {
       baseDigest: s.baseDigest,
       gridDigest: s.gridDigest,
       ...s.options,
+      // a risk op logged before rivers:'retrace' existed regenerated the rivers
+      ...(s.options.rebuild === "risk" && !s.options.rivers ? { rivers: "regenerate" } : {}),
       fill: false,
       expectGraph: s.graphAfter ?? undefined
     };
@@ -215,7 +221,7 @@ export function register(ctx: ToolContext): void {
     {
       title: "Import terrain (set heights)",
       description:
-        "Replace the heightmap in one call, then rebuild what depends on it. Exactly one source: grid (dense, one 0-100 height per GRID cell in grid order; a length mismatch error gives the expected length and grid geometry; eval 'return grid.points' gives each cell's [x,y]), pack ({<packCellId>: h}, sparse) or image ({path | dataUrl, invert?, range?, channel?}, stretched over the map). Sea level is 20. fill:true fills land depressions first (priority flood). rebuild 'risk' (default) re-packs the map: coastline, lakes, climate, rivers and biomes are recomputed and cell ids change; burgs, states, cultures, religions, provinces, zones, routes, markers and regiments stay where land remains and move to the new cells (a burg on new water keeps its cell as land, height 20); lake and island names carry over; rivers are regenerated (a new river overlapping an old course keeps its id, name and type; the result counts kept/new/gone rivers). 'keep' refuses any change across height 20, keeps cell ids and is local: only the changed cells' heights, temperature, biome and lake levels are updated (result local {packCells, temperature, biomes, lakes, rivers {through, climbing}}); rivers, precipitation, other biomes, burg economies and treasuries stay; rivers:'regenerate' is the opt-in global river pass. The rebuild runs even with no height changed. erosion (default false; with keep it implies rivers:'regenerate') lowers river beds; keepHeights (default true) sets land heights the rebuild changed back. biomes 'redefine' (default) recomputes biomes (risk: every one; keep: the changed cells'); 'keep' keeps them. For a few cells paint_cells height is the same local keep. dryRun:true changes nothing and returns cells changed, land/water flips, land %, lakes, pits, fill raise, grid geometry, burgs on new water, painted biomes, rivers; detail:true lists pit and fill-raised cells. One auto-undo entry; replayable in a sketch (only the changed cells are logged).",
+        "Replace the heightmap in one call, then rebuild what depends on it. Exactly one source: grid (dense, one 0-100 height per GRID cell in grid order; eval 'return grid.points' gives each cell's [x,y]), pack ({<packCellId>: h}, sparse) or image ({path | dataUrl, invert?, range?, channel?}, stretched over the map). Sea level is 20. fill:true fills land depressions first (priority flood). rebuild 'risk' (default) re-packs the map: coastline, lakes, climate and biomes are recomputed and cell ids change; burgs, states, cultures, religions, provinces, zones, routes, markers and regiments stay where land remains and move to the new cells (a burg on new water keeps its cell as land, height 20); lake and island names carry over. rivers 'retrace' (default on a map with rivers) re-traces each river onto the new heights, keeping ids, names, parents, main stems and hand edits, carving where it would climb (result rivers names any removed or not re-traced); 'regenerate' re-runs the generator (ids kept by course). 'keep' refuses any change across height 20, keeps cell ids and is local: only the changed cells' heights, temperature, biome and lake levels are updated (result local {packCells, temperature, biomes, lakes, rivers {through, climbing}}); rivers, precipitation, other biomes, burg economies and treasuries stay; rivers:'regenerate' is the opt-in global river pass. The rebuild runs even with no height changed. erosion (default false; implies rivers:'regenerate') lowers river beds; keepHeights (default true) sets land heights the rebuild changed back. biomes 'redefine' (default) recomputes biomes (risk: every one; keep: the changed cells'); 'keep' keeps them. For a few cells paint_cells height is the same local keep. dryRun:true changes nothing and returns the counts (flips, land %, lakes, pits, fill, grid geometry, burgs on new water, painted biomes, rivers); detail:true lists pit and fill-raised cells. One auto-undo entry; replayable in a sketch (only the changed cells are logged).",
       inputSchema: z.object({
         ...HeightSource,
         fill: z
@@ -230,10 +236,10 @@ export function register(ctx: ToolContext): void {
           .optional()
           .describe("Default 'redefine' (rebuild 'keep': only the changed cells' biomes, from their new temperature)"),
         rivers: z
-          .enum(["keep", "regenerate"])
+          .enum(["keep", "regenerate", "retrace"])
           .optional()
           .describe(
-            "rebuild 'keep' only. 'keep' (default; 'regenerate' when erosion is on) leaves every river as it is and lists rivers through the changed cells that now climb. 'regenerate' re-runs the river generator over the whole map on the current precipitation (ids carried by course) and recomputes the biome of cells whose river or flux changed; the economy is never re-rolled"
+            "Default: rebuild 'keep' -> 'keep'; rebuild 'risk' -> 'retrace' when the map has rivers, else 'regenerate'; erosion -> 'regenerate'. 'keep' (rebuild 'keep' only) leaves every river as it is and lists rivers through the changed cells that now climb. 'retrace' (rebuild 'risk' only, no erosion) captures each river's line before the re-pack and traces it again onto the new heights as a contiguous path (as regrid does): ids, names, types, parents, basins, main stems and hand-edited courses (reroute, mainStem, name) are kept, and a river with no changed cell on its course keeps it cell for cell (result rivers.unchanged; one the re-pack splits at the coast is traced again); a river that climbs more than before, or climbs at a changed cell, has its land cells lowered to the lowest land upstream (never below 20; rivers.carved {rivers, cells, maxDrop, most}); a carve never makes another river climb (a confluence goes no lower than its parent's land downstream, unless the step is at most 5: then the parent is carved too; a river left climbing more is named in climbingMore); rivers that climb no more than before are left (climbingLeft); a river crosses new water rather than a burg's cell kept at 20; a river meeting the new sea higher up ends there (shortened); an inflow of a lake that is gone joins the lake's outlet (its parent) or ends inland as a main river, an outlet starts where it left the lake (lakeGone); a river whose course is under water (no point of its line on land) is removed (underWater), its tributaries become main rivers (orphaned); one that cannot be traced keeps its old cells mapped by grid cell (notRetraced). dryRun lists rivers.underWater by the same rule. 'regenerate' re-runs the river generator over the whole map (rebuild 'keep': on the current precipitation, recomputing the biome of cells whose river or flux changed; the economy is never re-rolled); a new river whose course overlaps an old one keeps its id, name and type"
           ),
         dryRun: z.boolean().optional().describe("Return the counts and change nothing"),
         detail: z
