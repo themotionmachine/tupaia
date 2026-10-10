@@ -145,7 +145,8 @@ What the newer tools and fields replaced (all one undo entry each, all dryRun-ab
   neighbour, through the same clean-up as regenerate biomes' minRegion; `territories:'regrow'`
   regrows states, cultures and religions together (one label per triple, each piece to its
   copied area) and then provinces along the terrain instead of copying the old cells' steps
-  (burgs keep their state and culture; locked states keep their land unless territoryLocked). App hook: `Resample.process({keepId})`.
+  (burgs keep their state and culture; locked states keep their land unless territoryLocked);
+  at the map's own density `territories:'regrow'` is a regrow-only pass (no rebuild). App hook: `Resample.process({keepId})`.
 - `apply` (declarative spec, `mode:'check'|'upsert'|'update'`, idempotent; its `paint` list
   paints territory, biomes and heights in order, later entries winning, each entry only its
   differing cells, logged as replayable paint_cells steps; it creates provinces around their
@@ -318,7 +319,12 @@ the hash and HMAC match and the base holds on the server: the current version's 
 blob sha256 (one GET), or the retained version's size (the Worker serves no retained bytes or
 hashes). A contradiction keeps it unrelated; a check that cannot be made (e.g.
 `TUPAIA_LIVE_ORIGIN=none`) binds with a warning. `lineage.file` is `none` (no line: an app save
-or an older file), `modified`, `foreign` (another key) or `valid`. A compact:true copy is marked
+or an older file), `modified`, `foreign` (another key) or `valid`. A `foreign` file (written by the
+server of another TUPAIA_OUT, such as the stdio server's default out dir and a daemon's `--out`)
+binds only when the base check verified it, and its sketch log is not trusted: the sketch comes
+back blob-only (promotable while its base is current, never replayed). `snapshot take saveTo`
+writes the same line as save_map. A file holding the active sketch at the same op, loaded over
+a page that already holds that map, logs no op and pushes no undo entry. A compact:true copy is marked
 `compacted` (one more op, no sketch log). A file naming a sketch reactivates it unless another
 sketch records, or a stopped one has ops not saved to the Worker; undoing that load_map ends it
 again (and names the replaced, Worker-saved sketch to reopen).
@@ -329,6 +335,8 @@ again (and names the replaced, Worker-saved sketch to reopen).
 tupaia call <tool> [<json>|-]   # result text, then 'IMAGE: <path>' per image; a failed tool
                                 # prints 'ERROR CODE: message' and exits 1
 tupaia tools [<tool>] [--names] # list tools; with a name: its description and arguments
+                                # (a running daemon's; with none, this checkout's: starts
+                                # nothing and creates no TUPAIA_OUT)
 tupaia help <tool>              # same as tupaia tools <tool>
 tupaia status | start | stop    # status exits 1 when not running (and says starting/stopping)
 tupaia headers                  # {"Authorization":"Bearer ..."} for Claude Code's headersHelper
@@ -411,7 +419,7 @@ or, once: `claude mcp add-json tupaia-shared '{"type":"http","url":"http://127.0
 | `TUPAIA_HEADED` | off | `1` shows the browser window. |
 | `TUPAIA_DEBUG` | off | `1` logs page events to stderr. |
 | `TUPAIA_TEST_HOOKS` | off | `1` enables `session {action:'crash'}` and `sketch rebase {onto}` (tests only). |
-| `TUPAIA_BUILD_CACHE_MS` | `300000` | How long the deployed-build check is cached. |
+| `TUPAIA_BUILD_CACHE_MS` | `300000` | How long a clean deployed-build check is cached (any other result is read again on the next preview). |
 | `TUPAIA_HTTP_PORT` | CLI: this TUPAIA_OUT's last port, else any free port | Port for `--http` (also `--port N`); strict when set. |
 | `TUPAIA_HTTP_IDLE_MIN` | `120` | Daemon stops after this many idle minutes (fractions allowed) with no attached client; an active unsaved sketch adds one period, or holds it while not persisted (`0` = never). |
 | `TUPAIA_STATE` | on | `off` stops persisting and resuming `TUPAIA_OUT/state`. |
@@ -452,11 +460,13 @@ independent locks:
    holds the edit lock) is refused unless `force:true`. `expectVersion` adds a hard condition.
    The PUT always carries `X-Map-Version` and never `X-Map-Overwrite`, so the Worker's own guard
    still answers 409 on a race (CONFLICT, with the Worker's body).
-5. **Build.** The deployed `versioning.js` VERSION is fetched (cached 5 minutes). A newer local
+5. **Build.** The deployed `versioning.js` VERSION is fetched (a clean result is cached 5
+   minutes; any other is read again on the next preview, so a fixed deploy needs no restart). A newer local
    VERSION blocks the save outright (live users would get "Newer file"). A map with
    `reliefOnLoad` is refused unless the deployed build is the local one or its entry chunk has
    the relief load hook (an older client would show no relief). When the builds cannot be
-   compared, the save is refused unless `skipBuildCheck:true`; `force` does not imply it.
+   compared (or the relief hook cannot be checked), the save is refused unless
+   `skipBuildCheck:true` (shared_save and sketch_promote); `force` does not imply it.
    `shared_status` runs the build check by default only in live mode.
 6. **Backups.** Before every write the live blob is downloaded to
    `TUPAIA_OUT/shared-saves/v<N>-live-<time>.map`, and for a save the outgoing body is written
@@ -568,7 +578,9 @@ node --test --test-concurrency=3 "test/**/*.test.ts"
   `routes`, `rivers`, `riverkeep` (terrain rebuilds that re-trace the rivers), `biomes`, `regen`,
   `relief`, `labels`, `tokens`, `http`; `fam-a/b/c`, `polishintegrate` (rivers retrace then
   territory regrow, condition paint with hand-placed labels, apply alias + baseline with territory
-  paint) and `integrate.test.ts` cross the features (one apply spec over biomes, settings with locks,
+  paint), `polishfix` (lineage from another out dir, snapshot saveTo lineage, same-op loads, the
+  build cache and sketch_promote skipBuildCheck, regrid regrow-only, fake-worker-serve
+  --assets/--port, `tupaia tools` without a daemon) and `integrate.test.ts` cross the features (one apply spec over biomes, settings with locks,
   route groups and rivers; a sketch of 8 replayable records rebased onto someone else's v7).
 - `test/sketch.test.ts` and `test/shared.test.ts`: sketches and the shared tools against
   `test/fake-worker.ts`, an in-process `node:http` fake of the Worker on 127.0.0.1.
@@ -585,4 +597,8 @@ server with `TUPAIA_MODE=live TUPAIA_LIVE_ORIGIN=http://127.0.0.1:<port>` and it
 `--out`/TUPAIA_OUT (on the default out dir a running production live daemon would serve the
 rehearsal; the CLI refuses that origin mismatch). `test/fake-worker.ts` is a lighter stand-in
 (see `test/sketch.test.ts` for how the tests drive it); `node test/fake-worker-serve.ts
-[seed.map] [--version N]` runs it alone and prints its origin for trying the CLI by hand.
+[seed.map] [--version N] [--port N] [--assets [dir]]` runs it alone and prints its origin for
+trying the CLI by hand. `--port` pins the origin (restart it in place); `--assets` serves a built
+app (default `<repo>/dist`) like the Worker's ASSETS binding, so the build check sees the local
+entry chunk and its relief load hook: needed to promote a reliefOnLoad map (without it `/` names
+a stub `index-FAKE.js` that answers 404, a BUILD refusal).

@@ -29,13 +29,22 @@ interface BuildCheck {
   liveEntry: string | null;
   verdict: "ok" | "warn" | "block" | "unknown" | "skipped";
   message: string;
+  /** When the deployed build was read (it is cached for TUPAIA_BUILD_CACHE_MS). */
+  checkedAt?: string;
 }
 
+/** The deployed build against the local one. Only an 'ok' result stays cached (TUPAIA_BUILD_CACHE_MS). */
 async function buildCheck(ctx: ToolContext): Promise<BuildCheck> {
+  const b = await compareBuilds(ctx);
+  if (b.verdict !== "ok") ctx.shared.forgetBuild();
+  return b;
+}
+
+async function compareBuilds(ctx: ToolContext): Promise<BuildCheck> {
   const local = ctx.browser.appVersion;
   const localEntry = ctx.browser.distEntry;
   const lb = await ctx.shared.liveBuild();
-  const base = { local, live: lb.version, localEntry, liveEntry: lb.entry };
+  const base = { local, live: lb.version, localEntry, liveEntry: lb.entry, checkedAt: lb.fetchedAt };
   if (!local || !lb.version) {
     return {
       ...base,
@@ -363,6 +372,10 @@ export async function sharedSave(
       message: `${build.message}. A newer local build would make the shared map unloadable for live users; pass skipBuildCheck:true only if the human agrees to save without that check (force does not override this).`
     });
   }
+  // only a clean build check is cached (buildCheck), so a fixed deploy or origin needs no restart
+  for (const r of refusals)
+    if (r.code === "BUILD")
+      r.message = `${r.message} (deployed build read at ${build.checkedAt ?? "?"}; the next preview reads it again)`;
 
   const fields: GateFields = {
     kind: "save",

@@ -226,6 +226,11 @@ export class SharedApi {
     return value;
   }
 
+  /** Drop the cached deployed build, so the next liveBuild() reads it again (after a BUILD refusal). */
+  forgetBuild(): void {
+    this.#build = null;
+  }
+
   // ------------------------------------------------------------------ the gate
 
   /** Issue a one-time token bound to these fields (10 minutes, single use). */

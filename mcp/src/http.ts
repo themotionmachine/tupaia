@@ -168,7 +168,7 @@ async function writeWeb(res: http.ServerResponse, r: Response): Promise<void> {
   }
 }
 
-function jsonSchemaOf(schema: unknown): Record<string, unknown> {
+export function jsonSchemaOf(schema: unknown): Record<string, unknown> {
   try {
     const j = z.toJSONSchema(schema as z.ZodType, { io: "input", unrepresentable: "any" }) as Record<string, unknown>;
     delete j.$schema;

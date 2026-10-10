@@ -12,6 +12,9 @@ import { defineTools } from "./registry.ts";
 export const REGRID_REASON =
   "regrid rebuilt the cell grid (every cell id changed), so the log cannot be replayed; the page map is promoted as is";
 NOT_REPLAYABLE.regrid = REGRID_REASON;
+/** territories:'regrow' at the map's own density (regrow-only: the cells stay, the borders move). */
+export const REGROW_REASON =
+  "regrid territories:'regrow' redrew every state, culture, religion and province border from the terrain, so the log cannot be replayed onto another base; the page map is promoted as is";
 
 /** The Options "cells density" slider: position -> points (same table as the bridge). */
 const SLIDER_POINTS: Record<number, number> = {
@@ -94,7 +97,7 @@ export function register(ctx: ToolContext): void {
           .enum(["copy", "regrow"])
           .optional()
           .describe(
-            "copy (default): every new cell takes its nearest old cell's state, culture, religion and province (the old stepped outlines survive on a finer grid). regrow: then states, cultures and religions regrow together (one label per state|culture|religion, so coinciding borders move as one line) along the terrain (cost-based spread like the app's expand: slopes, hills, mountains, costly biomes, rivers) from their cores (interior, burgs, capitals, centres) over a band of territoryBand rings along their borders, each connected piece to about its copied area; every burg keeps its state and culture, every capital and centre stays inside; a locked state keeps its cells, provinces and the cultures and religions on them (unless territoryLocked); then each state's provinces the same way inside it. Result territories {state, culture, religion: changed, maxAreaChangePct (of those with 20+ cells), lockedKept?; note?; province: changed, within15pct}"
+            "copy (default): every new cell takes its nearest old cell's state, culture, religion and province (the old stepped outlines survive on a finer grid). regrow: then states, cultures and religions regrow together (one label per state|culture|religion, so coinciding borders move as one line) along the terrain (cost-based spread like the app's expand: slopes, hills, mountains, costly biomes, rivers) from their cores (interior, burgs, capitals, centres) over a band of territoryBand rings along their borders, each connected piece to about its copied area; every burg keeps its state and culture, every capital and centre stays inside; a locked state keeps its cells, provinces and the cultures and religions on them (unless territoryLocked); then each state's provinces the same way inside it. Result territories {state, culture, religion: changed, maxAreaChangePct (of those with 20+ cells), lockedKept?; note?; province: changed, within15pct}. At the map's own density regrow is the whole call (mode 'regrow-only': no rebuild, heights/rivers/biomes/cell ids stay; heights, ice, relief, biomes, minRegion, carve are refused; band default 3)"
           ),
         territoryBand: z
           .number()
@@ -130,7 +133,12 @@ export function register(ctx: ToolContext): void {
         { timeoutMs }
       );
       const { phase: _phase, ...planBody } = plan;
-      if (dryRun) return { dryRun: true, ...planBody, note: "dry run: nothing was changed" };
+      if (dryRun)
+        return {
+          dryRun: true,
+          ...planBody,
+          note: `dry run: nothing was changed${planBody.note ? `; ${planBody.note}` : ""}`
+        };
 
       await ctx.verifyProvenance();
       const prov = ctx.snapshots.provenance;
@@ -145,10 +153,13 @@ export function register(ctx: ToolContext): void {
       } finally {
         ctx.snapshots.noteMutation();
       }
+      const regrowOnly = out.mode === "regrow-only";
       await scope.record("regrid", args, null, {
         replayable: false,
-        reason: REGRID_REASON,
-        summary: `Regridded the map from ${out.cells.before} to ${out.cells.after} cells (density ${args.density}).`
+        reason: regrowOnly ? REGROW_REASON : REGRID_REASON,
+        summary: regrowOnly
+          ? `Regrew the state, culture, religion and province borders along the terrain (density unchanged, ${out.cells.after} cells).`
+          : `Regridded the map from ${out.cells.before} to ${out.cells.after} cells (density ${args.density}).`
       });
       const pageId = await ctx.pageMapId();
       const claimsShared = (prov.kind === "shared" || prov.kind === "sketch") && typeof prov.sharedVersion === "number";
@@ -158,7 +169,11 @@ export function register(ctx: ToolContext): void {
       else if (claimsShared)
         lineage = `LOST: the page map id changed (${prov.mapId} -> ${pageId}); shared_save will call it unrelated`;
       else lineage = `unchanged: origin '${prov.kind}' (not the shared map)`;
-      return { ...out, lineage, undo: "snapshot {action:'undo'} returns to the previous grid" };
+      return {
+        ...out,
+        lineage,
+        undo: `snapshot {action:'undo'} returns to the previous ${regrowOnly ? "borders" : "grid"}`
+      };
     }
   );
 }

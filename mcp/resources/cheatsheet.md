@@ -37,7 +37,7 @@ only in a server a human spawned with `TUPAIA_MODE=live`, behind a preview and a
 | `shared_save {confirm?, token?, force?, replaceWithUnrelated?, expectVersion?, skipBuildCheck?, compact?}` | OUTWARD: overwrite the live shared map (preview, then confirm + token). |
 | `shared_restore {version, confirm?, token?, expectCurrent?, force?, reload?}` | OUTWARD: roll the live shared map back to a retained version. |
 | `sketch {action, slug?, note?, onConflict?, confirm?, shots?, full?, compact?, format?}` | provisional change: ops log against shared version N; status, summary, save (view link), list, open, rebase, discard. |
-| `sketch_promote {confirm?, token?, then?:'keep'\|'discard', compact?}` | OUTWARD: put the active sketch on the live shared map (rebase first). |
+| `sketch_promote {confirm?, token?, then?:'keep'\|'discard', compact?, skipBuildCheck?}` | OUTWARD: put the active sketch on the live shared map (rebase first). |
 
 Every tool's arguments: `tupaia help <tool>` (CLI) or the tool's own schema. Every tool except
 `apply` (its lists go under any key) refuses an unknown top-level argument: BAD_ARGS `<tool> does
@@ -352,7 +352,9 @@ exclave stays where it is), then each state's provinces inside it; every burg ke
 and culture, capitals and centres stay inside. A locked state keeps its cells, provinces and the
 cultures and religions on them (`note` says so) unless `territoryLocked:true`. Result
 `territories` (per field changed, maxAreaChangePct of entities with 20+ cells, lockedKept;
-province within15pct).
+province within15pct). At the map's own density (`grid.cellsDesired`) `territories:'regrow'` is
+the whole call (`mode:'regrow-only'`: no rebuild, cells/heights/rivers/biomes stay, band 3,
+locked states keep their labels: `layers.stateLabelsKept`); without it that density is BAD_ARGS.
 
 **clear**: types notes, labels, markers, zones, routes, rivers, burgs, provinces, states,
 religions, cultures, emblems (run in that dependency order). `where` per type
@@ -557,9 +559,12 @@ random stream; `rivers` keeps pack heights; `restoreLayers:true` undoes layer ch
   (the app ignores it): origin, lineage, shared base version, sketch slug + log, opsSince, sha256
   of the content, HMAC with `TUPAIA_OUT/provenance.key`. load_map of the unmodified file
   restores the lineage (shared base, sketch) after re-checking the base with the server (meta +
-  blob sha256, or the retained version's size); a modified/foreign file or a contradicted base
-  loads as unrelated. Result: `lineage {file, lineage, base, sketch?, baseCheck, note}`
-  (`file:'none'` = no provenance line). save_map: `sha256` (file), `mapSha256` (map text).
+  blob sha256, or the retained version's size); a modified file or a contradicted base loads as
+  unrelated. `file:'foreign'` (another out dir's key) keeps the lineage only with
+  `baseCheck:'verified'`, its sketch blob-only. Result: `lineage {file, lineage, base, sketch?,
+  baseCheck, note}` (`file:'none'` = no provenance line). save_map: `sha256` (file),
+  `mapSha256` (map text). `snapshot take saveTo` writes the same line. A file holding the active
+  sketch at the same op, with the page already that map, logs no op and no undo entry.
 - Screenshot ids continue across servers (after the highest `TUPAIA_OUT/shots/sN*`); default
   shot files and CLI `call-*.jpg` images are never overwritten; `saveTo` needs `overwrite:true`.
 - `TUPAIA_OUT/state/` keeps the page map, undo/redo, snapshots, provenance and the active sketch
@@ -579,7 +584,9 @@ random stream; `rivers` keeps pack heights; `restoreLayers:true` undoes layer ch
   `replaceWithUnrelated`, `skipBuildCheck`, `compact`).
 - LINEAGE: only `replaceWithUnrelated` overrides. STALE, LOCKED: `force` (human-approved).
   BUILD: a newer local app VERSION, or a reliefOnLoad map on a deploy without the hook, is never
-  overridable; an unverifiable build needs `skipBuildCheck`. CONFLICT: the Worker answered 409.
+  overridable; an unverifiable build (or relief hook) needs `skipBuildCheck` (shared_save,
+  sketch_promote). Only a clean build check is cached (`TUPAIA_BUILD_CACHE_MS`): after a BUILD
+  refusal the next preview reads the deployed build again. CONFLICT: the Worker answered 409.
 - Backups go to `TUPAIA_OUT/shared-saves/` before every write. Display changes ship with the save,
   and the save records the Trade layer as off or on as the page has it.
 - Every write renames the Worker row to the page's file name (a timestamp), as the app's own save
@@ -587,6 +594,9 @@ random stream; `rivers` keeps pack heights; `restoreLayers:true` undoes layer ch
   exclusions about 1.7 MB, reliefOnLoad about 0.75 MB on it.
 - `TUPAIA_LIVE_ORIGIN=http://127.0.0.1:<port>` points a daemon at a test Worker (mcp/test/fake-worker.ts)
   for a write rehearsal: give it its own `--out` so it never serves another caller.
+  `node mcp/test/fake-worker-serve.ts <seed.map> --version 7 --port <p> --assets` serves the
+  local dist as the deployed app (needed to promote a reliefOnLoad map; `--port` restarts it on
+  the same origin).
 
 ## Sketches
 

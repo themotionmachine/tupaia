@@ -605,8 +605,9 @@ describe("tupaia CLI daemon lifecycle", () => {
     }
     assert.equal(fs.existsSync(statePath(env.TUPAIA_OUT)), false);
     assert.equal(fs.existsSync(path.join(env.TUPAIA_OUT, "daemon.last.json")), false, "an untouched page is not saved");
-    // the next auto-start uses the registered port, not the one the first daemon had
-    const next = await cli(["tools", "--names"], env);
+    // the next start uses the registered port, not the one the first daemon had (tools no longer
+    // starts one: with no daemon it lists this checkout's tools, polishfix.test.ts)
+    const next = await cli(["start"], env);
     try {
       assert.equal(next.code, 0, next.stderr);
       assert.equal(readState(env.TUPAIA_OUT)?.port, other);
@@ -645,11 +646,11 @@ describe("tupaia CLI daemon lifecycle", () => {
 
   test("an auto-started daemon keeps its port across restarts", async () => {
     const env = safeEnv({ TUPAIA_HTTP_IDLE_MIN: "0" });
-    const first = await cli(["tools", "--names"], env);
+    const first = await cli(["start"], env);
     assert.equal(first.code, 0, first.stderr);
     const p1 = readState(env.TUPAIA_OUT)?.port;
     assert.equal((await cli(["stop"], env)).code, 0);
-    const second = await cli(["tools", "--names"], env);
+    const second = await cli(["start"], env);
     try {
       assert.equal(second.code, 0, second.stderr);
       assert.equal(readState(env.TUPAIA_OUT)?.port, p1);
@@ -698,7 +699,7 @@ describe("tupaia CLI daemon lifecycle", () => {
       assert.match(last.savedMap, /maps\/daemon-exit-\d+T\d+\.map$/);
       assert.ok(fs.statSync(last.savedMap).size > 1_000_000, "the loaded map was saved");
       // the next start reports it
-      const next = await cli(["tools", "--names"], d.env);
+      const next = await cli(["start"], d.env);
       assert.equal(next.code, 0, next.stderr);
       assert.match(next.stderr, /previous daemon \(pid \d+\) stopped .* saved its page to .*daemon-exit-/);
     } finally {
@@ -785,7 +786,7 @@ describe("tupaia CLI daemon lifecycle", () => {
       dummy.kill();
       fs.rmSync(path.join(env.TUPAIA_OUT, START_LOCK), { force: true });
     }
-    const slow = await cli(["tools", "--names"], { ...env, TUPAIA_START_TIMEOUT_MS: "50" });
+    const slow = await cli(["start"], { ...env, TUPAIA_START_TIMEOUT_MS: "50" });
     assert.equal(slow.code, 2);
     assert.match(slow.stderr, /did not come up within 0\.05 s, so it was stopped/);
     assert.ok(await waitFor(() => !fs.existsSync(statePath(env.TUPAIA_OUT)), 30_000), "no daemon is left behind");
@@ -794,7 +795,7 @@ describe("tupaia CLI daemon lifecycle", () => {
 
   test("concurrent first calls start exactly one daemon", async () => {
     const env = safeEnv();
-    const runs = await Promise.all([1, 2, 3].map(() => cli(["tools", "--names"], env)));
+    const runs = await Promise.all([1, 2, 3].map(() => cli(["start"], env)));
     try {
       for (const r of runs) assert.equal(r.code, 0, r.stderr);
       const started = runs.filter(r => /started a daemon/.test(r.stderr)).length;

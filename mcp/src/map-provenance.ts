@@ -7,8 +7,10 @@
 // names where the map came from (lineage, shared base version, sketch slug and its ops log, ops
 // since) and carries the sha256 of the map content before the trailer plus an HMAC over the block
 // with this TUPAIA_OUT's key (TUPAIA_OUT/provenance.key, 0600). A file edited after the save fails the
-// content hash; a copied or hand-written block fails the HMAC: both load as unrelated. A valid
-// block's base is then checked against the shared map server (state.ts has the key).
+// content hash and loads as unrelated. A block whose HMAC is another key's ('foreign': written by
+// the server of another TUPAIA_OUT, or copied/hand-made) keeps shared lineage only when the shared
+// map server verifies its base, and its sketch log is not trusted for replay (file-lineage.ts). A
+// valid block's base is checked against the server too (state.ts has the key).
 import crypto from "node:crypto";
 import zlib from "node:zlib";
 import type { Provenance, ProvenanceKind } from "./snapshots.ts";
@@ -78,7 +80,9 @@ export function withTrailer(text: string, block: Omit<ProvBlock, "sha256" | "sig
 
 export type TrailerCheck =
   | { status: "none" }
-  | { status: "modified" | "foreign" | "bad"; reason: string; block?: ProvBlock }
+  | { status: "modified" | "bad"; reason: string; block?: ProvBlock }
+  /** Content hash intact, HMAC of another key. */
+  | { status: "foreign"; reason: string; block: ProvBlock }
   | { status: "valid"; block: ProvBlock };
 
 /** The map text of a file (plain or gzip), or null for anything else (base64). */
@@ -124,7 +128,7 @@ export function checkTrailer(bytes: Buffer, key: Buffer): TrailerCheck {
     return {
       status: "foreign",
       reason:
-        "the provenance was not written by this TUPAIA_OUT's server (signature mismatch: another output directory's key, or a copied or edited block)",
+        "the provenance was signed with another key (the server of another TUPAIA_OUT, or a copied or hand-made block)",
       block
     };
   return { status: "valid", block };

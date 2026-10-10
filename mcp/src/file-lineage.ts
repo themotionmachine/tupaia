@@ -2,16 +2,19 @@
 // exit save embed, and what load_map makes of a file it reads.
 //
 // load_map binds the page back to the shared map only when all of these hold:
-// - the file has a trailer whose content hash matches (unmodified) and whose HMAC is this
-//   TUPAIA_OUT's (written by this output directory's server, not copied or hand-made);
+// - the file has a trailer whose content hash matches (unmodified);
 // - it records shared lineage (a base version), against this server's live origin;
 // - the shared map server agrees about that base where it can tell: the current version's
-//   updated_at, or the retained version's size; a contradiction keeps the file unrelated, a check
-//   that cannot be made (no live origin, network, not retained) binds with a warning.
+//   updated_at and blob sha256, or the retained version's size; a contradiction keeps the file
+//   unrelated, a check that cannot be made (no live origin, network, not retained) binds with a
+//   warning when the HMAC is this TUPAIA_OUT's;
+// - a block signed with another key ('foreign': a save by the server of another TUPAIA_OUT, such
+//   as the stdio server's default out dir vs a daemon's --out) binds only when that check
+//   verified the base. Its sketch log is not trusted: the sketch comes back blob-only.
 // A file that names a sketch reactivates it (slug, base, ops log) when no other sketch records.
 import type { CallScope, ToolContext } from "./context.ts";
 import { baseOf, checkTrailer, type ProvBase, type ProvBlock, type ProvSketch, withTrailer } from "./map-provenance.ts";
-import { type OpRecord, type Sketch, type SketchBase, sanitizeRecord } from "./ops.ts";
+import { blobOnlyReasons, type OpRecord, type Sketch, type SketchBase, sanitizeRecord } from "./ops.ts";
 import { sha256 } from "./shared-api.ts";
 import type { Provenance } from "./snapshots.ts";
 
@@ -180,11 +183,13 @@ export async function fileLineage(ctx: ToolContext, bytes: Buffer): Promise<File
       lineage: "unrelated",
       note: "no provenance line (an app save, another tool's file, or a save from before lineage trailers): unrelated to the shared map"
     };
-  if (c.status !== "valid") return { file: c.status, lineage: "unrelated", note: `provenance ignored: ${c.reason}` };
+  if (c.status !== "valid" && c.status !== "foreign")
+    return { file: c.status, lineage: "unrelated", note: `provenance ignored: ${c.reason}` };
   const b = c.block;
+  const file = c.status;
   if (b.lineage !== "shared" || !b.base || typeof b.base.version !== "number")
     return {
-      file: "valid",
+      file,
       lineage: "unrelated",
       block: b,
       note: `saved from a map not derived from the shared map (${b.kind})`
@@ -192,19 +197,27 @@ export async function fileLineage(ctx: ToolContext, bytes: Buffer): Promise<File
   const v = await checkBase(ctx, b as ProvBlock & { base: ProvBase });
   if (v.verdict === "mismatch")
     return {
-      file: "valid",
+      file,
       lineage: "unrelated",
       block: b,
       baseCheck: v.verdict,
       note: `its claimed base v${b.base.version} does not hold: ${v.note}`
     };
-  return {
-    file: "valid",
-    lineage: "shared",
-    block: b,
-    baseCheck: v.verdict,
-    note: b.compacted ? `${v.note}; a compacted copy (removed records as stubs, counted as one op)` : v.note
-  };
+  if (file === "foreign" && v.verdict !== "verified")
+    return {
+      file,
+      lineage: "unrelated",
+      block: b,
+      baseCheck: v.verdict,
+      note: `${c.reason}; such a file keeps shared lineage only when the shared map server verifies its base, and here: ${v.note}`
+    };
+  const notes = [v.note];
+  if (b.compacted) notes.push("a compacted copy (removed records as stubs, counted as one op)");
+  if (file === "foreign")
+    notes.push(
+      `signed with another TUPAIA_OUT's key (content hash intact, base verified)${b.sketch ? `: the log of sketch '${b.sketch.slug}' is not trusted, so the sketch comes back blob-only (promote while v${b.base.version} is current; no rebase)` : ""}`
+    );
+  return { file, lineage: "shared", block: b, baseCheck: v.verdict, note: notes.join("; ") };
 }
 
 const sameLog = (ops: readonly OpRecord[], log: readonly unknown[] | null): boolean => {
@@ -248,12 +261,31 @@ export async function bindFileLineage(
   const cur = ctx.sketches.current;
   if (cur && cur.slug === fsk.slug && cur.base.kind === "shared" && cur.base.version === b.base.version) {
     if (cur.recording && sameLog(cur.ops, fsk.log)) {
+      const after = await scope.digest();
+      const undoId = scope.undoPushed[scope.undoPushed.length - 1];
+      if (after !== null && after === scope.digestBefore && undoId !== undefined) {
+        // the page already held this map: nothing to log, nothing to undo (at the undo cap the
+        // push evicted the oldest entry; that one stays gone)
+        const key = ctx.snapshots.popUndo(undoId);
+        if (key) {
+          scope.undoPushed.pop();
+          await scope.cleanup(() => scope.call("dropBaseline", { key }, { noAlerts: true })).catch(() => {});
+        }
+        scope.opRecorded = true;
+        notes.push(
+          `the file holds sketch '${fsk.slug}' at the same op (${fsk.ops}) and the page already held that map: no op logged${key ? ", no undo entry" : ""}`
+        );
+        return notes;
+      }
+      // the page had drifted from the log: the load puts it back (one no-op op, so undo can take it out)
       await scope.record("load_map", args, null, {
         replayable: true,
         noop: true,
-        summary: `Loaded ${abs}: the sketch as it was at op ${fsk.ops} (same log); no change to the log.`
+        summary: `Loaded ${abs}: the page is the sketch at op ${fsk.ops} again (a no-op for the log; rebase and promote skip it).`
       });
-      notes.push(`the file holds sketch '${fsk.slug}' at the same op (${fsk.ops}); its log is unchanged`);
+      notes.push(
+        `the file holds sketch '${fsk.slug}' at the same op (${fsk.ops}); the page differed from it, so the load is logged as a no-op (rebase skips it; snapshot undo takes it out)`
+      );
     } else
       notes.push(
         `sketch '${fsk.slug}' is active with ${cur.ops.length} op(s); the file holds it at ${fsk.ops}${cur.recording ? ", so the load is logged as a whole-map replacement (blob-only until undone)" : ""}`
@@ -296,6 +328,10 @@ export async function bindFileLineage(
   sk.blockers = Array.isArray(fsk.blockers) ? fsk.blockers.filter(x => typeof x === "string") : [];
   if (!Array.isArray(fsk.log) && fsk.ops)
     sk.blockers.push(`the file did not carry the ops log of its ${fsk.ops} op(s)`);
+  else if (fl.file === "foreign" && sk.ops.length)
+    sk.blockers.push(
+      `its ops log came from a file signed with another TUPAIA_OUT's key, so it is not replayed (${abs})`
+    );
   sk.recording = fsk.recording !== false;
   if (fsk.saved) sk.saved = { rev: fsk.saved.dirty ? -1 : sk.rev, version: fsk.saved.version, at: fsk.saved.at };
   sk.reactivatedBy = scope.undoPushed[scope.undoPushed.length - 1];
@@ -307,8 +343,9 @@ export async function bindFileLineage(
       `replaced the stopped sketch '${cur.slug}' (${cur.ops.length} op(s)${cur.ops.length ? ", saved to the Worker: sketch open brings it back" : ""})`
     );
   }
+  const blobOnly = blobOnlyReasons(sk).length > 0;
   notes.push(
-    `sketch '${fsk.slug}' is active again from the file (base v${b.base.version}, ${sk.ops.length} op(s), ${sk.recording ? "recording" : "stopped"}); sketch_promote works while v${b.base.version} is the shared map's current version, else rebase first`
+    `sketch '${fsk.slug}' is active again from the file (base v${b.base.version}, ${sk.ops.length} op(s), ${sk.recording ? "recording" : "stopped"}${blobOnly ? ", blob-only" : ""}); sketch_promote works while v${b.base.version} is the shared map's current version, ${blobOnly ? "else (blob-only: no rebase) start a new sketch from the current shared map" : "else rebase first"}`
   );
   return notes;
 }

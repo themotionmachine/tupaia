@@ -954,7 +954,7 @@ async function discard(ctx: ToolContext, args: { slug?: string; confirm?: boolea
 async function promote(
   ctx: ToolContext,
   scope: CallScope,
-  args: { confirm?: boolean; token?: string; then?: "keep" | "discard"; compact?: boolean }
+  args: { confirm?: boolean; token?: string; then?: "keep" | "discard"; compact?: boolean; skipBuildCheck?: boolean }
 ): Promise<Record<string, unknown>> {
   requireLive(ctx);
   const sk = needSketch(ctx);
@@ -993,6 +993,7 @@ async function promote(
     token: args.token,
     expectVersion: base,
     compact: args.compact,
+    skipBuildCheck: args.skipBuildCheck,
     viaSketch: true,
     // the token is bound to what happens to the saved sketch afterwards too
     extraFlags: { then }
@@ -1002,7 +1003,7 @@ async function promote(
     if (typeof res.next === "string")
       res.next = res.next.replace(
         /shared_save \{confirm:true, token:'([^']+)'([^}]*)\}/,
-        `sketch_promote {confirm:true, token:'$1'${then === "discard" ? ", then:'discard'" : ""}${args.compact ? ", compact:true" : ""}}`
+        `sketch_promote {confirm:true, token:'$1'${then === "discard" ? ", then:'discard'" : ""}${args.compact ? ", compact:true" : ""}${args.skipBuildCheck ? ", skipBuildCheck:true" : ""}}`
       );
     return { ...res, sketch: sketchInfo };
   }
@@ -1154,7 +1155,13 @@ export function register(ctx: ToolContext): void {
           .enum(["keep", "discard"])
           .optional()
           .describe("After a confirmed promote: 'keep' (default) the saved sketch, or 'discard' it"),
-        compact: CompactFlag
+        compact: CompactFlag,
+        skipBuildCheck: z
+          .boolean()
+          .optional()
+          .describe(
+            "As in shared_save: overrides only a BUILD refusal for builds that cannot be compared (or a relief load hook that cannot be checked); only if the human agrees. Same value in preview and confirm"
+          )
       }),
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
       kind: "heavy"

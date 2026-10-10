@@ -132,11 +132,15 @@ export class FakeWorker {
     return this.#shared.retained;
   }
 
-  async start(): Promise<string> {
+  /** Listen on 127.0.0.1 (`port` 0 = any free port); returns the origin. */
+  async start(port = 0): Promise<string> {
     this.#server = http.createServer((req, res) => void this.#handle(req, res));
-    await new Promise<void>(r => this.#server?.listen(0, "127.0.0.1", () => r()));
-    const { port } = this.#server.address() as AddressInfo;
-    this.origin = `http://127.0.0.1:${port}`;
+    await new Promise<void>((r, j) => {
+      this.#server?.once("error", j);
+      this.#server?.listen(port, "127.0.0.1", () => r());
+    });
+    const bound = (this.#server.address() as AddressInfo).port;
+    this.origin = `http://127.0.0.1:${bound}`;
     return this.origin;
   }
 

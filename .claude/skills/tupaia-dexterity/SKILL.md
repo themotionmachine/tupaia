@@ -391,6 +391,13 @@ drew (straight lines, nearest centre):
   (sizes are held tightest at the default band 4).
   Ids, names, capitals, centres, emblems and every burg's province stay; replays in a sketch.
   Tests: `mcp/test/territory.test.ts` (regenerate provinces {regrow:true}).
+- Already at the target density (e.g. a 50K map whose borders are still stepped):
+  `regrid {density:<its density>, territories:'regrow', dryRun:true}` says `mode:'regrow-only'`,
+  then without dryRun: only the state, culture, religion and province borders regrow (no
+  rebuild; heights, rivers, biomes and cell ids stay; heights/ice/relief/biomes/minRegion/carve
+  are refused; band default 3). Locked states keep their labels (`layers.stateLabelsKept`).
+  `eval {readOnly:true, code:'return grid.cellsDesired'}` gives the density (points). Not
+  replayable in a sketch (blob-only), one undo entry. Tests: `mcp/test/polishfix.test.ts`.
 
 **Combining the polish tools on one map.** They compose: `set_heights` (rivers re-traced) then
 `regrid {territories:'regrow'}` keeps the same rivers (carved, never climbing) with burgs,
@@ -486,12 +493,16 @@ points (spire.js), ice shapes. Read the runtime API first and pass `redraw`.
   sketch slug and log, ops since, content hash, signed with this out dir's key; the result's
   `lineage` says what). `load_map` of that file, unmodified, puts the page back on the shared
   base (`shared_status` lineage `shared`, stale against that base, the sketch active again); an
-  edited file, a copied block or another out dir's file stays unrelated, and a base the server
-  contradicts too (result `lineage.note` says why; `foreign` = signed with another out dir's
-  `<out>/provenance.key`, which deleting `<out>/state` does not touch; `file:'none'` = no
-  provenance line, e.g. an exit save from before 2026-10-10). save_map returns `sha256` (the
-  file) and `mapSha256` (the map text). Never edit a saved .map to keep its lineage
-  (test: `mcp/test/persist.test.ts`, "persist item 2").
+  edited file or a copied block stays unrelated, and a base the server contradicts too (result
+  `lineage.note` says why; `file:'none'` = no provenance line, e.g. an exit save from before
+  2026-10-10). A file from another out dir (`file:'foreign'`: signed with that dir's
+  `<out>/provenance.key`, e.g. the stdio server's default out dir vs a daemon's `--out`) keeps
+  the lineage only when the server verifies its base (`baseCheck:'verified'`); its sketch comes
+  back blob-only (promote while its base is current, no rebase). `snapshot {action:'take',
+  saveTo}` writes the same line. Loading a file that holds the active sketch at the same op
+  logs nothing when the page already held that map. save_map returns `sha256` (the file) and
+  `mapSha256` (the map text). Never edit a saved .map to keep its lineage (tests:
+  `mcp/test/persist.test.ts` "persist item 2", `mcp/test/polishfix.test.ts`).
 - `shared_save`, `shared_restore` and `sketch_promote` change the live shared map that other
   people use. Use them ONLY when the human, in this conversation, explicitly asks for the live
   map to change; they work only in a server spawned with `TUPAIA_MODE=live` (otherwise MODE:
@@ -504,7 +515,10 @@ points (spire.js), ice shapes. Read the runtime API first and pass `redraw`.
   overwrite (preview again with force, confirm with force and the new token, say you forced
   it). LINEAGE: only `replaceWithUnrelated:true`, only when asked for exactly that. BUILD block:
   nothing overrides; tell the human to deploy first (also for a `reliefOnLoad` map on an old
-  deploy). BUILD unknown: only `skipBuildCheck:true` after the human agreed. CONFLICT: report it.
+  deploy). BUILD unknown (also a relief load hook that cannot be checked): only
+  `skipBuildCheck:true` (shared_save and sketch_promote) after the human agreed. Only a clean
+  build check is cached, so after a deploy or an origin fix the next preview checks again (no
+  restart). CONFLICT: report it.
 - `shared_restore`: preview `{version}`, tell the human, then `{version, confirm:true, token,
   expectCurrent}`.
 - Layer visibility, style and label overrides are saved with the map; mention them.
@@ -594,4 +608,7 @@ save, discarding a saved sketch, and promote need the live-mode server.
 - Typed arrays come back from eval as plain arrays; large results are capped.
 - `mapId` is not an identity; it changes on every load.
 - Snapshots live in server memory: they survive browser relaunches, not a server or daemon
-  restart. `snapshot {action:'take', saveTo}` or `save_map` for anything that must last.
+  restart. `snapshot {action:'take', saveTo}` or `save_map` for anything that must last (both
+  carry the provenance line).
+- `tupaia tools [<name>]` needs no daemon: with none running it lists this checkout's tools and
+  starts nothing (no browser, no TUPAIA_OUT).

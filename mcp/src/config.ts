@@ -83,7 +83,8 @@ function int(raw: string | undefined, def: number, min: number, max: number): nu
   return Math.max(min, Math.min(max, Math.round(n)));
 }
 
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
+/** `mkdir: false` (tupaia tools without a daemon) leaves TUPAIA_OUT uncreated. */
+export function loadConfig(env: NodeJS.ProcessEnv = process.env, opts: { mkdir?: boolean } = {}): Config {
   const warnings: string[] = [];
   const repoRoot = findRepoRoot(warnings);
   const liveOrigin = parseOrigin(env.TUPAIA_LIVE_ORIGIN, warnings);
@@ -100,7 +101,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const distDir = path.resolve(env.TUPAIA_DIST || path.join(repoRoot, "dist"));
   let outDir = env.TUPAIA_OUT ? path.resolve(env.TUPAIA_OUT) : path.join(repoRoot, ".tupaia-mcp-out");
   try {
-    fs.mkdirSync(outDir, { recursive: true });
+    if (opts.mkdir !== false) fs.mkdirSync(outDir, { recursive: true });
   } catch {
     const fallback = path.join(os.tmpdir(), "tupaia-mcp-out");
     warnings.push(`cannot create ${outDir}; using ${fallback}`);

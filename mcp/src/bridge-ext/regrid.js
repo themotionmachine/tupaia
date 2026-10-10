@@ -212,13 +212,35 @@
     const want = targetCells(a.density);
     const shape = gridShape(want);
     const nowShape = { spacing: grid.spacing, cellsX: grid.cellsX, cellsY: grid.cellsY };
-    if (
+    const sameDensity =
       want === grid.cellsDesired &&
       shape.spacing === nowShape.spacing &&
       shape.cellsX === nowShape.cellsX &&
-      shape.cellsY === nowShape.cellsY
-    )
-      fail("BAD_ARGS", `the map already has this density (${want} points, ${pack.cells.i.length} cells)`);
+      shape.cellsY === nowShape.cellsY;
+    if (sameDensity && territories !== "regrow")
+      fail(
+        "BAD_ARGS",
+        `the map already has this density (${want} points, ${pack.cells.i.length} cells); territories:'regrow' at this density regrows the borders only`
+      );
+    // tupaia-mcp: same density + territories:'regrow' = a regrow-only pass (no grid rebuild)
+    if (sameDensity) {
+      const forGrid = ["heights", "ice", "relief", "biomes", "minRegion", "carve"].filter(k => a[k] !== undefined);
+      if (forGrid.length)
+        fail(
+          "BAD_ARGS",
+          `the map already has this density, so only the territories regrow; ${forGrid.join(", ")} ${forGrid.length > 1 ? "are" : "is"} for a density change`
+        );
+      return {
+        want,
+        shape,
+        regrowOnly: true,
+        territories,
+        territoryLocked: a.territoryLocked === true,
+        band: a.territoryBand ?? 3,
+        packNow: pack.cells.i.length,
+        warnings: []
+      };
+    }
     const gridNow = grid.points.length;
     const packNow = pack.cells.i.length;
     // pack = land grid cells (scale with the point count) + the water rings and coastline
@@ -1748,8 +1770,70 @@
 
   // ---------------------------------------------------------------- the call
 
+  /**
+   * territories:'regrow' at the map's own density: the regrow step of a regrid on the cells as
+   * they are (no rebuild: heights, rivers, biomes and cell ids stay), then centres, poles,
+   * statistics and the territory layers.
+   */
+  async function regrowOnly(P, a) {
+    const plan = {
+      mode: "regrow-only",
+      cells: { now: P.packNow, est: P.packNow },
+      density: { now: sliderOf(grid.cellsDesired), after: sliderOf(grid.cellsDesired) },
+      territories: "regrow",
+      territoryBand: P.band,
+      ...(P.territoryLocked ? { territoryLocked: true } : {}),
+      note: "the map already has this density: only the state, culture, religion and province borders regrow (no grid rebuild; heights, rivers, biomes and cell ids stay)"
+    };
+    if (a.phase !== "apply") return { phase: "validate", ...plan, warnings: P.warnings };
+    const t0 = performance.now();
+    if (typeof closeDialogs === "function") closeDialogs();
+    const C = pack.cells;
+    const stateBefore = Uint16Array.from(C.state || []);
+    const report = {};
+    const territories = T.territory.regrowAll({ band: P.band, withLocked: P.territoryLocked });
+    recenter({ pack }, report);
+    if (typeof States?.getPoles === "function") States.getPoles();
+    if (typeof Provinces?.getPoles === "function") Provinces.getPoles();
+    collectAreaStats();
+    // the labels of the unlocked states whose cells changed (a locked state keeps its label, as a
+    // regrid keeps it: drawStateLabels leaves locked states alone)
+    const touched = new Set();
+    if (C.state)
+      for (const c of C.i)
+        if (C.state[c] !== stateBefore[c]) {
+          touched.add(C.state[c]);
+          touched.add(stateBefore[c]);
+        }
+    const moved = [...touched].filter(s => s > 0 && isLive(pack.states[s]));
+    const ids = moved.filter(s => !pack.states[s].lock);
+    const labelsKept = moved.filter(s => pack.states[s].lock);
+    const fills = ["cultures", "religions", "states", "provinces", "borders"].map(layer => ({ layer, ifDrawn: true }));
+    const drawn = await FNS.redraw({ layers: [...fills, ...(ids.length ? [{ layer: "stateLabels", ids }] : [])] });
+    const fixed = {};
+    if (report.centersMoved?.length)
+      fixed.centersMoved = a.details ? report.centersMoved.slice(0, 50) : report.centersMoved.length;
+    return {
+      mode: "regrow-only",
+      cells: { before: P.packNow, after: pack.cells.i.length },
+      density: plan.density,
+      territories,
+      fixed,
+      layers: {
+        redrawn: drawn.redrawn,
+        ...(drawn.skippedHidden.length ? { hidden: drawn.skippedHidden } : {}),
+        ...(labelsKept.length ? { stateLabelsKept: labelsKept } : {})
+      },
+      warnings: P.warnings,
+      mapId: T.summary().mapId,
+      digest: FNS.digest().hash,
+      ms: Math.round(performance.now() - t0)
+    };
+  }
+
   FNS.regrid = async a => {
     const P = prepare(a);
+    if (P.regrowOnly) return regrowOnly(P, a);
     const plan = {
       cells: { now: P.packNow, est: P.packEst },
       gridCells: { now: P.gridNow, after: P.shape.points },

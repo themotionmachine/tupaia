@@ -301,7 +301,7 @@ describe("persist item 2: lineage through save_map -> load_map (local mode, fake
     assert.equal(s.stale, true);
   });
 
-  test("a modified file, a copied block and a foreign signature stay unrelated", async () => {
+  test("a modified file and a copied block stay unrelated; a foreign signature needs a verified base", async () => {
     const text = fs.readFileSync(edited, "utf8");
     const modified = path.join(out, "lineage-modified.map");
     fs.writeFileSync(modified, text.replace("Lineagetown", "Lineagetowm"));
@@ -318,8 +318,18 @@ describe("persist item 2: lineage through save_map -> load_map (local mode, fake
     const { sig: _s, sha256: _h, v: _v, ...rest } = block;
     const foreign = path.join(out, "lineage-foreign.map");
     fs.writeFileSync(foreign, withTrailer(demo, rest, crypto.randomBytes(32)));
+    // signed with another key (another TUPAIA_OUT's server): shared only because the server
+    // verifies its base (retained v3 has the recorded size); polishfix.test.ts has the rest
     const f = await h.ok("load_map", { path: foreign });
     assert.equal((f.lineage as Obj).file, "foreign");
+    assert.equal((f.lineage as Obj).baseCheck, "verified");
+    assert.equal((await status()).lineage, "shared");
+    const unverified = path.join(out, "lineage-foreign-unverified.map");
+    fs.writeFileSync(
+      unverified,
+      withTrailer(demo, { ...rest, base: { ...rest.base, bytes: undefined } } as never, crypto.randomBytes(32))
+    );
+    assert.equal(((await h.ok("load_map", { path: unverified })).lineage as Obj).lineage, "unrelated");
     assert.equal((await status()).lineage, "unrelated");
     // a file without provenance (the app's own save, or an exit save from before trailers) says so
     const none = (await h.ok("load_map", { path: DEMO_MAP })).lineage as Obj;

@@ -53,6 +53,7 @@ const USAGE = `tupaia: drive the shared tupaia-mcp daemon (one browser and page 
                                   (saved under $TUPAIA_OUT/shots). A failed tool prints
                                   'ERROR CODE: message' and exits 1. Starts a daemon if none runs.
   tupaia tools [<tool>] [--names] list the tools; with a name: its description and arguments
+                                  (a running daemon's; else this checkout's, starting none)
   tupaia help <tool>              same as tupaia tools <tool>
   tupaia status                   is a daemon running for this TUPAIA_OUT? (exit 1 if not)
   tupaia start                    start a daemon (detached; log: $TUPAIA_OUT/daemon.log)
@@ -705,11 +706,16 @@ export function describeTool(t: ToolInfo): string[] {
 async function cmdTools(cfg: Config, opts: Opts): Promise<number> {
   const want = opts.positional[1];
   if (opts.positional.length > 2) throw new CliError("usage: tupaia tools [<tool>] [--names] [--json]");
-  // read-only: listing a live daemon's tools is allowed
-  const f = await ensureDaemon(cfg, opts, false);
-  const r = await daemonRequest(f.st.port, f.st.token, "GET", "/tools", undefined, 15_000);
-  if (r.status !== 200) throw new CliError(`daemon answered HTTP ${r.status}: ${r.body.slice(0, 500)}`);
-  const { tools } = JSON.parse(r.body) as { tools: ToolInfo[] };
+  // a running daemon's own list (its checkout may differ); else this checkout's, without starting
+  // one (no browser, nothing written in TUPAIA_OUT)
+  const f = await findDaemon(cfg, true);
+  let tools: ToolInfo[];
+  if (f) {
+    warnMismatch(cfg, f, opts);
+    const r = await daemonRequest(f.st.port, f.st.token, "GET", "/tools", undefined, 15_000);
+    if (r.status !== 200) throw new CliError(`daemon answered HTTP ${r.status}: ${r.body.slice(0, 500)}`);
+    tools = (JSON.parse(r.body) as { tools: ToolInfo[] }).tools;
+  } else tools = await (await import("./tool-list.ts")).listToolsOffline(cfg);
   if (want) {
     const t = tools.find(x => x.name === want);
     if (!t) {
@@ -943,8 +949,9 @@ export async function main(argv: string[]): Promise<number> {
   }
   try {
     if (opts.out) process.env.TUPAIA_OUT = path.resolve(opts.out);
-    checkOutDir();
-    const cfg = loadConfig(process.env);
+    // tools (listing or help) creates nothing: no out dir, no daemon
+    if (cmd !== "tools") checkOutDir();
+    const cfg = loadConfig(process.env, { mkdir: cmd !== "tools" });
     if (cmd === "call") return await cmdCall(cfg, opts);
     if (cmd === "tools") return await cmdTools(cfg, opts);
     if (cmd === "status") return await cmdStatus(cfg, opts);
