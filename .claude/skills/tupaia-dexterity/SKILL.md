@@ -270,15 +270,17 @@ map departs from the spec on purpose (~100 differences on story-polish) and new 
    Corvallis gorge)':'Klein', 'The Spire':'Spire', 'Glassward south-face stream':'Glassward',
    'Unclaimed valley outlet':'Unclaimed Valley'}}` (the other seven rivers match by name + type
    word). Order: id > name > aliases; neither id nor alias renames; rows say `by`, the result
-   counts `matched`. Upsert never creates an entity matched by alias (two entries reaching one
-   entity: CONFLICT).
+   counts `matched`. An `id` must agree with the entry's name or aliases, else ID_MISMATCH (a
+   spec's own numbering is not a map id: drop it). Upsert never creates an entity matched by
+   alias (two entries reaching one entity: CONFLICT).
 2. `apply {<the call above>, aliases, mode:'baseline', writeBaseline:{path:'/abs/design/
    apply-baseline.json', allowOutside:true}}` records every difference, missing entry and error
    as accepted (one JSON item per line: list, key, field, have, want).
 3. `apply {..., mode:'check', baseline:'/abs/design/apply-baseline.json'}`: `clean:true`,
    `baselined:N`, accepted rows counted as `accepted`. Later checks list only new drift, or an
-   accepted difference whose values changed (its old item counts in `baselineStale`). Re-run
-   step 2 to accept the new state. A baseline filters checks only: upsert refuses it (leave
+   accepted difference whose values changed (its old item counts in `baselineStale`; items of
+   lists an `only` left out count in `baselineNotChecked`). Re-run step 2 to accept the new
+   state (`baseline:` in mode 'baseline' replaces only a baseline file, never the spec). A baseline filters checks only: upsert refuses it (leave
    accepted fields out with `ignore`/`only`). Verified on a copy of polish-final.map
    (test/applyalias.test.ts): 12/12 rivers matched, 124 differences baselined, re-check clean,
    one burg edit is the one row reported, no river duplicated by upsert.

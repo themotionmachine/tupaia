@@ -314,14 +314,23 @@ Matching: `id` (the map's id) > name (exact, then folded) > aliases: the entry's
 (or `aliases` beside the spec, `{list: {entry name: 'Map name' | [...] | id}}`, also a top-level
 `aliases` in the spec file), then name + type word (a river 'Melstone' of type Brook is
 'Melstone Brook', so 'Melstone brook' finds it). id and alias matches never rename (ref does);
-the row says `by` ('id', "alias 'X'", "name+type 'X'") and the result counts `matched`. An
+the row says `by` ('id', "alias 'X'", "name+type 'X'") and the result counts `matched` (not plain
+name matches). An id whose entity goes by another name than the entry's (and its aliases) is an
+ID_MISMATCH error row, never edited; id 0 of states, cultures, religions, burgs, provinces is no
+key (their placeholder). An entry whose id finds its entity leaves the same-name pairing. An
 upsert never creates an entity matched by alias; two entries reaching one entity: CONFLICT.
+Aliases apply to entity lists, not notes or nested states[].provinces (use a provinces list).
 **Baseline** (accepted departures): `mode:'baseline', writeBaseline:'x.json'` (or
 `{path, overwrite, allowOutside}`; .json, relative under TUPAIA_OUT) writes every difference,
 missing entry and error of the check as items {list, key, field, have, want, ...}; `mode:'check',
 baseline:'x.json'` (or the object) then drops those (same values only), counts wholly accepted
 rows as `accepted`, and adds `baselined` (differences accepted), `baselineStale` + `staleItems`
-(accepted items no longer reported: fixed, or their values changed) and `clean`. Upsert/update
+(accepted items of the lists checked no longer reported: fixed, or their values changed),
+`baselineNotChecked` (items of lists this check left out: only, a smaller spec) and `clean`.
+Paint items key on the entry's label + a hash of its select/set (reordering keeps them); cell-set
+diffs carry a `sig` of which cells differ, so the same counts on other cells is new drift.
+`baseline:'x.json'` in mode 'baseline' replaces only an existing baseline file (else REFUSED:
+writeBaseline {path, overwrite:true}); the spec file itself is never overwritten. Upsert/update
 refuse a baseline (BAD_ARGS).
 
 **apply paint** (territory, biomes, heights): `paint:[{select, set:{state|province|culture|

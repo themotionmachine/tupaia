@@ -232,6 +232,20 @@
   }
 
   /** A short, readable {field, have, want, ...} for one difference. */
+  /** A short hash of cell lists (order-free): equal sets, equal sig. */
+  function cellSig(...lists) {
+    let h = 0x811c9dc5;
+    for (const l of lists) {
+      for (const c of [...l].sort((x, y) => x - y)) {
+        h ^= c + 1;
+        h = Math.imul(h, 0x01000193) >>> 0;
+      }
+      h ^= 0xff;
+      h = Math.imul(h, 0x01000193) >>> 0;
+    }
+    return h.toString(16).padStart(8, "0");
+  }
+
   function diffRow(type, field, have, want, extra, tol = {}) {
     if (isObj(have) && isObj(want) && !isPlaceLike(have) && !isPlaceLike(want)) {
       // e.g. a marker note {name, legend}: the first differing key
@@ -263,8 +277,12 @@
       const b = new Set(want);
       h = `${a.size} cells`;
       w = `${b.size} cells`;
-      row.add = [...b].filter(x => !a.has(x)).length;
-      row.remove = [...a].filter(x => !b.has(x)).length;
+      const add = [...b].filter(x => !a.has(x));
+      const remove = [...a].filter(x => !b.has(x));
+      row.add = add.length;
+      row.remove = remove.length;
+      // tupaia-mcp: which cells differ (a baseline tells a new drift with the same counts)
+      row.sig = cellSig(add, remove);
     } else if (typeof have === "string" && typeof want === "string" && (have.length > 80 || want.length > 80)) {
       // long text (legends): around the first difference
       const a = textOf(field, have);
@@ -414,8 +432,10 @@
    * `nth`, the nth in id order. One spec entry but several on the map and no place to tell them
    * apart: AMBIGUOUS (with candidates). null: none.
    */
-  function findByName(type, name, nth = 0, dups = 1, at = null, tol = {}, aliases = []) {
+  function findByName(type, name, nth = 0, dups = 1, at = null, tol = {}, aliases = [], skip = null) {
     let hits = name !== undefined ? allByName(type, name) : [];
+    // entities other entries of the list take by their id: never paired by name order
+    if (skip?.size && hits.length > 1) hits = hits.filter(h => !skip.has(String(h.i)));
     // nothing by name: the alias tier (the entry's aliases, typed names), never paired by order
     const alias = !hits.length;
     if (alias) hits = aliasHits(type, name, aliases);
@@ -772,7 +792,10 @@
    * The key of an entry: {ref} (explicit, must exist), {ref, byId} (the `id` of an extension
    * type such as a route group, which may then create it) or {id?, name?} (labels: text): a core
    * type's `id` (the map's id: 12, 'label3') is tried first and, when no live entity has it, the
-   * name; neither renames (ref does).
+   * name; neither renames (ref does). An id whose entity goes by another name than the entry's
+   * is ID_MISMATCH (idHit), never bound silently. Id 0 of the types whose record 0 is a
+   * placeholder (Neutrals, Wildlands, No religion, the empty burg/province) is not a key: a spec
+   * numbering its entries from 0 matches by name.
    */
   function keyOf(type, e) {
     if (e.ref !== undefined) return { ref: e.ref };
@@ -782,11 +805,55 @@
     if (
       type !== "map" &&
       type !== "note" &&
-      ((Number.isInteger(e.id) && e.id >= 0) || (typeof e.id === "string" && e.id.trim()))
+      ((Number.isInteger(e.id) && (e.id > 0 || (e.id === 0 && !ID0_PLACEHOLDER.includes(type)))) ||
+        (typeof e.id === "string" && e.id.trim()))
     )
       k.id = e.id;
     if (typeof name === "string" && name.trim()) k.name = name;
     return k.id !== undefined || k.name !== undefined ? k : null;
+  }
+
+  // tupaia-mcp: types whose record 0 is a placeholder, so id 0 never keys an entry
+  const ID0_PLACEHOLDER = ["state", "culture", "religion", "burg", "province"];
+
+  /** Folded names an entity goes by: its name, alt names, typed name (labels: without '|'). */
+  function namesOf(type, x, i, name) {
+    const out = new Set();
+    for (const n of [name, ...(x ? alts(type, x, i) : []), x ? typedName(type, x) : null])
+      if (typeof n === "string" && n) out.add(fold(type === "label" ? n.replace(/\|/g, "") : n));
+    return out;
+  }
+
+  /**
+   * An entry with an id: the live entity of that id when it goes by the entry's name or one of its
+   * aliases (or the entry gives neither), else ID_MISMATCH naming both candidates. null: no live
+   * entity has the id (the name tiers decide).
+   */
+  function idHit(type, id, name, aliases, ctx) {
+    let hit;
+    try {
+      hit = byRef(type, { id });
+    } catch (err) {
+      if (err?.code !== "NOT_FOUND" && err?.code !== "REMOVED") throw err;
+      return null;
+    }
+    const mine = [name, ...aliases].filter(n => typeof n === "string" && n.trim());
+    if (!mine.length) return { ...hit, alt: true, by: "id" };
+    const theirs = namesOf(type, hit.entity, hit.i, hit.name);
+    if (mine.some(n => theirs.has(fold(type === "label" ? n.replace(/\|/g, "") : n))))
+      return { ...hit, alt: true, by: "id" };
+    let other = null;
+    try {
+      other = findByName(type, name, 0, 1, ctx.at, ctx.tol, aliases, ctx.skip);
+    } catch {}
+    const cands = [hit.entity ? candidate(type, hit.entity) : { type, i: hit.i, name: hit.name }];
+    if (other && other.i !== hit.i)
+      cands.push(other.entity ? candidate(type, other.entity) : { type, i: other.i, name: other.name });
+    fail(
+      "ID_MISMATCH",
+      `${type} ${id} is '${hit.name}', not '${mine[0]}'${other && other.i !== hit.i ? ` (that name is ${type} ${other.i})` : ""}: fix or drop the id (a spec's own numbering is not a map id), or add the map name to aliases; ref:{id} renames`,
+      { candidates: cands }
+    );
   }
 
   /** An entry's declared aliases (strings). */
@@ -866,15 +933,12 @@
       if (key.ref === undefined) {
         // id > name (exact, then folded) > aliases (declared, then name+type word)
         let idMiss = false;
-        if (key.id !== undefined)
-          try {
-            found = { ...byRef(type, { id: key.id }), alt: true, by: "id" };
-          } catch (err) {
-            if (err?.code !== "NOT_FOUND" && err?.code !== "REMOVED") throw err;
-            idMiss = true;
-          }
+        if (key.id !== undefined) {
+          found = idHit(type, key.id, key.name, aliases, { at: e.at, tol: ctx.tol, skip: ctx.skip });
+          idMiss = !found;
+        }
         if (!found && (key.name !== undefined || aliases.length))
-          found = findByName(type, key.name, ctx.nth, ctx.dups, e.at, ctx.tol, aliases);
+          found = findByName(type, key.name, ctx.nth, ctx.dups, e.at, ctx.tol, aliases, ctx.skip);
         if (found && idMiss) found.by = `${found.by ?? "name"} (no ${type} ${key.id})`;
       } else
         try {
@@ -1472,6 +1536,7 @@
         }
         if (!todo.length) continue;
         d.differ = todo.length;
+        d.sig = cellSig(todo);
         const top = Object.entries(from).sort((a, b) => b[1] - a[1]);
         d.have = Object.fromEntries(top.slice(0, 4));
         if (top.length > 4) d.have["…"] = top.slice(4).reduce((n, x) => n + x[1], 0);
@@ -1679,9 +1744,21 @@
         continue;
       }
       // a name the list repeats pairs with the map's entities of that name in id order
+      // (an entry whose id finds its entity is left out: the others pair with the rest)
       const count = new Map();
+      const skip = new Set();
       const keys = entries.map(e => {
         const kk = isObj(e) ? keyOf(type, e) : null;
+        if (kk?.id !== undefined) {
+          let hit = null;
+          try {
+            hit = idHit(type, kk.id, kk.name, aliasesOf(e), { tol });
+          } catch {}
+          if (hit) {
+            skip.add(String(hit.i));
+            return null;
+          }
+        }
         const f = kk?.name !== undefined ? fold(type === "label" ? kk.name.replace(/\|/g, "") : kk.name) : null;
         if (f !== null) count.set(f, (count.get(f) || 0) + 1);
         return f;
@@ -1692,7 +1769,7 @@
         const f = keys[k];
         const nth = f !== null ? seen.get(f) || 0 : 0;
         if (f !== null) seen.set(f, nth + 1);
-        ctxs[k] = { mode, tol, pending, clamp: !!a.clamp, nth, dups: f !== null ? count.get(f) : 1 };
+        ctxs[k] = { mode, tol, pending, clamp: !!a.clamp, nth, dups: f !== null ? count.get(f) : 1, skip };
         const r = planEntry(type, isObj(e) ? e : {}, ctxs[k]);
         // two entries for one entity would fight over it on every apply
         if (r.entity && r.status !== "error") {

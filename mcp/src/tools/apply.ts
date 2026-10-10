@@ -12,14 +12,18 @@
 // checks (identity, both-changed) apply per record, and its id map pairs every add's created
 // entities before the next record is rewritten. A single record could do none of that without
 // a second replay engine.
+import crypto from "node:crypto";
 import fs from "node:fs";
+import path from "node:path";
 import { z } from "zod";
 import {
   type Baseline,
   baselineOf,
   type CheckRow,
+  canonical,
   filterBaseline,
   itemLabel,
+  listOfAt,
   readBaseline
 } from "../apply-baseline.ts";
 import { type AliasMap, type Ignore, type Mapping, normalizeSpec, type SpecInput } from "../apply-spec.ts";
@@ -86,6 +90,8 @@ export function shapeResult(
   res: PageResult,
   opts: { mode: string; verbose?: boolean; limit?: number; skipped?: string[]; notes?: string[] }
 ): Record<string, unknown> {
+  // a diff's sig (which cells differ) is for baselines only
+  res = { ...res, rows: res.rows.map(unsig) };
   const counts: Record<string, number> = {};
   const byList: Record<string, Record<string, number>> = {};
   const listOf = (r: Row) => r.at.replace(/\[\d+\]/, ""); // "burgs[3].note" counts under "burgs.note"
@@ -209,7 +215,7 @@ export function register(ctx: ToolContext): void {
     {
       title: "Apply or check a spec",
       description:
-        "Bring the map in line with a spec in one call, or check it. Lists burgs, markers, labels, zones, routes, notes, states, provinces, cultures, religions, rivers, features, biomes, routeGroups (any list whose singular is an edit/add type), map {name, year, ...} and paint; inline or specPath (JSON file). Entries are keyed by name (labels: text; notes: id | entity:{type,name} | entity:'Name' | name), by id (route groups) or by ref. Match: id, then name (exact, folded; several: the one at x,y, else AMBIGUOUS), then aliases (declared, or a river's name+type word: row by) -> only differing fields are edited; missing -> created. mode 'upsert' (default) | 'update' (no creates) | 'check' (read-only: what upsert would do) | 'baseline' (records the check's differences as accepted; baseline then filters a check). Rows: unchanged | updated | created | differs | missing | error, diffs [{field, have, want}] (readOnly + fix: another tool sets it; pending: created by this spec). Two entries for one entity or note: CONFLICT. Places match within 1 px, numbers exactly, colours case-insensitive, legends HTML-decoded (see tolerance). Shapes: x,y or at:[x,y]; routes through:[burg names or [x,y]] or draw:'points' (freehand); zones shape/select {polygon:[[x,y]], circle:[x,y,r], where}; an entry's note becomes its note (zones too; markers[].places join the legend); states[].provinces are checked as provinces. paint [{select, set:{state|province|culture|religion|biome|height}}] paints cells in order, later entries winning; check counts each entry's differing cells; select adds any:[...], feature_polygon(s)+buffer_px, from:'spec.path'. A burgs entry's state paints its own cell. mapping {lists, keys, values} renames first; ignore {list:[keys]} leaves keys out. One auto-undo entry, none when nothing changes; replayable in sketches. Result: counts; rows most actionable first, 3+ identical rows grouped (verbose: every row); created {list: {key: id}}.",
+        "Bring the map in line with a spec in one call, or check it. Lists burgs, markers, labels, zones, routes, notes, states, provinces, cultures, religions, rivers, features, biomes, routeGroups (any list whose singular is an edit/add type), map {name, year, ...} and paint; inline or specPath (JSON file). Entries are keyed by name (labels: text; notes: id | entity:{type,name} | entity:'Name' | name), by id (route groups) or by ref. Match: id (if its entity has the name or an alias, else ID_MISMATCH), then name (exact, folded; several: the one at x,y, else AMBIGUOUS), then aliases (declared, or a river's name+type word: row by) -> only differing fields are edited; missing -> created. mode 'upsert' (default) | 'update' (no creates) | 'check' (read-only: what upsert would do) | 'baseline' (records the check's differences as accepted; baseline then filters a check). Rows: unchanged | updated | created | differs | missing | error, diffs [{field, have, want}] (readOnly + fix: another tool sets it; pending: created by this spec). Two entries for one entity or note: CONFLICT. Places match within 1 px, numbers exactly, colours case-insensitive, legends HTML-decoded (see tolerance). Shapes: x,y or at:[x,y]; routes through:[burg names or [x,y]] or draw:'points' (freehand); zones shape/select {polygon:[[x,y]], circle:[x,y,r], where}; an entry's note becomes its note (zones too; markers[].places join the legend); states[].provinces are checked as provinces. paint [{select, set:{state|province|culture|religion|biome|height}}] paints cells in order, later entries winning; check counts each entry's differing cells; select adds any:[...], feature_polygon(s)+buffer_px, from:'spec.path'. A burgs entry's state paints its own cell. mapping {lists, keys, values} renames first; ignore {list:[keys]} leaves keys out. One auto-undo entry, none when nothing changes; replayable in sketches. Result: counts; rows most actionable first, 3+ identical rows grouped (verbose: every row); created {list: {key: id}}.",
       inputSchema: z
         .object({
           specPath: z
@@ -360,8 +366,8 @@ async function runApply(ctx: ToolContext, scope: CallScope, args: Record<string,
     }
   let accepted =
     baseline !== undefined && mode === "check" ? readBaseline(baseAbs ?? baseline, baseAbs ?? "(object)") : null;
-  const target = baselineTarget(ctx, mode, writeBaseline, baseAbs ?? baseline);
   const specAbs = specPath ? resolveReadPath(ctx.config, specPath) : null;
+  const target = baselineTarget(ctx, mode, writeBaseline, baseAbs ?? baseline, specAbs);
   const fileSpec = specAbs ? readSpecFile(p => p, specAbs) : null;
   const named = (r: Record<string, unknown>) => (specAbs ? { specPath: specAbs, ...r } : r);
   const spec = normalizeSpec(fileSpec, inline as SpecInput, mapping ?? {}, only, ignore, aliases);
@@ -376,6 +382,21 @@ async function runApply(ctx: ToolContext, scope: CallScope, args: Record<string,
       `nothing to apply: pass lists (burgs, markers, labels, zones, routes, notes, states, ...) inline or in specPath${spec.skipped.length ? ` (not lists: ${spec.skipped.join(", ")})` : ""}`
     );
   }
+  // a paint row's baseline key: its label (without a from list's [k]) and a hash of the entry,
+  // so reordering or inserting paint entries keeps the accepted items
+  const paintEntries = new Map<string, unknown>();
+  for (const l of spec.lists)
+    if (l.type === "paint") for (const [k, e] of l.entries.entries()) paintEntries.set(`${l.key}[${k}]`, e);
+  const paintKey = (r: CheckRow): string | undefined => {
+    const e = paintEntries.get(r.at);
+    if (!isRec(e)) return undefined;
+    const label = typeof e.label === "string" ? e.label.replace(/\[\d+\]$/, "") : "paint";
+    const h = crypto
+      .createHash("sha1")
+      .update(canonical({ select: e.select, set: e.set }))
+      .digest("hex");
+    return `${label} #${h.slice(0, 8)}`;
+  };
   const pageMode = mode === "baseline" ? "check" : mode;
   const bridgeArgs = { mode: pageMode, lists: spec.lists, map: spec.map, tolerance: tolerance ?? {}, clamp: !!clamp };
   const callOpts = { timeoutMs: scope.remainingMs, json: { maxDepth: 30 } };
@@ -386,7 +407,7 @@ async function runApply(ctx: ToolContext, scope: CallScope, args: Record<string,
     const extra: Record<string, unknown> = {};
     if (target) {
       // every difference this check reports, before any baseline filters it
-      const b = baselineOf(plan.rows as CheckRow[], specAbs ? { specPath: specAbs } : {});
+      const b = baselineOf(plan.rows as CheckRow[], { ...(specAbs ? { specPath: specAbs } : {}), keyOf: paintKey });
       fs.writeFileSync(target, baselineText(b));
       extra.wroteBaseline = target;
       extra.recorded = b.items.length;
@@ -394,13 +415,18 @@ async function runApply(ctx: ToolContext, scope: CallScope, args: Record<string,
     }
     let rows = plan.rows;
     if (accepted) {
-      const f = filterBaseline(plan.rows as CheckRow[], accepted);
+      // lists this check ran: items of the others (only, a smaller spec) are not stale
+      const checked = new Set<string>(plan.rows.map(r => listOfAt(r.at)));
+      for (const l of spec.lists) checked.add(l.key).add(`${l.key}.note`);
+      if (spec.map) checked.add("map").add("map.note");
+      const f = filterBaseline(plan.rows as CheckRow[], accepted, { keyOf: paintKey, checked });
       rows = f.rows as Row[];
       extra.baselined = f.baselined;
       if (f.stale.length) {
         extra.baselineStale = f.stale.length;
         extra.staleItems = f.stale.slice(0, 5).map(itemLabel);
       }
+      if (f.notChecked) extra.baselineNotChecked = f.notChecked;
       if (baseAbs && mode === "check") extra.baseline = baseAbs;
     }
     const shaped = shapeResult({ ...plan, rows }, shapeOpts);
@@ -445,22 +471,53 @@ function baselineTarget(
   ctx: ToolContext,
   mode: string,
   write: string | { path: string; overwrite?: boolean; allowOutside?: boolean } | undefined,
-  baseline: unknown
+  baseline: unknown,
+  specAbs: string | null
 ): string | null {
   const w = typeof write === "string" ? { path: write } : write;
+  let target: string | null = null;
   if (w)
-    return resolveWritePath(ctx.config, w.path, {
+    target = resolveWritePath(ctx.config, w.path, {
       exts: [".json"],
       overwrite: w.overwrite,
       allowOutside: w.allowOutside
     });
-  if (mode !== "baseline") return null;
-  if (typeof baseline !== "string")
-    throw new ToolError(
-      "BAD_ARGS",
-      "mode 'baseline' writes a file: pass writeBaseline:'path.json' (or baseline:'path.json')"
-    );
-  return resolveWritePath(ctx.config, baseline, { exts: [".json"], overwrite: true });
+  else if (mode === "baseline") {
+    if (typeof baseline !== "string")
+      throw new ToolError(
+        "BAD_ARGS",
+        "mode 'baseline' writes a file: pass writeBaseline:'path.json' (or baseline:'path.json')"
+      );
+    target = resolveWritePath(ctx.config, baseline, { exts: [".json"], overwrite: true });
+    // named only as the baseline: replaced only when it is one (never a spec, args or export)
+    if (fs.existsSync(target) && !isBaselineFile(target))
+      throw new ToolError(
+        "REFUSED",
+        `${target} exists and is not an apply baseline; to replace it pass writeBaseline:{path, overwrite:true}`
+      );
+  }
+  if (target && specAbs && realOf(target) === realOf(specAbs))
+    throw new ToolError("REFUSED", `the baseline would overwrite the spec (${specAbs}); write it to another file`);
+  return target;
+}
+
+/** A path with its links resolved (as far as it exists). */
+function realOf(p: string): string {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return path.resolve(p);
+  }
+}
+
+/** A file holding an apply baseline (kind 'tupaia-apply-baseline'). */
+function isBaselineFile(p: string): boolean {
+  try {
+    const v = JSON.parse(fs.readFileSync(p, "utf8"));
+    return isRec(v) && v.kind === "tupaia-apply-baseline";
+  } catch {
+    return false;
+  }
 }
 
 /** A baseline as JSON, one item per line (diffable). */
@@ -469,6 +526,14 @@ function baselineText(b: Baseline): string {
   const top = JSON.stringify(head).slice(0, -1);
   return `${top},"items":[\n${items.map(it => JSON.stringify(it)).join(",\n")}\n]}\n`;
 }
+
+/** A row without its diffs' sig. */
+function unsig(r: Row): Row {
+  if (!r.diffs?.some(d => isRec(d) && "sig" in d)) return r;
+  return { ...r, diffs: r.diffs.map(d => (isRec(d) && "sig" in d ? (({ sig: _s, ...rest }) => rest)(d) : d)) };
+}
+
+const isRec = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 
 /** One sketch record per step, all under this call's undo entry (no-op record when none). */
 async function logSteps(scope: CallScope, res: PageResult, args: Record<string, unknown>): Promise<void> {

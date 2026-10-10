@@ -5,7 +5,9 @@
 //   {list, key, field, have, want, ...the diff's other keys (px, add, remove, cells, ...)}
 //   {list, key, status:'missing'} | {list, key, status:'error', error:{code, message, field?}}
 // list is the row's list ('burgs', 'rivers.note', 'paint', 'map'); key the entry's key (its
-// name, a note id, a paint entry's label; a `<list>[k].note` row without one takes its entry's).
+// name, a note id; a paint entry's label + a hash of its select/set, from the caller's keyOf; a
+// `<list>[k].note` row without one takes its entry's). Cell-set diffs (zone cells, paint) carry a
+// sig, a hash of which cells differ, so a drift that keeps the counts still shows.
 // A later check drops every difference whose item is in the baseline (the same key and field and
 // the same values: one that changed since is reported again) and counts them as `baselined`.
 import fs from "node:fs";
@@ -56,14 +58,24 @@ export function canonical(v: unknown): string {
 /** "burgs[3].note" -> "burgs.note" (as the result's lists count it). */
 export const listOfAt = (at: string): string => at.replace(/\[\d+\]/, "");
 
-/** The entity key of each row: its key, else its entry's (`x[k].note` rows), else its name or list. */
-function rowKeys(rows: CheckRow[]): string[] {
+/** A row's own baseline key when the caller has one (paint entries: label + entry hash). */
+export type KeyOf = (r: CheckRow) => string | undefined;
+
+/**
+ * The entity key of each row: keyOf's, else its key, else its entry's (`x[k].note` rows), else
+ * its name or list.
+ */
+function rowKeys(rows: CheckRow[], keyOf?: KeyOf): string[] {
   const byAt = new Map<string, CheckRow>();
   for (const r of rows) byAt.set(r.at, r);
   return rows.map(r => {
+    const own = keyOf?.(r);
+    if (own !== undefined) return own;
     if (r.key !== undefined && r.key !== null) return String(r.key);
     const parent = /^(.*\[\d+\])\.\w+$/.exec(r.at)?.[1];
     const p = parent ? byAt.get(parent) : undefined;
+    const pOwn = p ? keyOf?.(p) : undefined;
+    if (pOwn !== undefined) return pOwn;
     if (p?.key !== undefined && p.key !== null) return String(p.key);
     return r.name ?? listOfAt(r.at);
   });
@@ -79,8 +91,8 @@ function itemsOf(r: CheckRow, key: string): BaselineItem[] {
 }
 
 /** The baseline of a check's rows: every difference, missing entry and error it reports. */
-export function baselineOf(rows: CheckRow[], meta: { specPath?: string } = {}): Baseline {
-  const keys = rowKeys(rows);
+export function baselineOf(rows: CheckRow[], meta: { specPath?: string; keyOf?: KeyOf } = {}): Baseline {
+  const keys = rowKeys(rows, meta.keyOf);
   const items = rows.flatMap((r, k) => itemsOf(r, keys[k]));
   return {
     kind: "tupaia-apply-baseline",
@@ -95,8 +107,10 @@ export interface Filtered {
   rows: CheckRow[];
   /** Differences (items) the baseline accepted. */
   baselined: number;
-  /** Baseline items no longer reported (fixed, or their values changed). */
+  /** Baseline items no longer reported (fixed, or their values changed) in the lists checked. */
   stale: BaselineItem[];
+  /** Baseline items of lists this check did not run (opts.checked): neither accepted nor stale. */
+  notChecked: number;
 }
 
 /**
@@ -104,7 +118,11 @@ export interface Filtered {
  * status 'accepted' (no diffs); a differs row keeps only its new diffs. Items match as a multiset
  * (two identical differences need two identical items).
  */
-export function filterBaseline(rows: CheckRow[], baseline: Baseline): Filtered {
+export function filterBaseline(
+  rows: CheckRow[],
+  baseline: Baseline,
+  opts: { keyOf?: KeyOf; checked?: Set<string> } = {}
+): Filtered {
   const left = new Map<string, BaselineItem[]>();
   for (const it of baseline.items) {
     const c = canonical(it);
@@ -118,7 +136,7 @@ export function filterBaseline(rows: CheckRow[], baseline: Baseline): Filtered {
     l.pop();
     return true;
   };
-  const keys = rowKeys(rows);
+  const keys = rowKeys(rows, opts.keyOf);
   let baselined = 0;
   const out = rows.map((r, k) => {
     const items = itemsOf(r, keys[k]);
@@ -138,7 +156,10 @@ export function filterBaseline(rows: CheckRow[], baseline: Baseline): Filtered {
     const { diffs: _d, error: _e, note: _n, ...rest } = r;
     return { ...rest, status: "accepted" };
   });
-  return { rows: out, baselined, stale: [...left.values()].flat() };
+  const rest = [...left.values()].flat();
+  const checked = opts.checked;
+  const stale = checked ? rest.filter(it => checked.has(it.list)) : rest;
+  return { rows: out, baselined, stale, notChecked: rest.length - stale.length };
 }
 
 /** Read and check a baseline file (or an inline object). */

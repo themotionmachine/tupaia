@@ -5,8 +5,12 @@
 //     'Nelbaz river' finds Nelbaz, type River); none of id/alias renames; rows say `by`;
 //   - upsert never creates an entity matched by alias (no duplicate river), and two entries
 //     reaching one entity by alias are a CONFLICT, not a create;
+//   - an id whose entity has another name is ID_MISMATCH (never edited); id 0 of placeholder
+//     types is no key; same-name entries pair around the one an id takes;
 //   - mode 'baseline' writes the check's differences; a check with baseline is clean, a change to
-//     one entity is exactly the one new drift, a changed accepted value is reported again (stale).
+//     one entity is exactly the one new drift, a changed accepted value is reported again (stale);
+//     it never overwrites the spec or a non-baseline file; lists `only` left out are not stale;
+//     paint items key on content (reorder-proof), cell sets on which cells differ (sig).
 // With the primordial-soup builder's data on this machine, the same against copies of its
 // build-spec.json and polish-final.map (skipped elsewhere).
 // Fixture (demo.map): rivers 2 Ngauping, 4 Nelbaz, 5 Lukfung, 6 Maracenda, 9 Weisental (type
@@ -171,7 +175,7 @@ describe("tupaia-mcp apply: ids, aliases, baseline (demo.map)", () => {
       rivers: [
         { name: "Nelbaz river" }, // name + type word
         { name: "The Great Ngauping", aliases: ["Ngauping"] }, // declared alias
-        { id: 5, name: "Maracenda" }, // id beats the name (Maracenda is river 6)
+        { id: 5, name: "lukfung" }, // id, agreeing with the name (folded)
         { name: "Lungongmun", aliases: ["Weisental"] }, // the name beats an alias
         { id: 99999, name: "Weisental river" }, // no such id: then the name tiers
         { name: "Lukfung brook" } // Lukfung is a River, not a Brook: not found
@@ -189,13 +193,14 @@ describe("tupaia-mcp apply: ids, aliases, baseline (demo.map)", () => {
     assert.match(r(5).error.message, /^missing; a new river needs its course/);
     assert.deepEqual(c.matched, { "name+type": 2, alias: 1, id: 1 });
 
-    // an id or alias match never renames; a burg by id compares its other fields
+    // an id or alias match never renames; a burg by id (agreeing through an alias) compares
+    // its other fields
     const up = await h.ok("apply", {
       rivers: [
         { name: "The Great Ngauping", aliases: ["Ngauping"] },
-        { id: 5, name: "Maracenda" }
+        { id: 5, name: "Lukfung" }
       ],
-      burgs: [{ id: 1, name: "Longong Prime", population: 15067 }]
+      burgs: [{ id: 1, name: "Longong Prime", aliases: ["Longong"], population: 15067 }]
     });
     assert.equal(up.changed, false, JSON.stringify(up));
     assert.deepEqual(up.counts, { unchanged: 3 });
@@ -305,6 +310,159 @@ describe("tupaia-mcp apply: ids, aliases, baseline (demo.map)", () => {
     assert.equal(errorBody(none).error.code, "BAD_ARGS");
     const bad = await h.call("apply", { ...spec, mode: "check", baseline: { nope: 1 } });
     assert.equal(errorBody(bad).error.code, "BAD_ARGS");
+  });
+
+  test("an id that names another entity is ID_MISMATCH (never edited); id 0 of a placeholder type is no key", async () => {
+    // a spec numbering its entries its own way: id 5 is Lukfung, the entry says Maracenda (river 6)
+    const c = await h.ok("apply", {
+      mode: "check",
+      rivers: [{ id: 5, name: "Maracenda" }],
+      burgs: [{ id: 2, name: "Longong", population: 1 }]
+    });
+    const r = rowAt(c, "rivers[0]");
+    assert.equal(r.status, "error", JSON.stringify(c.rows));
+    assert.equal(r.error.code, "ID_MISMATCH");
+    assert.match(r.error.message, /river 5 is 'Lukfung', not 'Maracenda' \(that name is river 6\)/);
+    assert.deepEqual(
+      (r.error.candidates as Obj[]).map(x => x.i),
+      [5, 6]
+    );
+    // upsert edits neither: Krar (burg 2) keeps its population, Longong too
+    const pops = async () =>
+      (await h.ok("eval", { code: "return [pack.burgs[1].population, pack.burgs[2].population]", readOnly: true }))
+        .value as number[];
+    const p0 = await pops();
+    const up = await h.ok("apply", { burgs: [{ id: 2, name: "Longong", population: 1 }] });
+    assert.equal(up.changed, false, JSON.stringify(up));
+    assert.equal(rowAt(up, "burgs[0]").error.code, "ID_MISMATCH");
+    assert.deepEqual(await pops(), p0);
+
+    // state 0 is Neutrals: {id:0} is the spec's numbering, matched by name
+    const st = (await h.ok("eval", { code: "return pack.states[1].name", readOnly: true })).value as string;
+    const s0 = await h.ok("apply", { mode: "check", verbose: true, states: [{ id: 0, name: st }] });
+    assert.deepEqual([rowAt(s0, "states[0]").i, rowAt(s0, "states[0]").by], [1, undefined], JSON.stringify(s0.rows));
+  });
+
+  test("same-name entries: one with an id takes its entity, the plain one pairs with the rest (either order)", async () => {
+    await h.ok("edit", {
+      type: "burg",
+      ops: [
+        { ref: 1, set: { name: "Twin" } },
+        { ref: 2, set: { name: "Twin" } }
+      ]
+    });
+    for (const burgs of [
+      [{ name: "Twin" }, { name: "Twin", id: 1 }],
+      [{ name: "Twin", id: 1 }, { name: "Twin" }]
+    ]) {
+      const c = await h.ok("apply", { mode: "check", verbose: true, burgs });
+      const ids = (c.rows as Obj[]).map(r => [r.i, r.status]);
+      const want =
+        burgs[0].id === undefined
+          ? [
+              [2, "unchanged"],
+              [1, "unchanged"]
+            ]
+          : [
+              [1, "unchanged"],
+              [2, "unchanged"]
+            ];
+      assert.deepEqual(ids, want, JSON.stringify(c.rows));
+    }
+    await h.ok("snapshot", { action: "undo" });
+  });
+
+  test("baseline guards: never overwrites the spec or a non-baseline file; 'only' items are not stale", async () => {
+    const spec = { burgs: [{ name: "Longong", population: 15000 }], rivers: [{ name: "Nelbaz", note: "The Nelbaz." }] };
+    fs.writeFileSync(path.join(out, "myspec.json"), JSON.stringify(spec));
+    fs.writeFileSync(path.join(out, "args.json"), JSON.stringify({ hello: 1 }));
+    const self = await h.call("apply", { specPath: "myspec.json", mode: "baseline", baseline: "myspec.json" });
+    assert.equal(errorBody(self).error.code, "REFUSED");
+    const other = await h.call("apply", { specPath: "myspec.json", mode: "baseline", baseline: "args.json" });
+    assert.equal(errorBody(other).error.code, "REFUSED");
+    assert.match(errorBody(other).error.message, /not an apply baseline/);
+    const spec2 = await h.call("apply", {
+      specPath: "myspec.json",
+      mode: "baseline",
+      writeBaseline: { path: "myspec.json", overwrite: true }
+    });
+    assert.equal(errorBody(spec2).error.code, "REFUSED");
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(out, "myspec.json"), "utf8")), spec, "spec untouched");
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(out, "args.json"), "utf8")), { hello: 1 });
+    // a baseline file named by baseline: is replaced
+    const w = await h.ok("apply", { specPath: "myspec.json", mode: "baseline", writeBaseline: "guard.json" });
+    assert.equal(w.recorded, 2);
+    const re = await h.ok("apply", { specPath: "myspec.json", mode: "baseline", baseline: "guard.json" });
+    assert.equal(re.recorded, 2);
+
+    // a check of one list: the other list's items are not stale, only not checked
+    const one = await h.ok("apply", {
+      specPath: "myspec.json",
+      only: ["burgs"],
+      mode: "check",
+      baseline: "guard.json"
+    });
+    assert.equal(one.clean, true, JSON.stringify(one));
+    assert.equal(one.baselined, 1);
+    assert.equal(one.baselineStale, undefined);
+    assert.equal(one.baselineNotChecked, 1);
+  });
+
+  test("baseline identity: paint entries keyed by content (reorder stays clean); cell sets by which cells differ", async () => {
+    const info = (await h.ok("eval", {
+      readOnly: true,
+      code: `const z = pack.zones.find(z => !z.hidden && z.cells && z.cells.length >= 3 && pack.zones.filter(y => y.name === z.name).length === 1);
+        const inZ = new Set(z.cells);
+        const out = [];
+        for (const c of z.cells) for (const n of pack.cells.c[c]) if (!inZ.has(n) && !out.includes(n) && pack.cells.h[n] >= 20) out.push(n);
+        const land = [];
+        for (let i = 0; i < pack.cells.i.length && land.length < 2; i += 97) if (pack.cells.h[i] >= 20 && pack.cells.biome[i] !== 11) land.push(i);
+        const at = land.map(i => pack.cells.p[i]);
+        return { name: z.name, cells: z.cells.slice(), out: out.slice(0, 2), at };`
+    })) as Obj;
+    const {
+      name,
+      cells,
+      out: extra,
+      at
+    } = info.value as { name: string; cells: number[]; out: number[]; at: number[][] };
+    assert.equal(extra.length, 2, JSON.stringify(info.value));
+    // the spec wants cells[0] swapped for extra[0]
+    const want = [...cells.slice(1), extra[0]];
+    const paint = [
+      { select: { circle: [at[0][0], at[0][1], 12] }, set: { biome: "Glacier" } },
+      { select: { circle: [at[1][0], at[1][1], 12] }, set: { biome: "Wetland" } }
+    ];
+    const spec = { zones: [{ name, cells: want }], paint };
+    const b = await h.ok("apply", { ...spec, mode: "baseline", writeBaseline: "ident.json" });
+    const items = JSON.parse(fs.readFileSync(path.join(out, "ident.json"), "utf8")).items as Obj[];
+    assert.ok(
+      items.some(it => it.list === "zones" && it.field === "cells" && typeof it.sig === "string"),
+      JSON.stringify(items)
+    );
+    assert.ok(
+      items.filter(it => it.list === "paint").every(it => /^biome=\w+ #[0-9a-f]{8}$/.test(it.key)),
+      JSON.stringify(items)
+    );
+    assert.equal(b.clean, true);
+    // the paint entries reordered: still clean, nothing stale
+    const re = await h.ok("apply", {
+      zones: spec.zones,
+      paint: [paint[1], paint[0]],
+      mode: "check",
+      baseline: "ident.json"
+    });
+    assert.equal(re.clean, true, JSON.stringify(re));
+    assert.equal(re.baselineStale, undefined);
+    // the zone drifts with the same counts (extra[1] in where the spec wants extra[0]): add 1 /
+    // remove 1 and the same sizes as before, other cells
+    await h.ok("apply", { zones: [{ name, cells: [...cells.slice(1), extra[1]] }] });
+    const drift = await h.ok("apply", { ...spec, mode: "check", baseline: "ident.json" });
+    assert.equal(drift.clean, false);
+    const d = (rowAt(drift, "zones[0]").diffs as Obj[])[0];
+    assert.deepEqual([d.field, d.add, d.remove, d.sig], ["cells", 1, 1, undefined], JSON.stringify(drift.rows));
+    assert.equal(drift.baselineStale, 1);
+    await h.ok("snapshot", { action: "undo" });
   });
 
   // ------------------------------------------------- the builder's data (when on this machine)
