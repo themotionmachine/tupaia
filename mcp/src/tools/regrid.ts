@@ -50,7 +50,7 @@ export function register(ctx: ToolContext): void {
     {
       title: "Change the cell density, keep the map",
       description:
-        "Rebuild the map at another cell density (points, as in Options > cells density) and keep it the same map: shared-map lineage (map id), names, notes and labels stay; burgs, markers, states, provinces, cultures, religions, routes, rivers and zones are moved by coordinates. density: slider position 1-13 (4 = 10K, 6 = 30K, 8 = 50K) or a points count 1000-100000. Uses the app's Transform resampler (full extent, scale 1) with fixes: heights 'interpolate' (default, smooth coast) or 'nearest' (blocky); burgs that share a new cell move to a free neighbour, a burg's cell joins its state, every area keeps a center inside it, small areas and zones keep a cell; ice and relief icons 'keep' (default: as drawn) or 'regenerate'/'redraw'. Recomputed: temperature, lakes/coast features (names carried over), economy flows (burg treasuries kept), territory statistics; rivers traced again as contiguous cell paths along their old lines (ids, names, confluences kept) and carved where they would climb (carve; result rivers.carved); biomes re-derived from the climate, custom and painted ones carried, speckles merged (minRegion; result biomes); the other layers are redrawn from the data, but a layer that was on and undrawn stays undrawn (layers.keptEmpty) and big count changes are listed (layers.redrawn). Returns cells before/after, entities per type kept/moved/lost (lostNames; maxAreaChangeOf), feature lakes/islands/oceans, fixed (counts), warnings, the new file size and lineage; details:true lists moved burgs/markers, the largest area changes and a legend of the heights counters. dryRun:true (allowed with an editor open) estimates cells, file size and, when lowering, atRisk (burgs that will share a cell, lakes/islands smaller than a cell); it changes nothing. One auto-undo entry. In a sketch it is logged as not replayable (blob-only: no rebase; sketch_promote directly while the shared map is still at the sketch's base). Screenshot afterwards to check the coastline.",
+        "Rebuild the map at another cell density (points, as in Options > cells density) and keep it the same map: shared-map lineage (map id), names, notes and labels stay; burgs, markers, states, provinces, cultures, religions, routes, rivers and zones are moved by coordinates. density: slider position 1-13 (4 = 10K, 6 = 30K, 8 = 50K) or a points count 1000-100000. Uses the app's Transform resampler (full extent, scale 1) with fixes: heights 'interpolate' (default, smooth coast) or 'nearest' (blocky); burgs that share a new cell move to a free neighbour, a burg's cell joins its state, every area keeps a center inside it, small areas and zones keep a cell; ice and relief icons 'keep' (default: as drawn) or 'regenerate'/'redraw'. Recomputed: temperature, lakes/coast features (names carried over), economy flows (burg treasuries kept), territory statistics; rivers traced again as contiguous cell paths along their old lines (ids, names, confluences kept) and carved where they would climb (carve; result rivers.carved); biomes re-derived from the climate, custom and painted ones carried, speckles merged (minRegion; result biomes); territories:'regrow' redraws borders along the terrain; the other layers are redrawn from the data, but a layer that was on and undrawn stays undrawn (layers.keptEmpty) and big count changes are listed (layers.redrawn). Returns cells before/after, entities per type kept/moved/lost (lostNames; maxAreaChangeOf), feature lakes/islands/oceans, fixed (counts), warnings, the new file size and lineage; details:true lists moved burgs/markers, the largest area changes and a legend of the heights counters. dryRun:true (allowed with an editor open) estimates cells, file size and, when lowering, atRisk (burgs that will share a cell, lakes/islands smaller than a cell); it changes nothing. One auto-undo entry. In a sketch it is logged as not replayable (blob-only: no rebase; sketch_promote directly while the shared map is still at the sketch's base). Screenshot afterwards to check the coastline.",
       inputSchema: z.object({
         density: z
           .number()
@@ -89,6 +89,27 @@ export function register(ctx: ToolContext): void {
           .optional()
           .describe(
             "true (default): where a retraced river would climb (the new heights cross a ridge, mostly when lowering the density), lower its land cells to the lowest land height upstream of it on that river, so heights never rise downstream (water skipped, never below 20; a carved lake shore lowers its lake level). Only climbing cells change. Result rivers.carved {rivers, cells, maxDrop, lakesLowered?}. false: heights as interpolated; rivers.climbing counts the rivers that climb"
+          ),
+        territories: z
+          .enum(["copy", "regrow"])
+          .optional()
+          .describe(
+            "copy (default): every new cell takes its nearest old cell's state, culture, religion and province (the old stepped outlines survive on a finer grid). regrow: then cultures, religions and states regrow along the terrain (cost-based spread like the app's expand: slopes, hills, mountains, costly biomes, rivers) from their cores (interior, burgs, capitals, centres) over a band of territoryBand rings along their borders, each to about its copied area; every burg keeps its state and culture, every capital and centre stays inside, locked entities keep their cells; then each state's provinces the same way inside it. Result territories {state, culture, religion: changed, maxAreaChangePct (of those with 20+ cells); province: changed, within15pct}"
+          ),
+        territoryBand: z
+          .number()
+          .int()
+          .min(1)
+          .max(50)
+          .optional()
+          .describe(
+            "territories:'regrow': rings of new cells along the borders that move (default about 1.5 old cells, at least 3)"
+          ),
+        territoryLocked: z
+          .boolean()
+          .optional()
+          .describe(
+            "territories:'regrow': also regrow locked states, cultures, religions and provinces (default false: they keep their copied cells; their locks stay either way)"
           ),
         details: z.boolean().optional().describe("Also list moved burgs and markers"),
         dryRun: z.boolean().optional().describe("Estimate cells and file size; change nothing"),

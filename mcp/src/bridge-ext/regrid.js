@@ -195,6 +195,19 @@
       );
     if (a.carve !== undefined && typeof a.carve !== "boolean") fail("BAD_ARGS", "carve must be true or false");
     const carve = a.carve ?? true;
+    const territories = a.territories ?? "copy";
+    if (!["copy", "regrow"].includes(territories)) fail("BAD_ARGS", "territories is 'copy' (default) or 'regrow'");
+    if (territories === "regrow" && !T.territory)
+      fail("PAGE_ERROR", "the territory bridge is missing (src/bridge-ext/territory.js)");
+    if (a.territoryBand !== undefined && territories !== "regrow")
+      fail("BAD_ARGS", "territoryBand is the regrow band; it needs territories:'regrow'");
+    if (
+      a.territoryBand !== undefined &&
+      (!Number.isInteger(a.territoryBand) || a.territoryBand < 1 || a.territoryBand > 50)
+    )
+      fail("BAD_ARGS", "territoryBand must be an integer 1..50 (rings of new cells)");
+    if (a.territoryLocked !== undefined && (typeof a.territoryLocked !== "boolean" || territories !== "regrow"))
+      fail("BAD_ARGS", "territoryLocked is true or false, with territories:'regrow'");
     if (a.density === undefined) fail("BAD_ARGS", "density is required (1-13 or 1000-100000)");
     const want = targetCells(a.density);
     const shape = gridShape(want);
@@ -222,9 +235,17 @@
       );
     if (want > 50000)
       warnings.push("over 50K cells the app gets slow to draw and edit (the Options slider marks it red)");
+    // regrow band (new-cell rings): about one and a half old cells, at least 3
+    const band =
+      territories === "regrow"
+        ? (a.territoryBand ?? Math.max(3, Math.ceil((1.5 * grid.spacing) / shape.spacing)))
+        : undefined;
     return {
       want,
       shape,
+      territories,
+      territoryLocked: a.territoryLocked === true,
+      band,
       heights,
       iceMode,
       relief,
@@ -2199,6 +2220,13 @@
       own.restoreProvinces = function (parentMap, ...rest) {
         origProvinces.call(this, parentMap, ...rest);
         recenter(parentMap, report);
+        // territories:'regrow' (territory.js): along the terrain instead of the old cells' steps
+        if (P.territories === "regrow") {
+          report.territories = T.territory.regrowAll({ band: P.band, withLocked: P.territoryLocked });
+          recenter(parentMap, report);
+          if (typeof States?.getPoles === "function") States.getPoles();
+          if (typeof Provinces?.getPoles === "function") Provinces.getPoles();
+        }
       };
     }
     if (typeof R.restoreEconomy === "function") {
@@ -2306,7 +2334,10 @@
       relief: P.relief,
       biomes: P.biomes,
       ...(P.biomes !== "keep" ? { minRegion: P.minRegion } : {}),
-      carve: P.carve
+      carve: P.carve,
+      territories: P.territories,
+      ...(P.band ? { territoryBand: P.band } : {}),
+      ...(P.territoryLocked ? { territoryLocked: true } : {})
     };
     if (a.phase !== "apply") {
       if (!a.dryRun) return { phase: "validate", ...plan, warnings: P.warnings }; // apply follows
@@ -2517,6 +2548,7 @@
       entities: cmp.entities,
       ...(report.rivers ? { rivers: report.rivers } : {}),
       biomes: report.biomes ?? { mode: "keep" },
+      ...(report.territories ? { territories: report.territories } : {}),
       fixed,
       layers: {
         keptEmpty: layers.keptEmpty,

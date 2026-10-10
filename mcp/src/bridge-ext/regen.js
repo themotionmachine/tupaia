@@ -131,7 +131,17 @@
 
   // ---------------------------------------------------------------- provinces: plan
 
-  const PROV_KEYS = ["states", "centres", "count", "ratio", "keepLocked", "lockedStates", "crossForeign"];
+  const PROV_KEYS = [
+    "states",
+    "centres",
+    "count",
+    "ratio",
+    "keepLocked",
+    "lockedStates",
+    "crossForeign",
+    "regrow",
+    "band"
+  ];
   const CENTRE_KEYS = ["state", "burg", "at", "name", "formName", "fullName"];
   const elevationCost = h => (h >= 70 ? 100 : h >= 50 ? 30 : h >= 20 ? 10 : 100);
 
@@ -148,9 +158,30 @@
   /** Validate provinces options against the page; mutates nothing. */
   function planProvinces(o, parts) {
     if (o !== undefined && o !== null && !isObj(o))
-      fail("BAD_ARGS", "provinces is {states?, centres?, count?, ratio?, keepLocked?, lockedStates?, crossForeign?}");
+      fail(
+        "BAD_ARGS",
+        "provinces is {states?, centres?, count?, ratio?, keepLocked?, lockedStates?, crossForeign?, regrow?, band?}"
+      );
     const opt = o || {};
     checkKeys(opt, PROV_KEYS, "provinces");
+    // regrow (territory.js): the existing provinces keep their ids and about their sizes
+    if (opt.regrow !== undefined && typeof opt.regrow !== "boolean")
+      fail("BAD_ARGS", "provinces.regrow must be true or false");
+    const regrow = opt.regrow === true;
+    if (regrow) {
+      const mixed = ["centres", "count", "ratio", "crossForeign"].filter(k => opt[k] !== undefined);
+      if (mixed.length)
+        fail(
+          "BAD_ARGS",
+          `provinces.regrow keeps the existing provinces; ${mixed.join(", ")} ${mixed.length > 1 ? "are" : "is"} for new ones (drop ${mixed.length > 1 ? "them" : "it"} or regrow)`
+        );
+      if (!T.territory) fail("PAGE_ERROR", "the territory bridge is missing (src/bridge-ext/territory.js)");
+    }
+    if (opt.band !== undefined) {
+      if (!regrow) fail("BAD_ARGS", "provinces.band is the regrow band (rings); it needs regrow:true");
+      if (!Number.isInteger(opt.band) || opt.band < 1 || opt.band > 50)
+        fail("BAD_ARGS", "provinces.band must be an integer 1..50 (rings)");
+    }
     if ((opt.states !== undefined || opt.centres !== undefined) && parts.some(p => REFS_CHANGING.includes(p)))
       fail(
         "BAD_ARGS",
@@ -225,7 +256,10 @@
         if (!targets.includes(c.state))
           fail("BAD_ARGS", `centres[${c.k}] is in ${stateName(c.state)}, which is not in states`);
     } else if (centres.length) targets = [...new Set(centres.map(c => c.state))];
-    else targets = pack.states.filter(s => live(s) && (lockedStates || !s.lock)).map(s => s.i);
+    else if (regrow) {
+      const withProvinces = new Set(pack.provinces.filter(live).map(p => p.state));
+      targets = pack.states.filter(s => live(s) && (lockedStates || !s.lock) && withProvinces.has(s.i)).map(s => s.i);
+    } else targets = pack.states.filter(s => live(s) && (lockedStates || !s.lock)).map(s => s.i);
     if (!lockedStates) {
       const locked = targets.filter(i => pack.states[i].lock);
       if (locked.length)
@@ -245,6 +279,19 @@
         if (keepLocked && p.lock) kept.add(p.i);
         else replaced.push(p.i);
       }
+    if (regrow)
+      return {
+        regrow: true,
+        band: opt.band ?? T.territory.DEFAULT_BAND,
+        keepLocked,
+        lockedStates,
+        crossForeign: false,
+        centres: [],
+        targets,
+        kept,
+        replaced: [],
+        notes: []
+      };
     for (const c of centres) {
       const pid = C.province[c.cell];
       const p = pack.provinces[pid];
@@ -282,6 +329,7 @@
   }
 
   function modeOf(plan, sid) {
+    if (plan.regrow) return "regrow";
     if (plan.centres.some(c => c.state === sid)) return "centres";
     return plan.count ? "count" : "auto";
   }
@@ -892,6 +940,7 @@
 
   /** Regenerate provinces from a plan, on a copy of cells.province: changes nothing on the map. */
   function generateProvinces(plan) {
+    if (plan.regrow) return T.territory.provincesRun(plan);
     const targetSet = new Set(plan.targets);
     const replacedSet = new Set(plan.replaced);
     const keep = keepSet(plan.kept, plan.keepLocked);
@@ -979,6 +1028,7 @@
 
   /** Write a run: placeholders for the replaced provinces, the new ones, cells, state lists, poles. */
   function commitProvinces(run) {
+    if (run.regrow) return T.territory.commitProvinces(run);
     const C = pack.cells;
     const list = pack.provinces;
     const work = run.work;
@@ -1073,6 +1123,7 @@
 
   /** Literal outcome of a provinces run (built after any emblems run of the same call). */
   function provincesLiteral(run) {
+    if (run.regrow) return T.territory.provincesLiteral(run);
     const cellsOf = cellsByPid(
       run.work,
       run.made.map(p => p.i)
@@ -1104,6 +1155,7 @@
 
   /** Result view of a run (the same shape for a dryRun preview and the real call). */
   function provincesView(run, notesOut) {
+    if (run.regrow) return T.territory.provincesView(run, notesOut);
     const byState = run.targets.map(sid => {
       const made = run.made.filter(p => p.state === sid);
       const row = { i: sid, name: pack.states[sid].name, mode: run.modes.get(sid) ?? "literal", created: made.length };
@@ -1137,6 +1189,10 @@
   // ---------------------------------------------------------------- provinces: literal replay
 
   function checkProvincesLiteral(L) {
+    if (isObj(L) && L.mode === "regrow") {
+      if (!T.territory) return { errors: [{ code: "PAGE_ERROR", message: "the territory bridge is missing" }] };
+      return T.territory.checkLiteral(L);
+    }
     const errors = [];
     const err = (code, message) => errors.push({ code, message });
     if (!isObj(L) || !Array.isArray(L.states) || !Array.isArray(L.created) || !Array.isArray(L.replaced)) {
@@ -1226,6 +1282,11 @@
   }
 
   function applyProvincesLiteral(L, notesOut) {
+    if (isObj(L) && L.mode === "regrow") {
+      const run = T.territory.applyLiteral(L);
+      commitProvinces(run);
+      return run;
+    }
     const chk = checkProvincesLiteral(L);
     if (chk.errors.length) fail(chk.errors[0].code, chk.errors[0].message, { details: chk.errors });
     const C = pack.cells;

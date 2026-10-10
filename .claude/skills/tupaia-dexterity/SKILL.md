@@ -180,6 +180,8 @@ Token economy (results are counts first; ask for detail only when needed):
    were (`biomes`: redefined, carriedCustom, carriedPainted), then speckles under `minRegion`
    cells (default 3, 0 = off) merged into their neighbour (`biomes.cleanup`; river and carried
    cells stay); `biomes:'climate'` carries custom only, `'keep'` the old pattern (warns).
+   Add `territories:'regrow'` so state, culture, religion and province borders follow the
+   terrain instead of the old cells' steps (see "Borders along the terrain" below).
 8. `lint` (markers on new water, route links), then `screenshot {full:true}`.
 
 **Wipe the random base and build from a spec.**
@@ -288,6 +290,18 @@ marker-near-burg) run only when named.
 
 **Propose a change as a sketch.** See section 10; the replay table there says which calls keep
 the sketch rebasable.
+
+**Borders along the terrain.** Stepped borders after a density change, or provinces a script
+drew (straight lines, nearest centre):
+- Regrid: `regrid {density:8, territories:'regrow'}` (add `territoryLocked:true` to move locked
+  states too). Read `territories`: each field's `changed` and `maxAreaChangePct` (about its
+  copied area), `province.within15pct`. Every burg keeps its state and culture, capitals stay
+  inside. Screenshot a border region with `{only:['states','borders','rivers','relief']}` before
+  and after. Tests: `mcp/test/territory.test.ts` (regrid ... versus 'copy').
+- Provinces only: `regenerate {parts:['provinces'], provinces:{regrow:true, states:['S']},
+  dryRun:true}` (read `within15pct`, `sizes`), then without dryRun; `band:8` reshapes more.
+  Ids, names, capitals, centres, emblems and every burg's province stay; replays in a sketch.
+  Tests: `mcp/test/territory.test.ts` (regenerate provinces {regrow:true}).
 
 **Hand-made state with provinces and arms.** `add {type:'state', items:[{capital:{burg:'X'},
 name:'S'}]}` -> `paint_cells {select, set:{state:'S'}}` (and `{culture}`) ->
