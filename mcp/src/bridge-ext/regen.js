@@ -268,6 +268,17 @@
           `${listNames(locked)} ${locked.length > 1 ? "are" : "is"} locked: pass lockedStates:true to regenerate ${locked.length > 1 ? "their" : "its"} provinces anyway (locked provinces stay unless keepLocked:false), or unlock with edit state {lock:false}`
         );
     }
+    if (!targets.length && regrow) {
+      const anyLocked = pack.states.some(
+        s => live(s) && s.lock && pack.provinces.some(p => live(p) && p.state === s.i)
+      );
+      fail(
+        "BAD_ARGS",
+        anyLocked
+          ? "no unlocked state has provinces to regrow (lockedStates:true includes the locked ones)"
+          : "no state has provinces to regrow: regenerate provinces without regrow (count or centres) makes them"
+      );
+    }
     if (!targets.length)
       fail("BAD_ARGS", "no state to regenerate provinces for: every state is locked (lockedStates:true includes them)");
     targets.sort((a, b) => a - b);

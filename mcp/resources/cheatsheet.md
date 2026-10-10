@@ -281,12 +281,15 @@ heights, climate and rivers, but a cell whose nearest old cell had a custom or p
 cells (default 3, 0 = off; regenerate biomes' clean-up) join their most common neighbour, a
 region with a river or carried cell staying (`cleanup {minRegion, regions, cells}`). 'climate'
 carries custom only; 'keep' copies every old cell's biome and warns with the stale count. A new ocean (water cut off at the edge) is a warning.
-`territories:'regrow'` (default 'copy': the old cells' steps survive) then regrows cultures,
-religions and states along the terrain over `territoryBand` rings (default about 1.5 old cells,
-at least 3) from their cores, each to about its copied area, and each state's provinces inside
-it; every burg keeps its state and culture, capitals and centres stay inside, locked entities
-keep their cells unless `territoryLocked:true`. Result `territories` (changed, maxAreaChangePct
-of entities with 20+ cells, province within15pct).
+`territories:'regrow'` (default 'copy': the old cells' steps survive) then regrows states,
+cultures and religions together (one label per state|culture|religion, so borders that coincide
+move as one line, no slivers) along the terrain over `territoryBand` rings (default about 1.5 old
+cells, at least 3), each connected piece from its cores to about its copied area (a hole or an
+exclave stays where it is), then each state's provinces inside it; every burg keeps its state
+and culture, capitals and centres stay inside. A locked state keeps its cells, provinces and the
+cultures and religions on them (`note` says so) unless `territoryLocked:true`. Result
+`territories` (per field changed, maxAreaChangePct of entities with 20+ cells, lockedKept;
+province within15pct).
 
 **clear**: types notes, labels, markers, zones, routes, rivers, burgs, provinces, states,
 religions, cultures, emblems (run in that dependency order). `where` per type

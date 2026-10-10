@@ -2222,6 +2222,8 @@
         recenter(parentMap, report);
         // territories:'regrow' (territory.js): along the terrain instead of the old cells' steps
         if (P.territories === "regrow") {
+          // the costs read the biomes: re-derived now (rivers are in), not at restoreEconomy
+          if (biomeCap && !biomeCap.done) redefineBiomes(biomeCap, P, report);
           report.territories = T.territory.regrowAll({ band: P.band, withLocked: P.territoryLocked });
           recenter(parentMap, report);
           if (typeof States?.getPoles === "function") States.getPoles();
@@ -2235,7 +2237,7 @@
       const origEconomy = R.restoreEconomy;
       own.restoreEconomy = function (parentMap, ...rest) {
         // the economy reads the biomes (production), so they are re-derived first
-        if (biomeCap) redefineBiomes(biomeCap, P, report);
+        if (biomeCap && !biomeCap.done) redefineBiomes(biomeCap, P, report);
         collectAreaStats(); // state taxes read the state populations
         origEconomy.call(this, parentMap, ...rest);
         let kept = 0;

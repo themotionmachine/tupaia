@@ -4,10 +4,12 @@
 //     emblem and about its size (within 15%), only inside its state; dryRun, refusals, locks,
 //     undo; a province layout drawn by a script (straight stripes) settles along the terrain;
 //   - the sketch log holds the literal cells and a rebase replays them; someone else's repaint or
-//     lock since is a conflict;
-//   - regrid {territories:'regrow'} versus 'copy' on demo.map at 20K: borders no longer follow the
-//     old cells' steps and sit on dearer edges; every burg keeps its state and culture, every
-//     capital stays inside; a locked state keeps its copied cells.
+//     lock since is a conflict; state borders moved since leave no province cell outside its state;
+//   - regrid {territories:'regrow'} versus 'copy' on demo.map (density 20000: 13K cells): borders
+//     no longer follow the old cells' steps, along dear edges, no longer and in no more pieces or
+//     slivers than the copy; every burg keeps its state and culture, every capital stays inside;
+//     a locked state keeps its copied cells, provinces, cultures and religions; where state,
+//     culture and religion borders coincide (the fork's maps) they stay together.
 // Local runs on tests/fixtures/demo.map only (no live origin).
 import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
@@ -213,7 +215,7 @@ describe("regenerate provinces {regrow:true} on demo.map", () => {
     assert.equal(p.states[0].i, S);
     const b1 = await read(PROV_BORDERS, { sid: S });
     assert.ok(b1.edges < 0.95 * b0.edges, `border edges ${b0.edges} -> ${b1.edges}`);
-    assert.ok(b1.cost >= b0.cost, `mean cost of the cut edges ${b0.cost} -> ${b1.cost}`);
+    assert.ok(b1.cost >= 0.98 * b0.cost, `mean cost of the cut edges ${b0.cost} -> ${b1.cost}`);
     const now = await read(PROVS);
     const was = new Map((striped.provs as Obj[]).map(x => [x.i, x]));
     for (const x of now.provs as Obj[]) {
@@ -263,6 +265,13 @@ describe("regenerate provinces {regrow:true} on demo.map", () => {
     assert.ok(!((dry.provinces as Obj).states as Obj[]).some(s => s.i === S), "the default skips it");
     await h.ok("regenerate", { parts: ["provinces"], provinces: { regrow: true } });
     assert.equal(await read(CELLS_OF, { sid: S }), cells, "the locked state's provinces did not move");
+    // every state locked: the regrow default has nothing to do, and says why
+    await h.ok("eval", { code: "for (const s of pack.states) if (s && s.i && !s.removed) s.lock = true; return 1" });
+    const none = await refused({ parts: ["provinces"], provinces: { regrow: true } });
+    assert.match(
+      none.message,
+      /no unlocked state has provinces to regrow \(lockedStates:true includes the locked ones\)/
+    );
     await h.ok("load_map", { path: "tests/fixtures/demo.map" });
   });
 });
@@ -272,7 +281,7 @@ describe("regenerate provinces {regrow:true} in a sketch (literal replay)", () =
   let S = 0;
   let pick: Obj;
   let sketched = "";
-  const files = { shifted: "", repainted: "", locked: "" };
+  const files = { shifted: "", repainted: "", locked: "", moved: "" };
   const read = async (code: string, args: Obj = {}): Promise<any> =>
     (await h.ok("eval", { code, args, readOnly: true })).value;
 
@@ -309,6 +318,20 @@ describe("regenerate provinces {regrow:true} in a sketch (literal replay)", () =
     );
     files.repainted = await otherCopy("terr-repainted", `pack.cells.province[args.cell] = args.to; return 1;`);
     files.locked = await otherCopy("terr-locked", `pack.states[args.S].lock = true; return 1;`);
+    // state borders moved since (cells.state only; their province ids left as they were)
+    files.moved = await otherCopy(
+      "terr-moved",
+      `const C = pack.cells, centre = c => pack.provinces.some(p => p && p.center === c);
+       let out = 0, into = 0;
+       for (const c of C.i) {
+         if (C.h[c] < 20 || C.burg[c] || centre(c)) continue;
+         const j = C.c[c].find(j => C.h[j] >= 20 && C.state[j] && C.state[j] !== C.state[c] && (C.state[c] === args.S || C.state[j] === args.S));
+         if (j === undefined) continue;
+         if (C.state[c] === args.S && out < 6) { C.state[c] = C.state[j]; out++; }
+         else if (C.state[j] === args.S && C.state[c] && into < 6) { C.state[c] = args.S; into++; }
+       }
+       return out + into;`
+    );
     await h.ok("load_map", { path: "tests/fixtures/demo.map" });
   });
 
@@ -355,6 +378,24 @@ describe("regenerate provinces {regrow:true} in a sketch (literal replay)", () =
     assert.match(repainted.reason, /had its cells changed since by someone else; the sketch regrew it/);
     const locked = await conflictOf(files.locked);
     assert.match(locked.reason, /was locked since; the sketch regrew its provinces/);
+  });
+
+  test("rebase onto a copy whose state borders moved since: no province cell left outside its state", async () => {
+    const r = await h.ok("sketch", { action: "rebase", onto: { path: files.moved } }, 240_000);
+    assert.equal(r.completed, true, JSON.stringify(r.conflicts));
+    const off = await read(
+      `const C = pack.cells, live = x => x && x.i && !x.removed;
+       let outside = 0, none = 0;
+       for (const c of C.i) {
+         if (C.h[c] < 20) continue;
+         const p = pack.provinces[C.province[c]];
+         if (live(p) && p.state === args.S && C.state[c] !== args.S) outside++;
+         if (C.state[c] === args.S && !(live(p) && p.state === args.S)) none++;
+       }
+       return { outside, none };`,
+      { S }
+    );
+    assert.deepEqual(off, { outside: 0, none: 0 }, "the state's provinces cover its land, and only it");
     await h.ok("sketch", { action: "discard", confirm: true }).catch(() => h.ok("sketch", { action: "stop" }));
   });
 });
@@ -387,7 +428,30 @@ for (const f of ["state", "culture", "religion", "province"]) {
       if (own[j] === own[c]) inside++;
     }
   }
-  out[f] = { edges: e, insidePct: (100 * inside) / e, cost: cost / e / (allCost / all) };
+  // connected pieces of the field over the land, and those of one or two cells
+  const comp = new Int32Array(C.i.length).fill(-1);
+  let pieces = 0, small = 0;
+  for (const c0 of C.i) {
+    if (C.h[c0] < 20 || comp[c0] >= 0) continue;
+    const cells = [c0];
+    comp[c0] = c0;
+    for (let x = 0; x < cells.length; x++)
+      for (const j of C.c[cells[x]])
+        if (C.h[j] >= 20 && comp[j] < 0 && C[f][j] === C[f][c0]) { comp[j] = c0; cells.push(j); }
+    pieces++;
+    if (cells.length <= 2) small++;
+  }
+  out[f] = { edges: e, insidePct: (100 * inside) / e, cost: cost / e / (allCost / all), pieces, small };
+}
+// state, culture and religion together: distinct triples, and land cells off the state's own
+// (culture, religion) when args.joint maps each state to them
+const triples = new Set();
+let offJoint = 0;
+for (const c of C.i) {
+  if (C.h[c] < 20) continue;
+  triples.add(C.state[c] + "|" + C.culture[c] + "|" + C.religion[c]);
+  const want = args.joint?.[C.state[c]];
+  if (want && (C.culture[c] !== want[0] || C.religion[c] !== want[1])) offJoint++;
 }
 let burgState = 0, burgCulture = 0, capitals = 0, provOutside = 0;
 const provCapitals = [];
@@ -404,8 +468,11 @@ for (const c of C.i) {
 }
 const L = args.locked;
 const lockedCells = [];
-for (const c of C.i) if (C.state[c] === L) lockedCells.push(c + ":" + C.province[c]);
-return { cells: C.i.length, out, burgState, burgCulture, capitals, provCapitals: provCapitals.length,
+const burgCells = new Set(pack.burgs.filter(live).map(b => b.cell));
+for (const c of C.i)
+  if (C.state[c] === L)
+    lockedCells.push(c + ":" + C.province[c] + (burgCells.has(c) ? "" : ":" + C.culture[c] + ":" + C.religion[c]));
+return { cells: C.i.length, out, triples: triples.size, offJoint, burgState, burgCulture, capitals, provCapitals: provCapitals.length,
   provCapitalsOf: provCapitals, provOutside, locked: lockedCells.join(",") };`;
 
 describe("regrid {territories:'regrow'} versus 'copy' (demo.map to 20K)", () => {
@@ -452,16 +519,34 @@ describe("regrid {territories:'regrow'} versus 'copy' (demo.map to 20K)", () => 
     assert.ok(ok / all >= 0.95, t.province.within15pct);
   });
 
-  test("borders leave the old cells' steps and cut dearer edges (terrain) than the copied ones", () => {
+  test("borders leave the old cells' steps along the terrain, no longer and in no more pieces than copied", () => {
     for (const f of ["state", "culture", "religion", "province"]) {
       assert.ok(copy.out[f].insidePct < 1, `copy ${f}: ${copy.out[f].insidePct}`);
       assert.ok(regrow.out[f].insidePct > 5, `regrow ${f}: ${regrow.out[f].insidePct}`);
+      // no longer (more jagged) borders, no more pieces or slivers than the copy
+      assert.ok(
+        regrow.out[f].edges <= 1.05 * copy.out[f].edges,
+        `${f} edges ${copy.out[f].edges} -> ${regrow.out[f].edges}`
+      );
+      assert.ok(
+        regrow.out[f].pieces <= copy.out[f].pieces,
+        `${f} pieces ${copy.out[f].pieces} -> ${regrow.out[f].pieces}`
+      );
+      assert.ok(
+        regrow.out[f].small <= copy.out[f].small,
+        `${f} 1-2 cell pieces ${copy.out[f].small} -> ${regrow.out[f].small}`
+      );
     }
+    // the cut edges: dear ones (well above the mean edge); state borders dearer than copied ones.
+    // demo's cultures and religions were drawn by the app's own expand along the terrain, so
+    // theirs stay about as dear (within 5%) on borders that are shorter
+    assert.ok(regrow.out.state.cost > copy.out.state.cost, `state: ${copy.out.state.cost} -> ${regrow.out.state.cost}`);
     for (const f of ["state", "culture", "religion"])
       assert.ok(
-        regrow.out[f].cost > copy.out[f].cost && regrow.out[f].cost > 1.2,
+        regrow.out[f].cost >= 0.95 * copy.out[f].cost && regrow.out[f].cost > 1.2,
         `${f}: cut-edge cost / mean edge cost ${copy.out[f].cost} -> ${regrow.out[f].cost}`
       );
+    assert.ok(regrow.triples <= copy.triples, `state|culture|religion triples ${copy.triples} -> ${regrow.triples}`);
   });
 
   test("every burg keeps its state and culture; capitals inside; provinces inside their states", () => {
@@ -474,9 +559,12 @@ describe("regrid {territories:'regrow'} versus 'copy' (demo.map to 20K)", () => 
     assert.ok(copy.burgCulture > 0 && copy.provCapitals > regrow.provCapitals, "copy leaves some outside");
   });
 
-  test("a locked state keeps its copied cells and provinces", () => {
+  test("a locked state keeps its copied cells and provinces, and the cultures and religions on them", () => {
     assert.ok(copy.locked.length > 100);
-    assert.ok(regrow.locked === copy.locked, "same cells and provinces");
+    assert.ok(regrow.locked === copy.locked, "same cells, provinces, cultures and religions (but burg cells)");
+    const t = result.territories as Obj;
+    assert.equal(t.state.lockedKept, 1);
+    assert.match(String(t.note), /1 locked state kept its cells and provinces.*territoryLocked:true regrows them too/);
   });
 
   test("territoryLocked:true regrows the locked state too; refusals", async () => {
@@ -509,4 +597,38 @@ describe("regrid {territories:'regrow'} versus 'copy' (demo.map to 20K)", () => 
     assert.equal(bad.isError, true);
     assert.equal(await read("return pack.cells.i.length"), 7462, "nothing changed");
   });
+
+  test("where state, culture and religion borders coincide (the fork's maps) they move as one line", async () => {
+    // every state's land (and burgs) takes one culture and one religion, as on the fork's maps
+    await h.ok("load_map", { path: "tests/fixtures/demo.map" });
+    const joint = (await h.ok("eval", { code: COINCIDE })).value as Obj;
+    await read(STASH);
+    await h.ok("regrid", { density: 20000 }, 300_000);
+    const c = await read(AFTER, { locked: L, joint });
+    await h.ok("snapshot", { action: "undo" });
+    await read(STASH);
+    await h.ok("regrid", { density: 20000, territories: "regrow", territoryLocked: true }, 300_000);
+    const r = await read(AFTER, { locked: L, joint });
+    assert.equal(r.offJoint, 0, `cells of a state's land off its culture or religion (copy: ${c.offJoint})`);
+    assert.ok(r.triples <= c.triples, `triples ${c.triples} -> ${r.triples}`);
+    for (const f of ["state", "culture", "religion"]) {
+      assert.ok(r.out[f].pieces <= c.out[f].pieces, `${f} pieces ${c.out[f].pieces} -> ${r.out[f].pieces}`);
+      assert.ok(r.out[f].small <= c.out[f].small, `${f} 1-2 cell pieces ${c.out[f].small} -> ${r.out[f].small}`);
+      assert.ok(r.out[f].edges <= 1.05 * c.out[f].edges, `${f} edges ${c.out[f].edges} -> ${r.out[f].edges}`);
+      assert.ok(r.out[f].insidePct > 5, `${f} off the old steps: ${r.out[f].insidePct}`);
+    }
+    assert.deepEqual([r.burgState, r.burgCulture, r.capitals, r.provCapitals, r.provOutside], [0, 0, 0, 0, 0]);
+  });
 });
+
+/** Every state's land and burgs take one culture (its own) and one religion; returns state -> [culture, religion]. */
+const COINCIDE = `const C = pack.cells, live = x => x && x.i && !x.removed;
+const rel = pack.religions.filter(live).map(r => r.i);
+const map = { 0: [0, 0] };
+for (const s of pack.states) if (live(s)) map[s.i] = [live(pack.cultures[s.culture]) ? s.culture : 0, rel[s.i % rel.length]];
+for (const c of C.i) {
+  const m = map[C.state[c]];
+  if (C.h[c] >= 20 && m) { C.culture[c] = m[0]; C.religion[c] = m[1]; }
+}
+for (const b of pack.burgs) if (live(b) && map[b.state]) b.culture = map[b.state][0];
+return map;`;

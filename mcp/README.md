@@ -122,8 +122,9 @@ What the newer tools and fields replaced (all one undo entry each, all dryRun-ab
   lowered, never below 20), and biomes re-derived from the climate (custom and painted ones
   carried) with one-biome speckles under `minRegion` cells (default 3) merged into their
   neighbour, through the same clean-up as regenerate biomes' minRegion; `territories:'regrow'`
-  regrows cultures, religions, states and provinces along the terrain instead of copying the
-  old cells' steps (burgs keep their state and culture). App hook: `Resample.process({keepId})`.
+  regrows states, cultures and religions together (one label per triple, each piece to its
+  copied area) and then provinces along the terrain instead of copying the old cells' steps
+  (burgs keep their state and culture; locked states keep their land unless territoryLocked). App hook: `Resample.process({keepId})`.
 - `apply` (declarative spec, `mode:'check'|'upsert'|'update'`, idempotent; its `paint` list
   paints territory, biomes and heights in order, later entries winning, each entry only its
   differing cells, logged as replayable paint_cells steps; it creates provinces around their
