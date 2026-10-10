@@ -252,7 +252,7 @@ const SelectShape = {
     })
     .optional()
     .describe(
-      "Filter (every key must hold); alone it scans every cell. Conditions: all/any/not combine where objects; height, flux, precipitation, temperature, x, y, slope, riverDist, aboveRiver and noise take ranges {gte, lte, gt, lt}, e.g. {all:[{height:{lte:35}}, {riverDist:{lte:2, minFlux:300}}, {slope:{lte:3}}]}. An unknown key is BAD_FIELD (never ignored)"
+      "Filter (every key must hold); alone it scans every cell. Conditions: all/any/not combine where objects (at most 32 deep); height, flux, precipitation, temperature, x, y, slope, riverDist, aboveRiver, rainShadow and noise take ranges {gte, lte, gt, lt}, e.g. {all:[{height:{lte:35}}, {riverDist:{lte:2, minFlux:300}}, {slope:{lte:3}}]}. An unknown key is BAD_FIELD (never ignored)"
     )
 };
 

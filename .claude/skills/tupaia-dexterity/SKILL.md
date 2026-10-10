@@ -293,12 +293,19 @@ replayable (literal cells). Floodplain (rivers `R` = the main river and its big 
 feather:{width:4, unit:'cells', seed:11}}` (on polish-final this matched the fork's hand-made
 floodplain at Jaccard 0.72 before feathering, 0.70 painted). A contour band (Badlands):
 `where:{height:{gte:45, lte:53}, noise:{scale:60, seed:31, gte:0.3}}` with `circle` to bound it.
-Rain-shadow desert: `regenerate {parts:['biomes'], biomes:{rainShadow:{ridge:74, maxDistance:336,
-unit:'px', strength:3}, smoothClimate:{precipitation:2, temperature:2}, smooth:1, keepPainted:
-false, select:{where:{height:{lte:58}, biome:['Hot desert','Savanna','Grassland']}}}, dryRun:true}`
-(read `details.biomes.rainShadow`, then apply). It derives biomes with the app's matrix, so it
-will not reproduce a hand-tuned classifier cell for cell (the fork's open-eval made cool dry land
-Grassland). Tests: `mcp/test/condpaint.test.ts`.
+Rain-shadow desert, the call measured against the fork's open-eval on polish-final (`S` = the
+fork's scope: `{height:{gte:20, lte:58}}` and `{any:[{biome:['Hot desert','Savanna','Grassland',
+'Tropical seasonal forest','Cold desert']}, {biome:'Wetland', x:{gte:1440}, y:{lte:920}}]}`):
+`paint_cells {select:{where:{all:[...S, {temperature:{gte:18.5, smooth:150}}, {precipitation:
+{lt:0.6, smooth:150, rainShadow:{ridge:74, maxDistance:336, unit:'px', wind:0, spread:30,
+strength:2}}}]}}, set:{biome:'Hot desert'}}`. It matches the fork's classifier without its noise
+at Jaccard 0.65 and the fork's noisy result at 0.22; the fork's own classifier without its noise
+reaches only 0.175 against that result, so the remaining gap is the fork's ±140 px warp noise.
+Precipitation is the raw `grid.cells.prec` (cell info shows x100 mm). `where.rainShadow:{gte:0.5,
+...}` selects the lee itself. `regenerate {parts:['biomes'], biomes:{rainShadow, smoothClimate,
+select, keepPainted:false}}` re-derives with the app's biome matrix instead (Jaccard 0.14 here: the
+fork classified by its own thresholds); `keepPainted` defaults to true, which on a hand-painted
+map keeps most cells, so pass false. Tests: `mcp/test/condpaint.test.ts`.
 
 **Propose a change as a sketch.** See section 10; the replay table there says which calls keep
 the sketch rebasable.

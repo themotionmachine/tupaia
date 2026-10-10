@@ -102,15 +102,19 @@ What the newer tools and fields replaced (all one undo entry each, all dryRun-ab
   {parts:['biomes'], biomes:{noise, smooth, minRegion, seed, keepPainted, rainShadow,
   smoothClimate, ...}}`. App fix: the biome line's 4th field keeps icon density, icons and cost
   through save/load. `rainShadow` walks upwind from each land cell (the map's winds per latitude
-  tier, or a fixed `wind`) and cuts its precipitation by the ridge height crossed;
+  tier, by grid row exactly as generatePrecipitation, or a fixed `wind`; `spread` fans the look
+  over ±degrees) and cuts its precipitation by the ridge height crossed;
   `smoothClimate` averages the precipitation/temperature inputs; both only feed the biome
   derivation (grid climate untouched) and the op still logs literal biome cells.
 - Paint by condition: every select's `where` (src/where.ts schema, src/bridge-ext/where.js) takes
   ranges `{gte, lte, gt, lt}` on height, flux, precipitation, temperature, x, y, slope (max or
   mean neighbour difference), riverDist (graph steps to river cells; `rivers`, `tributaries`,
   `minFlux` pick the sources), aboveRiver (height above that river cell) and seeded noise, and
-  `all`/`any`/`not` over where objects. A compiled predicate tree, never an evaluated string;
-  unknown keys are BAD_FIELD. paint_cells logs the literal cells, so it replays as before.
+  `all`/`any`/`not` over where objects (at most 32 deep, else BAD_ARGS). precipitation and
+  temperature take `smooth` passes, precipitation a `rainShadow` (the value regenerate would
+  read), and `rainShadow` selects on the shadow's cut 0..1. A compiled predicate tree, never an
+  evaluated string; unknown keys are BAD_FIELD. apply's paint entries intersect an entry `where`
+  with the select's where when they share a key. paint_cells logs the literal cells, so it replays as before.
 - `regenerate {parts:['provinces','emblems'], provinces:{states, centres|count}, emblems:{...}}`
   for named states only (hand-made states too).
 - `regenerate {parts:['relief'], relief:{density|matchIcons, perBiome, exclude, nearBurgs,

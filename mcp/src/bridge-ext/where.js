@@ -16,6 +16,12 @@
 //                                                    nearest river cell (river cells are 0)
 //   aboveRiver {same options, ...range}              height above that nearest river cell
 //   noise {scale, seed?, octaves?, ...range}         seeded value noise 0..1 (feature size scale px)
+//   precipitation {smooth?, rainShadow?, ...range}    the precipitation regenerate biomes would read
+//                                                    with the same rainShadow / smoothClimate options
+//   temperature {smooth?, ...range}                  likewise smoothed
+//   rainShadow {strength?, maxDistance?, unit?, ridge?, wind?, ...range}   the shadow's cut 0..1
+//                                                    (share of precipitation the lee cell loses)
+// Combinators nest at most MAX_DEPTH deep (a deeper where is BAD_ARGS, not a stack overflow).
 // Nothing is evaluated from strings: every key and bound is checked, unknown ones are BAD_FIELD.
 (root => {
   const T = root.__tupaia;
@@ -52,6 +58,12 @@
       (lt === undefined || x < lt);
   }
 
+  function biomesKit() {
+    const B = T.biomes;
+    if (!B?.shadowCuts) fail("UNAVAILABLE", "climate conditions need the biomes bridge extension");
+    return B;
+  }
+
   /** A value per cell computed on first use (one compile = one where tree = one map state). */
   function lazy(make) {
     let arr = null;
@@ -63,11 +75,28 @@
 
   // ---------------------------------------------------------------- combinators
 
+  const MAX_DEPTH = 32;
+  let depth = 0; // compiling is synchronous, so one counter tracks the nesting of the tree being compiled
+
+  /** Compile a nested where one level deeper (BAD_ARGS past MAX_DEPTH). */
+  function nested(compile, w) {
+    if (depth >= MAX_DEPTH) {
+      depth = 0;
+      fail("BAD_ARGS", `where nests all/any/not at most ${MAX_DEPTH} deep`);
+    }
+    depth++;
+    try {
+      return compile(w);
+    } finally {
+      depth = Math.max(0, depth - 1);
+    }
+  }
+
   function list(name, v, compile) {
     if (!Array.isArray(v) || !v.length) fail("BAD_ARGS", `where.${name} is a non-empty list of where objects`);
     return v.map((w, k) => {
       if (!isObj(w)) fail("BAD_ARGS", `where.${name}[${k}] is a where object`);
-      return compile(w);
+      return nested(compile, w);
     });
   }
   EXT.all = (v, compile) => {
@@ -80,7 +109,7 @@
   };
   EXT.not = (v, compile) => {
     if (!isObj(v)) fail("BAD_ARGS", "where.not is a where object");
-    const t = compile(v);
+    const t = nested(compile, v);
     return c => !t(c);
   };
 
@@ -96,19 +125,47 @@
     const F = pack.cells.fl;
     return c => ok(F ? F[c] || 0 : 0);
   };
-  // the grid's climate, as Biomes.define reads it (precipitation in the app's own units: the cell
-  // info shows them as mm; temperature in degrees Celsius)
-  EXT.precipitation = v => {
-    const ok = rangeTest("precipitation", v);
+  // the grid's climate, as Biomes.define reads it: precipitation is the raw grid.cells.prec value
+  // (the cell info shows it x 100 as mm: 12 there reads "1200 mm"), temperature in degrees Celsius.
+  // smooth (passes of a land-neighbour mean) and rainShadow (precipitation only) give the inputs
+  // regenerate biomes would read with smoothClimate / rainShadow.
+  function passes(name, v) {
+    if (v === undefined) return 0;
+    if (!Number.isInteger(v) || v < 0 || v > 200)
+      fail("BAD_ARGS", `where.${name}.smooth is a number of passes (integer 0..200)`);
+    return v;
+  }
+  function climateField(name, v, key) {
+    const smooth = passes(name, v.smooth);
+    const rs = key === "prec" ? biomesKit().shadowOptions(v.rainShadow, `where.${name}.rainShadow`) : null;
     const G = pack.cells.g;
-    const P = grid.cells.prec;
-    return c => ok(P ? P[G[c]] || 0 : 0);
+    const src = key === "prec" ? grid.cells.prec : grid.cells.temp;
+    if (!smooth && !rs) return c => (src ? src[G[c]] || 0 : 0);
+    return lazy(() => {
+      const o = key === "prec" ? { rainShadow: rs, smoothPrec: smooth } : { smoothTemp: smooth };
+      return biomesKit().adjustedClimate(o)[key];
+    });
+  }
+  EXT.precipitation = v => {
+    const ok = rangeTest("precipitation", v, ["smooth", "rainShadow"]);
+    const at = climateField("precipitation", v, "prec");
+    return c => ok(at(c));
   };
   EXT.temperature = v => {
-    const ok = rangeTest("temperature", v);
-    const G = pack.cells.g;
-    const TT = grid.cells.temp;
-    return c => ok(TT ? TT[G[c]] : 0);
+    const ok = rangeTest("temperature", v, ["smooth"]);
+    const at = climateField("temperature", v, "temp");
+    return c => ok(at(c));
+  };
+
+  // the rain shadow's cut 0..1 (the share of precipitation a lee cell loses; 0 off the shadow)
+  const SHADOW_KEYS = ["strength", "maxDistance", "unit", "ridge", "wind", "spread"];
+  EXT.rainShadow = v => {
+    const ok = rangeTest("rainShadow", v, SHADOW_KEYS);
+    const opts = {};
+    for (const k of SHADOW_KEYS) if (v[k] !== undefined) opts[k] = v[k];
+    const rs = biomesKit().shadowOptions(opts, "where.rainShadow");
+    const at = lazy(() => biomesKit().shadowCuts(rs).cuts);
+    return c => ok(at(c));
   };
 
   // the cell centre in map px (a half-plane or band: "north of y 500" is y:{lt:500})

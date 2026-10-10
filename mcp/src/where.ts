@@ -19,6 +19,43 @@ const RiverOpts = {
   minFlux: z.number().min(0).optional().describe("Only river cells with at least this flux count")
 };
 
+/** Rain-shadow options, shared by regenerate biomes.rainShadow and the where keys. */
+export const RainShadowShape = {
+  strength: z
+    .number()
+    .min(0)
+    .max(5)
+    .optional()
+    .describe("0..5, default 1: a lee cell loses strength * crossed / 50 of its precipitation (capped at all)"),
+  maxDistance: z.number().positive().max(20000).optional().describe("How far upwind to look (default 15)"),
+  unit: z.enum(["cells", "px"]).optional().describe("maxDistance unit: cells (default, grid spacing) or px"),
+  ridge: z
+    .number()
+    .min(20)
+    .max(100)
+    .optional()
+    .describe("Only ground at least this high blocks the wind (default 50: hills and mountains)"),
+  wind: z
+    .number()
+    .min(0)
+    .max(360)
+    .optional()
+    .describe(
+      "Direction the wind blows towards in degrees (90 = from the west, 0 = from the south); default: the map's winds setting of each cell's latitude tier"
+    ),
+  spread: z
+    .number()
+    .min(0)
+    .max(60)
+    .optional()
+    .describe("Look along a fan of rays within ±spread degrees of upwind (default 0: one ray), so the shadow widens")
+};
+export const RainShadowOption = z.union([z.boolean(), z.strictObject(RainShadowShape)]);
+
+// a pass averages a cell with its land neighbours: n passes blur over about 6 * sqrt(n) px on a
+// 10 px cell spacing (150 passes ~ 75 px)
+const smoothPasses = z.number().int().min(0).max(200).optional();
+
 const whereList = z.array(z.record(z.string(), z.unknown())).min(1);
 
 /** Keys spread into SelectSchema's where (tools/edit.ts). */
@@ -28,8 +65,28 @@ export const WhereConditions = {
   not: z.record(z.string(), z.unknown()).optional().describe("The where object does not hold"),
   height: range("Cell height 0..100 (20 = sea level)"),
   flux: range("Water flux through the cell (river cells: hundreds to thousands)"),
-  precipitation: range("The cell's precipitation in the app's units (as Biomes reads it; the cell info shows mm)"),
-  temperature: range("The cell's temperature in °C"),
+  precipitation: z
+    .looseObject({
+      ...RangeShape,
+      smooth: smoothPasses.describe("Passes of a land-neighbour mean first (as regenerate smoothClimate)"),
+      rainShadow: RainShadowOption.optional().describe(
+        "Apply the rain shadow first (same options as regenerate biomes.rainShadow): the precipitation regenerate would read"
+      )
+    })
+    .optional()
+    .describe(
+      "The cell's raw grid precipitation (grid.cells.prec, as Biomes reads it; the cell info shows it x 100 as mm, so 1200 mm there is 12): range + smooth, rainShadow"
+    ),
+  temperature: z
+    .looseObject({ ...RangeShape, smooth: smoothPasses.describe("Passes of a land-neighbour mean first") })
+    .optional()
+    .describe("The cell's temperature in °C: range + smooth"),
+  rainShadow: z
+    .looseObject({ ...RangeShape, ...RainShadowShape })
+    .optional()
+    .describe(
+      "The rain shadow's cut 0..1 (share of precipitation a lee cell loses; 0 outside the shadow), e.g. {gte:0.5, ridge:70, maxDistance:300, unit:'px'}: range + the rainShadow options"
+    ),
   x: range("The cell centre's x in map px"),
   y: range("The cell centre's y in map px (north is up: y:{lt:500} is the north)"),
   slope: z

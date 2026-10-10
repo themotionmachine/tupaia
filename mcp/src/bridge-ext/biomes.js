@@ -467,24 +467,29 @@
   // inputs before the biomes are derived (grid.cells.prec and temp are never written, so the
   // precipitation layer and later recalculations are unchanged; the op logs literal biome cells)
 
-  /** The prevailing wind (degrees, the direction it blows towards, as options.winds) at map y. */
-  function windAt(y, fixed) {
+  /**
+   * The prevailing wind (degrees, the direction it blows towards, as options.winds) of pack cell
+   * i: the wind of its latitude tier, computed from its grid row exactly as generatePrecipitation
+   * does (lat = latN - row / cellsY * latT; tier = |lat - 89| / 30).
+   */
+  function windAt(i, fixed) {
     if (fixed !== undefined) return fixed;
     const mc = typeof mapCoordinates !== "undefined" ? mapCoordinates : null;
     const winds = typeof options !== "undefined" && Array.isArray(options.winds) ? options.winds : null;
     if (!mc || !winds) return 90;
-    const lat = mc.latN - (y / graphHeight) * mc.latT;
-    const tier = Math.min(5, Math.max(0, (Math.abs(lat - 89) / 30) | 0)); // as generatePrecipitation
+    const row = Math.floor(pack.cells.g[i] / grid.cellsX);
+    const lat = mc.latN - (row / grid.cellsY) * mc.latT;
+    const tier = Math.min(5, Math.max(0, (Math.abs(lat - 89) / 30) | 0));
     return Number(winds[tier]) || 0;
   }
 
   /**
-   * Rain shadow, in place on `precP` (precipitation per pack cell): from each land cell walk
-   * upwind (the wind of its latitude tier) up to maxPx; the highest ridge on the way (heights >=
-   * ridge) above the cell, fading linearly with distance, is the height crossed, and the cell
-   * loses strength * crossed / 50 of its precipitation (capped at all of it).
+   * Rain shadow per pack cell: from each land cell walk upwind (the wind of its latitude tier, or
+   * rs.wind) up to maxPx; the highest ridge on the way (heights >= ridge) above the cell, fading
+   * linearly with distance, is the height crossed, and the cut (the share of its precipitation
+   * the cell loses) is strength * crossed / 50, capped at 1. Returns the cuts and a report.
    */
-  function applyRainShadow(precP, rs) {
+  function shadowCuts(rs) {
     const C = pack.cells;
     const { h, p: P, g } = C;
     const n = C.i.length;
@@ -494,6 +499,8 @@
     for (let i = 0; i < n; i++) if (h[i] > hr[g[i]]) hr[g[i]] = h[i];
     const stepPx = spacing * 0.75;
     const steps = Math.max(1, Math.ceil(rs.maxPx / stepPx));
+    const fan = rs.spread ? [-1, -0.5, 0, 0.5, 1].map(f => f * rs.spread) : [0];
+    const cuts = new Float64Array(n);
     let shadowed = 0;
     let strong = 0;
     let total = 0;
@@ -501,38 +508,53 @@
     for (let i = 0; i < n; i++) {
       if (h[i] < 20) continue;
       const [x0, y0] = P[i];
-      const ang = windAt(y0, rs.wind);
+      const ang = windAt(i, rs.wind);
       tiers.add(ang);
-      const rad = (ang * Math.PI) / 180;
-      const ux = -Math.sin(rad); // upwind: against the direction the wind blows towards
-      const uy = Math.cos(rad);
       let crossed = 0;
-      for (let k = 1; k <= steps; k++) {
-        const d = k * stepPx;
-        if (d > rs.maxPx) break;
-        const x = x0 + ux * d;
-        const y = y0 + uy * d;
-        if (x < 0 || y < 0 || x >= graphWidth || y >= graphHeight) break;
-        const gx = Math.min(cellsX - 1, Math.floor(x / spacing));
-        const gy = Math.min(cellsY - 1, Math.floor(y / spacing));
-        const hs = hr[gy * cellsX + gx];
-        if (hs < rs.ridge || hs <= h[i]) continue;
-        const c = (hs - h[i]) * (1 - d / rs.maxPx);
-        if (c > crossed) crossed = c;
+      // one ray straight upwind, or with spread a fan of rays within ±spread degrees of it
+      for (const off of fan) {
+        const rad = ((ang + off) * Math.PI) / 180;
+        const ux = -Math.sin(rad); // upwind: against the direction the wind blows towards
+        const uy = Math.cos(rad);
+        for (let k = 1; k <= steps; k++) {
+          const d = k * stepPx;
+          if (d > rs.maxPx) break;
+          const x = x0 + ux * d;
+          const y = y0 + uy * d;
+          if (x < 0 || y < 0 || x >= graphWidth || y >= graphHeight) break;
+          const gx = Math.min(cellsX - 1, Math.floor(x / spacing));
+          const gy = Math.min(cellsY - 1, Math.floor(y / spacing));
+          const hs = hr[gy * cellsX + gx];
+          if (hs < rs.ridge || hs <= h[i]) continue;
+          const c = (hs - h[i]) * (1 - d / rs.maxPx);
+          if (c > crossed) crossed = c;
+        }
       }
       const cut = Math.min(1, (rs.strength * crossed) / 50);
       if (cut <= 0) continue;
-      precP[i] *= 1 - cut;
+      cuts[i] = cut;
       shadowed++;
       if (cut >= 0.5) strong++;
       total += cut;
     }
     return {
-      wind: rs.wind !== undefined ? rs.wind : [...tiers].sort((a, b) => a - b),
-      shadowed,
-      halved: strong,
-      meanCut: shadowed ? rn(total / shadowed, 2) : 0
+      cuts,
+      report: {
+        // always a list: the fixed wind, or the winds of the map's latitude tiers the land lies in
+        wind: rs.wind !== undefined ? [rs.wind] : [...tiers].sort((a, b) => a - b),
+        windFrom: rs.wind !== undefined ? "fixed" : "map",
+        shadowed,
+        halved: strong,
+        meanCut: shadowed ? rn(total / shadowed, 2) : 0
+      }
     };
+  }
+
+  /** Rain shadow, in place on `precP` (precipitation per pack cell); returns the report. */
+  function applyRainShadow(precP, rs) {
+    const { cuts, report } = shadowCuts(rs);
+    for (let i = 0; i < precP.length; i++) if (cuts[i] > 0) precP[i] *= 1 - cuts[i];
+    return report;
   }
 
   /** Passes of a land-neighbour mean, in place on a per-pack-cell array. */
@@ -571,25 +593,27 @@
     return { prec: precP, temp: tempP, report };
   }
 
-  const SHADOW_KEYS = ["strength", "maxDistance", "unit", "ridge", "wind"];
+  const SHADOW_KEYS = ["strength", "maxDistance", "unit", "ridge", "wind", "spread"];
 
-  function shadowOptions(v) {
+  function shadowOptions(v, name = "rainShadow") {
     if (v === undefined || v === null || v === false) return null;
     const rs = v === true ? {} : v;
-    if (!isObj(rs)) fail("BAD_ARGS", "rainShadow is true or {strength?, maxDistance?, unit?, ridge?, wind?}");
+    if (!isObj(rs))
+      fail("BAD_ARGS", `${name} is true, false or {strength?, maxDistance?, unit?, ridge?, wind?, spread?}`);
     for (const k of Object.keys(rs))
       if (!SHADOW_KEYS.includes(k))
-        fail("BAD_FIELD", `rainShadow does not take '${k}'; allowed: ${SHADOW_KEYS.join(", ")}`, {
+        fail("BAD_FIELD", `${name} does not take '${k}'; allowed: ${SHADOW_KEYS.join(", ")}`, {
           details: { unknown: k, allowed: SHADOW_KEYS }
         });
     const unit = rs.unit ?? "cells";
-    if (!["px", "cells"].includes(unit)) fail("BAD_ARGS", "rainShadow.unit is 'cells' (default) or 'px'");
-    const strength = rs.strength === undefined ? 1 : num("rainShadow.strength", 0, 5)(rs.strength);
-    const dist = rs.maxDistance === undefined ? 15 : num("rainShadow.maxDistance", 0.1, 20000)(rs.maxDistance);
-    const ridge = rs.ridge === undefined ? 50 : num("rainShadow.ridge", 20, 100)(rs.ridge);
-    const wind = rs.wind === undefined ? undefined : num("rainShadow.wind", 0, 360)(rs.wind);
+    if (!["px", "cells"].includes(unit)) fail("BAD_ARGS", `${name}.unit is 'cells' (default) or 'px'`);
+    const strength = rs.strength === undefined ? 1 : num(`${name}.strength`, 0, 5)(rs.strength);
+    const dist = rs.maxDistance === undefined ? 15 : num(`${name}.maxDistance`, 0.1, 20000)(rs.maxDistance);
+    const ridge = rs.ridge === undefined ? 50 : num(`${name}.ridge`, 20, 100)(rs.ridge);
+    const wind = rs.wind === undefined ? undefined : num(`${name}.wind`, 0, 360)(rs.wind);
+    const spread = rs.spread === undefined ? 0 : num(`${name}.spread`, 0, 60)(rs.spread);
     const maxPx = unit === "cells" ? dist * grid.spacing : dist;
-    return { strength, maxDistance: dist, unit, maxPx, ridge, wind };
+    return { strength, maxDistance: dist, unit, maxPx, ridge, wind, spread };
   }
 
   function smoothClimateOptions(v) {
@@ -602,8 +626,8 @@
         });
     const passes = k => {
       if (v[k] === undefined) return 0;
-      const x = num(`smoothClimate.${k}`, 0, 10)(v[k]);
-      if (!Number.isInteger(x)) fail("BAD_ARGS", `smoothClimate.${k} is a number of passes (integer 0..10)`);
+      const x = num(`smoothClimate.${k}`, 0, 200)(v[k]);
+      if (!Number.isInteger(x)) fail("BAD_ARGS", `smoothClimate.${k} is a number of passes (integer 0..200)`);
       return x;
     };
     return { smoothPrec: passes("precipitation"), smoothTemp: passes("temperature") };
@@ -836,6 +860,7 @@
               maxDistance: o.rainShadow.maxDistance,
               unit: o.rainShadow.unit,
               ridge: o.rainShadow.ridge,
+              ...(o.rainShadow.spread ? { spread: o.rainShadow.spread } : {}),
               ...r.climate.rainShadow
             }
           }
@@ -1058,5 +1083,18 @@
     return res;
   };
 
-  T.biomes = { seedOf, hash01, valueNoise, fbm, iconWeights, RELIEF_ICONS, mergeSmallRegions };
+  T.biomes = {
+    seedOf,
+    hash01,
+    valueNoise,
+    fbm,
+    iconWeights,
+    RELIEF_ICONS,
+    mergeSmallRegions,
+    // tupaia-mcp condpaint: where.js reads the same rain shadow and smoothing as regenerate biomes
+    shadowOptions,
+    shadowCuts,
+    windAt,
+    adjustedClimate
+  };
 })(globalThis);

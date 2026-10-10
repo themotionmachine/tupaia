@@ -108,6 +108,117 @@ describe("tupaia-mcp condpaint (local)", () => {
     assert.deepEqual(await cells({ where: { riverDist: { lte: 0 }, aboveRiver: { lte: 0, gte: 0 } } }), riverCells);
   });
 
+  test("riverDist == k for k = 2..4 matches an independent breadth-first search over land", async () => {
+    const bfs = `const dist = new Array(C.i.length).fill(Infinity); const q = [];
+for (let c = 0; c < C.i.length; c++) if (C.r[c] && C.h[c] >= 20) { dist[c] = 0; q.push(c); }
+for (let k = 0; k < q.length; k++) { const c = q[k]; if (C.h[c] < 20) continue; for (const j of C.c[c]) if (dist[j] === Infinity) { dist[j] = dist[c] + 1; q.push(j); } }`;
+    for (const k of [2, 3, 4]) {
+      const got = await cells({ where: { riverDist: { gte: k, lte: k } } });
+      assert.ok(got.length > 0, `cells at distance ${k}`);
+      assert.deepEqual(got, await expected(`dist[c] === ${k}`, bfs), `riverDist == ${k}`);
+    }
+  });
+
+  test("feather frays the condition's edge: painted cells outside lie within width/2 of it, unpainted ones inside within width/2 of its outside", async () => {
+    const where = { land: true, height: { gte: 20, lte: 30 }, not: { biome: "Wetland" } };
+    const inside = await cells({ where });
+    const before = (await h.ok("eval", { readOnly: true, code: "return Array.from(pack.cells.biome)" }))
+      .value as number[];
+    const width = 4; // cells
+    const r = await h.ok("paint_cells", {
+      select: { where },
+      set: { biome: "Wetland" },
+      feather: { width, unit: "cells", seed: 5 }
+    });
+    const f = r.feather as Obj;
+    assert.ok(f.addedOutside > 0 && f.droppedInside > 0, JSON.stringify(f));
+    const check = (
+      await h.ok("eval", {
+        readOnly: true,
+        args: { inside, before, width },
+        code: `const C = pack.cells, P = C.p, inS = new Set(args.inside);
+// the feather measures to the inside/outside boundary (midpoints); allow one cell spacing on top of width/2
+const reach = (args.width / 2 + 1) * grid.spacing;
+const inB = [], outB = [];
+for (let c = 0; c < C.i.length; c++) { if (C.h[c] < 20) continue;
+  if (inS.has(c) && C.c[c].some(j => !inS.has(j) && C.h[j] >= 20)) inB.push(c);
+  if (!inS.has(c) && C.c[c].some(j => inS.has(j))) outB.push(c); }
+const near = (c, B) => B.some(b => Math.hypot(P[b][0] - P[c][0], P[b][1] - P[c][1]) <= reach);
+let added = 0, dropped = 0, addedFar = 0, droppedFar = 0;
+for (let c = 0; c < C.i.length; c++) { if (C.h[c] < 20) continue;
+  const painted = C.biome[c] === 12 && args.before[c] !== 12;
+  if (painted && !inS.has(c)) { added++; if (!near(c, inB)) addedFar++; }
+  if (!painted && inS.has(c)) { dropped++; if (!near(c, outB)) droppedFar++; } }
+return { added, dropped, addedFar, droppedFar };`
+      })
+    ).value as Obj;
+    // addedOutside also counts band cells outside that were Wetland already (or water, never painted)
+    assert.ok(check.added > 0 && check.added <= f.addedOutside, JSON.stringify({ check, f }));
+    assert.equal(check.dropped, f.droppedInside, JSON.stringify({ check, f }));
+    assert.equal(check.addedFar, 0, "every cell painted outside the condition is near its edge");
+    assert.equal(check.droppedFar, 0, "every cell left unpainted inside the condition is near its edge");
+    await h.ok("snapshot", { action: "undo" });
+  });
+
+  test("nesting all/any/not deeper than 32 is BAD_ARGS (not a stack overflow); 32 deep works", async () => {
+    let deep: Obj = { height: { gte: 20 } };
+    for (let k = 0; k < 5000; k++) deep = { not: deep };
+    const r = await h.call("paint_cells", { select: { where: deep }, set: { biome: "Wetland" }, dryRun: true });
+    assert.equal(r.isError, true);
+    assert.equal(errorBody(r).error.code, "BAD_ARGS");
+    assert.match(errorBody(r).error.message, /32 deep/);
+    let ok: Obj = { height: { gte: 20 } };
+    for (let k = 0; k < 32; k++) ok = { not: ok };
+    // an even number of nots is the condition itself
+    assert.deepEqual(await cells({ where: ok }), await cells({ where: { height: { gte: 20 } } }));
+    // and the counter is reset after a refusal
+    assert.ok((await cells({ where: { all: [{ any: [{ height: { gte: 20 } }] }] } })).length > 0);
+  });
+
+  test("climate conditions: precipitation/temperature smooth, precipitation rainShadow and the rainShadow cut", async () => {
+    // an independent land-neighbour mean (as regenerate's smoothClimate) of the grid values per pack cell
+    const smoothed = (key: string, passes: number) =>
+      `const v = Float64Array.from(C.i, c => G.${key}[C.g[c]]);
+for (let p = 0; p < ${passes}; p++) { const prev = Float64Array.from(v); for (let c = 0; c < C.i.length; c++) { if (C.h[c] < 20) continue; let s = prev[c], k = 1; for (const j of C.c[c]) if (C.h[j] >= 20) { s += prev[j]; k++; } v[c] = s / k; } }`;
+    const sp = await cells({ where: { land: true, precipitation: { lt: 6, smooth: 5 } } });
+    assert.ok(sp.length > 0);
+    assert.deepEqual(sp, await expected("C.h[c] >= 20 && v[c] < 6", smoothed("prec", 5)));
+    const st = await cells({ where: { land: true, temperature: { gte: 10, smooth: 3 } } });
+    assert.ok(st.length > 0);
+    assert.deepEqual(st, await expected("C.h[c] >= 20 && v[c] >= 10", smoothed("temp", 3)));
+
+    // the rainShadow cut agrees with regenerate's report (shadowed: cut > 0, halved: cut >= 0.5)
+    const rs = { strength: 2, maxDistance: 20, ridge: 50, spread: 20 };
+    const dry = await h.ok("regenerate", {
+      parts: ["biomes"],
+      biomes: { keepPainted: false, rainShadow: rs },
+      dryRun: true
+    });
+    const rep = ((dry.details as Obj).biomes as Obj).rainShadow as Obj;
+    assert.equal(rep.spread, 20);
+    assert.equal((await cells({ where: { rainShadow: { gt: 0, ...rs } } })).length, rep.shadowed);
+    assert.equal((await cells({ where: { rainShadow: { gte: 0.5, ...rs } } })).length, rep.halved);
+    // a fan of rays shadows at least as much as one ray
+    const narrow = await cells({ where: { rainShadow: { gt: 0, ...rs, spread: 0 } } });
+    assert.ok(narrow.length < rep.shadowed, `${narrow.length} < ${rep.shadowed}`);
+    // precipitation with rainShadow is the grid's precipitation times (1 - cut)
+    const cutCells = (
+      await h.ok("eval", {
+        readOnly: true,
+        args: { rs },
+        code: `const B = __tupaia.biomes; const cuts = B.shadowCuts(B.shadowOptions(args.rs)).cuts; const C = pack.cells, G = grid.cells; const out = []; for (let c = 0; c < C.i.length; c++) if (C.h[c] >= 20 && G.prec[C.g[c]] * (1 - cuts[c]) < 3) out.push(c); return out;`
+      })
+    ).value as number[];
+    assert.deepEqual(await cells({ where: { land: true, precipitation: { lt: 3, rainShadow: rs } } }), cutCells);
+    assert.ok(cutCells.length > (await cells({ where: { land: true, precipitation: { lt: 3 } } })).length);
+    // bad options
+    const sel = (where: Obj) => ({ select: { where }, set: { biome: "Wetland" }, dryRun: true });
+    assert.equal(await code("paint_cells", sel({ precipitation: { lt: 3, smooth: 1.5 } })), "BAD_ARGS");
+    assert.equal(await code("paint_cells", sel({ precipitation: { lt: 3, rainShadow: { strenght: 1 } } })), "BAD_ARGS");
+    assert.equal(await code("paint_cells", sel({ temperature: { lt: 3, rainShadow: true } })), "BAD_FIELD");
+    assert.equal(await code("paint_cells", sel({ rainShadow: { gt: 0, spread: 90 } })), "BAD_ARGS");
+  });
+
   test("noise: seeded, deterministic, scale-sized blobs, value in 0..1", async () => {
     const a = await cells({ where: { noise: { scale: 150, seed: 7, gte: 0.5 } } });
     const b = await cells({ where: { noise: { scale: 150, seed: 7, gte: 0.5 } } });
@@ -163,7 +274,62 @@ describe("tupaia-mcp condpaint (local)", () => {
     assert.equal(await code("paint_cells", sel({ riverDist: { lte: 2, tributaries: true } })), "BAD_ARGS");
   });
 
-  test("conditions work in every select: regenerate biomes select, add zone select", async () => {
+  test("conditions work in every select: regenerate biomes select/exclude, relief exclude, add zone select", async () => {
+    const biomeArr = async () =>
+      (await h.ok("eval", { readOnly: true, code: "return Array.from(pack.cells.biome)" })).value as number[];
+    const before = await biomeArr();
+    const near = { land: true, riverDist: { lte: 3 } };
+    const nearSet = new Set(await cells({ where: near }));
+    // select: only cells of the condition change
+    const r1 = await h.ok("regenerate", {
+      parts: ["biomes"],
+      biomes: { keepPainted: false, noise: 0.6, select: { where: near } }
+    });
+    assert.ok(((r1.details as Obj).biomes as Obj).changed > 0, JSON.stringify((r1.details as Obj).biomes));
+    const a1 = await biomeArr();
+    const changed1 = a1.map((v, i) => (v !== before[i] ? i : -1)).filter(i => i >= 0);
+    assert.ok(
+      changed1.length > 0 && changed1.every(c => nearSet.has(c)),
+      "regenerate select: changes stay inside the condition"
+    );
+    await h.ok("snapshot", { action: "undo" });
+    // exclude: the condition's cells keep their biome
+    await h.ok("regenerate", {
+      parts: ["biomes"],
+      biomes: { keepPainted: false, noise: 0.6, exclude: { where: near } }
+    });
+    const a2 = await biomeArr();
+    const changed2 = a2.map((v, i) => (v !== before[i] ? i : -1)).filter(i => i >= 0);
+    assert.ok(
+      changed2.length > 0 && changed2.every(c => !nearSet.has(c)),
+      "regenerate exclude: the condition's cells keep their biome"
+    );
+    await h.ok("snapshot", { action: "undo" });
+    // relief exclude: no icon centre on a steep cell
+    const steep = { land: true, slope: { gte: 4 } };
+    const steepCells = await cells({ where: steep });
+    assert.ok(steepCells.length > 20);
+    await h.ok("display", { on: ["relief"] });
+    const ICONS = `return [...document.querySelectorAll("#terrain use")].map(u => { const s = +u.getAttribute("width"); const x = +u.getAttribute("x") + s / 2, y = +u.getAttribute("y") + s / 2;
+const c = findCell(x, y); if (d3.polygonContains(getPackPolygon(c), [x, y])) return c; return pack.cells.c[c].find(n => d3.polygonContains(getPackPolygon(n), [x, y])) ?? c; });`;
+    const steepSet = new Set(steepCells);
+    const onSteep = async () => {
+      const ic = (await h.ok("eval", { readOnly: true, code: ICONS })).value as number[];
+      return { all: ic.length, steep: ic.filter(c => steepSet.has(c)).length };
+    };
+    await h.ok("regenerate", { parts: ["relief"], relief: { seed: "cp" } });
+    const open = await onSteep();
+    await h.ok("snapshot", { action: "undo" });
+    await h.ok("regenerate", { parts: ["relief"], relief: { seed: "cp", exclude: { where: steep } } });
+    const shut = await onSteep();
+    await h.ok("snapshot", { action: "undo" });
+    // an icon is placed by cell but its drawn centre can fall just over a cell edge: allow 2%
+    assert.ok(open.steep > 20, JSON.stringify(open));
+    assert.ok(
+      shut.all > 0 && shut.steep <= Math.max(1, open.steep * 0.02),
+      `relief exclude: ${JSON.stringify({ open, shut })}`
+    );
+
     const z = await h.ok("add", {
       type: "zone",
       items: [
@@ -182,6 +348,40 @@ describe("tupaia-mcp condpaint (local)", () => {
       (await cells({ where: { land: true, riverDist: { lte: 1, minFlux: 500 }, slope: { lte: 3 } } })).length
     );
     await h.ok("snapshot", { action: "undo" });
+  });
+
+  test("apply paint: an entry's where intersects select.where (same keys, ranges and combinators never widen it)", async () => {
+    const want = await cells({ where: { height: { gte: 30, lte: 35 } } });
+    const wantAll = await cells({ where: { all: [{ height: { gte: 30 } }, { height: { lte: 35 } }] } });
+    assert.deepEqual(wantAll, want);
+    const painted = async (entry: Obj) => {
+      await h.ok("apply", { paint: [{ ...entry, set: { biome: "Wetland" } }] });
+      const v = (
+        await h.ok("eval", {
+          readOnly: true,
+          code: "const C = pack.cells; const o = []; for (let c = 0; c < C.i.length; c++) if (C.biome[c] === 12 && C.h[c] >= 30 && C.h[c] <= 35) o.push(c); const out = []; for (let c = 0; c < C.i.length; c++) if (C.biome[c] === 12 && (C.h[c] < 30 || C.h[c] > 35)) out.push(c); return {inRange: o.length, outside: out.length};"
+        })
+      ).value as Obj;
+      await h.ok("snapshot", { action: "undo" });
+      return v;
+    };
+    const wetBefore = (
+      await h.ok("eval", {
+        readOnly: true,
+        code: "const C = pack.cells; let n = 0; for (let c = 0; c < C.i.length; c++) if (C.biome[c] === 12 && (C.h[c] < 30 || C.h[c] > 35)) n++; return n;"
+      })
+    ).value as number;
+    for (const entry of [
+      { select: { where: { height: { gte: 30 } } }, where: { height: { lte: 35 } } },
+      { select: { where: { all: [{ height: { gte: 30 } }] } }, where: { all: [{ height: { lte: 35 } }] } }
+    ]) {
+      const v = await painted(entry);
+      assert.equal(v.outside, wetBefore, `nothing outside height 30..35 was painted: ${JSON.stringify(entry)}`);
+      assert.ok(v.inRange > 0);
+    }
+    // distinct keys still merge flat (the classic hMin + hMax)
+    const flat = await painted({ select: { where: { hMin: 30 } }, where: { hMax: 35 } });
+    assert.equal(flat.outside, wetBefore);
   });
 
   test("apply paint list: a nested condition that reads a painted key sees the earlier entry's paint", async () => {
@@ -226,12 +426,22 @@ describe("tupaia-mcp condpaint: rain shadow and climate smoothing (local)", () =
   test("rainShadow: winds from the map settings, deterministic, only lee cells dry, the grid's climate untouched", async () => {
     const climate = `{ let a = 0x811c9dc5; for (const v of grid.cells.prec) { a ^= v; a = Math.imul(a, 0x01000193); } for (const v of grid.cells.temp) { a ^= v & 255; a = Math.imul(a, 0x01000193); } return (a >>> 0).toString(36); }`;
     const climateBefore = (await h.ok("eval", { readOnly: true, code: climate })).value;
+    // the app's own tier formula (public/main.js generatePrecipitation): by grid row i of cellsY
+    const APP_TIER = `const tierOfRow = i => { const lat = mapCoordinates.latN - (i / grid.cellsY) * mapCoordinates.latT; return (Math.abs(lat - 89) / 30) | 0; };`;
     const winds = (
       await h.ok("eval", {
         readOnly: true,
-        code: `const tiers = new Set(); for (const p of pack.cells.p) { const lat = mapCoordinates.latN - (p[1] / graphHeight) * mapCoordinates.latT; tiers.add(options.winds[Math.min(5, (Math.abs(lat - 89) / 30) | 0)]); } return [...tiers].sort((a, b) => a - b);`
+        code: `${APP_TIER} const tiers = new Set(); const C = pack.cells; for (let c = 0; c < C.i.length; c++) if (C.h[c] >= 20) tiers.add(options.winds[tierOfRow(Math.floor(C.g[c] / grid.cellsX))]); return [...tiers].sort((a, b) => a - b);`
       })
     ).value as number[];
+    // and per cell, the walk uses exactly the app's tier wind
+    const mismatch = (
+      await h.ok("eval", {
+        readOnly: true,
+        code: `${APP_TIER} const C = pack.cells; let bad = 0; for (let c = 0; c < C.i.length; c++) if (__tupaia.biomes.windAt(c) !== options.winds[tierOfRow(Math.floor(C.g[c] / grid.cellsX))]) bad++; return bad;`
+      })
+    ).value as number;
+    assert.equal(mismatch, 0, "windAt follows generatePrecipitation's tier per grid row");
 
     const plain = await h.ok("regenerate", { parts: ["biomes"], biomes: { keepPainted: false } });
     const plainArr = await biomes();
@@ -241,6 +451,7 @@ describe("tupaia-mcp condpaint: rain shadow and climate smoothing (local)", () =
     const r = await h.ok("regenerate", { parts: ["biomes"], biomes: opts });
     const b = (r.details as Obj).biomes as Obj;
     assert.deepEqual(b.rainShadow.wind, winds, "the winds of the map's latitude tiers");
+    assert.equal(b.rainShadow.windFrom, "map");
     assert.ok(b.rainShadow.shadowed > 0 && b.rainShadow.halved > 0, JSON.stringify(b.rainShadow));
     const shadowArr = await biomes();
     await h.ok("snapshot", { action: "undo" });
@@ -266,8 +477,7 @@ const rows = (b, c) => { if (b === 1) return [0, 0]; if (b === 12) return [9, 9]
   const M = biomesData.biomesMatrix; const t = Math.min(Math.max(20 - grid.cells.temp[C.g[c]], 0), 25);
   const r = []; for (let k = 0; k < M.length; k++) if (M[k][t] === b) r.push(k); return r.length ? [Math.min(...r), Math.max(...r)] : null; };
 for (const c of args.changed) {
-  const [x0, y0] = C.p[c]; const lat = mapCoordinates.latN - (y0 / graphHeight) * mapCoordinates.latT;
-  const ang = options.winds[Math.min(5, (Math.abs(lat - 89) / 30) | 0)] * Math.PI / 180;
+  const [x0, y0] = C.p[c]; const ang = __tupaia.biomes.windAt(c) * Math.PI / 180;
   let ok = false;
   for (let d = grid.spacing * 0.5; d <= max && !ok; d += grid.spacing * 0.5) {
     const k = findCell(x0 - Math.sin(ang) * d, y0 + Math.cos(ang) * d);
@@ -297,7 +507,8 @@ return {noRidge, wetter, n: args.changed.length};`
       parts: ["biomes"],
       biomes: { ...opts, rainShadow: { ...opts.rainShadow, wind: 0 } }
     });
-    assert.equal(((w.details as Obj).biomes as Obj).rainShadow.wind, 0);
+    assert.deepEqual(((w.details as Obj).biomes as Obj).rainShadow.wind, [0], "the wind is always a list");
+    assert.equal(((w.details as Obj).biomes as Obj).rainShadow.windFrom, "fixed");
     assert.notDeepEqual(await biomes(), shadowArr);
     await h.ok("snapshot", { action: "undo" });
 

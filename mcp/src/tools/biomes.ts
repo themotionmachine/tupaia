@@ -12,6 +12,7 @@ import type { CallScope } from "../context.ts";
 import { type ReplaySpec, type Resolved, type Rewriter, registerReplayable } from "../ops.ts";
 import { ToolError } from "../result.ts";
 import { EntityRef } from "../schemas.ts";
+import { RainShadowOption } from "../where.ts";
 import { SelectSchema } from "./edit.ts";
 
 export const BIOMES_OP = "regenerate:biomes";
@@ -37,42 +38,19 @@ export const BiomesRegenOptions = z
         "'warp' (default): read the climate at a noise-displaced point, so edges wiggle and biome totals stay close; 'jitter': add noise to temperature (±4 °C) and moisture (±6), which grows dry biomes"
       ),
     scale: z.number().min(10).max(20000).optional().describe("Noise feature size in map px (default map size / 12)"),
-    rainShadow: z
-      .union([
-        z.literal(true),
-        z.strictObject({
-          strength: z
-            .number()
-            .min(0)
-            .max(5)
-            .optional()
-            .describe("Default 1: a cell loses strength * crossed / 50 of its precipitation (capped at all)"),
-          maxDistance: z.number().positive().max(20000).optional().describe("How far upwind to look (default 15)"),
-          unit: z.enum(["cells", "px"]).optional().describe("maxDistance unit: cells (default, grid spacing) or px"),
-          ridge: z
-            .number()
-            .min(20)
-            .max(100)
-            .optional()
-            .describe("Only ground at least this high blocks the wind (default 50: hills and mountains)"),
-          wind: z
-            .number()
-            .min(0)
-            .max(360)
-            .optional()
-            .describe(
-              "Direction the wind blows towards in degrees (90 = from the west); default: the map's winds setting of each cell's latitude tier"
-            )
-        })
-      ])
-      .optional()
-      .describe(
-        "Rain shadow before the biomes are derived: from each land cell walk upwind up to maxDistance; the highest ridge on the way above the cell (fading with distance) is the height crossed, and the cell loses that share of its precipitation, so lee sides of ranges dry into steppe and desert. Only the biome derivation reads it (the precipitation layer is unchanged). Deterministic; the result reports rainShadow {wind, shadowed, halved, meanCut}"
-      ),
+    rainShadow: RainShadowOption.optional().describe(
+      "Rain shadow before the biomes are derived: from each land cell walk upwind up to maxDistance; the highest ridge on the way above the cell (fading with distance) is the height crossed, and the cell loses that share of its precipitation, so lee sides of ranges dry into steppe and desert. Only the biome derivation reads it (the precipitation layer is unchanged). true = defaults, false = off. Deterministic; the result reports rainShadow {wind: [degrees...], windFrom: map|fixed, shadowed, halved, meanCut}. The same cut is selectable as where.rainShadow, and precipitation:{rainShadow} reads the shadowed precipitation"
+    ),
     smoothClimate: z
       .strictObject({
-        precipitation: z.number().int().min(0).max(10).optional().describe("Passes of a land-neighbour mean"),
-        temperature: z.number().int().min(0).max(10).optional().describe("Passes of a land-neighbour mean")
+        precipitation: z
+          .number()
+          .int()
+          .min(0)
+          .max(200)
+          .optional()
+          .describe("Passes of a land-neighbour mean (n passes blur over about 6 * sqrt(n) px at 10 px spacing)"),
+        temperature: z.number().int().min(0).max(200).optional().describe("Passes of a land-neighbour mean")
       })
       .optional()
       .describe(
