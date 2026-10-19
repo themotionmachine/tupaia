@@ -80,10 +80,76 @@ export interface PatternTile {
   referenceZoom?: number;
 }
 
-const inherited = ["fill", "fill-opacity", "stroke", "stroke-width", "stroke-opacity", "opacity", "style"];
+// Presentation properties a <pattern> passes down to its children (SVG inheritance), copied onto the tile wrapper.
+export const INHERITED_PATTERN_ATTRIBUTES = [
+  "fill",
+  "fill-opacity",
+  "fill-rule",
+  "stroke",
+  "stroke-width",
+  "stroke-opacity",
+  "stroke-dasharray",
+  "stroke-dashoffset",
+  "stroke-linecap",
+  "stroke-linejoin",
+  "stroke-miterlimit",
+  "shape-rendering",
+  "opacity",
+  "style"
+] as const;
 
-// Only userSpaceOnUse patterns without viewBox/href/images/filters are native; others return a reason.
-export async function rasterizePattern(pattern: Element, scale: number): Promise<PatternTile | string> {
+// Tile raster bounds: one side and total pixels (RGBA, 4 B/px => 16 MB worst case per id@bucket tile).
+export const MAX_TILE_SIDE = 4096;
+export const MAX_TILE_PIXELS = 4 * 1024 * 1024;
+
+export interface TileSize {
+  tw: number;
+  th: number;
+  // true when the memory bound forced a lower resolution than `scale` asked for
+  capped: boolean;
+}
+
+// Raster size for a width x height tile (pattern units) drawn at `scale` device px per unit. Per-axis ceil keeps the
+// raster at least as fine as the device (sampling pitch error < 1 device px at every bucket); no fixed 512 clamp.
+export function tileSize(width: number, height: number, scale: number): TileSize {
+  const s = Math.max(1e-6, scale);
+  let tw = Math.max(1, Math.ceil(width * s - 1e-9));
+  let th = Math.max(1, Math.ceil(height * s - 1e-9));
+  const shrink = Math.min(1, MAX_TILE_SIDE / Math.max(tw, th), Math.sqrt(MAX_TILE_PIXELS / (tw * th)));
+  const capped = shrink < 1;
+  if (capped) {
+    tw = Math.max(1, Math.floor(tw * shrink));
+    th = Math.max(1, Math.floor(th * shrink));
+  }
+  return { tw, th, capped };
+}
+
+export function inheritedAttributes(pattern: Pick<Element, "hasAttribute" | "getAttribute">): [string, string][] {
+  return INHERITED_PATTERN_ATTRIBUTES.filter(name => pattern.hasAttribute(name)).map(name => [
+    name,
+    pattern.getAttribute(name)!
+  ]);
+}
+
+export interface PatternPlan {
+  width: number;
+  height: number;
+  x: number;
+  y: number;
+  transform: Affine;
+  referenceZoom?: number;
+  // device px per pattern unit the tile is rasterized at (bucket x patternTransform scale)
+  scale: number;
+  size: TileSize;
+  // pitch of the tile in device px at the bucket (width x scale, height x scale), before any cap
+  pitch: [number, number];
+}
+
+// Classifies a pattern for native tile rasterization: a plan, or the reason it routes to compat.
+export function planPattern(
+  pattern: Pick<Element, "getAttribute" | "hasAttribute" | "querySelector">,
+  scale: number
+): PatternPlan | string {
   const width = Number(pattern.getAttribute("width"));
   const height = Number(pattern.getAttribute("height"));
   if (pattern.getAttribute("patternUnits") !== "userSpaceOnUse") return "pattern units";
@@ -96,25 +162,44 @@ export async function rasterizePattern(pattern: Element, scale: number): Promise
   const transform = parseTransform(patternTransform);
   if (!transform) return "patternTransform";
   let referenceZoom: number | undefined;
-  if (pattern.hasAttribute("data-zone-hatch-clone")) {
+  const clone = pattern.hasAttribute("data-zone-hatch-clone");
+  if (clone) {
     const match = /^scale\(\s*([+\-\d.eE]+)\s*\)/.exec(patternTransform || "");
     const inverse = Number(match?.[1]);
     if (!Number.isFinite(inverse) || inverse <= 0) return "zone hatch scale";
     referenceZoom = 1 / inverse;
   }
-  const x = Number(pattern.getAttribute("x") || 0);
-  const y = Number(pattern.getAttribute("y") || 0);
-  const pixels = Math.min(512, Math.max(4, Math.ceil(Math.max(width, height) * scale)));
-  const ratio = pixels / Math.max(width, height);
-  const [tw, th] = [Math.max(1, Math.round(width * ratio)), Math.max(1, Math.round(height * ratio))];
+  // A scaled patternTransform changes the device size of a tile unit. Zone-hatch clones are excluded: their runtime
+  // UV scale (hatchUvAtZoom) cancels the S(1/k) factor, and `scale` (k x dpr) already over-resolves them.
+  const unit = clone ? 1 : Math.max(Math.hypot(transform[0], transform[1]), Math.hypot(transform[2], transform[3]));
+  const deviceScale = scale * (unit > 0 && Number.isFinite(unit) ? unit : 1);
+  return {
+    width,
+    height,
+    x: Number(pattern.getAttribute("x") || 0),
+    y: Number(pattern.getAttribute("y") || 0),
+    transform,
+    referenceZoom,
+    scale: deviceScale,
+    size: tileSize(width, height, deviceScale),
+    pitch: [width * deviceScale, height * deviceScale]
+  };
+}
+
+// Only userSpaceOnUse patterns without viewBox/href/images/filters are native; others return a reason.
+export async function rasterizePattern(pattern: Element, scale: number): Promise<PatternTile | string> {
+  const plan = planPattern(pattern, scale);
+  if (typeof plan === "string") return plan;
+  const { width, height, x, y, transform } = plan;
+  const { tw, th } = plan.size;
   const wrapper = document.createElementNS(svgNs, "g");
-  for (const name of inherited) if (pattern.hasAttribute(name)) wrapper.setAttribute(name, pattern.getAttribute(name)!);
+  for (const [name, value] of inheritedAttributes(pattern)) wrapper.setAttribute(name, value);
   wrapper.innerHTML = pattern.innerHTML;
   const markup = `<svg xmlns="${svgNs}" width="${tw}" height="${th}" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none">${wrapper.outerHTML}</svg>`;
   try {
     const canvas = await decodeSvg(markup, tw, th);
     const tileToWorld = multiply(multiply(transform, [1, 0, 0, 1, x, y]), [width, 0, 0, height, 0, 0]);
-    return { canvas, worldToUv: invertAffine(tileToWorld), referenceZoom };
+    return { canvas, worldToUv: invertAffine(tileToWorld), referenceZoom: plan.referenceZoom };
   } catch (error) {
     return String((error as Error).message || error);
   }
