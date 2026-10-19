@@ -10,7 +10,10 @@ import { run } from "node:test";
 import { fileURLToPath } from "node:url";
 import { evaluateGates, GATES, LUMA, type Rgba, rgbDiff, SSIM_C1, SSIM_C2, SSIM_SIGMA, SSIM_WINDOW, ssim } from "./fidelity-metrics.ts";
 
-const EXPECTED_FINGERPRINT = "f99596d60eaf0b0ab818d14b2d9564559fb42ba7ad7037deec0af734e0b00911";
+// The pin is the P2 capture build. bench/gate/gate.ts sets BENCH_METRICS_EXPECTED_FINGERPRINT when it measures
+// pairs it has just captured from the current dist (`gate metrics`), so the same runner gates fresh builds.
+const EXPECTED_FINGERPRINT =
+  process.env.BENCH_METRICS_EXPECTED_FINGERPRINT || "f99596d60eaf0b0ab818d14b2d9564559fb42ba7ad7037deec0af734e0b00911";
 const EXPECTED_CELLS = ["1x1", "1x2", "1x4", "1x8", "2x1", "2x2", "2x4", "2x8"];
 const ROW_CHUNK = 128;
 

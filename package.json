@@ -23,6 +23,7 @@
     "test": "vitest",
     "test:e2e": "playwright test",
     "lint": "biome check --write",
+    "gate": "node bench/gate/gate.ts",
     "prepare": "simple-git-hooks"
   },
   "simple-git-hooks": {
