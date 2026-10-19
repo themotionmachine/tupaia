@@ -27,6 +27,7 @@ import { type PickHit, resolveLeaf } from "./pick";
 import {
   BudgetError,
   type CompatReuse,
+  compatReuseEnabled,
   hasDetail,
   type Prepared,
   prepareFrame,
@@ -230,6 +231,10 @@ export class GpuRenderer {
   private recovery = new RestoreClock(() => performance.now());
   private mutations: MutationObserver;
   private stopCompatWatch: () => void = () => {};
+  // compat raster reuse (prepare.ts compatReuseEnabled, opt-in): only then are the reuse tracker fed and the
+  // document-wide outside-input watcher installed, and previous details carried; off, prepare and refine release
+  // details as before. Fixed per page load (URL flag or build env).
+  private readonly compatReuse = compatReuseEnabled();
   // editor dialog visibility (editorReason): dirty on any document mutation that could change it
   // While suspended, a closing dialog is the only change that can resume an otherwise idle renderer (no camera, prepare
   // or draw follows it): re-check on the next frame. draw() hides again (a no-op) if the editor is still open.
@@ -302,7 +307,7 @@ export class GpuRenderer {
     });
     this.emblemCulling = new HiddenEmblemCulling(() => this.svg, this.canvas);
     this.observeLongTasks();
-    this.stopCompatWatch = watchCompatInputs();
+    if (this.compatReuse) this.stopCompatWatch = watchCompatInputs();
     this.resizes = new ResizeObserver(() => this.resize());
     this.resizes.observe(svg);
     window.addEventListener("resize", this.onWindowResize);
@@ -763,7 +768,7 @@ export class GpuRenderer {
       root => roots.push(root as Element)
     );
     // per record, for compat raster reuse: which runs a change can reach (compat-reuse.ts)
-    if (change === "static" || change === "overlay") compatDirt.note(pixelRecords(records));
+    if (this.compatReuse && (change === "static" || change === "overlay")) compatDirt.note(pixelRecords(records));
     if (change === "static") {
       this.traceJob("revision", this.invalidations.last)();
       this.invalidate(false);
@@ -903,8 +908,10 @@ export class GpuRenderer {
     };
     try {
       this.atlas.clear();
-      // cancels an in-flight refinement; prepareFrame drops the detail it does not carry over (lower old+new swap peak)
+      // Cancels an in-flight refinement; its detail is dropped to lower the old+new swap peak. With reuse on, prepareFrame
+      // drops only the detail it does not carry over (after the scene phase).
       this.refines++;
+      if (!this.compatReuse && this.prepared) releaseDetail(this.prepared, this.device);
       // per-prepare high-water (old frame + new allocations); the lifetime peak keeps what the reset discards
       this.peaks.lifetime = Math.max(this.peaks.lifetime, this.device.peak());
       this.device.resetPeak();
@@ -1004,7 +1011,8 @@ export class GpuRenderer {
     };
     const generation = this.generation;
     const token = ++this.refines; // a newer settle or prepare supersedes this refinement
-    // refineCompat releases every detail it does not keep for this view before measuring room
+    // with reuse on, refineCompat itself releases every detail it does not keep for this view before measuring room
+    if (!this.compatReuse) releaseDetail(prepared, this.device);
     this.requestDraw();
     this.activeRefinements++;
     const done = this.traceJob("refine", "running");
@@ -1014,7 +1022,7 @@ export class GpuRenderer {
       const ctx = this.ctx(generation, prepared, token);
       const refined = await refineCompat(prepared, ctx, visible, pixels, GPU_BUDGET - DETAIL_RESERVE);
       const reuse = prepared.compat.refine;
-      outcome = `${refined ? "committed" : "skipped"}${reuse ? ` kept ${reuse.kept} cut ${reuse.rasterized}` : ""}`;
+      outcome = `${refined ? "committed" : "skipped"}${reuse && this.compatReuse ? ` kept ${reuse.kept} cut ${reuse.rasterized}` : ""}`;
       if (refined && this.prepared === prepared) this.requestDraw();
     } catch {
       // detail is optional: the base compat raster keeps drawing

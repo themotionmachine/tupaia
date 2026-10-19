@@ -306,6 +306,21 @@ describe("compat reuse: stylesheets", () => {
     expect(styleState([sheet([rule("#labels text")], { disabled: true })], applies).key).not.toBe(base);
   });
 
+  it("keys whether each media query holds, not only its text (resize, color-scheme flip)", () => {
+    const applies = () => false;
+    const media = {
+      cssText: "@media (max-width: 600px) { #labels text { fill: red; } }",
+      media: { mediaText: "(max-width: 600px)" },
+      cssRules: [rule("#labels text")]
+    };
+    const narrow = (query: string) => query === "(max-width: 600px)" || query === "print";
+    const wide = () => false;
+    expect(styleState([sheet([media])], applies, narrow).key).not.toBe(styleState([sheet([media])], applies, wide).key);
+    expect(styleState([sheet([media])], applies, wide).key).toBe(styleState([sheet([media])], applies, wide).key);
+    const printSheet = sheet([rule("#labels text")], { media: { mediaText: "print" } });
+    expect(styleState([printSheet], applies, narrow).key).not.toBe(styleState([printSheet], applies, wide).key);
+  });
+
   it("reports sibling-dependent selectors only when their subject can match a map element", () => {
     const inMap = (selector: string) => selector === "text";
     expect(styleState([sheet([rule("div.header > div:first-child")])], inMap).structural).toBe("");

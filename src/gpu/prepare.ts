@@ -839,7 +839,8 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
 // Off by default: on the route-focus run (Metal, DPR 2, k=8/16) a route close dirties every run under the fail-closed
 // ancestor rule, and with a subtree-only rule the budget-scaled world rasters still diverge from their history, so
 // reuse saved nothing there (PERF-A stop-loss). Opt in with ?gpu-compat-reuse=1 or a build with
-// VITE_GPU_COMPAT_REUSE=1. Telemetry evaluates either way.
+// VITE_GPU_COMPAT_REUSE=1. The dirty-run telemetry (lastPrepare.reuse reasons) needs the flag too: off, the renderer
+// installs no tracker feed or outside-input watcher, and the default path matches the pre-reuse renderer.
 export function compatReuseEnabled(): boolean {
   if (import.meta.env?.VITE_GPU_COMPAT_REUSE === "1") return true;
   try {
@@ -870,7 +871,10 @@ function adoptRuns(device: GpuDevice, svg: SVGSVGElement, runs: CompatRun[], pre
     const key = report.reasons[reason] !== undefined || keys.length < 8 ? reason : "other";
     report.reasons[key] = (report.reasons[key] ?? 0) + 1;
   };
-  const style: StyleState | null = runs.length ? documentStyle(svg) : null;
+  // Off: the renderer feeds the tracker and watches outside inputs only when reuse is on (input-path cost), so its
+  // verdicts would be meaningless; skip the evaluation too. The renderer released the previous details at prepare start.
+  const style: StyleState | null = runs.length && report.enabled ? documentStyle(svg) : null;
+  if (!report.enabled && runs.length) report.reasons["reuse off"] = runs.length;
   report.structural = style?.structural ?? "";
   const now = compatDirt.now();
   let detailBytes = 0;
@@ -929,7 +933,7 @@ function adoptRuns(device: GpuDevice, svg: SVGSVGElement, runs: CompatRun[], pre
       carried.add(detail);
       report.details++;
     }
-  } else for (let i = 0; i < runs.length; i++) count(previous ? "new run" : "no previous frame");
+  } else if (report.enabled) for (let i = 0; i < runs.length; i++) count(previous ? "new run" : "no previous frame");
   if (previous)
     for (const run of previous.runs)
       if (run.slot.detail && !carried.has(run.slot.detail)) {
@@ -1181,9 +1185,10 @@ export async function refreshOverlays(
     runs.push(run);
   }
   if (!runs.length) return "committed";
-  const clone = await compatClone(ctx.revision);
+  // The copies come from the live roots, but their defs, embedded fonts, root attributes and the styles computed under
+  // them are the cached clone's: the refreshed raster is only as current as the clone (fail closed for reuse).
+  const { clone, stamp } = await stampedClone(ctx.revision);
   if (ctx.stale()) return "stale";
-  const stamp = compatDirt.now(); // the live roots are copied below, in this task
   // every copy is resolved before any is swapped in, so a "full" exit leaves the clone as it was
   const swaps: [Element, Element][] = [];
   for (const run of runs) {

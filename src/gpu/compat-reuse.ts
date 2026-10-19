@@ -267,6 +267,7 @@ export interface RuleLike {
   selectorText?: string;
   cssRules?: ArrayLike<RuleLike>;
   styleSheet?: SheetLike | null;
+  media?: { mediaText: string } | null; // @media (and @import) rules
 }
 
 export interface SheetLike {
@@ -337,8 +338,16 @@ export interface StyleState {
   structural: string; // a sibling-dependent selector that can match a map element ("" when none)
 }
 
-// `applies(subject)`: whether a compound selector matches an element of the map (true when unsure).
-export function styleState(sheets: Iterable<SheetLike>, applies: (selector: string) => boolean): StyleState {
+// `applies(subject)`: whether a compound selector matches an element of the map (true when unsure). `matches(media)`:
+// whether a media query holds now; the key records it, since a viewport resize or a color-scheme flip can switch the
+// rules the clone's inlined computed styles come from without any rule text changing.
+export function styleState(
+  sheets: Iterable<SheetLike>,
+  applies: (selector: string) => boolean,
+  matches: (media: string) => boolean = () => true
+): StyleState {
+  const holds = (media: { mediaText: string } | null | undefined) =>
+    media?.mediaText ? ` @holds ${matches(media.mediaText)}` : "";
   let key = "";
   let structural = "";
   const visit = (rules: ArrayLike<RuleLike>) => {
@@ -359,14 +368,14 @@ export function styleState(sheets: Iterable<SheetLike>, applies: (selector: stri
             }
       }
       if (rule.cssRules && rule.selectorText === undefined) {
-        key += `${rule.cssText.slice(0, rule.cssText.indexOf("{"))}{`;
+        key += `${rule.cssText.slice(0, rule.cssText.indexOf("{"))}${holds(rule.media)}{`;
         visit(rule.cssRules);
         key += "}";
       } else key += `${rule.cssText}\n`;
     }
   };
   const sheet = (item: SheetLike) => {
-    key += `@sheet ${item.href ?? ""} ${item.disabled} ${item.media?.mediaText ?? ""}{`;
+    key += `@sheet ${item.href ?? ""} ${item.disabled} ${item.media?.mediaText ?? ""}${holds(item.media)}{`;
     if (!item.disabled) {
       let rules: ArrayLike<RuleLike> | null = null;
       try {
@@ -398,9 +407,17 @@ export function documentStyle(svg: Element): StyleState {
       return true;
     }
   };
+  const matches = (media: string) => {
+    try {
+      return matchMedia(media).matches;
+    } catch {
+      return true;
+    }
+  };
   const state = styleState(
     [...Array.from(document.styleSheets), ...(document.adoptedStyleSheets ?? [])] as unknown as SheetLike[],
-    applies
+    applies,
+    matches
   );
   // the font list the export clone embeds from (services/fonts.ts getUsedFonts): a font added or changed there
   state.key += `@fonts ${document.fonts?.size ?? 0} ${JSON.stringify(mapFonts() ?? "unknown")}`;
@@ -409,8 +426,9 @@ export function documentStyle(svg: Element): StyleState {
 
 // ---- inputs outside #map -----------------------------------------------------------------------------------------
 
-// Watches what the clone reads outside svg#map (stylesheets, #defElements, #coas, any defs) and font loads; each
-// change dirties every run. Returns the disposer.
+// Watches what the clone reads outside svg#map (stylesheets, #defElements, #coas, any defs, the attributes of svg#map's
+// ancestors) and font loads; each change dirties every run. Returns the disposer. A document-wide observer: the
+// renderer installs it only while reuse is enabled (compatReuseEnabled), never on the default input path.
 export function watchCompatInputs(dirt = compatDirt): () => void {
   const outside = (node: Node | null): boolean => {
     const element = node instanceof Element ? node : node?.parentElement;
@@ -420,7 +438,8 @@ export function watchCompatInputs(dirt = compatDirt): () => void {
     for (const record of records) {
       if (!outside(record.target)) continue;
       const target = record.target as Element;
-      const root = target === document.documentElement || target === document.body;
+      const map = document.getElementById("map");
+      const root = target === document.documentElement || target === document.body || (!!map && target.contains?.(map));
       const nodes = [...record.addedNodes, ...record.removedNodes].filter(
         node => !(node instanceof Element && node.id === "fantasyMap")
       );
