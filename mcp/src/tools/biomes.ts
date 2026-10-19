@@ -12,6 +12,7 @@ import type { CallScope } from "../context.ts";
 import { type ReplaySpec, type Resolved, type Rewriter, registerReplayable } from "../ops.ts";
 import { ToolError } from "../result.ts";
 import { EntityRef } from "../schemas.ts";
+import { RainShadowOption } from "../where.ts";
 import { SelectSchema } from "./edit.ts";
 
 export const BIOMES_OP = "regenerate:biomes";
@@ -37,6 +38,24 @@ export const BiomesRegenOptions = z
         "'warp' (default): read the climate at a noise-displaced point, so edges wiggle and biome totals stay close; 'jitter': add noise to temperature (±4 °C) and moisture (±6), which grows dry biomes"
       ),
     scale: z.number().min(10).max(20000).optional().describe("Noise feature size in map px (default map size / 12)"),
+    rainShadow: RainShadowOption.optional().describe(
+      "Rain shadow before the biomes are derived: from each land cell walk upwind up to maxDistance; the highest ridge on the way above the cell (fading with distance) is the height crossed, and the cell loses that share of its precipitation, so lee sides of ranges dry into steppe and desert. Only the biome derivation reads it (the precipitation layer is unchanged). true = defaults, false = off. Deterministic; the result reports rainShadow {wind: [degrees...], windFrom: map|fixed, shadowed, halved, meanCut}. The same cut is selectable as where.rainShadow, and precipitation:{rainShadow} reads the shadowed precipitation"
+    ),
+    smoothClimate: z
+      .strictObject({
+        precipitation: z
+          .number()
+          .int()
+          .min(0)
+          .max(200)
+          .optional()
+          .describe("Passes of a land-neighbour mean (n passes blur over about 6 * sqrt(n) px at 10 px spacing)"),
+        temperature: z.number().int().min(0).max(200).optional().describe("Passes of a land-neighbour mean")
+      })
+      .optional()
+      .describe(
+        "Smooth the climate inputs (after rainShadow) before the biomes are derived, so biome edges follow broad climate instead of cell-scale speckle"
+      ),
     smooth: z
       .number()
       .int()
@@ -145,6 +164,12 @@ export const BIOMES_REPLAY: ReplaySpec = {
     const how = [
       o.from === "current" ? "cleaned up current biomes" : "re-derived biomes from the climate",
       o.noise ? `${o.mode ?? "warp"} noise ${o.noise}` : "",
+      o.rainShadow
+        ? `rain shadow${o.rainShadow === true || o.rainShadow.strength === undefined ? "" : ` strength ${o.rainShadow.strength}`}`
+        : "",
+      o.smoothClimate?.precipitation || o.smoothClimate?.temperature
+        ? `climate smoothed (${o.smoothClimate.precipitation ?? 0} precipitation, ${o.smoothClimate.temperature ?? 0} temperature passes)`
+        : "",
       o.smooth ? `${o.smooth} smoothing passes` : "",
       o.minRegion ? `regions under ${o.minRegion} cells merged` : "",
       seed !== undefined ? `seed ${seed}` : ""

@@ -123,3 +123,35 @@ test("embedded SVG newlines do not change real demo cell-section chunk boundarie
   assert.equal(added.length, 1, "a one-cell edit creates only its 128-cell block");
   assert.ok(added[0].bytes < 1500, `new payload was ${added[0].bytes} bytes`);
 });
+
+test("a resumed history (exportState -> importState) restores exact texts into shared blocks", () => {
+  const a = new SnapshotStore(3, 12);
+  const values = Array.from({ length: 20000 }, (_, i) => i % 80);
+  const sections = mapWithCells(values).split("\r\n");
+  const texts: string[] = [];
+  for (let step = 0; step < 4; step++) {
+    sections[25] = values.map((v, i) => (i === step * 50 ? v + 1 : v)).join(",");
+    texts.push(sections.join("\r\n"));
+  }
+  a.pushUndo("paint", "0", texts[0]);
+  a.pushUndo("paint", "1", texts[1]);
+  a.add(texts[2], "mid");
+  a.setRestorePoint(texts[3], "now", marks);
+  // the live objects (their text fixed by a's blocks), and plain copies as state.ts loads them
+  for (const state of [a.exportState(), structuredClone(a.exportState())]) {
+    const b = new SnapshotStore(3, 12);
+    b.importState(state);
+    assert.deepEqual(
+      b.undoStack.map(e => e.text),
+      texts.slice(0, 2)
+    );
+    assert.equal(b.snapshots[0].text, texts[2]);
+    assert.equal(b.restorePoint?.text, texts[3]);
+    const stats = b.storage;
+    assert.equal(
+      stats.logicalBytes,
+      texts.reduce((n, t) => n + Buffer.byteLength(t), 0)
+    );
+    assert.ok(stats.retainedBytes < stats.logicalBytes / 2, JSON.stringify(stats));
+  }
+});

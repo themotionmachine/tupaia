@@ -28,7 +28,8 @@ It is a separate Node package. Nothing here is imported by the app or shipped in
   dedicated process ownership for lifecycle diagnostics.
 - Page side: `src/bridge.js` and `src/bridge-mutations.js` define `globalThis.__tupaia`; every
   `src/bridge-ext/*.js` is injected after them in name order (apply, biomes, clear, compact,
-  labels, lint, regen-replay, regen, regrid, relief, rivers, routes, settings, terrain, tokens).
+  labels, lint, regen-replay, regen, regrid, relief, rivers, rivertrace, routes, settings, terrain,
+  territory, tokens, where).
   Extensions add FIELDS, types and FNS functions, and some wrap core ones (FNS.edit, regenerate,
   display, summary, loadMap). Every tool goes through one `__tupaia.call(name, args)`.
 - Node side: `src/tools/*.ts` are imported in name order and register through `defineTools`;
@@ -81,9 +82,15 @@ It is a separate Node package. Nothing here is imported by the app or shipped in
 
 What the newer tools and fields replaced (all one undo entry each, all dryRun-able):
 
-- `set_heights {grid|pack|image}` imports a heightmap and rebuilds coast, lakes, climate, rivers
-  and biomes, carrying burgs, routes, markers, regiments and lake/island names to the new cells
-  and keeping river identity by course; with `rebuild:'keep'` it is local (the changed cells'
+- `set_heights {grid|pack|image}` imports a heightmap and rebuilds coast, lakes, climate and
+  biomes, carrying burgs, routes, markers, regiments and lake/island names to the new cells; the
+  rivers are re-traced onto the new heights (`rivers:'retrace'`, default on a map with rivers;
+  `src/bridge-ext/rivertrace.js`, shared with regrid: ids, names, parents, main stems and hand
+  edits kept, climbs the change causes carved without making another river climb, a drained
+  lake's inflows joined to its outlet, drowned rivers removed and named, the dryRun naming the
+  same ones) or regenerated
+  (`rivers:'regenerate'`, identity kept by course overlap); paint_cells height risk does the
+  same; with `rebuild:'keep'` it is local (the changed cells'
   heights, temperature, biome and lake levels; rivers, economy and far biomes untouched;
   `rivers:'regenerate'` opts into the global river pass), like `paint_cells` height keep; `flow`
   previews drainage on current or proposed heights.
@@ -101,10 +108,26 @@ What the newer tools and fields replaced (all one undo entry each, all dryRun-ab
 - `add province {state, centre:{burg}|Place, name, cells|select}` makes a province like the
   provinces editor (grown over the state's nearer cells by default; shield, label, borders).
 - Biomes as entities (`find/inspect/add/edit biome`), `paint_cells feather`, and `regenerate
-  {parts:['biomes'], biomes:{noise, smooth, minRegion, seed, keepPainted, ...}}`. App fix: the
-  biome line's 4th field keeps icon density, icons and cost through save/load.
+  {parts:['biomes'], biomes:{noise, smooth, minRegion, seed, keepPainted, rainShadow,
+  smoothClimate, ...}}`. App fix: the biome line's 4th field keeps icon density, icons and cost
+  through save/load. `rainShadow` walks upwind from each land cell (the map's winds per latitude
+  tier, by grid row exactly as generatePrecipitation, or a fixed `wind`; `spread` fans the look
+  over ±degrees) and cuts its precipitation by the ridge height crossed;
+  `smoothClimate` averages the precipitation/temperature inputs; both only feed the biome
+  derivation (grid climate untouched) and the op still logs literal biome cells.
+- Paint by condition: every select's `where` (src/where.ts schema, src/bridge-ext/where.js) takes
+  ranges `{gte, lte, gt, lt}` on height, flux, precipitation, temperature, x, y, slope (max or
+  mean neighbour difference), riverDist (graph steps to river cells; `rivers`, `tributaries`,
+  `minFlux` pick the sources), aboveRiver (height above that river cell) and seeded noise, and
+  `all`/`any`/`not` over where objects (at most 32 deep, else BAD_ARGS). precipitation and
+  temperature take `smooth` passes, precipitation a `rainShadow` (the value regenerate would
+  read), and `rainShadow` selects on the shadow's cut 0..1. A compiled predicate tree, never an
+  evaluated string; unknown keys are BAD_FIELD. apply's paint entries intersect an entry `where`
+  with the select's where when they share a key. paint_cells logs the literal cells, so it replays as before.
 - `regenerate {parts:['provinces','emblems'], provinces:{states, centres|count}, emblems:{...}}`
-  for named states only (hand-made states too).
+  for named states only (hand-made states too); `provinces:{regrow:true, band?}` keeps the
+  provinces and redraws their borders along the terrain, each to about its size
+  (`src/bridge-ext/territory.js`: a quota-capped cost spread over a band along the borders).
 - `regenerate {parts:['relief'], relief:{density|matchIcons, perBiome, exclude, nearBurgs,
   seed}}` stores relief settings and draws icons deterministically. Saves preserve the drawn icons.
   `relief.onLoad` and `edit map {set:{reliefOnLoad:true}}` are deprecated compatibility options
@@ -122,13 +145,19 @@ What the newer tools and fields replaced (all one undo entry each, all dryRun-ab
   carved where the new heights would make them climb (`carve`, default on: only those cells are
   lowered, never below 20), and biomes re-derived from the climate (custom and painted ones
   carried) with one-biome speckles under `minRegion` cells (default 3) merged into their
-  neighbour, through the same clean-up as regenerate biomes' minRegion. App hook:
-  `Resample.process({keepId})`.
+  neighbour, through the same clean-up as regenerate biomes' minRegion; `territories:'regrow'`
+  regrows states, cultures and religions together (one label per triple, each piece to its
+  copied area) and then provinces along the terrain instead of copying the old cells' steps
+  (burgs keep their state and culture; locked states keep their land unless territoryLocked);
+  at the map's own density `territories:'regrow'` is a regrow-only pass (no rebuild). App hook: `Resample.process({keepId})`.
 - `apply` (declarative spec, `mode:'check'|'upsert'|'update'`, idempotent; its `paint` list
   paints territory, biomes and heights in order, later entries winning, each entry only its
   differing cells, logged as replayable paint_cells steps; it creates provinces around their
-  capital after the paint and rivers along their from/via/to points) and `lint` (23 checks with
-  ready fix calls).
+  capital after the paint and rivers along their from/via/to points; entries match by `id` (when
+  it agrees with the name, else ID_MISMATCH), then name, then aliases (declared, or a river's
+  name + type word), never duplicating an alias match;
+  `mode:'baseline'` writes the check's differences as accepted and a check with `baseline` reports
+  only new drift: src/apply-baseline.ts) and `lint` (23 checks with ready fix calls).
 
 Behaviour worth knowing:
 
@@ -144,6 +173,13 @@ Behaviour worth knowing:
   `warnings`.
 - `add culture` gives the culture a COA shield (the default culture's, a same-base culture's, a
   random one, else heater); `shield` is an editable culture field.
+- A state paint (paint_cells, apply's paint list) re-fits only the state labels that match what
+  the renderer draws for their state now (checked by drawing it and putting the original back);
+  hand-placed ones (locked state, dragged, resized, re-texted, reshaped, custom path) keep path,
+  size, text and pole unless the paint takes their anchor out of the state (then re-fitted no
+  larger than before and reported: `set.state.stateLabels`, a note; dryRun: `wouldMove`). A
+  state without a label gets none. A paint's fill redraw skips a layer whose button is on but
+  which drew nothing, so it never adds fills; layers are never toggled.
 - After a `rebuild:'risk'` (set_heights, paint_cells height) a carried route point whose cell
   moved away from its x,y is re-recorded to the cell under it (`carried.routePointsRepointed`),
   so lint `route-point-cell` stays clean.
@@ -216,7 +252,7 @@ node mcp/src/server.ts --http [--port N | --prefer-port N]   # usually started b
   `GET /health`, `POST /shutdown`, `POST /listen {port}`.
 - One daemon per `TUPAIA_OUT`. In that directory: `daemon.json` (0600: pid, port, ports, url,
   mcpUrl, mode, token, closing?, ...), `daemon.port.json` (the port the next auto-start uses),
-  `daemon.log`, `maps/daemon-exit-*.map` (last 5) and `daemon.last.json`.
+  `daemon.log`, `maps/daemon-exit-*.map` (last 5), `daemon.last.json` and `state/` (below).
 - Security: 127.0.0.1 only; the Host header must name the port the connection arrived on; any
   request with an `Origin` header gets 403; every route needs `Authorization: Bearer <token>`
   (random per start). The bearer token is the trust boundary: anyone holding it can confirm
@@ -235,13 +271,66 @@ node mcp/src/server.ts --http [--port N | --prefer-port N]   # usually started b
 - A queued call whose caller disconnects or cancels is skipped; a started call runs to its end.
 - Stopping (`tupaia stop`, idle, or another daemon taking over the TUPAIA_OUT): queued calls
   are refused (they never ran; `tupaia call` reruns them on a fresh daemon), the running call
-  finishes (up to 15 s), a changed page is saved to `maps/daemon-exit-<time>.map` and the next
-  start prints a `load_map` line for it.
-- Idle shutdown after `TUPAIA_HTTP_IDLE_MIN` (default 120) minutes with no call and no attached
-  MCP client (an open `subscriptions/listen` stream; Claude Code holds one per session). A live
-  daemon a Claude Code session is attached to therefore stays live for that whole session:
-  `tupaia stop` it once the write is done (after the session detaches).
-- `session` status shows `serving: http daemon ...`.
+  finishes (up to 15 s), a changed page is saved to `maps/daemon-exit-<time>.map` (with its
+  provenance line) and the state dir is written; the next start resumes it and prints where the
+  page was saved.
+- Idle shutdown after `TUPAIA_HTTP_IDLE_MIN` (default 120, fractions allowed) minutes with no
+  call and no attached MCP client (an open `subscriptions/listen` stream; Claude Code holds one
+  per session). A sketch that records or has ops not saved to the Worker holds it off: for one
+  more idle period when the state dir holds the sketch (it then stops through the normal exit
+  save and the next start resumes it), and for as long as the state dir does not hold it
+  (`TUPAIA_STATE=off`, or another server owns the dir). The daemon logs `idle shutdown held off:
+  sketch '<slug>' ...`; `/health` (`idleHeldBy`, `idleHoldPersisted`, `idleShutdownInS`),
+  `tupaia status` and session (`idle.note`, which names what releases it by mode) say so. A live daemon a Claude Code session is attached to therefore stays live for
+  that whole session: `tupaia stop` it once the write is done (after the session detaches).
+- `session` status shows `serving: http daemon ...`, `idle` and `state`.
+
+### State across restarts (TUPAIA_OUT/state)
+
+Every server (stdio or `--http`) persists, after each call that can change them: the page map
+as the newest call left it, its provenance and epoch counters, undo/redo, snapshots, the active
+sketch (ops log, base map, saved marks) and the screenshot counter. `state.json` is the index
+(HMAC-signed with `provenance.key`, 0600, written atomically); the map texts are
+`blobs/<sha256>.map`, written once and pruned when unused; `owner.json` names the one process
+that writes there. A daemon takes the dir over at start, a stdio server on its first tool call
+(an unused stdio server, like the one `.mcp.json` starts for every Claude session, never holds
+it). A server that finds another live owner neither resumes nor persists; `session` (`state`),
+`/health` (`state`), the CLI start line and `tupaia status` (`WARNING, NOT persisting`) say so,
+and it retries on every call: once the owner has exited, a server with no work of its own
+resumes the state, and one with work keeps its own page, history and sketch, adds the other's
+snapshots (labels `... (pid N)`) and writes the other's page and sketch to
+`maps/takeover-<pid>-<time>.map` with its provenance (load_map continues it). The resumed page
+map is loaded on the first browser launch, except an unedited one (a random boot map, or in live
+mode an unedited shared map: the live boot loads the current shared version instead); the first
+result carries a `resumed ...` note. Screenshot records persist too (`compare:'sN'` after a
+restart). A hand-edited state.json
+is not resumed (kept as `state.json.rejected-*`). Caps: `TUPAIA_SNAPSHOTS_MAX` entries and
+`TUPAIA_SNAPSHOTS_MAX_MB` (oldest first). `TUPAIA_STATE=off` disables it. The stdio server's
+exit (transport closed, a signal) saves `maps/stdio-exit-*.map` like the daemon.
+
+### Lineage in .map files
+
+save_map and the exit saves append one line, `#tupaia-provenance {json}`, after the app's 46
+CRLF lines. The app reads lines by index and ignores it (old and new builds; the app's own save
+drops it). It holds the origin, lineage, shared base (version, updated_at/by, blob size), opsSince,
+the active sketch (slug, note, recording, saved marks, ops log up to 2 MB), the sha256 of the
+content before the line (save_map's `mapSha256`; its `sha256` is the whole file's), and an HMAC
+over all of it with this TUPAIA_OUT's key, `TUPAIA_OUT/provenance.key` (0600; outside `state/`,
+so resetting the state keeps lineage; copy it to another out dir to load its files there). The
+base also records the blob's sha256. load_map binds the page back to the shared map only when
+the hash and HMAC match and the base holds on the server: the current version's updated_at and
+blob sha256 (one GET), or the retained version's size (the Worker serves no retained bytes or
+hashes). A contradiction keeps it unrelated; a check that cannot be made (e.g.
+`TUPAIA_LIVE_ORIGIN=none`) binds with a warning. `lineage.file` is `none` (no line: an app save
+or an older file), `modified`, `foreign` (another key) or `valid`. A `foreign` file (written by the
+server of another TUPAIA_OUT, such as the stdio server's default out dir and a daemon's `--out`)
+binds only when the base check verified it, and its sketch log is not trusted: the sketch comes
+back blob-only (promotable while its base is current, never replayed). `snapshot take saveTo`
+writes the same line as save_map. A file holding the active sketch at the same op, loaded over
+a page that already holds that map, logs no op and pushes no undo entry. A compact:true copy is marked
+`compacted` (one more op, no sketch log). A file naming a sketch reactivates it unless another
+sketch records, or a stopped one has ops not saved to the Worker; undoing that load_map ends it
+again (and names the replaced, Worker-saved sketch to reopen).
 
 ### CLI: mcp/bin/tupaia
 
@@ -249,6 +338,8 @@ node mcp/src/server.ts --http [--port N | --prefer-port N]   # usually started b
 tupaia call <tool> [<json>|-]   # result text, then 'IMAGE: <path>' per image; a failed tool
                                 # prints 'ERROR CODE: message' and exits 1
 tupaia tools [<tool>] [--names] # list tools; with a name: its description and arguments
+                                # (a running daemon's; with none, this checkout's: starts
+                                # nothing and creates no TUPAIA_OUT)
 tupaia help <tool>              # same as tupaia tools <tool>
 tupaia status | start | stop    # status exits 1 when not running (and says starting/stopping)
 tupaia headers                  # {"Authorization":"Bearer ..."} for Claude Code's headersHelper
@@ -331,9 +422,12 @@ or, once: `claude mcp add-json tupaia-shared '{"type":"http","url":"http://127.0
 | `TUPAIA_HEADED` | off | `1` shows the browser window. |
 | `TUPAIA_DEBUG` | off | `1` logs page events to stderr. |
 | `TUPAIA_TEST_HOOKS` | off | `1` enables `session {action:'crash'}` and `sketch rebase {onto}` (tests only). |
-| `TUPAIA_BUILD_CACHE_MS` | `300000` | How long the deployed-build check is cached. |
+| `TUPAIA_BUILD_CACHE_MS` | `300000` | How long a clean deployed-build check is cached (any other result is read again on the next preview). |
 | `TUPAIA_HTTP_PORT` | CLI: this TUPAIA_OUT's last port, else any free port | Port for `--http` (also `--port N`); strict when set. |
-| `TUPAIA_HTTP_IDLE_MIN` | `120` | Daemon stops after this many idle minutes with no attached client (`0` = never). |
+| `TUPAIA_HTTP_IDLE_MIN` | `120` | Daemon stops after this many idle minutes (fractions allowed) with no attached client; an active unsaved sketch adds one period, or holds it while not persisted (`0` = never). |
+| `TUPAIA_STATE` | on | `off` stops persisting and resuming `TUPAIA_OUT/state`. |
+| `TUPAIA_SNAPSHOTS_MAX` | `40` | Persisted snapshot/undo/redo entries (oldest dropped first). |
+| `TUPAIA_SNAPSHOTS_MAX_MB` | `512` | Size cap of the persisted entries' map texts. |
 | `TUPAIA_START_TIMEOUT_MS` | `90000` | How long the CLI waits for a daemon start (a timed-out start is killed). |
 | `TUPAIA_CALLER` | `pid N in <cwd>` | Your name in daemon.log. |
 | `TUPAIA_HEADERS_WAIT_MS` | `7000` | `tupaia headers` prints the token by then, even mid-start. |
@@ -369,11 +463,13 @@ independent locks:
    holds the edit lock) is refused unless `force:true`. `expectVersion` adds a hard condition.
    The PUT always carries `X-Map-Version` and never `X-Map-Overwrite`, so the Worker's own guard
    still answers 409 on a race (CONFLICT, with the Worker's body).
-5. **Build.** The deployed `versioning.js` VERSION is fetched (cached 5 minutes). A newer local
+5. **Build.** The deployed `versioning.js` VERSION is fetched (a clean result is cached 5
+   minutes; any other is read again on the next preview, so a fixed deploy needs no restart). A newer local
    VERSION blocks the save outright (live users would get "Newer file"). A map with
    `reliefOnLoad` is refused unless the deployed build is the local one or its entry chunk has
    the relief load hook (an older client would show no relief). When the builds cannot be
-   compared, the save is refused unless `skipBuildCheck:true`; `force` does not imply it.
+   compared (or the relief hook cannot be checked), the save is refused unless
+   `skipBuildCheck:true` (shared_save and sketch_promote); `force` does not imply it.
    `shared_status` runs the build check by default only in live mode.
 6. **Backups.** Before every write the live blob is downloaded to
    `TUPAIA_OUT/shared-saves/v<N>-live-<time>.map`, and for a save the outgoing body is written
@@ -483,9 +579,16 @@ npm run test:bridge     # pure bridge tests and a reused demo page with snapshot
   every description is at most 2048 chars, the instructions too, and the exact tool list.
 - One file per feature: `terrain`, `regrid`, `clear`, `compact`, `apply`, `applypaint` (the paint
   list, territory, places, burg cells), `addprov` (add province/river, apply creating them),
-  `lint`, `settings`,
-  `routes`, `rivers`, `biomes`, `regen`, `relief`, `labels`, `tokens`, `http`; `fam-a/b/c` and
-  `integrate.test.ts` cross the features (one apply spec over biomes, settings with locks,
+  `territory` (regrow borders along the terrain: regrid territories, regenerate provinces regrow),
+  `applyalias` (apply id/alias matching and the baseline; also on the builder's polish-final.map
+  when it is on the machine),
+  `lint`, `settings`, `condpaint` (where conditions, rain shadow, climate smoothing),
+  `routes`, `rivers`, `riverkeep` (terrain rebuilds that re-trace the rivers), `biomes`, `regen`,
+  `relief`, `labels`, `tokens`, `http`; `fam-a/b/c`, `polishintegrate` (rivers retrace then
+  territory regrow, condition paint with hand-placed labels, apply alias + baseline with territory
+  paint), `polishfix` (lineage from another out dir, snapshot saveTo lineage, same-op loads, the
+  build cache and sketch_promote skipBuildCheck, regrid regrow-only, fake-worker-serve
+  --assets/--port, `tupaia tools` without a daemon) and `integrate.test.ts` cross the features (one apply spec over biomes, settings with locks,
   route groups and rivers; a sketch of 8 replayable records rebased onto someone else's v7).
 - `test/sketch.test.ts` and `test/shared.test.ts`: sketches and the shared tools against
   `test/fake-worker.ts`, an in-process `node:http` fake of the Worker on 127.0.0.1.
@@ -501,4 +604,9 @@ A write rehearsal against a real Worker: run `wrangler dev --local` with a scrat
 server with `TUPAIA_MODE=live TUPAIA_LIVE_ORIGIN=http://127.0.0.1:<port>` and its own
 `--out`/TUPAIA_OUT (on the default out dir a running production live daemon would serve the
 rehearsal; the CLI refuses that origin mismatch). `test/fake-worker.ts` is a lighter stand-in
-(see `test/sketch.test.ts` for how the tests drive it).
+(see `test/sketch.test.ts` for how the tests drive it); `node test/fake-worker-serve.ts
+[seed.map] [--version N] [--port N] [--assets [dir]]` runs it alone and prints its origin for
+trying the CLI by hand. `--port` pins the origin (restart it in place); `--assets` serves a built
+app (default `<repo>/dist`) like the Worker's ASSETS binding, so the build check sees the local
+entry chunk and its relief load hook: needed to promote a reliefOnLoad map (without it `/` names
+a stub `index-FAKE.js` that answers 404, a BUILD refusal).

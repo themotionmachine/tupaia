@@ -20,6 +20,14 @@ function ownText(text: string): string {
   return Buffer.from(text, "utf16le").toString("utf16le");
 }
 
+/** Entries whose `text` a HistoryTextStore fixed (a getter over immutable blocks). */
+const fixed = new WeakSet<object>();
+
+/** True when `entry.text` is a HistoryTextStore getter: it never changes, and each read rebuilds the string. */
+export function hasFixedText(entry: object): boolean {
+  return fixed.has(entry);
+}
+
 export class HistoryTextStore {
   #last: HistoryText | undefined;
   #entries = new WeakMap<object, HistoryText>();
@@ -27,12 +35,17 @@ export class HistoryTextStore {
   attach<T extends { text: string }>(entry: T, text: string): T {
     const encoded = this.encode(text);
     this.#entries.set(entry, encoded);
+    fixed.add(entry);
     Object.defineProperty(entry, "text", {
       enumerable: true,
       configurable: false,
       get: () => encoded.blocks.map(block => block.text).join("")
     });
     return entry;
+  }
+
+  has(entry: object): boolean {
+    return this.#entries.has(entry);
   }
 
   encode(text: string): HistoryText {

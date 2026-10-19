@@ -20,6 +20,10 @@ export interface Provenance {
   sketchVersion?: number;
   sharedUpdatedBy?: string | null;
   sharedUpdatedAt?: string | null;
+  /** Size of the shared blob at sharedVersion (a saved file's provenance re-checks it). */
+  sharedBytes?: number;
+  /** sha256 of that blob (a saved file's provenance re-checks it while it is current). */
+  sharedSha256?: string;
   fetchedAt?: string;
   /**
    * The page's window.mapId when this provenance was recorded. The app stamps a new id on every
@@ -93,6 +97,20 @@ export interface UndoPlan {
   redo: HistoryEntry[];
 }
 
+/** Everything SnapshotStore holds, for the state dir (state.ts); entries are the live objects. */
+export interface HistoryState {
+  ring: Snapshot[];
+  undo: HistoryEntry[];
+  redo: HistoryEntry[];
+  nextId: number;
+  nextHist: number;
+  tick: number;
+  epochSeq: number;
+  provenance: Provenance;
+  restorePoint: RestorePoint | null;
+  checkpointEpoch?: number;
+}
+
 export function cloneProv(p: Provenance): Provenance {
   return { ...p };
 }
@@ -161,6 +179,34 @@ export class SnapshotStore {
       if (old) evicted.push(old.baselineKey);
     }
     return { snap, evicted };
+  }
+
+  /**
+   * Snapshots another server left in the state dir (a late takeover, resume.ts): new ids, their
+   * own provenance, `tag` appended to the label. Returns the new snapshots and evicted baselines.
+   */
+  adopt(list: readonly Snapshot[], tag: string): { added: Snapshot[]; evicted: string[] } {
+    const added: Snapshot[] = [];
+    for (const s of list) {
+      const id = this.#nextId++;
+      const snap: Snapshot = {
+        ...s,
+        id,
+        label: `${s.label ?? `#${s.id}`} (${tag})`,
+        provenance: cloneProv(s.provenance),
+        baselineKey: `snap:${id}`,
+        tick: ++this.#tick
+      };
+      this.#texts.attach(snap, s.text);
+      this.#ring.push(snap);
+      added.push(snap);
+    }
+    const evicted: string[] = [];
+    while (this.#ring.length > this.max) {
+      const old = this.#ring.shift();
+      if (old) evicted.push(old.baselineKey);
+    }
+    return { added: added.filter(a => this.#ring.includes(a)), evicted };
   }
 
   /** Find by id (number or numeric string) or label (newest wins). */
@@ -441,6 +487,61 @@ export class SnapshotStore {
       ...this.#redo,
       ...(this.restorePoint ? [this.restorePoint] : [])
     ]);
+  }
+
+  /**
+   * Everything the store holds, for the state dir (state.ts). Entries are the live objects: their
+   * `text` reads the full map back from the shared blocks (#texts), so the state dir keeps whole
+   * texts (content-addressed blobs) and a resumed store rebuilds the blocks (importState).
+   */
+  exportState(): HistoryState {
+    return {
+      ring: this.#ring,
+      undo: this.#undo,
+      redo: this.#redo,
+      nextId: this.#nextId,
+      nextHist: this.#nextHist,
+      tick: this.#tick,
+      epochSeq: this.#epochSeq,
+      provenance: this.provenance,
+      restorePoint: this.restorePoint,
+      checkpointEpoch: this.checkpointEpoch
+    };
+  }
+
+  /**
+   * Take over a persisted history (a new process resuming TUPAIA_OUT/state). The entries' texts
+   * go into this store's shared blocks (oldest state first, so neighbours share blocks).
+   */
+  importState(s: HistoryState): void {
+    const ring = s.ring.slice(-this.max);
+    const undo = s.undo.slice(-this.undoDepth);
+    const redo = s.redo.slice(-this.undoDepth);
+    const rp = s.restorePoint;
+    // redo entries hold states after the newest undo entry; the restore point is the page now
+    const order = (x: { tick?: number }) => x.tick ?? Number.MAX_SAFE_INTEGER;
+    const all: Array<{ text: string; tick?: number }> = [...ring, ...undo, ...[...redo].reverse()];
+    const owned = new Map<object, object>();
+    for (const e of [...all].sort((x, y) => order(x) - order(y))) owned.set(e, this.#own(e));
+    const mine = <T extends object>(e: T): T => owned.get(e) as T;
+    this.#ring = ring.map(mine);
+    this.#undo = undo.map(mine);
+    this.#redo = redo.map(mine);
+    this.#nextId = Math.max(1, s.nextId);
+    this.#nextHist = Math.max(1, s.nextHist);
+    this.#tick = Math.max(0, s.tick);
+    this.#epochSeq = Math.max(0, s.epochSeq);
+    this.provenance = cloneProv(s.provenance);
+    this.restorePoint = rp ? this.#own(rp) : null;
+    this.checkpointEpoch = undefined;
+  }
+
+  /** `e` with its text in this store's blocks (a copy when another store already fixed its text). */
+  #own<T extends { text: string }>(e: T): T {
+    if (this.#texts.has(e)) return e;
+    const d = Object.getOwnPropertyDescriptor(e, "text");
+    const target = d && !d.configurable ? { ...e } : e;
+    return this.#texts.attach(target, e.text);
   }
 
   listing() {

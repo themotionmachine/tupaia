@@ -81,7 +81,9 @@ function baseFromProvenance(ctx: ToolContext, notes: string[]): SketchBase {
       version: p.sharedVersion,
       updatedBy: p.sharedUpdatedBy ?? null,
       updatedAt: p.sharedUpdatedAt ?? null,
-      at
+      at,
+      ...(typeof p.sharedBytes === "number" ? { bytes: p.sharedBytes } : {}),
+      ...(p.sharedSha256 ? { sha256: p.sharedSha256 } : {})
     };
   }
   if (ctx.config.testHooks && p.kind === "file" && p.path) {
@@ -596,7 +598,9 @@ async function rebaseShared(ctx: ToolContext, scope: CallScope, sk: Sketch, onCo
         version,
         updatedBy: blob.updatedBy,
         updatedAt: blob.updatedAt,
-        at: new Date().toISOString()
+        at: new Date().toISOString(),
+        bytes: blob.bytes.length,
+        sha256: sha256(blob.bytes)
       },
       load: async () => {
         const s = await scope.loadMap({ b64: blob.bytes.toString("base64") });
@@ -607,6 +611,8 @@ async function rebaseShared(ctx: ToolContext, scope: CallScope, sk: Sketch, onCo
           sharedVersion: version,
           sharedUpdatedBy: blob.updatedBy,
           sharedUpdatedAt: blob.updatedAt,
+          sharedBytes: blob.bytes.length,
+          sharedSha256: sha256(blob.bytes),
           fetchedAt: new Date().toISOString()
         });
       }
@@ -855,6 +861,8 @@ async function open(ctx: ToolContext, scope: CallScope, args: { slug?: string })
     sharedUpdatedAt: base.updatedAt ?? null,
     sketchSlug: args.slug,
     sketchVersion: blob.version ?? undefined,
+    ...(typeof base.bytes === "number" ? { sharedBytes: base.bytes } : {}),
+    ...(base.sha256 ? { sharedSha256: base.sha256 } : {}),
     fetchedAt: new Date().toISOString()
   });
   const sk = ctx.sketches.begin({
@@ -946,7 +954,7 @@ async function discard(ctx: ToolContext, args: { slug?: string; confirm?: boolea
 async function promote(
   ctx: ToolContext,
   scope: CallScope,
-  args: { confirm?: boolean; token?: string; then?: "keep" | "discard"; compact?: boolean }
+  args: { confirm?: boolean; token?: string; then?: "keep" | "discard"; compact?: boolean; skipBuildCheck?: boolean }
 ): Promise<Record<string, unknown>> {
   requireLive(ctx);
   const sk = needSketch(ctx);
@@ -985,6 +993,7 @@ async function promote(
     token: args.token,
     expectVersion: base,
     compact: args.compact,
+    skipBuildCheck: args.skipBuildCheck,
     viaSketch: true,
     // the token is bound to what happens to the saved sketch afterwards too
     extraFlags: { then }
@@ -994,7 +1003,7 @@ async function promote(
     if (typeof res.next === "string")
       res.next = res.next.replace(
         /shared_save \{confirm:true, token:'([^']+)'([^}]*)\}/,
-        `sketch_promote {confirm:true, token:'$1'${then === "discard" ? ", then:'discard'" : ""}${args.compact ? ", compact:true" : ""}}`
+        `sketch_promote {confirm:true, token:'$1'${then === "discard" ? ", then:'discard'" : ""}${args.compact ? ", compact:true" : ""}${args.skipBuildCheck ? ", skipBuildCheck:true" : ""}}`
       );
     return { ...res, sketch: sketchInfo };
   }
@@ -1146,7 +1155,13 @@ export function register(ctx: ToolContext): void {
           .enum(["keep", "discard"])
           .optional()
           .describe("After a confirmed promote: 'keep' (default) the saved sketch, or 'discard' it"),
-        compact: CompactFlag
+        compact: CompactFlag,
+        skipBuildCheck: z
+          .boolean()
+          .optional()
+          .describe(
+            "As in shared_save: overrides only a BUILD refusal for builds that cannot be compared (or a relief load hook that cannot be checked); only if the human agrees. Same value in preview and confirm"
+          )
       }),
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
       kind: "heavy"

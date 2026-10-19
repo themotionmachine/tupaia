@@ -53,6 +53,7 @@ const USAGE = `tupaia: drive the shared tupaia-mcp daemon (one browser and page 
                                   (saved under $TUPAIA_OUT/shots). A failed tool prints
                                   'ERROR CODE: message' and exits 1. Starts a daemon if none runs.
   tupaia tools [<tool>] [--names] list the tools; with a name: its description and arguments
+                                  (a running daemon's; else this checkout's, starting none)
   tupaia help <tool>              same as tupaia tools <tool>
   tupaia status                   is a daemon running for this TUPAIA_OUT? (exit 1 if not)
   tupaia start                    start a daemon (detached; log: $TUPAIA_OUT/daemon.log)
@@ -72,7 +73,8 @@ Options:
 
 Environment: TUPAIA_OUT picks the daemon and where files go; TUPAIA_MODE and the other TUPAIA_*
 variables apply when this command starts the daemon (the mode never changes afterwards);
-TUPAIA_HTTP_IDLE_MIN (default 120, 0 = never) stops an idle daemon; TUPAIA_START_TIMEOUT_MS
+TUPAIA_HTTP_IDLE_MIN (default 120, 0 = never; fractions allowed) stops an idle daemon (an
+unsaved sketch adds one idle period, or holds it while not persisted); TUPAIA_STATE=off stops persisting $TUPAIA_OUT/state; TUPAIA_START_TIMEOUT_MS
 (default 90000) bounds a start; TUPAIA_CALLER names you in daemon.log.
 Relative paths: load_map {path} is taken from your cwd when the file is there (else the repo
 root); save_map and export write relative paths under TUPAIA_OUT.
@@ -344,9 +346,9 @@ async function startDaemon(cfg: Config, opts: Opts, soonMs?: number): Promise<Fo
             up = true;
             writePortPref(cfg.outDir, { port: st.port, registered: false });
             note(
-              `started a daemon: pid ${st.pid}, ${mcpUrlOf(st)}, mode ${st.mode}, TUPAIA_OUT ${cfg.outDir} (log ${logFile}). ${st.mode === "live" ? `Its page loads the shared map from ${st.liveOrigin ?? "the live origin"} (session says which version), with no undo history.` : "Its page is a fresh random map with no undo history."}`
+              `started a daemon: pid ${st.pid}, ${mcpUrlOf(st)}, mode ${st.mode}, TUPAIA_OUT ${cfg.outDir} (log ${logFile}). ${p.health.resumed ? `It resumed the previous server's page, history and sketch from ${cfg.outDir}/state (session shows what).` : st.mode === "live" ? `Its page loads the shared map from ${st.liveOrigin ?? "the live origin"} (session says which version), with no undo history.` : "Its page is a fresh random map with no undo history."}${stateWarning(p.health)}`
             );
-            reportLastExit(cfg);
+            reportLastExit(cfg, !stateWarning(p.health));
             return { st, health: p.health };
           }
         }
@@ -383,15 +385,21 @@ async function startDaemon(cfg: Config, opts: Opts, soonMs?: number): Promise<Fo
   }
 }
 
-/** The previous daemon saved its page when it stopped: say where (once). */
-function reportLastExit(cfg: Config): void {
+/** " NOT persisting ..." when another server holds TUPAIA_OUT/state (from /health), else "". */
+function stateWarning(h: Record<string, unknown>): string {
+  const s = h.state as { persists?: boolean; note?: string } | undefined;
+  return s && s.persists === false && s.note ? ` WARNING, NOT persisting: ${s.note}.` : "";
+}
+
+/** The previous server saved its page when it stopped: say where (once). */
+function reportLastExit(cfg: Config, persists = true): void {
   const file = path.join(cfg.outDir, LAST_FILE);
   try {
     const last = JSON.parse(fs.readFileSync(file, "utf8")) as LastExit;
     fs.unlinkSync(file);
     if (last.savedMap && fs.existsSync(last.savedMap))
       note(
-        `the previous daemon (pid ${last.pid}) stopped at ${last.at} (${last.reason}) and saved its page to ${last.savedMap}; load_map {"path":"${last.savedMap}"} continues from it`
+        `the previous ${last.transport === "stdio" ? "stdio server" : "daemon"} (pid ${last.pid}) stopped at ${last.at} (${last.reason}) and saved its page to ${last.savedMap}; ${persists ? "the new daemon resumes that page, its history and any sketch from TUPAIA_OUT/state" : "the new daemon resumes that page, its history and any sketch from TUPAIA_OUT/state once it can take that over (see the WARNING)"}, and load_map {"path":"${last.savedMap}"} restores its lineage too`
       );
   } catch {
     // none
@@ -698,11 +706,16 @@ export function describeTool(t: ToolInfo): string[] {
 async function cmdTools(cfg: Config, opts: Opts): Promise<number> {
   const want = opts.positional[1];
   if (opts.positional.length > 2) throw new CliError("usage: tupaia tools [<tool>] [--names] [--json]");
-  // read-only: listing a live daemon's tools is allowed
-  const f = await ensureDaemon(cfg, opts, false);
-  const r = await daemonRequest(f.st.port, f.st.token, "GET", "/tools", undefined, 15_000);
-  if (r.status !== 200) throw new CliError(`daemon answered HTTP ${r.status}: ${r.body.slice(0, 500)}`);
-  const { tools } = JSON.parse(r.body) as { tools: ToolInfo[] };
+  // a running daemon's own list (its checkout may differ); else this checkout's, without starting
+  // one (no browser, nothing written in TUPAIA_OUT)
+  const f = await findDaemon(cfg, true);
+  let tools: ToolInfo[];
+  if (f) {
+    warnMismatch(cfg, f, opts);
+    const r = await daemonRequest(f.st.port, f.st.token, "GET", "/tools", undefined, 15_000);
+    if (r.status !== 200) throw new CliError(`daemon answered HTTP ${r.status}: ${r.body.slice(0, 500)}`);
+    tools = (JSON.parse(r.body) as { tools: ToolInfo[] }).tools;
+  } else tools = await (await import("./tool-list.ts")).listToolsOffline(cfg);
   if (want) {
     const t = tools.find(x => x.name === want);
     if (!t) {
@@ -753,12 +766,16 @@ async function cmdStatus(cfg: Config, opts: Opts): Promise<number> {
   const h = f.health;
   if (opts.json) out(JSON.stringify({ running: true, ...publicState(f.st), health: h }));
   else {
-    const idle = Number(h.idleMin) ? `idle shutdown after ${h.idleMin} min (idle ${h.idleS} s)` : "no idle shutdown";
+    const idle = Number(h.idleMin)
+      ? `idle shutdown after ${h.idleMin} min (idle ${h.idleS} s${h.idleHeldBy ? `; held off: ${h.idleHeldBy}${typeof h.idleShutdownInS === "number" ? `, stops in ${h.idleShutdownInS} s` : ", until TUPAIA_OUT/state holds it"}` : ""})`
+      : "no idle shutdown";
     const extra = (f.st.ports ?? []).filter(p => p !== f.st.port);
     out(
       `running: pid ${f.st.pid}, ${mcpUrlOf(f.st)}${extra.length ? ` (also port ${extra.join(", ")})` : ""}, mode ${h.mode}, browser ${h.browser}, ${h.active} active request(s), ${h.attached ?? 0} attached MCP client(s), up ${h.uptimeS} s, ${idle}`
     );
     out(`version ${f.st.version}, app ${f.st.appVersion ?? "?"}, TUPAIA_OUT ${cfg.outDir}, repo ${h.repoRoot}`);
+    const w = stateWarning(h);
+    if (w) out(w.trim());
   }
   return 0;
 }
@@ -932,8 +949,9 @@ export async function main(argv: string[]): Promise<number> {
   }
   try {
     if (opts.out) process.env.TUPAIA_OUT = path.resolve(opts.out);
-    checkOutDir();
-    const cfg = loadConfig(process.env);
+    // tools (listing or help) creates nothing: no out dir, no daemon
+    if (cmd !== "tools") checkOutDir();
+    const cfg = loadConfig(process.env, { mkdir: cmd !== "tools" });
     if (cmd === "call") return await cmdCall(cfg, opts);
     if (cmd === "tools") return await cmdTools(cfg, opts);
     if (cmd === "status") return await cmdStatus(cfg, opts);

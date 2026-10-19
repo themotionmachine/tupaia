@@ -25,6 +25,11 @@ export interface Config {
   testHooks: boolean;
   /** How long the live build check (versioning.js VERSION, index entry) is cached (ms). */
   buildCacheMs: number;
+  /** TUPAIA_STATE (default on): persist history, provenance and the sketch to TUPAIA_OUT/state and resume them. */
+  stateEnabled: boolean;
+  /** TUPAIA_SNAPSHOTS_MAX / TUPAIA_SNAPSHOTS_MAX_MB: caps on the persisted snapshot/undo/redo entries. */
+  persistMax: number;
+  persistMaxMb: number;
   warnings: string[];
 }
 
@@ -78,7 +83,8 @@ function int(raw: string | undefined, def: number, min: number, max: number): nu
   return Math.max(min, Math.min(max, Math.round(n)));
 }
 
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
+/** `mkdir: false` (tupaia tools without a daemon) leaves TUPAIA_OUT uncreated. */
+export function loadConfig(env: NodeJS.ProcessEnv = process.env, opts: { mkdir?: boolean } = {}): Config {
   const warnings: string[] = [];
   const repoRoot = findRepoRoot(warnings);
   const liveOrigin = parseOrigin(env.TUPAIA_LIVE_ORIGIN, warnings);
@@ -95,7 +101,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const distDir = path.resolve(env.TUPAIA_DIST || path.join(repoRoot, "dist"));
   let outDir = env.TUPAIA_OUT ? path.resolve(env.TUPAIA_OUT) : path.join(repoRoot, ".tupaia-mcp-out");
   try {
-    fs.mkdirSync(outDir, { recursive: true });
+    if (opts.mkdir !== false) fs.mkdirSync(outDir, { recursive: true });
   } catch {
     const fallback = path.join(os.tmpdir(), "tupaia-mcp-out");
     warnings.push(`cannot create ${outDir}; using ${fallback}`);
@@ -117,6 +123,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     offline: flag(env.TUPAIA_OFFLINE),
     testHooks: flag(env.TUPAIA_TEST_HOOKS),
     buildCacheMs: int(env.TUPAIA_BUILD_CACHE_MS, 300_000, 0, 3_600_000),
+    stateEnabled: !/^(0|off|false|no)$/i.test((env.TUPAIA_STATE ?? "").trim()),
+    persistMax: int(env.TUPAIA_SNAPSHOTS_MAX, 40, 0, 500),
+    persistMaxMb: int(env.TUPAIA_SNAPSHOTS_MAX_MB, 512, 1, 100_000),
     warnings
   };
 }

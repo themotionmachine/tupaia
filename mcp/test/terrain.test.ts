@@ -292,7 +292,7 @@ describe("set_heights and flow on demo.map", () => {
       erosion: false,
       keepHeights: true,
       biomes: "redefine",
-      rivers: "regenerate"
+      rivers: "retrace" // a map with rivers: rebuild 'risk' re-traces them (riverkeep.test.ts)
     });
     const g = r.grid as Obj;
     assert.equal(g.cells, n);
@@ -375,7 +375,7 @@ describe("set_heights and flow on demo.map", () => {
     assert.equal(await digest(), d0);
   });
 
-  test("a risk rebuild carries routes, markers, burg cells, river ids and names and lake names to the new cells", async () => {
+  test("a risk rebuild carries routes, markers, burg cells, river ids and names (rivers:'regenerate': by course) and lake names to the new cells", async () => {
     const d0 = await digest();
     const consistency = `
       const C = pack.cells;
@@ -406,7 +406,7 @@ describe("set_heights and flow on demo.map", () => {
       })
     ).value as Obj;
     // an identity import re-packs the cells: everything still lines up, names and ids carry over
-    const same = await h.ok("set_heights", { grid: base }, 240_000);
+    const same = await h.ok("set_heights", { grid: base, rivers: "regenerate" }, 240_000);
     const rv = same.rivers as Obj;
     assert.ok(rv.kept >= rv.before - 3, JSON.stringify(rv));
     assert.ok(((same.carried as Obj).routes as number) > 0 && ((same.carried as Obj).markers as number) > 0);
@@ -421,7 +421,7 @@ describe("set_heights and flow on demo.map", () => {
     // flood the short river's patch: it is gone, and its note is reported
     const flooded = await h.ok(
       "set_heights",
-      { grid: shaped([{ x: named.at.x, y: named.at.y, r: named.at.r, set: 8 }]) },
+      { grid: shaped([{ x: named.at.x, y: named.at.y, r: named.at.r, set: 8 }]), rivers: "regenerate" },
       240_000
     );
     const fr = flooded.rivers as Obj;

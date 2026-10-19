@@ -393,6 +393,10 @@
     const minRegion = a.minRegion === undefined ? 0 : num("minRegion", 0, 1000)(a.minRegion);
     if (!Number.isInteger(minRegion)) fail("BAD_ARGS", "minRegion is a cell count (integer 0..1000)");
     if (from === "current" && noise) fail("BAD_ARGS", "noise perturbs the climate inputs, so it needs from:'climate'");
+    const rainShadow = shadowOptions(a.rainShadow);
+    const { smoothPrec, smoothTemp } = smoothClimateOptions(a.smoothClimate);
+    if (from === "current" && (rainShadow || smoothPrec || smoothTemp))
+      fail("BAD_ARGS", "rainShadow and smoothClimate change the climate inputs, so they need from:'climate'");
     if (from === "current" && !smooth && minRegion < 2)
       fail("BAD_ARGS", "from:'current' only cleans up the biomes as they are: give smooth >= 1 or minRegion >= 2");
     const featurePx =
@@ -416,6 +420,9 @@
       from,
       mode,
       noise,
+      rainShadow,
+      smoothPrec,
+      smoothTemp,
       smooth,
       minRegion,
       featurePx,
@@ -429,27 +436,201 @@
     };
   }
 
-  /** Climate inputs as Biomes.define reads them, and the noise-free biome of a cell. */
-  function climateKit() {
+  /**
+   * Climate inputs as Biomes.define reads them, and the noise-free biome of a cell. `inputs`
+   * (adjustedClimate: rain shadow, smoothing) replaces the grid's values by per-pack-cell ones.
+   */
+  function climateKit(inputs) {
     const C = pack.cells;
     const { fl, r, h, g } = C;
     const precG = grid.cells.prec;
     const tempG = grid.cells.temp;
+    const precAt = inputs?.prec ? i => inputs.prec[i] : i => precG[g[i]];
+    const tempAt = inputs?.temp ? i => Math.round(inputs.temp[i]) : i => tempG[g[i]];
     const riverBonus = i => (r[i] ? Math.max(fl[i] / 10, 2) : 0);
     // own precipitation (+ the cell's river bonus) averaged with the land neighbours'
     const moistureAt = (j, bonus) => {
-      let sum = precG[g[j]] + bonus;
+      let sum = precAt(j) + bonus;
       let k = 1;
       for (const nb of C.c[j])
         if (h[nb] >= 20) {
-          sum += precG[g[nb]];
+          sum += precAt(nb);
           k++;
         }
       return Math.round(4 + sum / k);
     };
-    const climateOf = i =>
-      h[i] < 20 ? 0 : Biomes.getId(moistureAt(i, riverBonus(i)), tempG[g[i]], h[i], Boolean(r[i]));
-    return { C, tempG, riverBonus, moistureAt, climateOf };
+    const climateOf = i => (h[i] < 20 ? 0 : Biomes.getId(moistureAt(i, riverBonus(i)), tempAt(i), h[i], Boolean(r[i])));
+    return { C, tempAt, riverBonus, moistureAt, climateOf };
+  }
+
+  // tupaia-mcp condpaint: rain shadow and climate smoothing, applied to copies of the climate
+  // inputs before the biomes are derived (grid.cells.prec and temp are never written, so the
+  // precipitation layer and later recalculations are unchanged; the op logs literal biome cells)
+
+  /**
+   * The prevailing wind (degrees, the direction it blows towards, as options.winds) of pack cell
+   * i: the wind of its latitude tier, computed from its grid row exactly as generatePrecipitation
+   * does (lat = latN - row / cellsY * latT; tier = |lat - 89| / 30).
+   */
+  function windAt(i, fixed) {
+    if (fixed !== undefined) return fixed;
+    const mc = typeof mapCoordinates !== "undefined" ? mapCoordinates : null;
+    const winds = typeof options !== "undefined" && Array.isArray(options.winds) ? options.winds : null;
+    if (!mc || !winds) return 90;
+    const row = Math.floor(pack.cells.g[i] / grid.cellsX);
+    const lat = mc.latN - (row / grid.cellsY) * mc.latT;
+    const tier = Math.min(5, Math.max(0, (Math.abs(lat - 89) / 30) | 0));
+    return Number(winds[tier]) || 0;
+  }
+
+  /**
+   * Rain shadow per pack cell: from each land cell walk upwind (the wind of its latitude tier, or
+   * rs.wind) up to maxPx; the highest ridge on the way (heights >= ridge) above the cell, fading
+   * linearly with distance, is the height crossed, and the cut (the share of its precipitation
+   * the cell loses) is strength * crossed / 50, capped at 1. Returns the cuts and a report.
+   */
+  function shadowCuts(rs) {
+    const C = pack.cells;
+    const { h, p: P, g } = C;
+    const n = C.i.length;
+    const { cellsX, cellsY, spacing } = grid;
+    // the highest pack height per grid cell (grid cells the pack dropped are deep water)
+    const hr = new Uint8Array(cellsX * cellsY);
+    for (let i = 0; i < n; i++) if (h[i] > hr[g[i]]) hr[g[i]] = h[i];
+    const stepPx = spacing * 0.75;
+    const steps = Math.max(1, Math.ceil(rs.maxPx / stepPx));
+    const fan = rs.spread ? [-1, -0.5, 0, 0.5, 1].map(f => f * rs.spread) : [0];
+    const cuts = new Float64Array(n);
+    let shadowed = 0;
+    let strong = 0;
+    let total = 0;
+    const tiers = new Set();
+    for (let i = 0; i < n; i++) {
+      if (h[i] < 20) continue;
+      const [x0, y0] = P[i];
+      const ang = windAt(i, rs.wind);
+      tiers.add(ang);
+      let crossed = 0;
+      // one ray straight upwind, or with spread a fan of rays within ±spread degrees of it
+      for (const off of fan) {
+        const rad = ((ang + off) * Math.PI) / 180;
+        const ux = -Math.sin(rad); // upwind: against the direction the wind blows towards
+        const uy = Math.cos(rad);
+        for (let k = 1; k <= steps; k++) {
+          const d = k * stepPx;
+          if (d > rs.maxPx) break;
+          const x = x0 + ux * d;
+          const y = y0 + uy * d;
+          if (x < 0 || y < 0 || x >= graphWidth || y >= graphHeight) break;
+          const gx = Math.min(cellsX - 1, Math.floor(x / spacing));
+          const gy = Math.min(cellsY - 1, Math.floor(y / spacing));
+          const hs = hr[gy * cellsX + gx];
+          if (hs < rs.ridge || hs <= h[i]) continue;
+          const c = (hs - h[i]) * (1 - d / rs.maxPx);
+          if (c > crossed) crossed = c;
+        }
+      }
+      const cut = Math.min(1, (rs.strength * crossed) / 50);
+      if (cut <= 0) continue;
+      cuts[i] = cut;
+      shadowed++;
+      if (cut >= 0.5) strong++;
+      total += cut;
+    }
+    return {
+      cuts,
+      report: {
+        // always a list: the fixed wind, or the winds of the map's latitude tiers the land lies in
+        wind: rs.wind !== undefined ? [rs.wind] : [...tiers].sort((a, b) => a - b),
+        windFrom: rs.wind !== undefined ? "fixed" : "map",
+        shadowed,
+        halved: strong,
+        meanCut: shadowed ? rn(total / shadowed, 2) : 0
+      }
+    };
+  }
+
+  /** Rain shadow, in place on `precP` (precipitation per pack cell); returns the report. */
+  function applyRainShadow(precP, rs) {
+    const { cuts, report } = shadowCuts(rs);
+    for (let i = 0; i < precP.length; i++) if (cuts[i] > 0) precP[i] *= 1 - cuts[i];
+    return report;
+  }
+
+  /** Passes of a land-neighbour mean, in place on a per-pack-cell array. */
+  function smoothLand(arr, passes) {
+    const C = pack.cells;
+    const h = C.h;
+    const n = C.i.length;
+    for (let pass = 0; pass < passes; pass++) {
+      const prev = Float64Array.from(arr);
+      for (let i = 0; i < n; i++) {
+        if (h[i] < 20) continue;
+        let sum = prev[i];
+        let k = 1;
+        for (const j of C.c[i])
+          if (h[j] >= 20) {
+            sum += prev[j];
+            k++;
+          }
+        arr[i] = sum / k;
+      }
+    }
+  }
+
+  /** Adjusted climate inputs per pack cell (null when no adjustment is asked for). */
+  function adjustedClimate(o) {
+    if (!o.rainShadow && !o.smoothPrec && !o.smoothTemp) return null;
+    const C = pack.cells;
+    const g = C.g;
+    const n = C.i.length;
+    const precP = Float64Array.from({ length: n }, (_, i) => grid.cells.prec[g[i]]);
+    const tempP = Float64Array.from({ length: n }, (_, i) => grid.cells.temp[g[i]]);
+    const report = {};
+    if (o.rainShadow) report.rainShadow = applyRainShadow(precP, o.rainShadow);
+    if (o.smoothPrec) smoothLand(precP, o.smoothPrec);
+    if (o.smoothTemp) smoothLand(tempP, o.smoothTemp);
+    return { prec: precP, temp: tempP, report };
+  }
+
+  const SHADOW_KEYS = ["strength", "maxDistance", "unit", "ridge", "wind", "spread"];
+
+  function shadowOptions(v, name = "rainShadow") {
+    if (v === undefined || v === null || v === false) return null;
+    const rs = v === true ? {} : v;
+    if (!isObj(rs))
+      fail("BAD_ARGS", `${name} is true, false or {strength?, maxDistance?, unit?, ridge?, wind?, spread?}`);
+    for (const k of Object.keys(rs))
+      if (!SHADOW_KEYS.includes(k))
+        fail("BAD_FIELD", `${name} does not take '${k}'; allowed: ${SHADOW_KEYS.join(", ")}`, {
+          details: { unknown: k, allowed: SHADOW_KEYS }
+        });
+    const unit = rs.unit ?? "cells";
+    if (!["px", "cells"].includes(unit)) fail("BAD_ARGS", `${name}.unit is 'cells' (default) or 'px'`);
+    const strength = rs.strength === undefined ? 1 : num(`${name}.strength`, 0, 5)(rs.strength);
+    const dist = rs.maxDistance === undefined ? 15 : num(`${name}.maxDistance`, 0.1, 20000)(rs.maxDistance);
+    const ridge = rs.ridge === undefined ? 50 : num(`${name}.ridge`, 20, 100)(rs.ridge);
+    const wind = rs.wind === undefined ? undefined : num(`${name}.wind`, 0, 360)(rs.wind);
+    const spread = rs.spread === undefined ? 0 : num(`${name}.spread`, 0, 60)(rs.spread);
+    const maxPx = unit === "cells" ? dist * grid.spacing : dist;
+    return { strength, maxDistance: dist, unit, maxPx, ridge, wind, spread };
+  }
+
+  function smoothClimateOptions(v) {
+    if (v === undefined || v === null) return { smoothPrec: 0, smoothTemp: 0 };
+    if (!isObj(v)) fail("BAD_ARGS", "smoothClimate is {precipitation?: passes, temperature?: passes}");
+    for (const k of Object.keys(v))
+      if (!["precipitation", "temperature"].includes(k))
+        fail("BAD_FIELD", `smoothClimate does not take '${k}'; allowed: precipitation, temperature`, {
+          details: { unknown: k, allowed: ["precipitation", "temperature"] }
+        });
+    const passes = k => {
+      if (v[k] === undefined) return 0;
+      const x = num(`smoothClimate.${k}`, 0, 200)(v[k]);
+      if (!Number.isInteger(x)) fail("BAD_ARGS", `smoothClimate.${k} is a number of passes (integer 0..200)`);
+      return x;
+    };
+    return { smoothPrec: passes("precipitation"), smoothTemp: passes("temperature") };
   }
 
   /**
@@ -468,7 +649,7 @@
       return i => {
         const x = P[i][0] / o.featurePx;
         const y = P[i][1] / o.featurePx;
-        const t = Math.round(K.tempG[g[i]] + fbm(seedA, x, y) * o.noise * TEMP_AMP);
+        const t = Math.round(K.tempAt(i) + fbm(seedA, x, y) * o.noise * TEMP_AMP);
         const m = Math.max(0, K.moistureAt(i, K.riverBonus(i)) + fbm(seedB, x, y) * o.noise * MOIST_AMP);
         return Biomes.getId(m, t, h[i], Boolean(r[i]));
       };
@@ -495,7 +676,7 @@
           break;
         }
       }
-      const t = j === i ? K.tempG[g[i]] : K.tempG[g[j]] + drop(gh[g[j]]) - drop(gh[g[i]]);
+      const t = j === i ? K.tempAt(i) : K.tempAt(j) + drop(gh[g[j]]) - drop(gh[g[i]]);
       return Biomes.getId(K.moistureAt(j, K.riverBonus(i)), t, h[i], Boolean(r[i]));
     };
   }
@@ -552,6 +733,9 @@
   /** The new biome per pack cell (a copy; nothing is written). */
   function computeBiomes(o) {
     const K = climateKit();
+    // the derived biomes read the adjusted inputs; "painted" stays measured against the plain climate
+    const adj = o.from === "climate" ? adjustedClimate(o) : null;
+    const KA = adj ? climateKit(adj) : K;
     const C = K.C;
     const h = C.h;
     const n = C.i.length;
@@ -575,10 +759,10 @@
     const held = i => kept[i] || (o.keepRivers && C.r[i]);
     let fromClimate = 0;
     if (o.from === "climate") {
-      const noisy = o.noise > 0 ? noisyClimate(K, o) : null;
+      const noisy = o.noise > 0 ? noisyClimate(KA, o) : null;
       for (let i = 0; i < n; i++) {
         if (!inScope(i) || kept[i]) continue;
-        const b = h[i] < 20 ? 0 : noisy ? noisy(i) : K.climateOf(i);
+        const b = h[i] < 20 ? 0 : noisy ? noisy(i) : KA.climateOf(i);
         if (b !== next[i]) fromClimate++;
         next[i] = b;
       }
@@ -617,7 +801,7 @@
       i => !inScope(i) || held(i),
       i => kept[i] > 0
     );
-    return { next, keptBy, fromClimate, smoothed, merged };
+    return { next, keptBy, fromClimate, smoothed, merged, climate: adj?.report ?? null };
   }
 
   function changeStats(before, next) {
@@ -669,6 +853,21 @@
       noise: o.noise,
       smooth: o.smooth,
       ...(o.minRegion ? { minRegion: o.minRegion, merged: r.merged } : {}),
+      ...(r.climate?.rainShadow
+        ? {
+            rainShadow: {
+              strength: o.rainShadow.strength,
+              maxDistance: o.rainShadow.maxDistance,
+              unit: o.rainShadow.unit,
+              ridge: o.rainShadow.ridge,
+              ...(o.rainShadow.spread ? { spread: o.rainShadow.spread } : {}),
+              ...r.climate.rainShadow
+            }
+          }
+        : {}),
+      ...(o.smoothPrec || o.smoothTemp
+        ? { smoothClimate: { precipitation: o.smoothPrec, temperature: o.smoothTemp } }
+        : {}),
       scale: o.featurePx,
       seed: o.seedNum,
       cells: o.scope ? o.scope.size : pack.cells.i.length,
@@ -884,5 +1083,18 @@
     return res;
   };
 
-  T.biomes = { seedOf, hash01, valueNoise, fbm, iconWeights, RELIEF_ICONS, mergeSmallRegions };
+  T.biomes = {
+    seedOf,
+    hash01,
+    valueNoise,
+    fbm,
+    iconWeights,
+    RELIEF_ICONS,
+    mergeSmallRegions,
+    // tupaia-mcp condpaint: where.js reads the same rain shadow and smoothing as regenerate biomes
+    shadowOptions,
+    shadowCuts,
+    windAt,
+    adjustedClimate
+  };
 })(globalThis);

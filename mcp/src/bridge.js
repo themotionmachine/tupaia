@@ -317,10 +317,12 @@
 
   /**
    * Coalesce redraw requests (names or {layer, ids}) into one step per layer, in canonical
-   * order. stateLabels ids are unioned; a request without ids means "all states".
+   * order. stateLabels ids are unioned; a request without ids means "all states". A layer is
+   * marked ifDrawn only when every request for it is {ifDrawn:true} (a paint's fill redraw).
    */
   function coalesceRedraws(requests) {
     const want = new Map();
+    const ifDrawn = new Map();
     for (const r of requests || []) {
       const layer = typeof r === "string" ? r : r?.layer;
       if (!layer) continue;
@@ -330,6 +332,8 @@
       if (!want.has(layer)) want.set(layer, ids ? new Set(ids) : null);
       else if (want.get(layer) && ids) for (const id of ids) want.get(layer).add(id);
       else want.set(layer, null);
+      const cond = typeof r === "object" && r.ifDrawn === true;
+      ifDrawn.set(layer, ifDrawn.has(layer) ? ifDrawn.get(layer) && cond : cond);
     }
     if (want.has("all")) return [{ layer: "all" }];
     if (want.has("labels")) {
@@ -338,7 +342,9 @@
     }
     return REDRAW_ORDER.filter(l => want.has(l)).map(l => {
       const ids = want.get(l);
-      return ids ? { layer: l, ids: [...ids].sort((a, b) => a - b) } : { layer: l };
+      const step = ids ? { layer: l, ids: [...ids].sort((a, b) => a - b) } : { layer: l };
+      if (ifDrawn.get(l)) step.ifDrawn = true;
+      return step;
     });
   }
 
@@ -1866,6 +1872,24 @@
     emblems: ["drawEmblems", "toggleEmblems"]
   };
 
+  // what a fill layer shows when it is drawn: a layer whose button is on but whose group holds
+  // none of these (a file saved with an emptied or whitespace-only group loads with the button
+  // on) shows nothing, and a paint's redraw ({ifDrawn:true}) leaves it so instead of filling it
+  const DRAWN_SEL = {
+    states: "#statesBody path",
+    provinces: "#provincesBody path",
+    borders: "#borders path",
+    cultures: "#cults path",
+    religions: "#relig path",
+    biomes: "#biomes path"
+  };
+  function layerShowsNothing(layer) {
+    const toggle = REDRAW[layer]?.[1];
+    if (!DRAWN_SEL[layer] || !toggle || typeof document === "undefined" || typeof layerIsOn !== "function")
+      return false;
+    return layerIsOn(toggle) && !document.querySelector(DRAWN_SEL[layer]);
+  }
+
   async function redraw(a) {
     const plan = coalesceRedraws(a.layers || []);
     const redrawn = [];
@@ -1878,6 +1902,11 @@
       }
       const [fnName, toggle] = REDRAW[step.layer];
       if (toggle && typeof layerIsOn === "function" && !layerIsOn(toggle)) {
+        skippedHidden.push(step.layer);
+        continue;
+      }
+      // a paint never puts fills into a layer that showed none
+      if (step.ifDrawn && layerShowsNothing(step.layer)) {
         skippedHidden.push(step.layer);
         continue;
       }
@@ -2420,6 +2449,7 @@
   T.getView = getView;
   T.setView = setView;
   T.redraw = redraw;
+  T.layerShowsNothing = layerShowsNothing;
   T.fail = fail;
   T.resetMemo = () => {
     memo = null; // per-call caches (labels, notes) go stale after a mutation inside the call

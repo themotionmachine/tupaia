@@ -57,8 +57,22 @@ $T tools ; $T status ; $T stop
   `specPath`, set_heights/flow `image.path`) absolute when the file is in your cwd; otherwise the
   server tries its cwd, then the out dir, then the repo root, and results name the file it read.
   `save_map`/`export` write relative paths under the out dir.
-- The daemon stops after 120 idle minutes; a changed page is saved first, and the next call
-  prints the `load_map` line for `<out>/maps/daemon-exit-*.map`.
+- The daemon stops after 120 idle minutes. A sketch that records or has changes not saved to the
+  Worker holds that off for one more period when `<out>/state` holds it (it resumes next start),
+  and for as long as it does not (`session` `idle.note` says which and what releases it: in local
+  mode `tupaia stop`, never `sketch save`; `tupaia status` says "held off").
+  Whatever stops it (idle, `stop`, a crash), the page map, undo/redo, snapshots, provenance and
+  the active sketch persist under `<out>/state/` after every call, and the next daemon on the
+  same `--out` resumes them by itself (its first result has a `resumed ...` note). A changed
+  page is also saved to `<out>/maps/daemon-exit-*.map` with its provenance: `load_map` of that
+  file restores the lineage and the sketch even if `<out>/state` is gone, so `sketch_promote`
+  works without `replaceWithUnrelated` (tests: `mcp/test/persist.test.ts`, "persist item 1").
+- One `<out>` has one state writer. A daemon takes it at start, a stdio server (the one
+  `.mcp.json` starts per Claude session) only on its first tool call. If `tupaia` prints
+  `WARNING, NOT persisting` (or session `state.persists` is false), another live server holds it:
+  this one takes over once that server exits (a server with work of its own keeps it and gets
+  the other's page + sketch as `maps/takeover-*.map`: `load_map` it). Test: "persist item 1:
+  holds, live boots and one TUPAIA_OUT shared".
 - For future sessions, the human can register the daemon as an http MCP server (an entry with
   `"type":"http"`, `"url":"http://127.0.0.1:7392/mcp"` and `"headersHelper":"TUPAIA_MODE=local
   /Users/mgm1/Desktop/code/vespucci/mcp/bin/tupaia headers"`; details in `mcp/README.md`). It
@@ -142,6 +156,11 @@ Token economy (results are counts first; ask for detail only when needed):
   {view:'<id>', compare:'<id>', crop:'changed'}`; a full-map baseline crops a one-label change to
   about 130 px. `view:'<id>'` repeats a frame across load_map and regrid too. A compare that
   finds nothing returns no image, just a note.
+- Shot ids and files are never reused: a restarted server continues after the highest
+  `<out>/shots/sN*` already there (s21 after s1..s20), a default file is never overwritten, and
+  `saveTo` replaces a file only with `overwrite:true`; `compare:'sN'` still finds a previous
+  server's shot. Cite `file` paths in reports freely
+  (test: `mcp/test/persist.test.ts`, "persist item 3").
 
 ## 5. Recipes
 
@@ -159,9 +178,10 @@ Token economy (results are counts first; ask for detail only when needed):
    the opt-in global river pass). `paint_cells {set:{height:{...}}}` is the same local keep.
 4. `flow {from:[{x:840, y:420}, {gridCell:5005}], heights:{grid:[...]}, fill:true}`: key rivers
    should end at `sea` (or `river` whose `goesTo` is the sea); `screenshot:true` draws them.
-5. `set_heights {...}` without dryRun. Read `rivers` (kept/new/gone, `notesOrphaned`) and
-   `carried` (field meanings in the cheatsheet, Terrain). Even an identity import with rebuild
-   'risk' regenerates rivers (ids and names carry over by course). Verify: the same dryRun says `changed:0`, and
+5. `set_heights {...}` without dryRun. Read `rivers` and `carried` (field meanings in the
+   cheatsheet, Terrain). On a map with rivers, rebuild 'risk' re-traces them (next recipe); a map
+   without rivers, `erosion:true` or `rivers:'regenerate'` runs the river generator (ids and names
+   carry over by course only; `rivers` kept/new/gone, `notesOrphaned`). Verify: the same dryRun says `changed:0`, and
    `edit {type:'map', recalculate:'biomes', dryRun:true}` reports `replaces.biomeCellsEdited:0`.
 6. World settings: `edit {type:'map', ops:[{set:{mapSize:1.1, latitude:38.8,
    temperatureEquator:30, temperatureNorthPole:-28, winds:[225,45,45,315,135,315],
@@ -180,7 +200,29 @@ Token economy (results are counts first; ask for detail only when needed):
    were (`biomes`: redefined, carriedCustom, carriedPainted), then speckles under `minRegion`
    cells (default 3, 0 = off) merged into their neighbour (`biomes.cleanup`; river and carried
    cells stay); `biomes:'climate'` carries custom only, `'keep'` the old pattern (warns).
+   Add `territories:'regrow'` so state, culture, religion and province borders follow the
+   terrain instead of the old cells' steps (see "Borders along the terrain" below).
 8. `lint` (markers on new water, route links), then `screenshot {full:true}`.
+
+**Change the coastline and keep the rivers.** A terrain change that crosses height 20 needs
+rebuild 'risk'; on a map with rivers it re-traces them (`rivers:'retrace'`, the default; for
+`paint_cells` height risk too) instead of regenerating them, so ids, names, types, parents, main
+stems and hand edits (mainStem, reroute, name) survive.
+1. `set_heights {pack:{<cell>:h, ...}, dryRun:true}` (or grid/image; for paint_cells height
+   risk, `set.height.rivers`): `rivers.underWater` names the rivers the apply removes (no point
+   of their line left on land; a burg's cell stays land); `toLand`/`toWater` count the flips.
+2. `set_heights {pack:{...}}`. Read `rivers`: `unchanged` (no changed cell on the course: kept
+   cell for cell), `retraced`, `carved` (land cells lowered where a river now climbs more than
+   before; `carved.most` names the deepest), and the named lists `underWater`, `notRetraced`,
+   `shortened` (meets new sea higher up), `toWaterNow`, `endsInland`, `lakeGone` (a drained
+   lake's inflows join its outlet), `orphaned`, `climbingMore` (a tributary the carve could not
+   flatten without making its parent climb: fix it by hand, lint `river-uphill` shows where).
+   `climbingLeft` counts rivers that climb no more than before. The notes repeat them.
+3. Verify: `find {type:'river'}` (or eval over `pack.rivers`) shows the same ids, names and
+   parents; `lint {checks:['river-gap','river-uphill']}`. Replays in a sketch (the log keeps the
+   heights the rivers were traced on). Tested in `mcp/test/riverkeep.test.ts` (demo.map: hand
+   edits, a no-op, a drained lake, a drowned river with tributaries, a carve at a confluence; the
+   builder's polish-final.map with a change near the Spire and Ballantine).
 
 **Wipe the random base and build from a spec.**
 1. `clear {types:['labels','markers','zones','routes','burgs','provinces','states','religions',
@@ -255,11 +297,35 @@ paint:[
   (joined into the legend as the builder wrote them) need nothing. Two duplicates stay CONFLICT
   rows: Wainfolk (cultures[3].note and notes[10]) and Kaisma's road (routes[13].note and
   notes[7]); the builder joined each pair into one legend.
-- apply matches rivers by name and creates a missing one along its from/via/to (`add river`);
-  a river whose first place is already on a river is an error row naming that river. Use
-  `edit river` for structure.
+- apply matches rivers by name, then by name + type word ('Melstone brook' finds Melstone, a
+  Brook) or a declared alias, and creates a missing one along its from/via/to (`add river`); a
+  river whose first place is already on a river is an error row naming that river: give the
+  entry that river as an alias (below). Use `edit river` for structure.
 - `specPath`: absolute (a relative one: your cwd via the CLI, else the server's cwd, the out dir,
   the repo root; the result's `specPath` names the file read).
+
+**Keep checking a polished map against its spec (aliases + baseline).** After hand polish the
+map departs from the spec on purpose (~100 differences on story-polish) and new drift drowns.
+1. Entities whose map name differs: an entry may carry `id` (the map's id) and
+   `aliases:['Map name']`; or keep the spec as is and pass `aliases` beside it:
+   `aliases:{rivers_intended:{'NE hollow brook':'Northeast Hollow', 'Klein river (with the
+   Corvallis gorge)':'Klein', 'The Spire':'Spire', 'Glassward south-face stream':'Glassward',
+   'Unclaimed valley outlet':'Unclaimed Valley'}}` (the other seven rivers match by name + type
+   word). Order: id > name > aliases; neither id nor alias renames; rows say `by`, the result
+   counts `matched`. An `id` must agree with the entry's name or aliases, else ID_MISMATCH (a
+   spec's own numbering is not a map id: drop it). Upsert never creates an entity matched by
+   alias (two entries reaching one entity: CONFLICT).
+2. `apply {<the call above>, aliases, mode:'baseline', writeBaseline:{path:'/abs/design/
+   apply-baseline.json', allowOutside:true}}` records every difference, missing entry and error
+   as accepted (one JSON item per line: list, key, field, have, want).
+3. `apply {..., mode:'check', baseline:'/abs/design/apply-baseline.json'}`: `clean:true`,
+   `baselined:N`, accepted rows counted as `accepted`. Later checks list only new drift, or an
+   accepted difference whose values changed (its old item counts in `baselineStale`; items of
+   lists an `only` left out count in `baselineNotChecked`). Re-run step 2 to accept the new
+   state (`baseline:` in mode 'baseline' replaces only a baseline file, never the spec). A baseline filters checks only: upsert refuses it (leave
+   accepted fields out with `ignore`/`only`). Verified on a copy of polish-final.map
+   (test/applyalias.test.ts): 12/12 rivers matched, 124 differences baselined, re-check clean,
+   one burg edit is the one row reported, no river duplicated by upsert.
 
 **Quality pass.** `lint {}` (overview: warn and error rows) -> run each `fixAll` call and the
 per-row `fix` calls (ready `edit`/`paint_cells`/`eval` calls; read them first: route-end-burg's
@@ -286,8 +352,60 @@ marker-near-burg) run only when named.
    cultures and religions only; removed markers, notes, labels, routes and zones are already
    gone.
 
+**Biomes by condition: floodplain, rain-shadow desert, contour bands.** One call each, both
+replayable (literal cells). Floodplain (rivers `R` = the main river and its big tributaries):
+`paint_cells {select:{where:{land:true, any:[{riverDist:{lte:0, rivers:R}}, {all:[{riverDist:
+{lte:4, rivers:R}}, {aboveRiver:{lte:4, rivers:R}}, {height:{lte:38}}]}]}}, set:{biome:'Wetland'},
+feather:{width:4, unit:'cells', seed:11}}` (on polish-final this matched the fork's hand-made
+floodplain at Jaccard 0.72 before feathering, 0.70 painted). A contour band (Badlands):
+`where:{height:{gte:45, lte:53}, noise:{scale:60, seed:31, gte:0.3}}` with `circle` to bound it.
+Rain-shadow desert, the call measured against the fork's open-eval on polish-final (`S` = the
+fork's scope: `{height:{gte:20, lte:58}}` and `{any:[{biome:['Hot desert','Savanna','Grassland',
+'Tropical seasonal forest','Cold desert']}, {biome:'Wetland', x:{gte:1440}, y:{lte:920}}]}`):
+`paint_cells {select:{where:{all:[...S, {temperature:{gte:18.5, smooth:150}}, {precipitation:
+{lt:0.6, smooth:150, rainShadow:{ridge:74, maxDistance:336, unit:'px', wind:0, spread:30,
+strength:2}}}]}}, set:{biome:'Hot desert'}}`. It matches the fork's classifier without its noise
+at Jaccard 0.65 and the fork's noisy result at 0.22; the fork's own classifier without its noise
+reaches only 0.175 against that result, so the remaining gap is the fork's ±140 px warp noise.
+Precipitation is the raw `grid.cells.prec` (cell info shows x100 mm). `where.rainShadow:{gte:0.5,
+...}` selects the lee itself. `regenerate {parts:['biomes'], biomes:{rainShadow, smoothClimate,
+select, keepPainted:false}}` re-derives with the app's biome matrix instead (Jaccard 0.14 here: the
+fork classified by its own thresholds); `keepPainted` defaults to true, which on a hand-painted
+map keeps most cells, so pass false. Tests: `mcp/test/condpaint.test.ts`.
+
 **Propose a change as a sketch.** See section 10; the replay table there says which calls keep
 the sketch rebasable.
+
+**Borders along the terrain.** Stepped borders after a density change, or provinces a script
+drew (straight lines, nearest centre):
+- Regrid: `regrid {density:8, territories:'regrow'}` (add `territoryLocked:true` to move locked
+  states too: a `note` and `state.lockedKept` say how many kept their land). States, cultures
+  and religions regrow as one label, so borders that coincide stay together. Read
+  `territories`: each field's `changed` and `maxAreaChangePct` (about its copied area),
+  `province.within15pct`. Every burg keeps its state and culture, capitals stay inside. Before
+  and after: `display {only:['states','borders','rivers','relief']}`, then `screenshot
+  {target:{bbox:[x0,y0,x1,y1]}}` (screenshot takes no `only`). Tests:
+  `mcp/test/territory.test.ts` (regrid ... versus 'copy', and the coinciding-borders case).
+- Provinces only: `regenerate {parts:['provinces'], provinces:{regrow:true, states:['S']},
+  dryRun:true}` (read `within15pct`, `sizes`), then without dryRun; `band:8` reshapes more
+  (sizes are held tightest at the default band 4).
+  Ids, names, capitals, centres, emblems and every burg's province stay; replays in a sketch.
+  Tests: `mcp/test/territory.test.ts` (regenerate provinces {regrow:true}).
+- Already at the target density (e.g. a 50K map whose borders are still stepped):
+  `regrid {density:<its density>, territories:'regrow', dryRun:true}` says `mode:'regrow-only'`,
+  then without dryRun: only the state, culture, religion and province borders regrow (no
+  rebuild; heights, rivers, biomes and cell ids stay; heights/ice/relief/biomes/minRegion/carve
+  are refused; band default 3). Locked states keep their labels (`layers.stateLabelsKept`).
+  `eval {readOnly:true, code:'return grid.cellsDesired'}` gives the density (points). Not
+  replayable in a sketch (blob-only), one undo entry. Tests: `mcp/test/polishfix.test.ts`.
+
+**Combining the polish tools on one map.** They compose: `set_heights` (rivers re-traced) then
+`regrid {territories:'regrow'}` keeps the same rivers (carved, never climbing) with burgs,
+capitals and provinces inside their territories; a state paint selected by `where` conditions
+(`{all:[{height:{lte:40}}, {not:{riverDist:{lte:0}}}]}`) keeps hand-placed state labels, in
+`paint_cells` and in apply's paint list (an entry's `where` adds to its select's); an apply spec
+with alias-matched entries and such paints takes a baseline like any other (the paint applied
+alone leaves its item stale, not a new row). Tests: `mcp/test/polishintegrate.test.ts`.
 
 **Hand-made state with provinces and arms.** `add {type:'state', items:[{capital:{burg:'X'},
 name:'S'}]}` -> `paint_cells {select, set:{state:'S'}}` (and `{culture}`) ->
@@ -328,6 +446,7 @@ replaces it:
 | River splices, splits, renames, moving notes (rivfix.js, split.py, rename_rivers.py) | `edit {type:'river', ops:[{ref, set:{split\|merge\|mainStem\|reroute\|end\|joinAt\|name\|type}}]}`; rivfix in two calls: `[{ref:28, set:{end:{at:7437}}}, {ref:14, set:{reroute:{cells:[7141,7289,7437,7586]}}}]` then `[{ref:9, set:{mainStem:8}}, ...renames]` |
 | Burg labels hidden at full-map zoom | `display {labels:{...}}`, `screenshot {labels:'all'}` (check first: usually they show, just small) |
 | Relief icon density by hand | `regenerate {parts:['relief'], relief:{density\|matchIcons, perBiome, exclude, nearBurgs}}` |
+| Floodplain by flux and flatness, rain-shadow deserts, a contour-following Badlands (polish flood-eval, open-eval, bad-eval) | `paint_cells {select:{where:{riverDist, aboveRiver, slope, height, flux, noise, all/any/not}}, feather}`; `regenerate {parts:['biomes'], biomes:{rainShadow, smoothClimate}}` (recipe in section 5) |
 | Removed entities bloating the .map | `compact`, `compact:true` on saves; `edit map {reliefOnLoad:true}` |
 | Territory and biome cell lists by eval (sel.py: feature polygons + buffer_px, except), then paint_cells per culture/state/religion/biome (territory.py, paint_territory.py, paint_biomes.py) | `apply {specPath, paint:[{from:'terrain_paint.Somnean', set:{culture, state}}, {from:'biomes_paint'}, ...]}` (the mapping above); one-off: `paint_cells {select:{polygon, buffer, except}}` |
 | Composite marker legends, map/label notes by id (add_markers.py, add_notes.py) | `markers[].places` and `notes[].entity` through apply (the mapping above) |
@@ -349,7 +468,7 @@ points (spire.js), ice shapes. Read the runtime API first and pass `redraw`.
   `restoreLayers:true` turns back layers a part switched on. biomes, provinces, emblems and
   relief take options, are seeded or literal, and replay in sketches.
 - Height edits on part of the map: `paint_cells ... set:{height:{..., rebuild:'keep'}}` (land
-  only, refuses crossing 20, local: rivers and the economy stay), `'risk'` (coastline changes, entities carried), `'erase'` (wipes
+  only, refuses crossing 20, local: rivers and the economy stay), `'risk'` (coastline changes, entities carried, rivers re-traced), `'erase'` (wipes
   every entity; only when asked, with `confirmErase:true`).
 - Names from a culture's language: `set:{name:{generate:{base:'Hawaiian'}}}` or
   `{generate:{culture:<ref>}}`.
@@ -370,6 +489,20 @@ points (spire.js), ice shapes. Read the runtime API first and pass `redraw`.
 - `save_map` and `export` write under TUPAIA_OUT by default. Elsewhere only to a path the human
   named (`allowOutside:true` outside the repo); `overwrite:true` to replace; never
   `tests/fixtures` or source folders. Both refuse while an app editor is open.
+- Lineage survives a file: `save_map` appends one provenance line the app ignores (base version,
+  sketch slug and log, ops since, content hash, signed with this out dir's key; the result's
+  `lineage` says what). `load_map` of that file, unmodified, puts the page back on the shared
+  base (`shared_status` lineage `shared`, stale against that base, the sketch active again); an
+  edited file or a copied block stays unrelated, and a base the server contradicts too (result
+  `lineage.note` says why; `file:'none'` = no provenance line, e.g. an exit save from before
+  2026-10-10). A file from another out dir (`file:'foreign'`: signed with that dir's
+  `<out>/provenance.key`, e.g. the stdio server's default out dir vs a daemon's `--out`) keeps
+  the lineage only when the server verifies its base (`baseCheck:'verified'`); its sketch comes
+  back blob-only (promote while its base is current, no rebase). `snapshot {action:'take',
+  saveTo}` writes the same line. Loading a file that holds the active sketch at the same op
+  logs nothing when the page already held that map. save_map returns `sha256` (the file) and
+  `mapSha256` (the map text). Never edit a saved .map to keep its lineage (tests:
+  `mcp/test/persist.test.ts` "persist item 2", `mcp/test/polishfix.test.ts`).
 - `shared_save`, `shared_restore` and `sketch_promote` change the live shared map that other
   people use. Use them ONLY when the human, in this conversation, explicitly asks for the live
   map to change; they work only in a server spawned with `TUPAIA_MODE=live` (otherwise MODE:
@@ -382,7 +515,10 @@ points (spire.js), ice shapes. Read the runtime API first and pass `redraw`.
   overwrite (preview again with force, confirm with force and the new token, say you forced
   it). LINEAGE: only `replaceWithUnrelated:true`, only when asked for exactly that. BUILD block:
   nothing overrides; tell the human to deploy first (also for a `reliefOnLoad` map on an old
-  deploy). BUILD unknown: only `skipBuildCheck:true` after the human agreed. CONFLICT: report it.
+  deploy). BUILD unknown (also a relief load hook that cannot be checked): only
+  `skipBuildCheck:true` (shared_save and sketch_promote) after the human agreed. Only a clean
+  build check is cached, so after a deploy or an origin fix the next preview checks again (no
+  restart). CONFLICT: report it.
 - `shared_restore`: preview `{version}`, tell the human, then `{version, confirm:true, token,
   expectCurrent}`.
 - Layer visibility, style and label overrides are saved with the map; mention them.
@@ -456,6 +592,14 @@ save, discarding a saved sketch, and promote need the live-mode server.
   A river cell list with gaps (`river-gap`, after an eval edit say) has a fixAll that reroutes it.
 - `paint_cells`: an unknown key in select/where/set is BAD_FIELD, never ignored; select has
   `buffer` (px) and `except` (another select). A feather narrower than one cell does nothing.
+- State paints (`paint_cells set:{state}`, apply's paint list) re-fit only state labels the
+  renderer would draw as they are; hand-placed ones (locked, dragged, resized, re-texted,
+  reshaped, custom path) keep path, size, text and pole, and a state with no label gets none.
+  Only a label whose anchor the paint takes out of its state is re-fitted (no larger than
+  before), reported in `set.state.stateLabels.moved` and a note; `dryRun:true` shows
+  `wouldMove` first. Layers are never toggled, and an on but empty fill layer (v7's whitespace
+  `#provs` loads with Provinces on) stays empty. State labels have no move tool: hand-place them
+  in the app. Recipe/test: mcp/test/paintlabels.test.ts.
 - Biomes cannot be removed (repaint their cells). `clear` keeps locked entities (freehand routes)
   and never removes route groups.
 - Population in `changes`/diffs is stored thousands; set and find use people.
@@ -464,4 +608,7 @@ save, discarding a saved sketch, and promote need the live-mode server.
 - Typed arrays come back from eval as plain arrays; large results are capped.
 - `mapId` is not an identity; it changes on every load.
 - Snapshots live in server memory: they survive browser relaunches, not a server or daemon
-  restart. `snapshot {action:'take', saveTo}` or `save_map` for anything that must last.
+  restart. `snapshot {action:'take', saveTo}` or `save_map` for anything that must last (both
+  carry the provenance line).
+- `tupaia tools [<name>]` needs no daemon: with none running it lists this checkout's tools and
+  starts nothing (no browser, no TUPAIA_OUT).

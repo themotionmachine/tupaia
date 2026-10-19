@@ -17,14 +17,17 @@ function fixture(existingLabels = [1, 2]) {
     provinces: [{i: 0}, {i: 1, state: 1, center: 0}, {i: 2, state: 2, center: 2}, {i: 3, state: 3, center: 3}],
     burgs: [{i: 0}, {i: 1, cell: 4, capital: 1}]
   };
-  const plans: Array<{layer: string; ids?: number[]}> = [];
-  const paint = new Function("pack", "nameFor", "isLive", "States", "Provinces", "document", `${paintSource}; return paintApply;`)(
+  const plans: Array<{layer: string; ids?: number[]; ifDrawn?: boolean}> = [];
+  // a label is its text and its path (stateLabelInfo reads both); the fixture's labels have no path
+  const paint = new Function("pack", "nameFor", "isLive", "States", "Provinces", "document", "T", `${paintSource}; return paintApply;`)(
     pack, (key: string, id: number) => `${key}${id}`, (x: {removed?: boolean}) => !!x && !x.removed,
     {collectStatistics() {}, getPoles() {}}, {getPoles() {}},
-    {getElementById: (id: string) => existingLabels.some(n => id === `stateLabel${n}`) ? {x: 99, y: 42} : null}
+    {getElementById: (id: string) => existingLabels.some(n => id === `stateLabel${n}`) ? {x: 99, y: 42} : null},
+    {}
   );
   const context = {
-    R: {add(layer: string, ids?: number[]) {plans.push({layer, ids});}},
+    R: {add(layer: string, ids?: number[]) {plans.push({layer, ids});}, list: plans},
+    notes: new Set<string>(),
     internals: {adjustProvinces() {}}
   };
   return {pack, plans, paint, context};
@@ -35,21 +38,25 @@ test("state painting redraws source and destination entities, preserves labels, 
   const result = await f.paint({cells: [0, 1, 2, 4, 5], state: 2}, true, f.context);
   assert.equal(result.state.changed, 1);
   assert.deepEqual(result.state.skipped, {stateCenter: 1, unchanged: 1, capital: 1, water: 1});
+  // fills only where the layer showed something (ifDrawn), and only the touched entities
   assert.deepEqual(f.plans, [
-    {layer: "states", ids: [1, 2]}, {layer: "borders", ids: [1, 2]}, {layer: "provinces", ids: [1]}
+    {layer: "states", ids: [1, 2], ifDrawn: true}, {layer: "borders", ids: [1, 2], ifDrawn: true},
+    {layer: "provinces", ids: [1], ifDrawn: true}
   ]);
   assert.equal(f.pack.cells.state[1], 2);
 });
-test("state painting requests only missing labels", async () => {
+// existing labels are never redrawn from scratch here, and (dx polish, paintlabels.test.ts) a
+// state that had no label gets none: only the renderer's own labels are re-fitted
+test("state painting draws no label a state did not have", async () => {
   const f = fixture([1]);
   await f.paint({cells: [1], state: 2}, true, f.context);
-  assert.deepEqual(f.plans.at(-1), {layer: "stateLabels", ids: [2]});
+  assert.equal(f.plans.some(p => p.layer === "stateLabels"), false, JSON.stringify(f.plans));
 });
 test("province painting tracks old and new provinces and the owning state", async () => {
   const f = fixture();
   f.pack.provinces.push({i: 4, state: 1, center: 4});
   await f.paint({cells: [1], province: 4}, true, f.context);
-  assert.deepEqual(f.plans, [{layer: "borders", ids: [1]}, {layer: "provinces", ids: [1, 4]}]);
+  assert.deepEqual(f.plans, [{layer: "borders", ids: [1], ifDrawn: true}, {layer: "provinces", ids: [1, 4], ifDrawn: true}]);
 });
 test("no-op and validation painting schedule no redraw and mutate nothing", async () => {
   const f = fixture(), original = structuredClone(f.pack);
