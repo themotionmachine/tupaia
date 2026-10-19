@@ -1,12 +1,19 @@
+import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   type Affine,
   cachedReliefImage,
   hatchUvAtZoom,
+  INHERITED_PATTERN_ATTRIBUTES,
+  inheritedAttributes,
+  MAX_TILE_PIXELS,
+  MAX_TILE_SIDE,
   meetImageRect,
   multiply,
   parseTransform,
-  scaleBucket
+  planPattern,
+  scaleBucket,
+  tileSize
 } from "./raster";
 
 const close = (actual: Affine | null, expected: number[]) => {
@@ -162,4 +169,122 @@ it("rescales a rotated or custom zone-hatch clone exactly like re-rasterizing it
       }
     }
   }
+});
+
+// Minimal Element stand-in built from a <pattern> markup string (vitest runs in node, no DOM).
+function fakePattern(markup: string) {
+  const open = /<pattern\b([^>]*)>/.exec(markup)!;
+  const attrs = new Map<string, string>();
+  for (const m of open[1].matchAll(/([\w:-]+)="([^"]*)"/g)) attrs.set(m[1], m[2]);
+  const body = markup.slice(open[0].length);
+  const tags = new Set([...body.matchAll(/<(\w+)/g)].map(m => m[1]));
+  return {
+    getAttribute: (n: string) => attrs.get(n) ?? null,
+    hasAttribute: (n: string) => attrs.has(n),
+    querySelector: (sel: string) => (sel.split(",").some(t => tags.has(t.trim())) ? ({} as Element) : null)
+  };
+}
+
+describe("pattern tile inheritance", () => {
+  it("passes dash, cap, join, offset and miter attributes to the tile wrapper", () => {
+    for (const name of [
+      "stroke-dasharray",
+      "stroke-dashoffset",
+      "stroke-linecap",
+      "stroke-linejoin",
+      "stroke-miterlimit",
+      "stroke-opacity",
+      "fill-opacity",
+      "opacity"
+    ])
+      expect(INHERITED_PATTERN_ATTRIBUTES).toContain(name);
+    const pattern = fakePattern(
+      '<pattern id="g" width="25" height="25" stroke="#000" stroke-dasharray="2 3" stroke-dashoffset="1" stroke-linecap="round" stroke-linejoin="bevel" stroke-miterlimit="2" bogus="x"><path d="M0 0"/></pattern>'
+    );
+    expect(Object.fromEntries(inheritedAttributes(pattern))).toEqual({
+      stroke: "#000",
+      "stroke-dasharray": "2 3",
+      "stroke-dashoffset": "1",
+      "stroke-linecap": "round",
+      "stroke-linejoin": "bevel",
+      "stroke-miterlimit": "2"
+    });
+  });
+});
+
+describe("tileSize", () => {
+  it("keeps pitch within one device px at every zoom bucket, with no 512 px clamp", () => {
+    for (const [w, h] of [
+      [4, 4],
+      [25, 43.4],
+      [100, 100],
+      [82.5, 50]
+    ])
+      for (const bucket of [1, 2, 4, 8, 16]) {
+        const { tw, th, capped } = tileSize(w, h, bucket);
+        if (capped) continue;
+        expect(tw).toBeGreaterThanOrEqual(w * bucket - 1e-6);
+        expect(tw - w * bucket).toBeLessThan(1);
+        expect(th - h * bucket).toBeLessThan(1);
+      }
+    expect(tileSize(100, 100, 8).tw).toBe(800);
+  });
+
+  it("bounds memory by side and area", () => {
+    const huge = tileSize(5000, 40, 16);
+    expect(huge.capped).toBe(true);
+    expect(Math.max(huge.tw, huge.th)).toBeLessThanOrEqual(MAX_TILE_SIDE);
+    const big = tileSize(1000, 1000, 16);
+    expect(big.capped).toBe(true);
+    expect(big.tw * big.th).toBeLessThanOrEqual(MAX_TILE_PIXELS);
+    expect(tileSize(4, 4, 1)).toEqual({ tw: 4, th: 4, capped: false });
+  });
+});
+
+describe("planPattern", () => {
+  const plan = (markup: string, scale = 4) => planPattern(fakePattern(markup), scale);
+  it("selects the raster size from the bucket and the patternTransform scale", () => {
+    const p = plan('<pattern width="10" height="10" patternUnits="userSpaceOnUse"><line/></pattern>', 8);
+    expect(typeof p).toBe("object");
+    if (typeof p === "string") return;
+    expect(p.size.tw).toBe(80);
+    const scaled = plan(
+      '<pattern width="10" height="10" patternUnits="userSpaceOnUse" patternTransform="scale(2)"><line/></pattern>',
+      8
+    );
+    if (typeof scaled === "string") throw new Error(scaled);
+    expect(scaled.size.tw).toBe(160);
+    const rotated = plan(
+      '<pattern width="4" height="4" patternUnits="userSpaceOnUse" patternTransform="rotate(45 0 0)"><line/></pattern>',
+      8
+    );
+    if (typeof rotated === "string") throw new Error(rotated);
+    expect(rotated.size.tw).toBe(32);
+  });
+
+  it("routes non-native patterns to compat with a reason (oceanic image pattern)", () => {
+    expect(
+      plan('<pattern id="oceanic" width="100" height="100" patternUnits="userSpaceOnUse"><image href="x"/></pattern>')
+    ).toBe("pattern content");
+    expect(plan('<pattern width="4" height="4"><line/></pattern>')).toBe("pattern units");
+  });
+});
+
+describe("stock hatch patterns", () => {
+  const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
+  const hatches = [...html.matchAll(/<pattern id="(hatch\d+)"[^>]*>[\s\S]*?<\/pattern>/g)];
+  it("defines hatch0..hatch41", () => {
+    expect(hatches.map(m => m[1])).toEqual(Array.from({ length: 42 }, (_, i) => `hatch${i}`));
+  });
+  it("classifies every one for native rasterization with a computed pitch at k 1/2/4/8", () => {
+    for (const m of hatches)
+      for (const k of [1, 2, 4, 8]) {
+        const p = planPattern(fakePattern(m[0]), k);
+        expect(typeof p, `${m[1]} -> ${p}`).toBe("object");
+        if (typeof p === "string") continue;
+        expect(p.pitch).toEqual([p.width * k, p.height * k]);
+        expect(p.size.capped).toBe(false);
+        expect(p.size.tw).toBe(Math.ceil(p.width * k));
+      }
+  });
 });
