@@ -32,16 +32,16 @@ import { alive, DEMO_MAP, errorBody, type Harness, startServer } from "./helpers
 
 type Obj = Record<string, any>;
 
-/** The pack cell of each relief icon (the cell whose polygon holds its centre; findCell alone can miss). */
+/**
+ * The pack cell of each relief icon (the cell whose polygon holds its centre; findCell alone can miss).
+ * Relief icons are drawn on canvas now, so the logical list comes from window.getReliefIcons().
+ */
 const CELLS_OF_ICONS = `const owner = (x, y) => {
   const c = findCell(x, y);
   if (d3.polygonContains(getPackPolygon(c), [x, y])) return c;
   return pack.cells.c[c].find(n => d3.polygonContains(getPackPolygon(n), [x, y])) ?? c;
 };
-const centres = [...document.querySelectorAll("#terrain use")].map(u => {
-  const s = +u.getAttribute("width");
-  return owner(+u.getAttribute("x") + s / 2, +u.getAttribute("y") + s / 2);
-});`;
+const centres = window.getReliefIcons().map(({ x, y, s }) => owner(x + s / 2, y + s / 2));`;
 
 const literal = {
   parts: ["provinces", "emblems"],
@@ -330,7 +330,10 @@ return { n: centres.length, inEx: centres.filter(c => ex.has(c)).length };`;
     assert.ok(rg.reliefExclusion, JSON.stringify(rg.regenerated));
     assert.equal((rg.reliefExclusion as Obj).before, e1.n);
     assert.match(JSON.stringify(rg.regenerated), /relief icon exclusion moved to the new cells/);
-    assert.match(JSON.stringify(rg.regenerated), /drawn as a load would, not kept/);
+    assert.match(
+      JSON.stringify(rg.regenerated),
+      /deprecated reliefOnLoad compatibility flag, so its stored settings are used to redraw them/
+    );
     const e2 = await ev(EXCL, { ...at, r: R });
     assert.equal(e2.stale, false);
     assert.equal(e2.n, (rg.reliefExclusion as Obj).after);
@@ -376,7 +379,7 @@ return n;`;
     await h.ok("edit", { type: "map", ops: [{ set: { reliefOnLoad: true } }] });
     const back = await h.ok("edit", { type: "biome", ops: [{ ref: b, set: { iconsDensity: dens } }] });
     const notes = JSON.stringify(back.notes);
-    assert.match(notes, /drawn now: this map draws its relief icons on load/);
+    assert.match(notes, /drawn now: this map carries the deprecated reliefOnLoad compatibility flag/);
     assert.match(notes, /relief icons redrawn \(\d+\)/);
     const n2 = (await ev(BIOME_ICONS)) as Obj;
     assert.ok(n2[b] > n0[b] * 0.8, JSON.stringify({ before: n0[b], after: n2[b] }));

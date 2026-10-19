@@ -682,7 +682,11 @@
     const shown = new Set();
     const items = [];
     let hidden = 0;
+    // label culling (src/renderers/label-culling.ts) hides labels outside the viewport with display:none,
+    // which have no box; measure them too, and put the class attribute back exactly
+    const culled = [...document.querySelectorAll("#labels .viewport-culled")].map(el => [el, el.getAttribute("class")]);
     try {
+      for (const [el] of culled) el.classList.remove("viewport-culled");
       for (const g of labelGroups()) {
         const z = groupAt(g, S);
         const was = g.classList.contains("hidden");
@@ -708,6 +712,7 @@
         items.push(parts ? { ...d, box, e, parts } : { ...d, box, e });
       }
     } finally {
+      for (const [el, cls] of culled) el.setAttribute("class", cls);
       for (const [g, fs, was] of saved) {
         if (fs === null) g.removeAttribute("font-size");
         else g.setAttribute("font-size", fs);

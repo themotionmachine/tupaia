@@ -111,6 +111,7 @@ function prepareMapSections(): BinaryMapSection[] {
   materializeRelief(cloneEl); // Only custom raster fallbacks need their embedded snapshot.
   cloneEl.querySelectorAll(".viewport-culled").forEach(element => {
     element.classList.remove("viewport-culled");
+    if (element.getAttribute("class") === "") element.removeAttribute("class"); // culling must not leave class=""
   });
 
   // reset transform values to default

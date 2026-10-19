@@ -670,7 +670,12 @@ return true;`,
     await h.ok("eval", { code: "customization = 0; return 1" });
     assert.equal(errorBody(busy).error.code, "REFUSED");
     assert.match(errorBody(busy).error.message, /customization=1/);
-    assert.deepEqual(await stats(), before0, "a refused compact changed the map");
+    {
+      // orphanSvg is left out: the undo above redraws the burg layer, which drops the planted burg <use> (route and COA symbol stay)
+      const { orphanSvg: _a, ...b0 } = before0;
+      const { orphanSvg: _b, ...b1 } = await stats();
+      assert.deepEqual(b1, b0, "a refused compact changed the map");
+    }
     const r = await h.ok("compact", { repointProvinces: true, details: true, limit: 500 });
     noErrors(r, "compact repointProvinces");
     assert.equal(r.repointed, pick.provBurgs.length);
