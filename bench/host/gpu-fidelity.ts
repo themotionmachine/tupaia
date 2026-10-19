@@ -4,6 +4,7 @@ import { chromium } from "playwright";
 import { createServer } from "node:http";
 import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { resolve, extname } from "node:path";
+import { isolateLayer } from "./golden-isolation.ts";
 const root = resolve(import.meta.dirname, "../.."); // repo root: bench/host -> ../..
 const dist = resolve(root, "dist");
 const output = resolve(process.env.GATE_OUT_DIR || process.cwd(), process.env.SMOKE_NAME || "gpu-smoke");
@@ -32,14 +33,9 @@ try {
  page.on("pageerror",e=>report.errors.push(e.message));page.on("console",m=>{if(["warning","error"].includes(m.type())&&report.warnings.length<50)report.warnings.push(m.text().slice(0,1000));});page.on("dialog",d=>d.dismiss());
  await page.goto(origin+"/?local&seed=7319&width=1280&height=720&renderer=gpu");
  await page.evaluate(async ({text,hideRelief})=>{const w=globalThis as any;const ready=await w.__tupaia.call("ready",{timeoutMs:120000});if(!ready.ok)throw Error(JSON.stringify(ready));await w.__tupaia.fns.loadMap({text,timeoutMs:120000});const shown=await w.__tupaia.call("display",hideRelief?{on:["heightmap"],off:["relief"]}:{on:["heightmap","relief"]});if(!shown.ok)throw Error(JSON.stringify(shown));await w.__tupaia.settle();await Promise.all([w.reliefRenderReady,w.burgRenderReady]);},{text:readFileSync(process.env.GATE_MAP||"/tmp/tupaia-navigation-shared-v8.map","utf8"),hideRelief:process.env.SMOKE_HIDE_RELIEF==="1"});
- if(process.env.SMOKE_ONLY_LAYER)await page.evaluate(id=>{
-  const view=document.querySelector("#viewbox")!,target=view.querySelector(":scope > #"+CSS.escape(id));
-  if(!target)throw Error("Missing isolated layer "+id);
-  for(const e of [...view.children])(e as SVGElement).style.display=e===target?"block":"none";
-  const bg=document.createElementNS("http://www.w3.org/2000/svg","rect");
-  for(const [k,v]of Object.entries({x:"-5000",y:"-5000",width:"20000",height:"20000",fill:"#fff"}))bg.setAttribute(k,v);
-  view.prepend(bg);
- },process.env.SMOKE_ONLY_LAYER);
+ // Diagnostic isolation, shared with the per-layer golden (golden-isolation.ts): hides the other #viewbox layers and the
+ // root overlays, white backdrop as the svg background (no extra element in the GPU scene).
+ if(process.env.SMOKE_ONLY_LAYER)await page.evaluate(isolateLayer,{id:process.env.SMOKE_ONLY_LAYER,bg:"#ffffff"});
  (report as any).contextProperties=await page.evaluate(()=>{const gl=(document.querySelector("canvas[data-gpu-renderer]") as HTMLCanvasElement)?.getContext("webgl2");return gl?{attributes:gl.getContextAttributes(),samples:gl.getParameter(gl.SAMPLES)}:null;});
  if(process.env.SMOKE_ZOOM) await page.evaluate(async k=>{const w=globalThis as any;w.d3.select("#map").call((0,eval)("zoom").transform,w.d3.zoomIdentity.translate(640-w.graphWidth*k/2,360-w.graphHeight*k/2).scale(k));await w.__tupaia.settle();await Promise.all([w.reliefRenderReady,w.burgRenderReady]);},Number(process.env.SMOKE_ZOOM));
  try {await page.waitForFunction(()=>{const s=(globalThis as any).rendererStatus?.();const c=document.querySelector("canvas[data-gpu-renderer]") as HTMLCanvasElement | null;if(s?.active==="svg"&&s?.fallbackReason)return true;return s?.gpu?.state==="active"&&!s.gpu.pending&&!!c&&getComputedStyle(c).display!=="none";},{},{timeout:15000});}

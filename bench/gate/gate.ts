@@ -3,8 +3,9 @@
 //
 //   node bench/gate/gate.ts <check|tier> [key=value ...]      (npm run gate -- <check> ...)
 //
-// Browser/GPU checks take a BLOCKING exclusive fcntl.flock on /tmp/tupaia-host-gates.lock (the lock hostlock.py
-// uses), so only one browser job runs on the host at a time across every worktree. Node-only checks skip it.
+// Browser/GPU checks take the host lock on /tmp/tupaia-host-gates.lock (host-lock.ts), across every worktree:
+// correctness checks a SHARED slot (at most TUPAIA_GATE_SLOTS, default 2, at once), timing checks the EXCLUSIVE lock
+// (nothing else in a browser; it is the same flock hostlock.py takes). Node-only checks take neither.
 // Evidence goes to ${TUPAIA_GATE_OUT:-~/.tupaia-gates}/<worktree>/<check>-<timestamp>/, never into the repo.
 // stdout gets exactly one compact JSON line; progress and the tier table go to stderr.
 // Exit 0 = pass, 1 = check failed, 2 = usage or environment error. See docs/performance/webgl-rewrite/GATE.md.
@@ -13,6 +14,8 @@ import { createHash } from "node:crypto";
 import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
+import { FAMILIES, FAMILY_NAMES, parsePresets, parseZooms, STYLE_PRESETS, selectFamilies } from "../host/golden-families.ts";
+import { HostLock, type LockMode, slotCount } from "./host-lock.ts";
 
 const REPO = resolve(import.meta.dirname, "../..");
 const NODE = process.execPath;
@@ -41,6 +44,7 @@ interface Result {
   images?: Record<string, string>;
   log_tail?: string;
   lock_wait_s?: number;
+  lock_mode?: LockMode;
 }
 
 interface Ctx {
@@ -53,16 +57,33 @@ interface Ctx {
 }
 
 interface CheckDef {
-  browser: boolean; // takes the host lock and needs dist/
+  // host lock tier: "shared" for correctness checks, "exclusive" for timing checks, null for node-only checks.
+  // Every check with a lock is a browser check: it needs dist/ and the fixture, and runs under nice.
+  lock: LockMode | null;
   keys: string[];
+  spec?: Record<string, Spec>; // per-check argument specs that override ARG_SPEC
   timeout: number; // seconds, per child process
   run(ctx: Ctx): Promise<Partial<Result>>;
 }
 
 // ---------------------------------------------------------------- arguments
 
-const LAYERS = ["labels", "icons", "markers", "zones", "routes", "borders", "cults", "regions", "provs", "terrs", "biomes", "terrain", "ocean", "coastline", "landmass", "texture"];
-const ARG_SPEC: Record<string, { type: "int" | "bool" | "enum" | "string"; values?: Value[]; default?: Value }> = {
+// smoke/fidelity `layer=`: any #viewbox family of the golden (golden-families.ts), by element id
+const LAYERS = FAMILIES.filter(f => !f.root).map(f => f.id);
+interface Spec {
+  type: "int" | "bool" | "enum" | "string";
+  values?: Value[];
+  default?: Value;
+  check?: (text: string) => void; // throws on a bad string value
+}
+const listOf = (parse: (text: string) => unknown) => (text: string) => {
+  try {
+    parse(text);
+  } catch (error) {
+    throw new UsageError(error instanceof Error ? error.message : String(error));
+  }
+};
+const ARG_SPEC: Record<string, Spec> = {
   dpr: { type: "int", values: [1, 2], default: 2 },
   zoom: { type: "int", values: [1, 2, 4, 8], default: 2 },
   block: { type: "int", values: [1, 2, 3, 4, 5], default: 1 },
@@ -83,17 +104,45 @@ const ARG_SPEC: Record<string, { type: "int" | "bool" | "enum" | "string"; value
   manifest: { type: "string", default: "fresh" },
   dirs: { type: "string" },
   skip: { type: "string", default: "" },
-  keep_going: { type: "bool", default: false }
+  keep_going: { type: "bool", default: false },
+  mode: { type: "enum", values: ["shared", "exclusive"], default: "exclusive" },
+  // golden (bench/host/layer-golden.ts)
+  layers: { type: "string", default: "all", check: listOf(selectFamilies) },
+  k: {
+    type: "string",
+    default: "1,4",
+    check: listOf(text => {
+      if (!parseZooms(text).length) throw new Error("k needs at least one zoom");
+    })
+  },
+  coastk: { type: "string", default: "", check: listOf(parseZooms) },
+  preset: { type: "string", default: "default", check: listOf(parsePresets) },
+  fixture: { type: "string", default: "shared" },
+  census: { type: "string" },
+  bg: { type: "string", default: "#ffffff", check: listOf(text => { if (!/^#[\da-f]{6}$/i.test(text)) throw new Error("bg must be #rrggbb"); }) },
+  // "conservative" is the repo convention (P2-FIDELITY-MEASUREMENT.md); over44 is an unapproved, looser opt-in
+  reading: { type: "enum", values: ["conservative", "over44"], default: "conservative" },
+  keep: { type: "enum", values: ["all", "fail"], default: "all" },
+  break: { type: "enum", values: ["none", "drop-batch"], default: "none" }
+};
+// golden takes a list of device pixel ratios (D5 nightly runs 1,2)
+const DPR_LIST: Spec = {
+  type: "string",
+  default: "2",
+  check: text => {
+    if (!text.split(",").every(d => d === "1" || d === "2")) throw new UsageError("dpr must be 1, 2 or 1,2");
+  }
 };
 
-function parseArgs(check: string, raw: string[], allowed: string[]): Args {
+function parseArgs(check: string, raw: string[], allowed: string[], overrides: Record<string, Spec> = {}): Args {
   const args: Args = {};
+  const specOf = (key: string) => overrides[key] ?? ARG_SPEC[key];
   for (const item of raw) {
     const at = item.indexOf("=");
     if (at < 1) throw new UsageError(`Bad argument "${item}": use key=value`);
     const key = item.slice(0, at);
     const text = item.slice(at + 1);
-    const spec = ARG_SPEC[key];
+    const spec = specOf(key);
     if (!spec || !allowed.includes(key)) throw new UsageError(`Unknown argument "${key}" for ${check}; allowed: ${allowed.join(", ") || "none"}`);
     let value: Value = text;
     if (spec.type === "int") {
@@ -104,92 +153,26 @@ function parseArgs(check: string, raw: string[], allowed: string[]): Args {
       value = text === "1" || text === "true";
     }
     if (spec.values && !spec.values.includes(value)) throw new UsageError(`Invalid ${key}=${text}; one of ${spec.values.join(", ")}`);
+    spec.check?.(text);
     args[key] = value;
   }
-  for (const key of allowed) if (!(key in args) && ARG_SPEC[key].default !== undefined) args[key] = ARG_SPEC[key].default!;
+  for (const key of allowed) if (!(key in args) && specOf(key).default !== undefined) args[key] = specOf(key).default!;
   return args;
 }
 
 class UsageError extends Error {}
+// A usage error about the environment rather than one step (dist/ missing): every later step would hit it too, so a
+// tier stops with exit 2 instead of recording a FAIL and going on.
+class EnvError extends UsageError {}
 
 // ---------------------------------------------------------------- host lock
 
-// A python3 helper holds fcntl.flock(LOCK_EX) on the same file hostlock.py uses, so the two interoperate exactly.
-// It prints "locked" once it owns the lock and keeps it until its stdin closes, which also happens if this
-// process dies, so the lock can never outlive the gate.
-const LOCK_HELPER = [
-  "import fcntl, sys",
-  "f = open(sys.argv[1], 'a+')",
-  "fcntl.flock(f, fcntl.LOCK_EX)",
-  "sys.stdout.write('locked\\n'); sys.stdout.flush()",
-  "sys.stdin.read()"
-].join("\n");
-
-class HostLock {
-  helper: ChildProcess | null = null;
-  inherited = false;
-  waitSeconds = 0;
-
-  async acquire(): Promise<void> {
-    if (this.helper || this.inherited) return;
-    const holder = inheritedLockHolder();
-    if (holder) {
-      this.inherited = true;
-      log(`host lock already held by ${holder}; not re-locking`);
-      return;
-    }
-    const started = Date.now();
-    const helper = spawn("python3", ["-I", "-c", LOCK_HELPER, LOCK_PATH], { stdio: ["pipe", "pipe", "inherit"] });
-    this.helper = helper;
-    const notice = setTimeout(() => log(`waiting for host lock ${LOCK_PATH} (another browser job is running)`), 1500);
-    try {
-      await new Promise<void>((done, fail) => {
-        let buffer = "";
-        helper.stdout!.on("data", chunk => {
-          buffer += chunk;
-          if (buffer.includes("locked\n")) done();
-        });
-        helper.on("error", fail);
-        helper.on("exit", code => fail(new Error(`host lock helper exited (${code}) before locking ${LOCK_PATH}`)));
-      });
-    } finally {
-      clearTimeout(notice);
-    }
-    this.waitSeconds = (Date.now() - started) / 1000;
-    if (this.waitSeconds > 1.5) log(`host lock acquired after ${this.waitSeconds.toFixed(0)}s`);
-  }
-
-  async release(): Promise<void> {
-    const helper = this.helper;
-    this.helper = null;
-    if (!helper || helper.exitCode !== null) return;
-    const gone = new Promise(done => helper.once("exit", done));
-    helper.stdin!.end();
-    await gone;
-  }
-}
-
-// hostlock.py (or a parent gate) already owns the lock: re-locking from here would deadlock against our own parent.
-function inheritedLockHolder(): string | null {
-  if (process.env.TUPAIA_GATE_LOCK_HELD === "1") return "parent gate (TUPAIA_GATE_LOCK_HELD=1)";
-  let pid = process.ppid;
-  for (let depth = 0; depth < 12 && pid > 1; depth++) {
-    const ps = spawnSync("ps", ["-o", "ppid=,command=", "-p", String(pid)], { encoding: "utf8" });
-    const line = ps.stdout?.trim();
-    if (!line) break;
-    const match = /^(\d+)\s+(.*)$/.exec(line);
-    if (!match) break;
-    // Only a python process actually executing hostlock.py counts, not a shell whose command line mentions it.
-    if (/^\S*python[\d.]*\s+(-\S+\s+)*\S*hostlock\.py(\s|$)/i.test(match[2])) return `ancestor pid ${pid} (hostlock.py)`;
-    pid = Number(match[1]);
-  }
-  return null;
-}
+// host-lock.ts: shared slots for correctness checks, the exclusive lock for timing checks (GATE.md "Host lock").
+const lock = new HostLock({ path: LOCK_PATH, slots: slotCount(), log });
 
 // ---------------------------------------------------------------- process running
 
 let activeChild: ChildProcess | null = null;
-const lock = new HostLock();
 
 function exec(command: string[], env: Record<string, string>, logPath: string, timeout: number, nice: boolean): Promise<number> {
   const argv = nice ? ["nice", "-n", "5", ...command] : command;
@@ -349,7 +332,7 @@ async function runScript(
   timeout: number,
   judge: (report: Json, code: number) => { failure?: string | null; metrics?: Json }
 ): Promise<Partial<Result>> {
-  const code = await exec(command, ctx.env(env), ctx.log, timeout, DEFS[ctx.check]?.browser ?? true);
+  const code = await exec(command, ctx.env(env), ctx.log, timeout, DEFS[ctx.check] ? DEFS[ctx.check].lock !== null : true);
   const data = readJson(report);
   let failure: string | null = null;
   let metrics: Json = {};
@@ -576,12 +559,125 @@ async function metricsCheck(ctx: Ctx): Promise<Partial<Result>> {
   return result;
 }
 
+// `fixture=` of the golden: the shared-v8 snapshot, the parity fixture (FIX packet), or a path to a .map file.
+function resolveNamedFixture(name: string): string {
+  if (name === "shared") return resolveFixture();
+  if (name === "parity") {
+    const candidates = [process.env.TUPAIA_GATE_PARITY_MAP, join(REPO, "tests/fixtures/parity/parity.map"), join(GATE_HOME, "fixtures", "parity.map")];
+    const found = candidates.find(path => path && existsSync(path));
+    if (!found)
+      throw new UsageError(
+        `parity fixture not found (TUPAIA_GATE_PARITY_MAP, tests/fixtures/parity/parity.map or ${join(GATE_HOME, "fixtures", "parity.map")}); ` +
+          "it comes from the FIX packet. Use fixture=shared meanwhile."
+      );
+    return found!;
+  }
+  const path = resolve(name);
+  if (!existsSync(path)) throw new UsageError(`fixture not found: ${path}`);
+  return path;
+}
+
+async function goldenCheck(ctx: Ctx): Promise<Partial<Result>> {
+  const report = join(ctx.dir, "golden.json");
+  const env: Record<string, string> = {
+    GOLDEN_MAP: ctx.map(),
+    GOLDEN_LAYERS: String(ctx.args.layers),
+    GOLDEN_K: String(ctx.args.k),
+    GOLDEN_COAST_K: String(ctx.args.coastk),
+    GOLDEN_DPR: String(ctx.args.dpr),
+    GOLDEN_PRESET: String(ctx.args.preset),
+    GOLDEN_BG: String(ctx.args.bg),
+    GOLDEN_READING: String(ctx.args.reading),
+    GOLDEN_KEEP: String(ctx.args.keep),
+    GOLDEN_BREAK: String(ctx.args.break)
+  };
+  if (ctx.args.census) {
+    const path = resolve(String(ctx.args.census));
+    if (!existsSync(path)) throw new UsageError(`census expectations not found: ${path}`);
+    env.GOLDEN_CENSUS = path;
+  }
+  const result = await runScript(ctx, nodeScript("bench/host/layer-golden.ts"), env, report, DEFS.golden.timeout, data => {
+    const failing = (data?.cells ?? []).filter((c: Json) => !c.pass);
+    return {
+      failure: reportFailure(data),
+      metrics: data && {
+        summary: data.summary,
+        fixture: data.fixture?.sha256?.slice(0, 12),
+        break: data.args?.break,
+        reading: data.args?.reading,
+        // passing cells with a non-gating ink-footprint note: read these before trusting a small family's PASS
+        notes: (data?.cells ?? []).filter((c: Json) => c.pass && c.notes?.length).slice(0, 20).map((c: Json) => `${c.key}: ${c.notes.join("; ")}`),
+        failing: failing.slice(0, 20).map((c: Json) => ({
+          cell: c.key,
+          ssim: round(c.metrics?.ssim, 4),
+          over16: round(c.metrics?.over16Fraction, 5),
+          over44: round(c.metrics?.over44Fraction, 5),
+          census: c.census,
+          why: c.failures?.[0]
+        }))
+      }
+    };
+  });
+  // Every cell's PNGs stay in the evidence dir; the result line lists the failing cells' only.
+  const images: Record<string, string> = {};
+  for (const cell of readJson(report)?.cells ?? [])
+    if (!cell.pass && cell.images) for (const [kind, path] of Object.entries(cell.images)) images[`${cell.key}/${kind}`] = join(ctx.dir, String(path));
+  result.images = images;
+  return result;
+}
+
+// Re-proves that the golden harness can still tell pass from fail: ocean at k=1 must pass, and the same cell with the
+// GPU arm's bottom-most fill batch dropped (break=drop-batch) must fail on a metric gate (not on a harness error, and
+// only after a batch was actually dropped). Runs on the shared fixture so it does not wait for the parity map.
+async function goldenSelftestCheck(ctx: Ctx): Promise<Partial<Result>> {
+  const base = {
+    GOLDEN_MAP: ctx.map(),
+    GOLDEN_LAYERS: "ocean",
+    GOLDEN_K: "1",
+    GOLDEN_DPR: "2",
+    GOLDEN_PRESET: "default",
+    GOLDEN_READING: String(ctx.args.reading),
+    GOLDEN_KEEP: "all"
+  };
+  const arms: Record<string, Json> = {};
+  for (const arm of ["clean", "broken"] as const) {
+    const dir = join(ctx.dir, arm);
+    mkdirSync(dir, { recursive: true });
+    const report = join(dir, "golden.json");
+    const env = { ...base, GATE_OUT_DIR: dir, GOLDEN_BREAK: arm === "broken" ? "drop-batch" : "none" };
+    const code = await exec(nodeScript("bench/host/layer-golden.ts"), ctx.env(env), ctx.log, DEFS["golden-selftest"].timeout, true);
+    arms[arm] = { code, data: readJson(report) };
+  }
+  const cellOf = (arm: string): Json | undefined => arms[arm].data?.cells?.[0];
+  const clean = cellOf("clean");
+  const broken = cellOf("broken");
+  const problems: string[] = [];
+  if (arms.clean.code !== 0 || !arms.clean.data) problems.push(`clean run exit ${arms.clean.code}, report ${arms.clean.data ? "written" : "missing"}`);
+  else if (!clean?.pass || arms.clean.data.failure) problems.push(`ocean k=1 should pass and failed: ${arms.clean.data.failure ?? clean?.failures?.[0] ?? "no cell"}`);
+  if (arms.broken.code !== 0 || !arms.broken.data) problems.push(`broken run exit ${arms.broken.code}, report ${arms.broken.data ? "written" : "missing"}`);
+  else if (!broken) problems.push("broken run captured no cell");
+  else if (!broken.dropped?.dropped) problems.push("break=drop-batch dropped nothing: the self-test is vacuous");
+  else if (broken.pass) problems.push("break=drop-batch passed: the golden can no longer see a dropped path");
+  else if ((broken.failures ?? []).some((f: string) => f.startsWith("harness:"))) problems.push(`broken run failed on a harness error, not a metric: ${broken.failures[0]}`);
+  else if (broken.gates && broken.gates.ssim && broken.gates.over16 && broken.gates[String(ctx.args.reading)]) problems.push(`broken run failed but no metric gate tripped: ${broken.failures?.[0]}`);
+  const metricsOf = (c: Json) => c && { pass: c.pass, ssim: round(c.metrics?.ssim, 4), over16: round(c.metrics?.over16Fraction, 5), changed: round(c.metrics?.changedFraction, 5), why: c.failures?.[0] ?? null };
+  const images: Record<string, string> = {};
+  for (const [arm, cell] of [["clean", clean], ["broken", broken]] as const)
+    if (cell?.images) for (const [kind, path] of Object.entries(cell.images)) images[`${arm}/${kind}`] = join(ctx.dir, arm, String(path));
+  return {
+    exit_code: problems.length ? 1 : 0,
+    failure: problems.length ? problems.join(" | ") : null,
+    metrics: { reading: ctx.args.reading, clean: metricsOf(clean), broken: { ...metricsOf(broken), dropped: broken?.dropped?.dropped ?? null } },
+    images
+  };
+}
+
 // ---------------------------------------------------------------- check table
 
 const CAMERA = ["dpr", "zoom"];
 const DEFS: Record<string, CheckDef> = {
   typecheck: {
-    browser: false,
+    lock: null,
     keys: [],
     timeout: 300,
     run: ctx =>
@@ -591,7 +687,7 @@ const DEFS: Record<string, CheckDef> = {
       })
   },
   unit: {
-    browser: false,
+    lock: null,
     keys: [],
     timeout: 600,
     run: ctx =>
@@ -601,7 +697,7 @@ const DEFS: Record<string, CheckDef> = {
       })
   },
   build: {
-    browser: false,
+    lock: null,
     keys: ["typecheck"],
     timeout: 600,
     run: async ctx => {
@@ -616,13 +712,18 @@ const DEFS: Record<string, CheckDef> = {
     }
   },
   bench: {
-    browser: false,
+    lock: null,
     keys: [],
     timeout: 600,
     run: ctx =>
       runScript(
         ctx,
-        [NODE, "--test", ...["renderer-ab", "compare", "frame-budget", "trace", "fidelity-metrics", "picking-oracle"].map(n => `bench/${n}.test.ts`)],
+        [
+          NODE,
+          "--test",
+          ...["renderer-ab", "compare", "frame-budget", "trace", "fidelity-metrics", "golden-metrics", "picking-oracle"].map(n => `bench/${n}.test.ts`),
+          "bench/gate/host-lock.test.ts"
+        ],
         {},
         null,
         600,
@@ -633,14 +734,14 @@ const DEFS: Record<string, CheckDef> = {
         }
       )
   },
-  smoke: { browser: true, keys: [...CAMERA, "layer"], timeout: 900, run: smokeLike("gpu-smoke.ts") },
-  fidelity: { browser: true, keys: [...CAMERA, "layer"], timeout: 900, run: smokeLike("gpu-fidelity.ts") },
-  hatch: { browser: true, keys: CAMERA, timeout: 900, run: smokeLike("hatch-motion.ts") },
-  navigation: { browser: true, keys: CAMERA, timeout: 900, run: smokeLike("native-navigation-pilot.ts") },
-  context: { browser: true, keys: CAMERA, timeout: 900, run: smokeLike("gpu-smoke.ts", () => ({ SMOKE_CONTEXT: "1" })) },
-  lifecycle: { browser: true, keys: CAMERA, timeout: 900, run: smokeLike("gpu-smoke.ts", () => ({ SMOKE_LIFECYCLE: "1" })) },
+  smoke: { lock: "shared", keys: [...CAMERA, "layer"], timeout: 900, run: smokeLike("gpu-smoke.ts") },
+  fidelity: { lock: "shared", keys: [...CAMERA, "layer"], timeout: 900, run: smokeLike("gpu-fidelity.ts") },
+  hatch: { lock: "shared", keys: CAMERA, timeout: 900, run: smokeLike("hatch-motion.ts") },
+  navigation: { lock: "exclusive", keys: CAMERA, timeout: 900, run: smokeLike("native-navigation-pilot.ts") },
+  context: { lock: "shared", keys: CAMERA, timeout: 900, run: smokeLike("gpu-smoke.ts", () => ({ SMOKE_CONTEXT: "1" })) },
+  lifecycle: { lock: "shared", keys: CAMERA, timeout: 900, run: smokeLike("gpu-smoke.ts", () => ({ SMOKE_LIFECYCLE: "1" })) },
   "native-recovery": {
-    browser: true,
+    lock: "exclusive",
     keys: ["dpr", "world", "gesture", "culling", "trace"],
     timeout: 300,
     run: ctx => {
@@ -670,7 +771,7 @@ const DEFS: Record<string, CheckDef> = {
     }
   },
   palette: {
-    browser: true,
+    lock: "shared",
     keys: [],
     timeout: 600,
     run: ctx =>
@@ -684,7 +785,7 @@ const DEFS: Record<string, CheckDef> = {
       }))
   },
   "package-smoke": {
-    browser: true,
+    lock: "shared",
     keys: [],
     timeout: 300,
     run: ctx => {
@@ -696,7 +797,7 @@ const DEFS: Record<string, CheckDef> = {
     }
   },
   canonical: {
-    browser: true,
+    lock: "shared",
     keys: [],
     timeout: 300,
     run: ctx => {
@@ -718,7 +819,7 @@ const DEFS: Record<string, CheckDef> = {
     }
   },
   paint: {
-    browser: true,
+    lock: "shared",
     keys: [],
     timeout: 120,
     run: ctx => {
@@ -729,10 +830,10 @@ const DEFS: Record<string, CheckDef> = {
       }));
     }
   },
-  "boundary-before": { browser: false, keys: [], timeout: 60, run: ctx => boundary(ctx, true) },
-  "boundary-after": { browser: false, keys: [], timeout: 60, run: ctx => boundary(ctx, false) },
+  "boundary-before": { lock: null, keys: [], timeout: 60, run: ctx => boundary(ctx, true) },
+  "boundary-after": { lock: null, keys: [], timeout: 60, run: ctx => boundary(ctx, false) },
   picking: {
-    browser: true,
+    lock: "shared",
     keys: [...CAMERA, "phase", "reliefMode", "denseLabels"],
     timeout: 900,
     run: ctx => {
@@ -763,7 +864,7 @@ const DEFS: Record<string, CheckDef> = {
     }
   },
   integration: {
-    browser: true,
+    lock: "shared",
     keys: [...CAMERA, "cohort", "focus", "preamble"],
     timeout: 900,
     run: ctx => {
@@ -784,25 +885,34 @@ const DEFS: Record<string, CheckDef> = {
       }));
     }
   },
-  timing: { browser: true, keys: ["arm", "headless", "trace"], timeout: 900, run: ctx => timing(ctx, "bench/navigation.ts") },
-  profile: { browser: true, keys: ["arm", "headless", "trace"], timeout: 900, run: ctx => timing(ctx, "bench/profile-navigation.ts") },
-  "gpu-timing": { browser: true, keys: ["arm", "headless", "trace"], timeout: 900, run: ctx => timing(ctx, "bench/timer-navigation.ts") },
-  metrics: { browser: true, keys: ["manifest"], timeout: 900, run: metricsCheck },
-  paired: { browser: true, keys: ["dpr", "block"], timeout: 1100, run: pairedBlock },
-  // Takes and releases the host lock without launching anything: shows who would wait and for how long.
+  timing: { lock: "exclusive", keys: ["arm", "headless", "trace"], timeout: 900, run: ctx => timing(ctx, "bench/navigation.ts") },
+  profile: { lock: "exclusive", keys: ["arm", "headless", "trace"], timeout: 900, run: ctx => timing(ctx, "bench/profile-navigation.ts") },
+  "gpu-timing": { lock: "exclusive", keys: ["arm", "headless", "trace"], timeout: 900, run: ctx => timing(ctx, "bench/timer-navigation.ts") },
+  metrics: { lock: "shared", keys: ["manifest"], timeout: 900, run: metricsCheck },
+  paired: { lock: "exclusive", keys: ["dpr", "block"], timeout: 1100, run: pairedBlock },
+  // Takes and releases the host lock in the given mode without launching anything: shows who would wait and how long.
   "lock-probe": {
-    browser: false,
-    keys: [],
+    lock: null,
+    keys: ["mode"],
     timeout: 1,
-    run: async () => {
-      await lock.acquire();
-      const metrics = { lock: LOCK_PATH, inherited: lock.inherited, waitSeconds: lock.waitSeconds };
+    run: async ctx => {
+      const mode = ctx.args.mode as LockMode;
+      await lock.acquire(mode);
+      const metrics = { lock: LOCK_PATH, mode, slots: lock.options.slots, slot: lock.slot, inherited: lock.inherited, waitSeconds: lock.waitSeconds };
       await lock.release();
       return { exit_code: 0, failure: null, metrics };
     }
   },
+  "golden-selftest": { lock: "shared", keys: ["reading"], timeout: 600, run: goldenSelftestCheck },
+  golden: {
+    lock: "shared",
+    keys: ["layers", "k", "coastk", "dpr", "preset", "fixture", "census", "bg", "reading", "keep", "break"],
+    spec: { dpr: DPR_LIST },
+    timeout: 3600,
+    run: goldenCheck
+  },
   "paired-summary": {
-    browser: false,
+    lock: null,
     keys: ["dpr", "dirs"],
     timeout: 60,
     run: ctx => {
@@ -870,7 +980,8 @@ async function timing(ctx: Ctx, script: string): Promise<Partial<Result>> {
 
 // ---------------------------------------------------------------- orchestration
 
-async function runCheck(check: string, args: Args, quiet = false): Promise<Result> {
+// `mode` is the tier's lock mode when a tier runs the check (the strongest any of its steps needs).
+async function runCheck(check: string, args: Args, mode: LockMode | null = null, quiet = false): Promise<Result> {
   const def = DEFS[check];
   const dir = makeDir(check);
   const logPath = join(dir, "run.log");
@@ -881,7 +992,7 @@ async function runCheck(check: string, args: Args, quiet = false): Promise<Resul
     args,
     dir,
     log: logPath,
-    map: () => (fixture ??= resolveFixture()),
+    map: () => (fixture ??= args.fixture ? resolveNamedFixture(String(args.fixture)) : resolveFixture()),
     env: (extra = {}) => {
       const env: Record<string, string> = {
         PATH: [dirname(NODE), BIN, "/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"].join(":"),
@@ -892,7 +1003,7 @@ async function runCheck(check: string, args: Args, quiet = false): Promise<Resul
         TUPAIA_GATE_LOCK_HELD: "1"
       };
       for (const key of ["LANG", "PLAYWRIGHT_BROWSERS_PATH", "USER"]) if (process.env[key]) env[key] = process.env[key]!;
-      if (def.browser) env.GATE_MAP = ctx.map();
+      if (def.lock) env.GATE_MAP = ctx.map();
       return { ...env, ...extra };
     }
   };
@@ -901,9 +1012,10 @@ async function runCheck(check: string, args: Args, quiet = false): Promise<Resul
   let lockWait = 0;
   let partial: Partial<Result>;
   try {
-    if (def.browser && !existsSync(join(REPO, "dist/index.html"))) throw new UsageError("dist/ is missing: run `gate build` first");
-    if (def.browser && !lock.helper && !lock.inherited) {
-      await lock.acquire();
+    if (def.lock && !existsSync(join(REPO, "dist/index.html"))) throw new EnvError("dist/ is missing: run `gate build` first");
+    if (def.lock) ctx.map(); // a missing fixture is a usage error before any lock wait
+    if (def.lock && !lock.held) {
+      await lock.acquire(mode ?? def.lock);
       lockWait = lock.waitSeconds;
       started = Date.now(); // runtime excludes the wait for the host lock
     }
@@ -925,7 +1037,11 @@ async function runCheck(check: string, args: Args, quiet = false): Promise<Resul
   };
   if (result.failure && result.exit_code === 0) result.exit_code = 1;
   if (lockWait > 1) result.lock_wait_s = Number(lockWait.toFixed(1));
-  if (def.browser) {
+  if (def.lock && lock.mode) result.lock_mode = lock.mode;
+  if (partial.images) {
+    if (Object.keys(partial.images).length) result.images = partial.images;
+  }
+  else if (def.lock) {
     const found = images(dir);
     if (Object.keys(found).length) result.images = found;
   }
@@ -933,9 +1049,11 @@ async function runCheck(check: string, args: Args, quiet = false): Promise<Resul
   const receipt = {
     ...result,
     git: { head: git("rev-parse", "HEAD"), branch: git("rev-parse", "--abbrev-ref", "HEAD"), dirty: git("status", "--porcelain").split("\n").filter(Boolean).length },
-    dist: def.browser || check === "build" ? distFingerprint() : undefined,
+    dist: def.lock || check === "build" ? distFingerprint() : undefined,
     fixture: fixture ? { path: fixture, sha256: fixture === FIXTURE_CACHE ? FIXTURE_SHA : sha256File(fixture) } : undefined,
-    lock: def.browser ? { path: LOCK_PATH, inherited: lock.inherited, waitSeconds: lock.waitSeconds } : undefined,
+    lock: def.lock
+      ? { path: LOCK_PATH, mode: lock.mode, slot: lock.slot, slots: lock.options.slots, inherited: lock.inherited, waitSeconds: lock.waitSeconds }
+      : undefined,
     finishedUtc: new Date().toISOString(),
     worktree: REPO
   };
@@ -955,8 +1073,24 @@ const TIERS: Record<string, Array<[string, Args]>> = {
     ["canonical", {}],
     ["palette", {}],
     ["picking", {}],
-    ["integration", { cohort: "short" }]
-  ]
+    ["integration", { cohort: "short" }],
+    // the golden harness can still fail (dropped GPU path) and still pass (ocean k=1), before its verdicts are trusted
+    ["golden-selftest", {}],
+    // D5 gate scale: default preset, k {1,4}, dpr 2, every layer family, on the parity fixture (FIX packet)
+    ["golden", { layers: "all", k: "1,4", dpr: "2", preset: "default", fixture: "parity" }]
+  ],
+  // D5 nightly matrix: k {1,2,4,8} plus the coastline switch points, dpr {1,2}, the 12 built-in presets. One golden
+  // step per (dpr, preset) so a failure names its cell and the rest keep going (keep_going is implied). PNGs are kept
+  // for failing cells only: the full matrix is ~4 000 cells.
+  nightly: [1, 2].flatMap(dpr =>
+    STYLE_PRESETS.map(
+      preset =>
+        [
+          "golden",
+          { layers: "all", k: "1,2,4,8", coastk: "1.4,1.6,2.5,2.7", dpr: String(dpr), preset, fixture: "parity", keep: "fail" }
+        ] as [string, Args]
+    )
+  )
 };
 TIERS.full = [
   ...TIERS.browser,
@@ -975,23 +1109,44 @@ async function runTier(tier: string, args: Args): Promise<number> {
   const steps: Json[] = [];
   let failedAt: string | null = null;
   const pairedDirs: string[] = [];
+  // One lock for the whole tier, taken at its first browser step: exclusive if any step that will run needs it.
+  // (nightly releases it after each step; see below.)
+  const modes = TIERS[tier].filter(([check]) => !skip.has(check)).map(([check]) => DEFS[check].lock);
+  const mode: LockMode | null = modes.includes("exclusive") ? "exclusive" : modes.includes("shared") ? "shared" : null;
+  const keepGoing = Boolean(args.keep_going) || tier === "nightly";
   for (const [check, preset] of TIERS[tier]) {
-    const label = check === "paired" ? `paired#${preset.block}` : check;
+    const label =
+      check === "paired" ? `paired#${preset.block}` : check === "golden" && tier === "nightly" ? `golden[d${preset.dpr} ${preset.preset}]` : check;
     if (skip.has(check)) {
       steps.push({ check: label, status: "SKIP" });
       continue;
     }
-    if (failedAt && !args.keep_going) {
+    if (failedAt && !keepGoing) {
       steps.push({ check: label, status: "NOT RUN" });
       continue;
     }
-    const stepArgs = parseArgs(check, [], DEFS[check].keys);
+    const stepArgs = parseArgs(check, [], DEFS[check].keys, DEFS[check].spec);
     Object.assign(stepArgs, preset);
     if (check === "paired-summary" && pairedDirs.length === 5) stepArgs.dirs = pairedDirs.join(",");
-    const result = await runCheck(check, stepArgs);
+    let result: Result;
+    try {
+      result = await runCheck(check, stepArgs, mode);
+    } catch (error) {
+      if (!(error instanceof UsageError) || error instanceof EnvError) {
+        await lock.release();
+        throw error;
+      }
+      // e.g. the parity fixture is not there yet: this step fails, the tier reports it and goes on as configured
+      steps.push({ check: label, status: "FAIL", exit_code: 2, failure: `usage: ${error.message}` });
+      failedAt ??= label;
+      continue;
+    }
     if (check === "paired" && !result.failure) pairedDirs.push(result.dir);
     steps.push({ check: label, status: result.failure ? "FAIL" : "PASS", seconds: result.seconds, exit_code: result.exit_code, failure: result.failure, metrics: result.metrics, dir: result.dir });
     if (result.failure) failedAt ??= label;
+    // nightly: give the host lock back between golden steps, so a queued exclusive (timing) run gets in between
+    // instead of waiting out the 3-4 h matrix behind one tier-wide shared hold
+    if (tier === "nightly") await lock.release();
   }
   await lock.release();
   const seconds = Number(((Date.now() - started) / 1000).toFixed(1));
@@ -1005,7 +1160,7 @@ async function runTier(tier: string, args: Args): Promise<number> {
   }
   lines.push(`${tier}: ${pass ? "PASS" : `FAIL at ${failedAt}`} in ${seconds}s  (evidence: ${tierDir})`);
   process.stderr.write("\n" + lines.join("\n") + "\n");
-  const summary = { tier, pass, failed_at: failedAt, seconds, dir: tierDir, steps: steps.map(({ metrics, ...rest }) => rest) };
+  const summary = { tier, pass, failed_at: failedAt, seconds, dir: tierDir, lock_mode: mode, steps: steps.map(({ metrics, ...rest }) => rest) };
   writeFileSync(join(tierDir, "summary.json"), JSON.stringify({ ...summary, steps, git: { head: git("rev-parse", "HEAD"), branch: git("rev-parse", "--abbrev-ref", "HEAD") }, worktree: REPO }, null, 2) + "\n");
   process.stdout.write(JSON.stringify(summary) + "\n");
   return pass ? 0 : 1;
@@ -1015,8 +1170,12 @@ function usage(): string {
   return [
     "usage: node bench/gate/gate.ts <check|tier> [key=value ...]",
     `tiers:  ${Object.keys(TIERS).join(", ")}   (key: skip=a,b  keep_going=1)`,
-    "checks:",
-    ...Object.entries(DEFS).map(([name, def]) => `  ${name.padEnd(16)} ${def.browser ? "lock " : "     "} ${def.keys.map(k => `${k}=${ARG_SPEC[k].values?.join("|") ?? ARG_SPEC[k].type}`).join(" ")}`),
+    `checks (lock: shared = correctness, at most TUPAIA_GATE_SLOTS=${lock.options.slots} at once; exclusive = timing, alone):`,
+    ...Object.entries(DEFS).map(([name, def]) => {
+      const spec = (k: string) => def.spec?.[k] ?? ARG_SPEC[k];
+      return `  ${name.padEnd(16)} ${(def.lock ?? "").padEnd(9)} ${def.keys.map(k => `${k}=${spec(k).values?.join("|") ?? spec(k).type}`).join(" ")}`;
+    }),
+    `golden families: ${FAMILY_NAMES.join(", ")}`,
     `evidence: ${OUT_BASE}/<check>-<timestamp>/`
   ].join("\n");
 }
@@ -1033,7 +1192,7 @@ async function main(): Promise<number> {
     process.stderr.write(usage() + "\n");
     throw new UsageError(`Unknown check "${target}"`);
   }
-  const args = parseArgs(target, rest, def.keys);
+  const args = parseArgs(target, rest, def.keys, def.spec);
   if (args.layer && !["smoke", "fidelity"].includes(target)) throw new UsageError("layer is only valid for smoke/fidelity");
   const result = await runCheck(target, args);
   await lock.release();
