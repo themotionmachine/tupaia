@@ -231,6 +231,27 @@ export function overlayRoot(node: NodeLike | null): NodeLike | null {
   return null;
 }
 
+// Camera-owned #viewbox transform, records on nodes detached later in the batch (their parent's childList record covers
+// them) and attribute writes that left the value unchanged.
+function ignored(record: MutationLike): boolean {
+  if (record.attributeName === "transform" && record.target.id === "viewbox") return true;
+  if (record.target.isConnected === false) return true;
+  return (
+    record.type === "attributes" &&
+    !!record.attributeName &&
+    record.oldValue !== undefined &&
+    !!record.target.getAttribute &&
+    record.oldValue === record.target.getAttribute(record.attributeName)
+  );
+}
+
+// The records classify() counts as pixel changes (static or overlay), each judged in its batch: what the compat reuse
+// tracker (compat-reuse.ts) must see. Neutral decoration and transient marker records change no prepared pixel.
+export function pixelRecords(records: ArrayLike<MutationLike>): MutationLike[] {
+  const batch = Array.from(records);
+  return batch.filter(record => !ignored(record) && !neutral(record, batch) && !transient(record));
+}
+
 // "static" needs a full prepare; "overlay" only a refresh of the screen batches passed to `overlay`; "dynamic" only a
 // redraw of the marker pass; "none" changes no prepared pixel. Precedence: static > overlay > dynamic > none. Without
 // an `overlay` callback overlay changes stay static. The #viewbox transform is camera-owned, and records on nodes
@@ -245,16 +266,7 @@ export function classify(
   let change: "none" | "dynamic" | "overlay" = "none";
   const batch = Array.from(records);
   for (const record of batch) {
-    if (record.attributeName === "transform" && record.target.id === "viewbox") continue;
-    if (record.target.isConnected === false) continue;
-    if (
-      record.type === "attributes" &&
-      record.attributeName &&
-      record.oldValue !== undefined &&
-      record.target.getAttribute &&
-      record.oldValue === record.target.getAttribute(record.attributeName)
-    )
-      continue;
+    if (ignored(record)) continue;
     if (neutral(record, batch)) {
       skipped?.(record);
       continue;

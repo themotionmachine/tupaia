@@ -4,6 +4,7 @@
 import { prepareMapClone } from "../io/export";
 import { alphaBounds, cropRegion, type PixelBounds, padBounds } from "./budget";
 import { isolateEmblemDefinitions } from "./compat-assets";
+import { compatDirt } from "./compat-reuse";
 
 export interface Region {
   x: number;
@@ -14,22 +15,32 @@ export interface Region {
 
 export { resolveInClone } from "./clone-map";
 
-let cached: { revision: number; clone: Promise<SVGSVGElement> } | null = null;
+// `stamp`: the reuse tracker's epoch when the clone was cut (compat-reuse.ts), taken before the copy starts so a change
+// racing it can only make the stamp older than the content, never newer.
+let cached: { revision: number; clone: Promise<SVGSVGElement>; stamp: number } | null = null;
 
 export function compatClone(revision: number): Promise<SVGSVGElement> {
+  return stampedClone(revision).then(entry => entry.clone);
+}
+
+export function stampedClone(revision: number): Promise<{ clone: SVGSVGElement; stamp: number }> {
   if (cached?.revision !== revision) {
+    const stamp = compatDirt.now();
     // keep #debug: the scene walks the live #viewbox, where editors draw their overlays (#controlPoints...)
     const clone = prepareMapClone("gpu", { debug: true });
-    cached = { revision, clone };
+    cached = { revision, clone, stamp };
     clone.catch(() => {
       if (cached?.clone === clone) cached = null;
     });
   }
-  return cached.clone;
+  const { clone, stamp } = cached;
+  return clone.then(element => ({ clone: element, stamp }));
 }
 
+// A replaced world or a disposed renderer: no raster cut before now may be reused.
 export function forgetCompatClone(): void {
   cached = null;
+  compatDirt.all("clone forgotten");
 }
 
 // Detaches everything but `keep` (and the ancestors needed to reach it) so serialization stays small.
