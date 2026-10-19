@@ -106,6 +106,17 @@ function listExtBridges(dir: string): string[] {
 const JSON_ARGS_MIN = 32 * 1024;
 
 /**
+ * The page the MCP browser opens: `/?local`, plus `&renderer=svg|gpu` when TUPAIA_RENDERER names one (the app's
+ * ?renderer= switch; default svg). Anything else is refused loudly, so a typo cannot silently test the wrong arm.
+ */
+export function bootPath(renderer: string | undefined): string {
+  const wanted = renderer?.trim().toLowerCase();
+  if (!wanted) return "/?local";
+  if (wanted !== "svg" && wanted !== "gpu") throw new ToolError("BAD_ARGS", `TUPAIA_RENDERER must be svg or gpu, got "${renderer}"`);
+  return `/?local&renderer=${wanted}`;
+}
+
+/**
  * `args` as a JSON string when it is large and plain JSON (objects, arrays, strings, finite
  * numbers, booleans, null), else null. Playwright passes arguments value by value, which costs
  * seconds per MB of nested arrays; one string and a JSON.parse in the page cost milliseconds.
@@ -342,7 +353,7 @@ export class BrowserManager {
     this.#context = ctx;
     this.#page = page;
     try {
-      await page.goto(`${this.#server.origin}/?local`, { waitUntil: "domcontentloaded", timeout: 60_000 });
+      await page.goto(`${this.#server.origin}${bootPath(process.env.TUPAIA_RENDERER)}`, { waitUntil: "domcontentloaded", timeout: 60_000 });
       const env = (await page.evaluate(
         ([n, a]) =>
           (globalThis as unknown as { __tupaia: { call: (n: string, a: unknown) => unknown } }).__tupaia.call(n, a),

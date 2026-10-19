@@ -717,6 +717,85 @@ async function goldenSelftestCheck(ctx: Ctx): Promise<Partial<Result>> {
   };
 }
 
+
+// Consumers of the document (REWRITE-PLAN rows 31-38 and 40): save, export, 3D, minimap, dialogs, cloud, with the gpu
+// arm compared against the svg arm of the same world and build (bench/host/consumers.ts). `break=` is the self-test:
+// it deliberately perturbs the gpu arm's data and the run must then FAIL.
+async function consumersCheck(ctx: Ctx): Promise<Partial<Result>> {
+  const report = join(ctx.dir, "consumers.json");
+  const worlds = String(ctx.args.worlds);
+  const env: Record<string, string> = {
+    CONSUMERS_WORLDS: worlds,
+    CONSUMERS_MAP: ctx.map(),
+    CONSUMERS_DPR: String(ctx.args.dpr),
+    CONSUMERS_BREAK: String(ctx.args.break),
+    CONSUMERS_CONTROL: ctx.args.control ? "1" : "0"
+  };
+  if (worlds.split(",").includes("parity")) env.CONSUMERS_PARITY_MAP = resolveNamedFixture("parity");
+  const result = await runScript(ctx, nodeScript("bench/host/consumers.ts"), env, report, DEFS.consumers.timeout, data => {
+    const checks: Json[] = data?.checks ?? [];
+    const failing = checks.filter(c => c.status === "FAIL");
+    return {
+      failure: reportFailure(data),
+      metrics: data && {
+        rows: data.rows,
+        checks: checks.length,
+        failed: failing.length,
+        break: data.args?.break,
+        control: data.args?.control || undefined,
+        fixtures: data.fixtures,
+        failing: failing.slice(0, 20).map((c: Json) => ({ row: c.row, id: c.id, why: String(c.detail).slice(0, 240), evidence: c.evidence })),
+        info: checks.filter(c => c.status === "INFO").slice(0, 20).map((c: Json) => `${c.id}: ${String(c.detail).slice(0, 160)}`)
+      }
+    };
+  });
+  // Evidence of a failing pixel check: the file from each arm (evidence is "<world>/{svg,gpu}/<file>").
+  const images: Record<string, string> = {};
+  for (const c of (readJson(report)?.checks ?? []).filter((c: Json) => c.status === "FAIL" && typeof c.evidence === "string" && c.evidence.endsWith(".png"))) {
+    const m = /^(.+)\/\{(.+),(.+)\}\/(.+)$/.exec(c.evidence);
+    if (m) for (const arm of [m[2], m[3]]) images[`${m[1]}/${arm}/${m[4]}`] = join(ctx.dir, m[1], arm, m[4]);
+  }
+  result.images = images;
+  return result;
+}
+
+// Re-proves that the consumers harness can still tell pass from fail: the gpu arm's text save and PNG export are
+// deliberately perturbed (break=tamper, save and export steps only, parity fixture) and the run must FAIL on exactly
+// the save-equality and PNG-equality checks, not on a harness error.
+async function consumersSelftestCheck(ctx: Ctx): Promise<Partial<Result>> {
+  const dir = join(ctx.dir, "broken");
+  mkdirSync(dir, { recursive: true });
+  const report = join(dir, "consumers.json");
+  const env = {
+    CONSUMERS_WORLDS: "parity",
+    CONSUMERS_PARITY_MAP: resolveNamedFixture("parity"),
+    CONSUMERS_MAP: ctx.map(),
+    CONSUMERS_DPR: "2",
+    CONSUMERS_BREAK: "tamper",
+    CONSUMERS_STEPS: "camera,save,export",
+    GATE_OUT_DIR: dir
+  };
+  const code = await exec(nodeScript("bench/host/consumers.ts"), ctx.env(env), ctx.log, DEFS["consumers-selftest"].timeout, true);
+  const data = readJson(report);
+  const failing: Json[] = (data?.checks ?? []).filter((c: Json) => c.status === "FAIL");
+  const failed = (suffix: string) => failing.some(c => String(c.id).endsWith(suffix));
+  const problems: string[] = [];
+  if (!data) problems.push(`no report written (exit ${code})`);
+  else if (String(data.failure ?? "").startsWith("harness:")) problems.push(`harness error: ${data.failure}`);
+  else {
+    if (!failed("save.arms-equal")) problems.push("break=tamper did not fail save.arms-equal: the harness can no longer see a changed save");
+    if (!failed("save.svg-section-identical")) problems.push("break=tamper did not fail save.svg-section-identical");
+    if (!failed("export.png")) problems.push("break=tamper did not fail export.png: the harness can no longer see a changed image");
+    const unexpected = failing.filter(c => !/(save\.arms-equal|save\.svg-section-identical|export\.png|export\.jpeg|export\.stable)/.test(String(c.id)) && c.row !== "run");
+    if (unexpected.length) problems.push(`unexpected failures: ${unexpected.slice(0, 4).map(c => `${c.id} (${String(c.detail).slice(0, 80)})`).join("; ")}`);
+  }
+  return {
+    exit_code: problems.length ? 1 : 0,
+    failure: problems.length ? problems.join(" | ") : null,
+    metrics: { broken_failing: failing.map(c => c.id).slice(0, 12), checks: data?.checks?.length ?? 0 }
+  };
+}
+
 // ---------------------------------------------------------------- check table
 
 const CAMERA = ["dpr", "zoom"];
@@ -768,7 +847,10 @@ const DEFS: Record<string, CheckDef> = {
           "--test",
           ...["renderer-ab", "compare", "frame-budget", "trace", "fidelity-metrics", "golden-metrics", "picking-oracle"].map(n => `bench/${n}.test.ts`),
           "bench/gate/host-lock.test.ts",
-          "bench/host/fixtures/fixtures.test.ts"
+          "bench/host/fixtures/fixtures.test.ts",
+          "bench/host/consumers-lib.test.ts",
+          "bench/integration-fixture.test.ts",
+          "bench/host/editor-replay-core.test.ts"
         ],
         {},
         null,
@@ -1006,6 +1088,20 @@ const DEFS: Record<string, CheckDef> = {
       return { exit_code: 0, failure: null, metrics };
     }
   },
+  // the document's consumers, gpu arm against svg arm: PNG-free of timing, so a shared slot. `break=save-tamper|export-tamper|tamper`
+  // perturbs the gpu arm and the run must FAIL (see `consumers-selftest`)
+  consumers: {
+    lock: "shared",
+    keys: ["worlds", "dpr", "break", "control"],
+    spec: {
+      worlds: { type: "string", default: "parity,shared", check: text => { if (!text.split(",").every(w => w === "parity" || w === "shared")) throw new UsageError("worlds must be parity, shared or parity,shared"); } },
+      break: { type: "enum", values: ["none", "save-tamper", "export-tamper", "tamper"], default: "none" },
+      control: { type: "bool", default: false }
+    },
+    timeout: 3600,
+    run: consumersCheck
+  },
+  "consumers-selftest": { lock: "shared", keys: [], timeout: 1200, run: consumersSelftestCheck },
   "golden-selftest": { lock: "shared", keys: ["reading"], timeout: 600, run: goldenSelftestCheck },
   golden: {
     lock: "shared",
