@@ -8,6 +8,8 @@ import {
   markerKind,
   type NodeLike,
   overlayRoot,
+  pixelRecords,
+  viewOverlayRoot,
   writeMarker
 } from "./markers";
 import { type Affine, multiply, parseTransform } from "./raster";
@@ -428,5 +430,66 @@ describe("classify: same-position raise pairs", () => {
 
   it("still lets an unrelated static record win beside a raise pair", () => {
     expect(classify([...pair(mark, mark, before, null), attribute(roads, "opacity")])).toBe("static");
+  });
+});
+
+describe("[LIFE] classify: #coordinates churn (row 5) and the root #map filter (row 28)", () => {
+  const body = node("body", null);
+  const map = node("svg", body, "map");
+  const mapViewbox = node("g", map, "viewbox");
+  const coordinates = node("g", mapViewbox, "coordinates");
+  const grid = node("g", coordinates, "coordinateGrid");
+  const labels = node("g", coordinates, "coordinateLabels");
+  const gridOverlay = node("g", mapViewbox, "gridOverlay");
+  const collect = () => {
+    const roots: NodeLike[] = [];
+    return { roots, overlay: (root: NodeLike) => roots.push(root) };
+  };
+
+  it("resolves the #coordinates layer as a view overlay root, and nothing else in #viewbox", () => {
+    expect(viewOverlayRoot(coordinates)).toBe(coordinates);
+    expect(viewOverlayRoot(node("path", grid))).toBe(coordinates);
+    expect(viewOverlayRoot(node("text", labels))).toBe(coordinates);
+    expect(viewOverlayRoot(gridOverlay)).toBeNull();
+    expect(viewOverlayRoot(node("rect", gridOverlay))).toBeNull();
+    expect(viewOverlayRoot(mapViewbox)).toBeNull();
+    expect(viewOverlayRoot(null)).toBeNull();
+  });
+
+  it("routes a drawCoordinates redraw to the overlay lane, not a static revision", () => {
+    const { roots, overlay } = collect();
+    // drawCoordinates: selectAll("*").remove(), font-size on the layer, then the grid and labels groups re-appended
+    const redraw = [
+      childList(coordinates, [], [grid, labels]),
+      attribute(coordinates, "font-size"),
+      childList(coordinates, [node("g", coordinates, "coordinateGrid"), node("g", coordinates, "coordinateLabels")])
+    ];
+    expect(classify(redraw, undefined, undefined, overlay)).toBe("overlay");
+    expect(roots).toEqual([coordinates, coordinates, coordinates]);
+    // still a pixel change for the compat reuse tracker
+    expect(pixelRecords(redraw)).toHaveLength(3);
+  });
+
+  it("keeps #coordinates churn static without an overlay lane, and next to any world change", () => {
+    expect(classify([attribute(coordinates, "font-size")])).toBe("static");
+    const { overlay } = collect();
+    expect(
+      classify([attribute(coordinates, "font-size"), attribute(gridOverlay, "opacity")], undefined, undefined, overlay)
+    ).toBe("static");
+  });
+
+  it("treats the root filter as pixel-neutral (forwarded as the canvas CSS filter)", () => {
+    const skipped: MutationLike[] = [];
+    const records = [attribute(map, "filter"), attribute(map, "data-filter")];
+    expect(classify(records, undefined, record => skipped.push(record))).toBe("none");
+    expect(skipped).toEqual(records);
+    expect(pixelRecords(records)).toEqual([]);
+  });
+
+  it("keeps other root attributes and filters below the root static", () => {
+    expect(classify([attribute(map, "style")])).toBe("static");
+    expect(classify([attribute(map, "background-color")])).toBe("static");
+    expect(classify([attribute(gridOverlay, "filter")])).toBe("static");
+    expect(classify([attribute(node("svg", body, "other"), "filter")])).toBe("static");
   });
 });

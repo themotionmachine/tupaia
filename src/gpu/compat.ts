@@ -107,7 +107,8 @@ export async function rasterizeRun(
   const viewbox = clone.querySelector("#viewbox");
   if (!viewbox) throw new Error("clone without #viewbox");
   const undo = isolate(clone, new Set(elements));
-  const saved = ["width", "height", "viewBox", "preserveAspectRatio"].map(
+  // LIFE: the root filter is applied to the whole canvas (renderer.ts root filter), never inside a raster
+  const saved = ["width", "height", "viewBox", "preserveAspectRatio", "filter"].map(
     name => [name, clone.getAttribute(name)] as const
   );
   const transform = viewbox.getAttribute("transform");
@@ -119,6 +120,7 @@ export async function rasterizeRun(
     clone.setAttribute("height", String(pixelHeight));
     clone.setAttribute("viewBox", `${region.x} ${region.y} ${region.width} ${region.height}`);
     clone.setAttribute("preserveAspectRatio", "none");
+    clone.removeAttribute("filter");
     undoDefinitions = isolateEmblemDefinitions(clone);
     markup = new XMLSerializer().serializeToString(clone);
   } finally {

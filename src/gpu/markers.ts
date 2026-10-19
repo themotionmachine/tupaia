@@ -181,10 +181,12 @@ function raised(records: readonly MutationLike[]): Set<MutationLike> {
 //   frame graph rescales its UVs to the live camera (hatchUvAtZoom), so the attribute value never reaches pixels;
 // - dense-zoom overlays and their contents: the scene skips them, the GPU draws the canonical image instead;
 // - the dense-zoom visibility handoff on that canonical image when it leaves the image drawn or undrawn (zoomHandoff);
-// - a node re-appended at its own position (raised), the pair's two childList records only.
+// - a node re-appended at its own position (raised), the pair's two childList records only;
+// - the root #map filter / data-filter (forwarded to the canvas, never rasterized; rootFilterRecord).
 // User edits of the same attributes are not excluded by origin, only when their effect is provably absent.
 function neutral(record: MutationLike, records: readonly MutationLike[]): boolean {
   const { target } = record;
+  if (rootFilterRecord(record)) return true;
   if (zoomHandoff(record, records)) return true;
   if (raised(records).has(record)) return true;
   if (record.type === "childList") {
@@ -231,6 +233,30 @@ export function overlayRoot(node: NodeLike | null): NodeLike | null {
   return null;
 }
 
+// World layers inside #viewbox whose whole content is redrawn from the camera at every settle (drawCoordinates removes
+// and re-appends the graticule and its edge-pinned labels on each exact position change). Their churn is routed to
+// the overlay lane with the layer as its root instead of a static revision; the lane answers "full" for a root the
+// prepared frame cannot refresh in place, so nothing is ever dropped.
+const VIEW_OVERLAYS = new Set(["coordinates"]);
+
+export function viewOverlayRoot(node: NodeLike | null): NodeLike | null {
+  for (; node; node = node.parentElement) {
+    const parent = node.parentElement;
+    if (parent?.id !== "viewbox") continue;
+    return VIEW_OVERLAYS.has(node.id || "") ? node : null;
+  }
+  return null;
+}
+
+// The root <svg id=map> filter is not part of the prepared frame: the renderer forwards it as the canvas CSS filter
+// (lifecycle.ts rootFilter) and compat rasters are cut without it (compat.ts rasterizeRun).
+const ROOT_FILTER = new Set(["filter", "data-filter"]);
+const rootFilterRecord = (record: MutationLike) =>
+  record.type === "attributes" &&
+  ROOT_FILTER.has(record.attributeName || "") &&
+  record.target.tagName?.toLowerCase() === "svg" &&
+  record.target.id === "map";
+
 // Camera-owned #viewbox transform, records on nodes detached later in the batch (their parent's childList record covers
 // them) and attribute writes that left the value unchanged.
 function ignored(record: MutationLike): boolean {
@@ -272,7 +298,7 @@ export function classify(
       continue;
     }
     if (!transient(record)) {
-      const root = overlay && overlayRoot(record.target);
+      const root = overlay && (overlayRoot(record.target) ?? viewOverlayRoot(record.target));
       if (!root) {
         found?.(record);
         return "static";
