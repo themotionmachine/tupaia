@@ -55,7 +55,6 @@ describe("canonical clone matching", () => {
   });
 });
 
-
 describe("batched canonical clone matching", () => {
   it("preserves scalar identity and error behavior across duplicate IDs and anonymous siblings", () => {
     const cases = [
@@ -79,7 +78,9 @@ describe("batched canonical clone matching", () => {
         const lives = [root, root.children[0].children[0], sourceGroup, ...siblings, element("path", "detached")];
         const expected = lives.map(live => resolveInClone(live, clone));
         const actual = resolveManyInClone(lives, clone);
-        actual.forEach((result, i) => expect(result).toBe(expected[i]));
+        actual.forEach((result, i) => {
+          expect(result).toBe(expected[i]);
+        });
       }
     }
   });
@@ -107,10 +108,22 @@ describe("batched canonical clone matching", () => {
     const cloneGroup = element("g", "emblems", copies);
     const clone = element("svg", "fantasyMap", [cloneGroup]);
     let reads = 0;
-    Object.defineProperty(liveGroup, "children", { get: () => { reads++; return lives; } });
-    Object.defineProperty(cloneGroup, "children", { get: () => { reads++; return copies; } });
+    Object.defineProperty(liveGroup, "children", {
+      get: () => {
+        reads++;
+        return lives;
+      }
+    });
+    Object.defineProperty(cloneGroup, "children", {
+      get: () => {
+        reads++;
+        return copies;
+      }
+    });
     const actual = resolveManyInClone(lives, clone);
-    actual.forEach((result, i) => expect(result).toBe(copies[i]));
+    actual.forEach((result, i) => {
+      expect(result).toBe(copies[i]);
+    });
     expect(reads).toBe(2);
   });
 });

@@ -32,8 +32,14 @@ describe("strokeHitRings", () => {
   it("takes the dash rings for a dashed stroke and the fine rings otherwise", () => {
     let flattened = 0;
     let dashed = 0;
-    const fine = () => (flattened++, [[0, 0, 5, 0.1, 10, 0]]);
-    const dash = () => (dashed++, [[0, 0, 3, 0, 4, 0]]);
+    const fine = () => {
+      flattened++;
+      return [[0, 0, 5, 0.1, 10, 0]];
+    };
+    const dash = () => {
+      dashed++;
+      return [[0, 0, 3, 0, 4, 0]];
+    };
     expect(strokeHitRings(dash, fine)).toEqual([[0, 0, 3, 0, 4, 0]]);
     expect(dashed).toBe(1);
     expect(flattened).toBe(0);
@@ -489,7 +495,8 @@ describe("transient viewport culling preserves world hit geometry", () => {
   });
 
   it("exposes all culled siblings before the first layout read, then restores every class", () => {
-    const a = culledUse(), b = culledUse();
+    const a = culledUse(),
+      b = culledUse();
     b.node.id = "second";
     const root = wrap(el("g", "emblems", [a.node, b.node]));
     const read = a.api.getBBox;
@@ -503,7 +510,8 @@ describe("transient viewport culling preserves world hit geometry", () => {
   });
 
   it("restores all siblings when a later layout read throws", () => {
-    const a = culledUse(), b = culledUse(false, true);
+    const a = culledUse(),
+      b = culledUse(false, true);
     b.node.id = "second";
     const root = wrap(el("g", "emblems", [a.node, b.node]));
     expect(() => compatShapes(root, viewbox)).toThrow("native geometry failure");
@@ -512,25 +520,33 @@ describe("transient viewport culling preserves world hit geometry", () => {
   });
 
   it("batches separate roots before the FIRST world CTM and preserves per-root geometry/order", () => {
-    const a = culledUse(), b = culledUse();
+    const a = culledUse(),
+      b = culledUse();
     b.node.id = "second";
     vi.stubGlobal("getComputedStyle", (node: { getAttribute(name: string): string | null }) => ({
-      pointerEvents: "all", visibility: "visible", fill: "red", stroke: "none", strokeWidth: "0",
+      pointerEvents: "all",
+      visibility: "visible",
+      fill: "red",
+      stroke: "none",
+      strokeWidth: "0",
       display: node.getAttribute("class")?.includes("viewport-culled") ? "none" : "inline"
     }));
     const expected = [compatShapes(a.api, viewbox), compatShapes(b.api, viewbox)];
-    const world = { getScreenCTM: () => {
-      expect(a.node.attrs.class).not.toContain("viewport-culled");
-      expect(b.node.attrs.class).not.toContain("viewport-culled");
-      return viewbox.getScreenCTM();
-    }};
+    const world = {
+      getScreenCTM: () => {
+        expect(a.node.attrs.class).not.toContain("viewport-culled");
+        expect(b.node.attrs.class).not.toContain("viewport-culled");
+        return viewbox.getScreenCTM();
+      }
+    };
     expect(compatShapesBatch([a.api, b.api], world)).toEqual(expected);
     expect(a.node.attrs.class).toBe("selected viewport-culled extra");
     expect(b.node.attrs.class).toBe("selected viewport-culled extra");
   });
 
   it("restores every separate root when a later root throws", () => {
-    const a = culledUse(), b = culledUse(false, true);
+    const a = culledUse(),
+      b = culledUse(false, true);
     b.node.id = "second";
     expect(() => compatShapesBatch([a.api, b.api], viewbox)).toThrow("native geometry failure");
     expect(a.node.attrs.class).toBe("selected viewport-culled extra");

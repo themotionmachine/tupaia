@@ -89,7 +89,14 @@ const declarations = (style: string | null | undefined) => {
   const map = new Map<string, string>();
   for (const rule of (style || "").split(";")) {
     const colon = rule.indexOf(":");
-    if (colon > 0) map.set(rule.slice(0, colon).trim().toLowerCase(), rule.slice(colon + 1).trim().replace(/\s+/g, " "));
+    if (colon > 0)
+      map.set(
+        rule.slice(0, colon).trim().toLowerCase(),
+        rule
+          .slice(colon + 1)
+          .trim()
+          .replace(/\s+/g, " ")
+      );
   }
   return map;
 };
@@ -200,7 +207,9 @@ function neutral(record: MutationLike, records: readonly MutationLike[]): boolea
   }
   if (record.attributeName === "class") {
     const [before, after] = [tokens(record.oldValue), tokens(value)];
-    const changed = [...before].filter(token => !after.has(token)).concat([...after].filter(token => !before.has(token)));
+    const changed = [...before]
+      .filter(token => !after.has(token))
+      .concat([...after].filter(token => !before.has(token)));
     // the scene draws a culled element even under display:none, so a co-present hiding class would make uncull visible
     return !after.has("hidden") && changed.every(token => NEUTRAL_CLASSES.has(token));
   }

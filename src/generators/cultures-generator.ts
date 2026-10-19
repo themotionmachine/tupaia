@@ -1,7 +1,7 @@
-import { expandCultures } from "./expansion-kernel";
-import { captureExpansionInput, expandInWorker } from "./expansion-worker";
 import { max, quadtree, range } from "d3";
 import { abbreviate, biased, ensureEl, getColors, getRandomColor, P, rand, rn, rw } from "../utils";
+import { expandCultures } from "./expansion-kernel";
+import { captureExpansionInput, expandInWorker } from "./expansion-worker";
 
 declare global {
   var Cultures: CulturesModule;
@@ -1263,8 +1263,6 @@ class CulturesModule {
   private applyExpansion(result: Uint16Array) {
     pack.cells.culture = result;
   }
-
-
 }
 
 window.Cultures = new CulturesModule();

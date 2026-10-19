@@ -1,14 +1,14 @@
-import { restoreHiddenEmblemClasses } from "@/renderers/emblems/transient-classes";
-import { compactEmblemCloneStyles } from "../renderers/emblems/styles";
-import { normalizeZoneHatching } from "@/renderers/zone-hatching";
-import { clearDenseZoom } from "@/renderers/dense-zoom";
 import type { Selection } from "d3";
 import { select } from "d3";
 import { restoreBurgVectorsIn } from "@/renderers/burg-canvas";
+import { clearDenseZoom } from "@/renderers/dense-zoom";
 import { stripCloneCaravans } from "@/renderers/draw-trade-animation";
+import { restoreHiddenEmblemClasses } from "@/renderers/emblems/transient-classes";
 import { restorePathVectorsIn } from "@/renderers/path-layer-canvas";
 import { materializeRelief } from "@/renderers/relief-canvas";
+import { normalizeZoneHatching } from "@/renderers/zone-hatching";
 import { connectVertices, ensureEl, getBase64, getCoordinates, getGridPolygon, rn, unique } from "@/utils";
+import { compactEmblemCloneStyles } from "../renderers/emblems/styles";
 
 type MapSelection = Selection<SVGSVGElement, unknown, null, undefined>;
 
@@ -310,7 +310,6 @@ export async function prepareMapClone(type: string, options: GetMapURLOptions = 
     // keep that asynchronous work detached so the browser never paints a second full map while it awaits assets.
     cloneEl.remove();
 
-
     // remove unused filters
     const filters = cloneEl.querySelectorAll("filter");
     for (let i = 0; i < filters.length; i++) {
@@ -577,14 +576,20 @@ function styleAttributeSelectors(): boolean {
     for (const rule of rules) {
       if ("selectorText" in rule && /\[\s*(?:[^|\]]+\|)?style[\s~|^$*=\]]/i.test(String(rule.selectorText)))
         return true;
-      if ("styleSheet" in rule && (rule as CSSImportRule).styleSheet &&
-        visit((rule as CSSImportRule).styleSheet!.cssRules)) return true;
+      if (
+        "styleSheet" in rule &&
+        (rule as CSSImportRule).styleSheet &&
+        visit((rule as CSSImportRule).styleSheet!.cssRules)
+      )
+        return true;
       if ("cssRules" in rule && visit((rule as CSSGroupingRule).cssRules)) return true;
     }
     return false;
   };
   try {
-    return [...document.styleSheets, ...document.adoptedStyleSheets].some(sheet => !sheet.disabled && visit(sheet.cssRules));
+    return [...document.styleSheets, ...document.adoptedStyleSheets].some(
+      sheet => !sheet.disabled && visit(sheet.cssRules)
+    );
   } catch {
     return true;
   }

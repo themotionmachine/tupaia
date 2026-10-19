@@ -32,9 +32,9 @@ import {
   pickDepth,
   pickId,
   rasterHits,
-  resScale as viewScaleOf,
   sensitivity,
-  strokeHitRings
+  strokeHitRings,
+  resScale as viewScaleOf
 } from "./compat-pick";
 import type { GpuDevice, TrackedBuffer, TrackedTexture } from "./device";
 import type { Batch, FillBatch, Frame, ImageBatch, StrokeBatch } from "./framegraph";
@@ -202,7 +202,14 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
   const slice = createSlicer();
 
   // `layer` is null for screen overlays: they sit outside the world and are not pickable
-  const compat = (element: Element, reason: string, out: Batch[], layer: string | null, screen = false, shapes?: HitShape[]) => {
+  const compat = (
+    element: Element,
+    reason: string,
+    out: Batch[],
+    layer: string | null,
+    screen = false,
+    shapes?: HitShape[]
+  ) => {
     if (reasons.length < 16 && !reasons.includes(reason)) reasons.push(reason);
     if (picking && layer !== null)
       for (const shape of shapes ?? compatShapes(element as unknown as CompatRoot, viewbox as SVGGraphicsElement))
@@ -300,7 +307,11 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
         // Hit areas follow the element's computed pointer-events (stylesheet rules such as #regions { none }), read
         // once at prepare time; the painted style alone would index click-through layers above selectable ones.
         const view = draw.element.ownerDocument.defaultView;
-        const hits = !picking ? null : view ? sensitivity(view.getComputedStyle(draw.element)) : { fill: true, stroke: true, box: false };
+        const hits = !picking
+          ? null
+          : view
+            ? sensitivity(view.getComputedStyle(draw.element))
+            : { fill: true, stroke: true, box: false };
         // Hit geometry is flattened at the compat pick tolerance, not the paint tolerance: a 0.2-unit chord error is
         // comparable to a thin route's half width (dashed strokes: see strokeHitRings).
         let hitPaths: Subpath[] | null = null;
@@ -321,7 +332,16 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
           } else batch.color = style.fill;
           pending.push(batch);
           if (hits?.fill)
-            pick.setDepth(pick.addFill(draw.layer, id, hitRings().map(s => s.points), style.evenOdd), depth, path);
+            pick.setDepth(
+              pick.addFill(
+                draw.layer,
+                id,
+                hitRings().map(s => s.points),
+                style.evenOdd
+              ),
+              depth,
+              path
+            );
         }
         if (style.stroke) {
           const batch = stroke(subpaths, style);
@@ -468,8 +488,9 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
           continue;
         }
         // hit areas are the DOM text's character cells (SVG hit testing), not the glyph-ink quads painted here
-        if (picking) for (const shape of compatShapes(draw.element as unknown as CompatRoot, viewbox as SVGGraphicsElement))
-          pick.addShape(draw.layer, shape);
+        if (picking)
+          for (const shape of compatShapes(draw.element as unknown as CompatRoot, viewbox as SVGGraphicsElement))
+            pick.addShape(draw.layer, shape);
         glyphs.push(batch.instances);
         const last = out[out.length - 1];
         // consecutive labels share one instanced draw; DOM order is preserved because nothing sits between them
@@ -494,8 +515,12 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
         if (draw.opacity < 1) out.push({ kind: "group", opacity: draw.opacity, mask: null, children });
         else out.push(...children);
       } else {
-        const shapes = picking ? compatShapesBatch(draw.elements as unknown as CompatRoot[], viewbox as SVGGraphicsElement) : [];
-        draw.elements.forEach((element, i) => compat(element, draw.reason, out, draw.layer, false, shapes[i]));
+        const shapes = picking
+          ? compatShapesBatch(draw.elements as unknown as CompatRoot[], viewbox as SVGGraphicsElement)
+          : [];
+        draw.elements.forEach((element, i) => {
+          compat(element, draw.reason, out, draw.layer, false, shapes[i]);
+        });
       }
     }
     return true;
@@ -582,7 +607,8 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
     // world rasters shrink; a share too small for useful world rasters (or for the screen overlays) fails the
     // prepare, and the renderer shows the SVG.
     const budget = compatAllowance(device.memory().total, owned(), pending);
-    if (budget < sum(true)) throw new BudgetError(`compat: screen overlays need ${mib(sum(true))}, ${mib(budget)} fits`);
+    if (budget < sum(true))
+      throw new BudgetError(`compat: screen overlays need ${mib(sum(true))}, ${mib(budget)} fits`);
     if (runs.length) {
       for (const run of runs) {
         if (run.screen) continue;
@@ -608,7 +634,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
     }
     ctx.mark?.("world");
 
-    const upload =(label: string, data: F32 | Float32Array, length: number) => {
+    const upload = (label: string, data: F32 | Float32Array, length: number) => {
       if (!length) return null;
       const buffer = device.buffer(label, data instanceof F32 ? data.view() : data);
       buffers.push(buffer);
@@ -692,7 +718,10 @@ export async function refineCompat(
   let refined = false;
   for (const run of runs) {
     const element = run.elements[0];
-    const entry = { id: element.id || `${element.parentElement?.id ?? ""}>${element.tagName}`, density: prepared.compat.resolution };
+    const entry = {
+      id: element.id || `${element.parentElement?.id ?? ""}>${element.tagName}`,
+      density: prepared.compat.resolution
+    };
     report.push(entry);
     if (ctx.stale()) return false;
     const resolved = resolveManyInClone(run.elements, clone);
@@ -792,7 +821,11 @@ export type OverlayRefresh = "committed" | "stale" | "full";
 // uploaded before any old one is released and only after the last staleness check, within windowAllowance (old+new
 // swap peak, steady budget once the old set is gone). "full" asks the caller for a full prepare instead: the overlay
 // is new, hidden, unsupported or over budget.
-export async function refreshOverlays(prepared: Prepared, ctx: PrepareContext, roots: Element[]): Promise<OverlayRefresh> {
+export async function refreshOverlays(
+  prepared: Prepared,
+  ctx: PrepareContext,
+  roots: Element[]
+): Promise<OverlayRefresh> {
   const runs: CompatRun[] = [];
   for (const root of roots) {
     const run = prepared.runs.find(item => item.screen && item.elements[0] === root);
@@ -815,10 +848,14 @@ export async function refreshOverlays(prepared: Prepared, ctx: PrepareContext, r
   const hits = runs.map(run => {
     const root = run.elements[0];
     return prepared.picking !== false && run.hits && root.parentElement instanceof SVGSVGElement
-      ? overlayShapes(root, root.parentElement) : run.hits;
+      ? overlayShapes(root, root.parentElement)
+      : run.hits;
   });
   const region = { x: 0, y: 0, ...ctx.screen };
-  const [w, h] = [Math.max(1, Math.round(region.width * region.dpr)), Math.max(1, Math.round(region.height * region.dpr))];
+  const [w, h] = [
+    Math.max(1, Math.round(region.width * region.dpr)),
+    Math.max(1, Math.round(region.height * region.dpr))
+  ];
   const held: { run: CompatRun; cropped: ReturnType<typeof cropRaster> }[] = [];
   try {
     for (const run of runs) {
@@ -832,18 +869,28 @@ export async function refreshOverlays(prepared: Prepared, ctx: PrepareContext, r
     }
     const { device } = ctx;
     const old = runs.reduce((n, run) => n + (run.slot.texture?.bytes ?? 0), 0);
-    const bytes = held.reduce((n, { cropped }) => n + (cropped ? cropped.canvas.width * cropped.canvas.height * 4 : 0), 0);
+    const bytes = held.reduce(
+      (n, { cropped }) => n + (cropped ? cropped.canvas.width * cropped.canvas.height * 4 : 0),
+      0
+    );
     if (bytes > windowAllowance(device.memory().total, old)) return "full";
-    const textures = uploadAll(held, ({ cropped }) => cropped && device.texture("compat screen", cropped.canvas), device);
+    const textures = uploadAll(
+      held,
+      ({ cropped }) => cropped && device.texture("compat screen", cropped.canvas),
+      device
+    );
     swapOverlays(
       held.map(({ run, cropped }, i) => ({
         run,
         texture: textures[i],
-        rect: cropped && ([cropped.rect.x, cropped.rect.y, cropped.rect.width, cropped.rect.height] as ImageBatch["rect"])
+        rect:
+          cropped && ([cropped.rect.x, cropped.rect.y, cropped.rect.width, cropped.rect.height] as ImageBatch["rect"])
       })),
       device
     );
-    runs.forEach((run, i) => (run.hits = hits[i]));
+    runs.forEach((run, i) => {
+      run.hits = hits[i];
+    });
     prepared.overlays = indexOverlays(prepared.runs, ctx.screen);
   } finally {
     // the canvases are copied into textures (or abandoned); free their backing stores on every exit

@@ -2,10 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   buildPaletteIndex,
   normalizePaletteText,
+  type PaletteWorld,
   paletteCandidate,
   resolvePaletteLocation,
-  searchPalette,
-  type PaletteWorld
+  searchPalette
 } from "./command-palette-search";
 
 function world(): PaletteWorld {
@@ -25,8 +25,23 @@ function world(): PaletteWorld {
       { i: 4, name: "Capital", center: 99, capital: 9 }
     ],
     routes: [
-      { i: 0, group: "roads", points: [[100, 200, 1], [300, 200, 2]] },
-      { i: 17, name: "Élan Road", group: "trails", points: [[100, 200, 1], [500, 400, 2]] },
+      {
+        i: 0,
+        group: "roads",
+        points: [
+          [100, 200, 1],
+          [300, 200, 2]
+        ]
+      },
+      {
+        i: 17,
+        name: "Élan Road",
+        group: "trails",
+        points: [
+          [100, 200, 1],
+          [500, 400, 2]
+        ]
+      },
       { i: 19, name: "Empty", group: "roads", points: [] }
     ],
     cells: { p: [[50, 70]] }
@@ -42,14 +57,24 @@ describe("command palette search", () => {
   it("omits removed, neutral, invalid and empty entities while retaining route zero", () => {
     const entries = buildPaletteIndex(world());
     expect(entries.map(entry => `${entry.key.kind}:${entry.key.id}`)).toEqual([
-      "burg:1", "burg:9", "state:1", "state:3", "state:4", "route:0", "route:17"
+      "burg:1",
+      "burg:9",
+      "state:1",
+      "state:3",
+      "state:4",
+      "route:0",
+      "route:17"
     ]);
     expect(entries.find(entry => entry.key.kind === "route" && entry.key.id === 0)?.label).toBe("Road 0");
   });
 
   it("ranks exact names first and matches context plus multiple accent-normalized tokens", () => {
     const entries = buildPaletteIndex(world());
-    expect(searchPalette(entries, "elan").results.map(entry => entry.label)).toEqual(["Elan", "Élan’s Rest", "Élan Road"]);
+    expect(searchPalette(entries, "elan").results.map(entry => entry.label)).toEqual([
+      "Elan",
+      "Élan’s Rest",
+      "Élan Road"
+    ]);
     expect(searchPalette(entries, "rest ellor").results.map(entry => entry.label)).toEqual(["Élan’s Rest"]);
     expect(searchPalette(entries, "trail").results.map(entry => entry.label)).toEqual(["Élan Road"]);
   });
@@ -99,13 +124,20 @@ describe("command palette search", () => {
     expect(route?.x).toBe(300);
     expect(route?.y).toBe(300);
     expect(route?.scale).toBeCloseTo(800 / 520);
-    expect(resolvePaletteLocation(data, { kind: "route", id: 0 }, viewport, [1, 2])).toEqual({ x: 200, y: 200, scale: 2 });
+    expect(resolvePaletteLocation(data, { kind: "route", id: 0 }, viewport, [1, 2])).toEqual({
+      x: 200,
+      y: 200,
+      scale: 2
+    });
     expect(resolvePaletteLocation(data, { kind: "burg", id: 1 }, viewport, [1, 3])?.scale).toBe(3);
   });
 
   it("rejects malformed route geometry and zero viewports instead of passing NaN to the camera", () => {
     const data = world();
-    data.routes[0].points = [[NaN, 10], [50, 20]];
+    data.routes[0].points = [
+      [NaN, 10],
+      [50, 20]
+    ];
     expect(resolvePaletteLocation(data, { kind: "route", id: 0 }, { width: 800, height: 600 })).toBeNull();
     expect(resolvePaletteLocation(data, { kind: "route", id: 17 }, { width: 0, height: 0 })).toBeNull();
   });

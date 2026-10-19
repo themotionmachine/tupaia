@@ -1,4 +1,4 @@
-import { expandCultures, expandStates, type ExpansionInput } from "./expansion-kernel";
+import { type ExpansionInput, expandCultures, expandStates } from "./expansion-kernel";
 export type ExpansionOperation = "expandStates" | "expandCultures";
 export function captureExpansionInput(): ExpansionInput {
   const value = (id: string) => (document.getElementById(id) as HTMLInputElement | null)?.valueAsNumber || 1;

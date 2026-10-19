@@ -233,7 +233,11 @@ const describe = (el: Element | null) => (el ? `${el.tagName}#${el.id}` : "null"
 //   stale, a dependency threw           -> dropped/error (fail-closed; the stale native target is never dispatched)
 //   current camera, a dependency threw  -> legacy (null) with errors++ (the native event is canonical)
 // A selection that threw is treated as unready: it still syncs and takes the resynced/dropped path, under key "error".
-export function routeClick(deps: ClickRouteDeps, event: MouseEvent, telemetry: ClickTelemetry): RoutedEvent | false | null {
+export function routeClick(
+  deps: ClickRouteDeps,
+  event: MouseEvent,
+  telemetry: ClickTelemetry
+): RoutedEvent | false | null {
   const start = performance.now();
   let key = "error";
   let stale: boolean | null = null;

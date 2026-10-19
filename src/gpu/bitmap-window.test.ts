@@ -28,7 +28,14 @@ function fakeDevice(failAt = -1) {
     texture: vi.fn((label: string, canvas: { width: number; height: number }) => {
       if (calls++ === failAt) throw new Error("upload failed");
       const { width, height } = canvas;
-      const texture = { kind: "texture", label, handle: {}, bytes: width * height * 4, width, height } as TrackedTexture;
+      const texture = {
+        kind: "texture",
+        label,
+        handle: {},
+        bytes: width * height * 4,
+        width,
+        height
+      } as TrackedTexture;
       live.add(texture);
       return texture;
     }),
@@ -71,7 +78,14 @@ describe("BitmapWindows", () => {
     const { device } = fakeDevice();
     const windows = new BitmapWindows(device, 10);
     const slot = windows.add(image(1000, 1000), [0, 0, 1000, 1000], 0.5);
-    expect(slot).toEqual({ kind: "image", opacity: 0.5, texture: null, rect: [0, 0, 1000, 1000], screen: false, detail: null });
+    expect(slot).toEqual({
+      kind: "image",
+      opacity: 0.5,
+      texture: null,
+      rect: [0, 0, 1000, 1000],
+      screen: false,
+      detail: null
+    });
     expect(windows.covers(at(0), view)).toBe(false);
 
     expect(await windows.refresh(at(0), view)).toBe(true);

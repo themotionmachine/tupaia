@@ -15,7 +15,9 @@ describe("materializedIcons", () => {
   const plain = { href: "#relief-hill-1", x: "12", y: "34", width: "8", height: "8" };
 
   it("reads prepareReliefIcons output back as the compact sprites", () => {
-    const icons = materializedIcons(group(glyph(plain), glyph({ ...plain, class: "draggable", style: "touch-action:none" })));
+    const icons = materializedIcons(
+      group(glyph(plain), glyph({ ...plain, class: "draggable", style: "touch-action:none" }))
+    );
     expect(icons).toEqual([
       { i: "#relief-hill-1", x: 12, y: 34, s: 8 },
       { i: "#relief-hill-1", x: 12, y: 34, s: 8 }
@@ -23,7 +25,12 @@ describe("materializedIcons", () => {
   });
 
   it("keeps the group exact for any glyph compactRelief would keep as SVG", () => {
-    const extras: Record<string, string>[] = [{ style: "fill:red" }, { transform: "rotate(20)" }, { id: "custom" }, { height: "9" }];
+    const extras: Record<string, string>[] = [
+      { style: "fill:red" },
+      { transform: "rotate(20)" },
+      { id: "custom" },
+      { height: "9" }
+    ];
     for (const extra of extras)
       expect(materializedIcons(group(glyph(plain), glyph({ ...plain, ...extra })))).toBeNull();
     expect(materializedIcons(group(glyph({ ...plain, href: "#missing" })))).toBeNull();

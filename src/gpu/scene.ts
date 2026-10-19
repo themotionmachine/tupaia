@@ -1,7 +1,7 @@
-import { withCanonicalEmblemPaint } from "./emblem-paint";
 // Read-only extraction of the canonical #viewbox into native GPU draws (DOM order) and explicit compat runs.
 // Nothing here writes to the live SVG; computed styles are read, never set.
 import type { ReliefSprite } from "../renderers/relief-canvas";
+import { withCanonicalEmblemPaint } from "./emblem-paint";
 import { TRADE_LAYER } from "./markers";
 import { flattenPath, type Subpath } from "./svg-path";
 
@@ -213,7 +213,8 @@ export function materializedIcons(group: Element): ReliefSprite[] | null {
     if (element.tagName !== "use") return null;
     for (const { name, value } of Array.from(element.attributes)) {
       if (plainGlyphAttributes.has(name)) continue;
-      if (name === "class" && value.split(/\s+/).every(c => !c || c === "draggable" || c === "viewport-culled")) continue;
+      if (name === "class" && value.split(/\s+/).every(c => !c || c === "draggable" || c === "viewport-culled"))
+        continue;
       const inert = (rule: string) =>
         !rule.trim() || ["touch-action", "-webkit-tap-highlight-color"].includes(rule.split(":")[0].trim());
       if (name === "style" && value.split(";").every(inert)) continue;

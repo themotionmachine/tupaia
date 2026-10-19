@@ -33,7 +33,6 @@ export function resolveInClone(live: Element, clone: Element): Element | string 
   return target;
 }
 
-
 // Indexes live and clone siblings once per synchronous batch. Nothing survives this call: rasterization can
 // restructure the export clone between runs, even when the map revision itself has not changed.
 export function resolveManyInClone(lives: readonly Element[], clone: Element): (Element | string)[] {
@@ -56,11 +55,20 @@ export function resolveManyInClone(lives: readonly Element[], clone: Element): (
     let transientBefore = false;
     for (const child of parent.children) {
       let tags = result.tags.get(child.tagName);
-      if (!tags) result.tags.set(child.tagName, (tags = []));
+      if (!tags) {
+        tags = [];
+        result.tags.set(child.tagName, tags);
+      }
       let ids = result.ids.get(child.tagName);
-      if (!ids) result.ids.set(child.tagName, (ids = new Map()));
+      if (!ids) {
+        ids = new Map();
+        result.ids.set(child.tagName, ids);
+      }
       let matches = ids.get(child.id);
-      if (!matches) ids.set(child.id, (matches = []));
+      if (!matches) {
+        matches = [];
+        ids.set(child.id, matches);
+      }
       result.positions.set(child, { tagOrdinal: tags.length, idOrdinal: matches.length, transientBefore });
       tags.push(child);
       matches.push(child);

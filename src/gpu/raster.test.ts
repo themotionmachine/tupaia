@@ -151,7 +151,11 @@ it("rescales a rotated or custom zone-hatch clone exactly like re-rasterizing it
     for (const zoom of [1, 2.25, 8, 20]) {
       const live = invert(tileToWorld(`scale(${1 / zoom}) ${tail}`));
       const rescaled = hatchUvAtZoom(prepared, reference, zoom, scratch);
-      for (const [x, y] of [[0, 0], [17, -40], [-123.5, 88]]) {
+      for (const [x, y] of [
+        [0, 0],
+        [17, -40],
+        [-123.5, 88]
+      ]) {
         const [u, v] = apply(live, x, y);
         expect(rescaled[0] * x + rescaled[3] * y + rescaled[6]).toBeCloseTo(u, 3);
         expect(rescaled[1] * x + rescaled[4] * y + rescaled[7]).toBeCloseTo(v, 3);

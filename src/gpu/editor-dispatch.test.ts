@@ -185,9 +185,9 @@ describe("routeClick", () => {
     });
     const native = click(stray);
     const routed = routeClick(d, native, telemetry);
-    expect(routed && routed.target).toBe(route);
+    expect(routed ? routed.target : routed).toBe(route);
     expect(routed && [routed.clientX, routed.pageY, routed.type]).toEqual([110, 220, "click"]);
-    routed && routed.preventDefault();
+    if (routed) routed.preventDefault();
     expect(native.prevented).toBe(1);
     expect(calls.sync).toBe(1);
     expect(calls.resolve).toBe(0);
@@ -210,7 +210,7 @@ describe("routeClick", () => {
     });
     const routed = routeClick(d, click(stray), telemetry);
     expect(order).toEqual(["sync", "resolve 110,220"]); // the SVG hit test re-runs only after the camera is written
-    expect(routed && routed.target).toBe(route);
+    expect(routed ? routed.target : routed).toBe(route);
     expect(telemetry.byKind.route).toMatchObject({ routed: 0, resynced: 1, agree: 1 });
   });
 
@@ -263,9 +263,14 @@ describe("routeClick outcomes and telemetry", () => {
     const order: string[] = [];
     const { d, calls } = deps({ selected: selection({}), stale: () => true });
     d.select = null;
-    d.origin = () => { throw new Error("GPU coordinates must not be read"); };
+    d.origin = () => {
+      throw new Error("GPU coordinates must not be read");
+    };
     d.sync = () => order.push("sync");
-    d.resolve = () => { order.push("resolve"); return route; };
+    d.resolve = () => {
+      order.push("resolve");
+      return route;
+    };
     expect(routeClick(d, click(stray), telemetry)).toMatchObject({ target: route });
     expect(order).toEqual(["sync", "resolve"]);
     expect(calls.select).toEqual([]);
@@ -359,7 +364,7 @@ describe("routeClick outcomes and telemetry", () => {
       resolve: () => fresh
     });
     const routed = routeClick(d, click(stray), telemetry);
-    expect(routed && routed.target).toBe(fresh); // the live SVG hit, not the detached GPU target
+    expect(routed ? routed.target : routed).toBe(fresh); // the live SVG hit, not the detached GPU target
     expect(telemetry.byKind.route).toMatchObject({ routed: 0, resynced: 1 });
     // the telemetry holds strings only: no element (the fake tree is cyclic, so a reference would fail to serialize)
     expect(() => JSON.stringify(telemetry)).not.toThrow();

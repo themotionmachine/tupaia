@@ -272,7 +272,8 @@ export function strokeCovers(
     } else {
       inside = across <= reach;
     }
-    if (inside && dashCovered(start + Math.min(len, Math.max(0, along)), across, dashes, offset, cap, reach)) return true;
+    if (inside && dashCovered(start + Math.min(len, Math.max(0, along)), across, dashes, offset, cap, reach))
+      return true;
     start += len;
   }
   return false;
@@ -377,7 +378,13 @@ export class PickIndex {
 
   // A box broadphase whose hits are decided by `narrow` (null keeps the box as the hit area). A narrowphase miss is no
   // hit, so lower items below it are still found in topmost order.
-  addInstance(layer: string, id: string, corners: ArrayLike<number>, instance: number, narrow: Narrowphase | null): number {
+  addInstance(
+    layer: string,
+    id: string,
+    corners: ArrayLike<number>,
+    instance: number,
+    narrow: Narrowphase | null
+  ): number {
     const index = this.addBox(layer, id, corners);
     this.items[index].instance = instance;
     this.items[index].narrow = narrow;
@@ -452,7 +459,9 @@ export class PickIndex {
     const r0 = this.row(y - reach);
     const c0 = this.col(x - reach);
     const single = r0 === this.row(y + reach) && c0 === this.col(x + reach);
-    const order = single ? (this.buckets.get(r0 * this.nx + c0) ?? []) : this.candidates(x, y, reach).sort((a, b) => a - b);
+    const order = single
+      ? (this.buckets.get(r0 * this.nx + c0) ?? [])
+      : this.candidates(x, y, reach).sort((a, b) => a - b);
     for (let k = order.length - 1; k >= 0; k--) {
       const item = this.items[order[k]];
       if (layer !== undefined && item.layer !== layer) continue;
@@ -491,7 +500,8 @@ export class PickIndex {
           halfWidth: item.halfWidth,
           outline: item.outline,
           distance:
-            Math.round(Math.min(...item.rings.map((ring, k) => polylineDistance(x, y, ring, item.closed[k]))) * 1e4) / 1e4,
+            Math.round(Math.min(...item.rings.map((ring, k) => polylineDistance(x, y, ring, item.closed[k]))) * 1e4) /
+            1e4,
           box: [item.minX, item.minY, item.maxX, item.maxY].map(v => Math.round(v * 1000) / 1000),
           clip: item.clip ? { ring: round(item.clip), inside: insideRings(x, y, [item.clip], false) } : null,
           ringsContaining: item.rings.flatMap((ring, k) => (windingNumber(x, y, ring) ? [k] : [])),

@@ -1,5 +1,3 @@
-import { expandStates } from "./expansion-kernel";
-import { captureExpansionInput, expandInWorker } from "./expansion-worker";
 import { mean, median, sum } from "d3";
 import {
   each,
@@ -16,6 +14,8 @@ import {
   rw,
   trimVowels
 } from "../utils";
+import { expandStates } from "./expansion-kernel";
+import { captureExpansionInput, expandInWorker } from "./expansion-worker";
 import type { Regiment } from "./military-generator";
 
 declare global {

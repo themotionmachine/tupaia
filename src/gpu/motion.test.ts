@@ -258,8 +258,9 @@ describe("describeMutation", () => {
   it("names the attribute, element and parent of the record", () => {
     const parent = { tagName: "g", id: "labels", parentElement: null };
     const target = { tagName: "text", id: "label3", parentElement: parent };
-    expect(describeMutation({ type: "attributes", attributeName: "display", target, addedNodes: [], removedNodes: [] }))
-      .toBe("@display <text#label3> in #labels");
+    expect(
+      describeMutation({ type: "attributes", attributeName: "display", target, addedNodes: [], removedNodes: [] })
+    ).toBe("@display <text#label3> in #labels");
     expect(describeMutation({ type: "childList", target: parent, addedNodes: [], removedNodes: [] })).toBe(
       "childList <g#labels>"
     );

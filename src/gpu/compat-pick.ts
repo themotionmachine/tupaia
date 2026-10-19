@@ -1,4 +1,7 @@
+import { emblemSourceClass } from "../renderers/emblems/transient-classes";
+import { dashPieces, measureContour, parseContours } from "./dash-measure";
 import { withCanonicalEmblemPaint } from "./emblem-paint";
+import { normalizeDashes } from "./geometry";
 // CPU hit-test geometry for compat-rasterized and DOM-laid-out world elements (text labels, marker <svg>, restored
 // burg vectors). The raster has no geometry, so each painted leaf is snapshotted once per prepare, in world space,
 // following SVG hit testing (SVG2 §15.6 pointer-events): the fill area when fill is pointer-sensitive, the stroke area
@@ -11,9 +14,6 @@ import { withCanonicalEmblemPaint } from "./emblem-paint";
 // Known approximations: <use> is its bbox, clip-path/mask are ignored, strokes use round joins, per-tspan paint
 // is taken from the <text>, non-scaling-stroke widths are not compensated.
 import { type HitShape, leafPath } from "./pick";
-import { emblemSourceClass } from "../renderers/emblems/transient-classes";
-import { dashPieces, measureContour, parseContours } from "./dash-measure";
-import { normalizeDashes } from "./geometry";
 import { parseDashes, pointsToPath } from "./scene";
 import { flattenPath, type Subpath } from "./svg-path";
 
@@ -213,7 +213,9 @@ export function textCells(text: TextApi): number[][] {
     return cells;
   }
   for (let i = 0; i < n; i++) {
-    let box, start, end;
+    let box: ReturnType<TextApi["getExtentOfChar"]>;
+    let start: ReturnType<TextApi["getStartPositionOfChar"]>;
+    let end: ReturnType<TextApi["getEndPositionOfChar"]>;
     try {
       box = text.getExtentOfChar(i);
       start = text.getStartPositionOfChar(i);
@@ -325,7 +327,7 @@ function nestedClip(
   cache: Map<Node, number[] | null>
 ): number[] | undefined {
   const svg = leaf.parentElement?.closest("svg");
-  if (!svg || !svg.ownerSVGElement) return undefined;
+  if (!svg?.ownerSVGElement) return undefined;
   if (!cache.has(svg)) {
     const parent = svg.parentElement?.getScreenCTM?.();
     const overflow = style(svg)?.overflow ?? "hidden";
@@ -347,10 +349,7 @@ export type CompatRoot = Node & { querySelectorAll(selector: string): Iterable<N
 // at the nearest viewport, which for marker content is the nested <svg>, not the map.
 // Adjacent compatibility roots are converted in one synchronous chunk. Expose their owned culls together:
 // restoring one <use> before reading the next otherwise forces a fresh SVG layout for every root.
-export function compatShapesBatch(
-  elements: CompatRoot[],
-  viewbox: { getScreenCTM?(): Affine | null }
-): HitShape[][] {
+export function compatShapesBatch(elements: CompatRoot[], viewbox: { getScreenCTM?(): Affine | null }): HitShape[][] {
   return withCanonicalEmblemPaint(() => {
     const exposed = new Map<Node, string>();
     try {
@@ -360,7 +359,12 @@ export function compatShapesBatch(
           const current = leaf.getAttribute?.("class");
           if (!current?.split(/\s+/).includes("viewport-culled") || !leaf.setAttribute || exposed.has(leaf)) continue;
           const source = emblemSourceClass(leaf as unknown as Element);
-          const value = source ? source.value : current.split(/\s+/).filter(c => c !== "viewport-culled").join(" ");
+          const value = source
+            ? source.value
+            : current
+                .split(/\s+/)
+                .filter(c => c !== "viewport-culled")
+                .join(" ");
           exposed.set(leaf, current);
           if (value === null && leaf.removeAttribute) leaf.removeAttribute("class");
           else leaf.setAttribute("class", value ?? "");
@@ -405,7 +409,12 @@ function canonicalCompatShapes(element: CompatRoot, viewbox: { getScreenCTM?(): 
       const originalClass = leaf.getAttribute?.("class");
       if (!originalClass?.split(/\s+/).includes("viewport-culled") || !leaf.setAttribute) continue;
       const source = emblemSourceClass(leaf as unknown as Element);
-      const value = source ? source.value : originalClass.split(/\s+/).filter(c => c !== "viewport-culled").join(" ");
+      const value = source
+        ? source.value
+        : originalClass
+            .split(/\s+/)
+            .filter(c => c !== "viewport-culled")
+            .join(" ");
       exposed.push([leaf, originalClass]);
       if (value === null && leaf.removeAttribute) leaf.removeAttribute("class");
       else leaf.setAttribute("class", value ?? "");

@@ -1,11 +1,11 @@
 import {
-  TRANSIENT_EMBLEM_CLASS,
   emblemClassSignature,
   forgetEmblemClass,
-  rememberEmblemClass
+  rememberEmblemClass,
+  TRANSIENT_EMBLEM_CLASS
 } from "../renderers/emblems/transient-classes";
-import { HiddenEmblemPaint } from "./emblem-paint";
 import type { Camera, Viewport } from "./camera";
+import { HiddenEmblemPaint } from "./emblem-paint";
 
 interface Entry {
   element: SVGGraphicsElement;
@@ -74,16 +74,25 @@ export class HiddenEmblemCulling {
         this.appearanceDirty = true;
         continue;
       }
-      const source = this.layer?.contains(target) || this.definitions?.contains(target) ||
+      const source =
+        this.layer?.contains(target) ||
+        this.definitions?.contains(target) ||
         ((!!target.closest?.("defs") || !!target.querySelector?.("defs")) && !target.closest("#fantasyMap"));
-      if (source && record.attributeName === "class" && emblemClassSignature(record.oldValue) === emblemClassSignature(target.getAttribute("class")))
+      if (
+        source &&
+        record.attributeName === "class" &&
+        emblemClassSignature(record.oldValue) === emblemClassSignature(target.getAttribute("class"))
+      )
         continue;
       const tag = target.nodeName.toLowerCase();
       const stylesheet = tag === "style" || tag === "link" || target.parentElement?.nodeName.toLowerCase() === "style";
       const ancestor = target === this.root || target.contains?.(this.canvas);
       const added = [...record.addedNodes, ...record.removedNodes].some(node => {
         const element = node as Element;
-        return element.matches?.("style,link,defs,#emblems,#coas") || element.querySelector?.("style,link,defs,#emblems,#coas");
+        return (
+          element.matches?.("style,link,defs,#emblems,#coas") ||
+          element.querySelector?.("style,link,defs,#emblems,#coas")
+        );
       });
       if (source || stylesheet || ancestor || added) {
         this.dirty = true;
@@ -154,8 +163,12 @@ export class HiddenEmblemCulling {
     // Effects on ancestors can bring offscreen ink back into the viewport. Unknown effects remain unculled.
     for (let node: Element | null = this.layer; node; node = node.parentElement) {
       const css = getComputedStyle(node);
-      if ((css.filter && css.filter !== "none") || (css.maskImage && css.maskImage !== "none") ||
-        node.getAnimations().some(animation => animation.playState !== "finished")) return;
+      if (
+        (css.filter && css.filter !== "none") ||
+        (css.maskImage && css.maskImage !== "none") ||
+        node.getAnimations().some(animation => animation.playState !== "finished")
+      )
+        return;
       if (node === root) break;
     }
     this.paintReady = this.paint.eligible(root, this.layer, this.definitions);
@@ -176,7 +189,8 @@ export class HiddenEmblemCulling {
       if (effects) continue;
       const css = getComputedStyle(element),
         sourceCss = getComputedStyle(source);
-      if ((sourceCss.filter && sourceCss.filter !== "none") || (sourceCss.maskImage && sourceCss.maskImage !== "none")) continue;
+      if ((sourceCss.filter && sourceCss.filter !== "none") || (sourceCss.maskImage && sourceCss.maskImage !== "none"))
+        continue;
       if (css.display === "none" || css.visibility !== "visible" || (css.filter && css.filter !== "none")) continue;
       if (!["hidden", "clip"].includes(sourceCss.overflow)) continue;
       const box = element.getBBox(),
@@ -228,18 +242,25 @@ export class HiddenEmblemCulling {
         (!css.mixBlendMode || css.mixBlendMode === "normal");
       for (let node = this.canvas.parentElement; this.canCover && node; node = node.parentElement) {
         const ancestor = getComputedStyle(node);
-        if (Number(ancestor.opacity) !== 1 || (ancestor.filter && ancestor.filter !== "none") ||
+        if (
+          Number(ancestor.opacity) !== 1 ||
+          (ancestor.filter && ancestor.filter !== "none") ||
           (ancestor.maskImage && ancestor.maskImage !== "none") ||
           (ancestor.transform && ancestor.transform !== "none") ||
           (ancestor.backdropFilter && ancestor.backdropFilter !== "none") ||
           (ancestor.clipPath && ancestor.clipPath !== "none") ||
           (ancestor.mixBlendMode && ancestor.mixBlendMode !== "normal") ||
-          node.getAnimations().some(animation => animation.playState !== "finished"))
+          node.getAnimations().some(animation => animation.playState !== "finished")
+        )
           this.canCover = false;
       }
-      const covered = this.canvas.getBoundingClientRect(), original = root.getBoundingClientRect();
-      this.canCover &&= covered.left <= original.left && covered.top <= original.top &&
-        covered.right >= original.right && covered.bottom >= original.bottom;
+      const covered = this.canvas.getBoundingClientRect(),
+        original = root.getBoundingClientRect();
+      this.canCover &&=
+        covered.left <= original.left &&
+        covered.top <= original.top &&
+        covered.right >= original.right &&
+        covered.bottom >= original.bottom;
       this.appearanceDirty = false;
     }
     if (!opaque || !this.canCover || !(camera.k > 0)) {

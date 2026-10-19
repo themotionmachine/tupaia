@@ -107,7 +107,8 @@ function ancestorAt(element: Element, steps: number): Element | null {
   return node;
 }
 
-const sameClass = (a: Classified | null, b: Classified) => !!a && a.kind === b.kind && a.id === b.id && a.branch === b.branch;
+const sameClass = (a: Classified | null, b: Classified) =>
+  !!a && a.kind === b.kind && a.id === b.id && a.branch === b.branch;
 
 // x, y: SVG-local CSS px (the gpuPick convention).
 export function selectAt(sources: SelectionSources, x: number, y: number, tolerance = 0): GpuSelection {
@@ -139,7 +140,8 @@ export function selectAt(sources: SelectionSources, x: number, y: number, tolera
   if (glyph || (hit?.layer === "terrain" && !element)) {
     const use = hit && hit.instance !== undefined ? (sources.glyph?.(hit) ?? null) : null;
     const info = hit && hit.instance !== undefined ? (sources.glyphInfo?.(hit) ?? null) : null;
-    if (use) return { ...base, kind: "relief", id: glyphKey(use), branch: "terrain", via: "index", target: use, glyph: info };
+    if (use)
+      return { ...base, kind: "relief", id: glyphKey(use), branch: "terrain", via: "index", target: use, glyph: info };
     return { ...base, kind: "relief", id: "", branch: "terrain-unsupported", via: "index", glyph: info };
   }
   if (world && sources.fallbacks) {

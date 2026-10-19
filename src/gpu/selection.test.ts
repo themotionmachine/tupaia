@@ -66,7 +66,12 @@ const sources = (over: Partial<SelectionSources>): SelectionSources => ({
 
 describe("classifyElement", () => {
   it("maps index elements to clicked() selections", () => {
-    const burgLabel = chain(["svg", "map"], ["g", "burgLabels"], ["g", "towns"], ["text", "burgLabel5", { "data-id": "5" }]);
+    const burgLabel = chain(
+      ["svg", "map"],
+      ["g", "burgLabels"],
+      ["g", "towns"],
+      ["text", "burgLabel5", { "data-id": "5" }]
+    );
     expect(classifyElement(burgLabel)).toEqual({ kind: "burg", id: "5", branch: "burgLabels" });
     const icon = chain(["g", "burgIcons"], ["g", "cities"], ["use", "burg9", { "data-id": "9" }]);
     expect(classifyElement(icon)).toEqual({ kind: "burg", id: "9", branch: "burgIcons" });
@@ -104,10 +109,19 @@ describe("selectAt", () => {
     const result = selectAt(
       sources({
         unavailable: () => "stale revision 3 < 4",
-        pick: () => (calls.push("pick"), null),
+        pick: () => {
+          calls.push("pick");
+          return null;
+        },
         fallbacks: true,
-        pickBurg: () => (calls.push("burg"), 7),
-        peekRelief: () => (calls.push("relief"), glyph)
+        pickBurg: () => {
+          calls.push("burg");
+          return 7;
+        },
+        peekRelief: () => {
+          calls.push("relief");
+          return glyph;
+        }
       }),
       10,
       10
@@ -118,11 +132,7 @@ describe("selectAt", () => {
   });
 
   it("an available index's empty hit still reaches the fallbacks", () => {
-    const result = selectAt(
-      sources({ unavailable: () => null, fallbacks: true, pickBurg: () => 7 }),
-      10,
-      10
-    );
+    const result = selectAt(sources({ unavailable: () => null, fallbacks: true, pickBurg: () => 7 }), 10, 10);
     expect(result).toMatchObject({ kind: "burg", id: "7", via: "pickBurg" });
   });
 
@@ -167,8 +177,14 @@ describe("selectAt", () => {
         pick: () => hit("stateLabel1"),
         element: () => label,
         fallbacks: true,
-        pickBurg: () => (calls.push("burg"), 7),
-        peekRelief: () => (calls.push("relief"), glyph)
+        pickBurg: () => {
+          calls.push("burg");
+          return 7;
+        },
+        peekRelief: () => {
+          calls.push("relief");
+          return glyph;
+        }
       }),
       10,
       10
@@ -202,8 +218,15 @@ describe("selectAt", () => {
         pick: () => hit("state1"),
         element: () => regions,
         fallbacks: true,
-        pickBurg: (x, y) => (at.push([x, y]), calls.push("burg"), 12),
-        peekRelief: () => (calls.push("relief"), glyph)
+        pickBurg: (x, y) => {
+          at.push([x, y]);
+          calls.push("burg");
+          return 12;
+        },
+        peekRelief: () => {
+          calls.push("relief");
+          return glyph;
+        }
       }),
       40,
       20
@@ -226,8 +249,14 @@ describe("selectAt", () => {
       sources({
         pick: () => hit("#relief-hill-1", "terrain"),
         fallbacks: true,
-        pickBurg: () => (calls.push("burg"), 5),
-        peekRelief: () => (calls.push("relief"), glyph)
+        pickBurg: () => {
+          calls.push("burg");
+          return 5;
+        },
+        peekRelief: () => {
+          calls.push("relief");
+          return glyph;
+        }
       }),
       1,
       1
@@ -244,7 +273,10 @@ describe("selectAt", () => {
     const use = chain(["g", "terrain"], ["use", "", { href: "#relief-hill-1", x: "10.5", y: "20" }]);
     const instance = { ...hit("terrain", "terrain"), instance: 3 };
     const asked: PickHit[] = [];
-    const glyph = (h: PickHit) => (asked.push(h), use);
+    const glyph = (h: PickHit) => {
+      asked.push(h);
+      return use;
+    };
     const result = selectAt(sources({ pick: () => instance, element: () => group, glyph, fallbacks: true }), 1, 1);
     expect(result).toMatchObject({ kind: "relief", id: "|#relief-hill-1@10.5,20", branch: "terrain" });
     expect(result.target).toBe(use);
@@ -262,7 +294,13 @@ describe("selectAt", () => {
     const instance = { ...hit("terrain", "terrain"), instance: 7 };
     const info = { index: 7, href: "#relief-swamp-9", reason: "mask on <g>" };
     const result = selectAt(
-      sources({ pick: () => instance, element: () => group, glyph: () => null, glyphInfo: () => info, fallbacks: true }),
+      sources({
+        pick: () => instance,
+        element: () => group,
+        glyph: () => null,
+        glyphInfo: () => info,
+        fallbacks: true
+      }),
       1,
       1
     );

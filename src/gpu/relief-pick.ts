@@ -34,7 +34,13 @@ export interface GlyphHits {
 }
 
 // Whether world point (px, py) is in the painted hit area of glyph instance `icon` (tolerance in world units).
-export function glyphCovers(glyph: GlyphHits, icon: Pick<ReliefSprite, "x" | "y" | "s">, px: number, py: number, tolerance: number) {
+export function glyphCovers(
+  glyph: GlyphHits,
+  icon: Pick<ReliefSprite, "x" | "y" | "s">,
+  px: number,
+  py: number,
+  tolerance: number
+) {
   const { x, y, s } = icon;
   // the <use> viewport clips exactly: no tolerance band outside it
   if (px < x || px > x + s || py < y || py > y + s) return false;
@@ -44,7 +50,10 @@ export function glyphCovers(glyph: GlyphHits, icon: Pick<ReliefSprite, "x" | "y"
   const ly = (py - (y + (s - vh * scale) / 2 - vy * scale)) / scale;
   const t = tolerance / scale;
   for (const p of glyph.primitives) {
-    if (p.fill && (insideRings(lx, ly, p.rings, p.fill.evenOdd) || p.rings.some(r => polylineDistance(lx, ly, r, true) <= t)))
+    if (
+      p.fill &&
+      (insideRings(lx, ly, p.rings, p.fill.evenOdd) || p.rings.some(r => polylineDistance(lx, ly, r, true) <= t))
+    )
       return true;
     const stroke = p.stroke;
     if (
@@ -154,7 +163,10 @@ export function readGlyphReport(group: Element, href: string): GlyphRead {
   if (["x", "y", "width", "height"].some(name => symbol.hasAttribute(name))) return no("symbol-viewport-attributes");
   const aspect = (symbol.getAttribute("preserveAspectRatio") ?? "xMidYMid meet").trim();
   if (aspect !== "xMidYMid meet" && aspect !== "xMidYMid") return no("preserveAspectRatio");
-  const viewBox = (symbol.getAttribute("viewBox") ?? "").trim().split(/[\s,]+/).map(Number);
+  const viewBox = (symbol.getAttribute("viewBox") ?? "")
+    .trim()
+    .split(/[\s,]+/)
+    .map(Number);
   if (viewBox.length !== 4 || !viewBox.every(Number.isFinite) || viewBox[2] <= 0 || viewBox[3] <= 0)
     return no("viewBox");
   const outer = view.getComputedStyle(group);
@@ -171,7 +183,10 @@ export function readGlyphReport(group: Element, href: string): GlyphRead {
   const computedOf = new Map<Element, CSSStyleDeclaration>([[symbol, view.getComputedStyle(symbol)]]);
   const computed = (element: Element) => {
     let style = computedOf.get(element);
-    if (!style) computedOf.set(element, (style = view.getComputedStyle(element)));
+    if (!style) {
+      style = view.getComputedStyle(element);
+      computedOf.set(element, style);
+    }
     return style;
   };
   // Depth-first in document order (paint order); `chain` is the leaf's ancestors up to the symbol, nearest first, and

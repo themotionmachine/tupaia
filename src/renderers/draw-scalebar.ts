@@ -134,9 +134,8 @@ const scaleBarResize = (scaleBar: ScaleBarSelection, fullWidth: number, fullHeig
   const width = plain(rect.attr("width")),
     height = plain(rect.attr("height"));
   const customSizing = /(?:^|;)\s*(?:width|height)\s*:/i.test(rect.attr("style") || "");
-  const bbox = width !== undefined && height !== undefined && !customSizing
-    ? { width, height }
-    : rect.node()!.getBBox();
+  const bbox =
+    width !== undefined && height !== undefined && !customSizing ? { width, height } : rect.node()!.getBBox();
 
   const x = rn((fullWidth * posX) / 100 - bbox.width + 10);
   const y = rn((fullHeight * posY) / 100 - bbox.height + 20);

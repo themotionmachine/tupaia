@@ -92,7 +92,9 @@ describe("memory allowances", () => {
       [300, 20]
     ]) {
       const allowed = windowAllowance(total * MiB, windows * MiB);
-      expect(total * MiB - windows * MiB + allowed).toBeLessThanOrEqual(Math.max(GPU_BUDGET, total * MiB - windows * MiB));
+      expect(total * MiB - windows * MiB + allowed).toBeLessThanOrEqual(
+        Math.max(GPU_BUDGET, total * MiB - windows * MiB)
+      );
       expect(total * MiB + allowed).toBeLessThanOrEqual(Math.max(PEAK_LIMIT, total * MiB));
     }
   });

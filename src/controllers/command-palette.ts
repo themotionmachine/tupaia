@@ -1,12 +1,12 @@
 import {
   buildPaletteIndex,
   normalizePaletteText,
-  paletteCandidate,
-  resolvePaletteLocation,
-  searchPalette,
   type PaletteActionId,
   type PaletteCandidate,
-  type PaletteWorld
+  type PaletteWorld,
+  paletteCandidate,
+  resolvePaletteLocation,
+  searchPalette
 } from "./command-palette-search";
 
 // Classic main.js owns these globals, including the lexical D3 zoom controller.
@@ -46,10 +46,13 @@ function currentWorld(): PaletteWorld | null {
     if (!Array.isArray(pack.burgs) || !Array.isArray(pack.states) || !Array.isArray(pack.routes)) return null;
     if (!Array.isArray(pack.cells?.p) || !(graphWidth > 0) || !(graphHeight > 0)) return null;
     if (!(svgWidth > 0) || !(svgHeight > 0) || typeof zoomTo !== "function") return null;
-    if (["loading", "mapOverlay"].some(id => {
-      const overlay = document.getElementById(id);
-      return overlay && visible(overlay);
-    })) return null;
+    if (
+      ["loading", "mapOverlay"].some(id => {
+        const overlay = document.getElementById(id);
+        return overlay && visible(overlay);
+      })
+    )
+      return null;
     return pack;
   } catch {
     return null;
@@ -57,23 +60,46 @@ function currentWorld(): PaletteWorld | null {
 }
 
 function editableEvent(event: KeyboardEvent): boolean {
-  return event.composedPath().some(target => target instanceof HTMLElement && (
-    target.isContentEditable || !!target.closest("input, textarea, select, [role='textbox'], [contenteditable]:not([contenteditable='false'])")
-  ));
+  return event
+    .composedPath()
+    .some(
+      target =>
+        target instanceof HTMLElement &&
+        (target.isContentEditable ||
+          !!target.closest(
+            "input, textarea, select, [role='textbox'], [contenteditable]:not([contenteditable='false'])"
+          ))
+    );
 }
 
 function creationBlock(): string | undefined {
   if (typeof customization !== "undefined" && customization) return "Finish customization first";
-  if (Array.from(document.querySelectorAll(".dialog, .ui-dialog")).some(visible)) return "Close the current editor first";
+  if (Array.from(document.querySelectorAll(".dialog, .ui-dialog")).some(visible))
+    return "Close the current editor first";
   if (document.querySelector("#addFeature button.pressed")) return "Finish the current placement tool first";
   return undefined;
 }
 
 function actionCandidates(ready: boolean): PaletteCandidate[] {
   const blocked = ready ? creationBlock() : "The map is not ready yet";
-  const label = paletteCandidate({ kind: "action", id: "add-label" }, "Add a label", "Click the map to place it", "text name annotation");
-  const route = paletteCandidate({ kind: "action", id: "draw-route" }, "Draw a route", "Connect places on the map", "add road path trail");
-  const whole = paletteCandidate({ kind: "action", id: "whole-map" }, "Show the whole map", "Return to the full map view", "reset zoom out overview");
+  const label = paletteCandidate(
+    { kind: "action", id: "add-label" },
+    "Add a label",
+    "Click the map to place it",
+    "text name annotation"
+  );
+  const route = paletteCandidate(
+    { kind: "action", id: "draw-route" },
+    "Draw a route",
+    "Connect places on the map",
+    "add road path trail"
+  );
+  const whole = paletteCandidate(
+    { kind: "action", id: "whole-map" },
+    "Show the whole map",
+    "Return to the full map view",
+    "reset zoom out overview"
+  );
   label.disabled = blocked || (!document.getElementById("addLabel") ? "Label tool is unavailable" : undefined);
   route.disabled = blocked || (!document.getElementById("addRoute") ? "Route tool is unavailable" : undefined);
   whole.disabled = !ready ? "The map is not ready yet" : undefined;
@@ -133,18 +159,27 @@ export function initializeCommandPalette(): CommandPalette {
     composing = false;
     previous.dialog.close();
     previous.dialog.remove();
-    const restore = previous.restore?.isConnected && previous.restore !== document.body
-      && !previous.restore.matches(":disabled, [inert]") && visible(previous.restore)
-      ? previous.restore : document.querySelector<HTMLElement>(launcherSelector);
+    const restore =
+      previous.restore?.isConnected &&
+      previous.restore !== document.body &&
+      !previous.restore.matches(":disabled, [inert]") &&
+      visible(previous.restore)
+        ? previous.restore
+        : document.querySelector<HTMLElement>(launcherSelector);
     restore?.focus({ preventScroll: true });
   }
 
   function refresh(): void {
     if (!view) return;
-    if (view.world !== currentWorld()) return close();
+    if (view.world !== currentWorld()) {
+      close();
+      return;
+    }
     const actions = actionCandidates(!!view.world);
     const query = normalizePaletteText(view.input.value);
-    const matches = query ? searchPalette([...view.index, ...actions], query) : { results: actions, total: actions.length };
+    const matches = query
+      ? searchPalette([...view.index, ...actions], query)
+      : { results: actions, total: actions.length };
     view.results = matches.results;
     view.active = query ? view.results.findIndex(result => !result.disabled) : -1;
     view.list.replaceChildren();
@@ -164,16 +199,21 @@ export function initializeCommandPalette(): CommandPalette {
       option.addEventListener("click", () => activate(index));
       view!.list.append(option);
     });
-    view.status.textContent = !view.world ? "The map is not ready yet. Try again when it has finished loading."
-      : !query ? "Search settlements, states and routes, or choose a drawing tool."
-      : matches.total ? `${matches.total} result${matches.total === 1 ? "" : "s"}${matches.total > matches.results.length ? ` · Showing ${matches.results.length}` : ""}`
-      : "No matches. Try another name, or search for a drawing tool.";
+    view.status.textContent = !view.world
+      ? "The map is not ready yet. Try again when it has finished loading."
+      : !query
+        ? "Search settlements, states and routes, or choose a drawing tool."
+        : matches.total
+          ? `${matches.total} result${matches.total === 1 ? "" : "s"}${matches.total > matches.results.length ? ` · Showing ${matches.results.length}` : ""}`
+          : "No matches. Try another name, or search for a drawing tool.";
     selectActive();
   }
 
   function selectActive(): void {
     if (!view) return;
-    Array.from(view.list.children).forEach((option, index) => option.setAttribute("aria-selected", String(index === view!.active)));
+    Array.from(view.list.children).forEach((option, index) => {
+      option.setAttribute("aria-selected", String(index === view!.active));
+    });
     const selected = view.list.children[view.active];
     if (selected) {
       view.input.setAttribute("aria-activedescendant", selected.id);
@@ -182,7 +222,7 @@ export function initializeCommandPalette(): CommandPalette {
   }
 
   function move(direction: number): void {
-    if (!view || !view.results.length) return;
+    if (!view?.results.length) return;
     const count = view.results.length;
     let next = view.active < 0 ? (direction > 0 ? -1 : 0) : view.active;
     for (let i = 0; i < count; i++) {
@@ -201,7 +241,10 @@ export function initializeCommandPalette(): CommandPalette {
     const result = view.results[index];
     if (!result) return;
     const world = currentWorld();
-    if (!world || world !== view.world) return close();
+    if (!world || world !== view.world) {
+      close();
+      return;
+    }
     if (result.key.kind === "action") {
       const action = actionCandidates(true).find(candidate => candidate.key.id === result.key.id);
       if (!action || action.disabled) {
@@ -214,7 +257,12 @@ export function initializeCommandPalette(): CommandPalette {
       else document.getElementById(id === "add-label" ? "addLabel" : "addRoute")?.click();
       return;
     }
-    const location = resolvePaletteLocation(world, result.key, { width: svgWidth, height: svgHeight }, zoom.scaleExtent());
+    const location = resolvePaletteLocation(
+      world,
+      result.key,
+      { width: svgWidth, height: svgHeight },
+      zoom.scaleExtent()
+    );
     if (!location) {
       view.index = buildPaletteIndex(world);
       refresh();
@@ -230,7 +278,10 @@ export function initializeCommandPalette(): CommandPalette {
   }
 
   function open(): void {
-    if (view) return view.input.focus();
+    if (view) {
+      view.input.focus();
+      return;
+    }
     if (!styles) styles = createStyles();
     const dialog = document.createElement("dialog");
     dialog.id = "commandPalette";
@@ -259,10 +310,17 @@ export function initializeCommandPalette(): CommandPalette {
       event.preventDefault();
       if (!composing) close();
     });
-    dialog.addEventListener("close", () => { if (view?.dialog === dialog) close(); });
+    dialog.addEventListener("close", () => {
+      if (view?.dialog === dialog) close();
+    });
     view.input.addEventListener("input", refresh);
-    view.input.addEventListener("compositionstart", () => { composing = true; });
-    view.input.addEventListener("compositionend", () => { composing = false; refresh(); });
+    view.input.addEventListener("compositionstart", () => {
+      composing = true;
+    });
+    view.input.addEventListener("compositionend", () => {
+      composing = false;
+      refresh();
+    });
     document.body.append(dialog);
     dialog.showModal();
     view.input.focus();
@@ -276,8 +334,11 @@ export function initializeCommandPalette(): CommandPalette {
   }
 
   function keydown(event: KeyboardEvent): void {
-    const shortcut = (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey
-      && (event.code === "KeyK" || event.key.toLowerCase() === "k");
+    const shortcut =
+      (event.metaKey || event.ctrlKey) &&
+      !event.altKey &&
+      !event.shiftKey &&
+      (event.code === "KeyK" || event.key.toLowerCase() === "k");
     if (!view) {
       const code = event.code || event.key;
       if (event.repeat && consumed.has(code)) {

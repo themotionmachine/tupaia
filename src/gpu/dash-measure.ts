@@ -45,10 +45,7 @@ function pointAt(s: Segment, t: number): [number, number] {
     b = 3 * u * u * t,
     c = 3 * u * t * t,
     d = t * t * t;
-  return [
-    a * s[0] + b * s[2] + c * s[4] + d * s[6],
-    a * s[1] + b * s[3] + c * s[5] + d * s[7]
-  ];
+  return [a * s[0] + b * s[2] + c * s[4] + d * s[6], a * s[1] + b * s[3] + c * s[5] + d * s[7]];
 }
 
 // Skia's cheap distance: Chebyshev, not Euclidean
@@ -74,7 +71,10 @@ function split(s: Segment, t: number): [Segment, Segment] {
   const lerp = (a: number, b: number) => a + (b - a) * t;
   if (s.length === 4) {
     const m = [lerp(s[0], s[2]), lerp(s[1], s[3])];
-    return [[s[0], s[1], ...m], [...m, s[2], s[3]]];
+    return [
+      [s[0], s[1], ...m],
+      [...m, s[2], s[3]]
+    ];
   }
   if (s.length === 6) {
     const a = [lerp(s[0], s[2]), lerp(s[1], s[3])];
@@ -119,7 +119,9 @@ function subdivide(seg: number, s: Segment, t0: number, t1: number, tol: number,
 export function measureContour(contour: Contour, resScale: number): Measure {
   const tol = CHEAP_DIST_LIMIT / (resScale > 0 ? resScale : 1);
   const leaves: Leaf[] = [];
-  contour.segs.forEach((s, i) => subdivide(i, s, 0, 1, tol, leaves));
+  contour.segs.forEach((s, i) => {
+    subdivide(i, s, 0, 1, tol, leaves);
+  });
   let d = 0;
   for (const leaf of leaves) {
     leaf.d0 = d;
@@ -156,7 +158,7 @@ export function dashPieces(m: Measure, dashes: number[], offset: number, toleran
   const period = pattern.reduce((sum, v) => sum + v, 0);
   if (!(period > 0) || pattern.some(v => v < 0) || m.length <= 0) return [];
   let i = 0;
-  let phase = (((offset % period) + period) % period);
+  let phase = ((offset % period) + period) % period;
   // Skia's find_first_interval: a gap is passed when phase > gap, or phase == gap and the gap is nonzero, so a zero-length
   // on-dash at the phase start is kept (it is drawn as a dot).
   while (phase > pattern[i] || (phase === pattern[i] && pattern[i] > 0)) {
@@ -239,7 +241,10 @@ export function parseContours(d: string, arcStep = 0.001): Contour[] {
   let cmd = "";
   const num = () => Number(tokens[i++]);
   const open = () => {
-    if (!cur) contours.push((cur = { segs: [], closed: false }));
+    if (!cur) {
+      cur = { segs: [], closed: false };
+      contours.push(cur);
+    }
   };
   while (i < tokens.length) {
     if (/[A-Za-z]/.test(tokens[i])) cmd = tokens[i++];
@@ -281,7 +286,8 @@ export function parseContours(d: string, arcStep = 0.001): Contour[] {
       // C: c1 c2 end · S: c2 end · Q: c end · T: end; the implicit first control point reflects the previous one
       const quad = up === "Q" || up === "T";
       const reflects = quad ? /^[QT]$/.test(prev) : /^[CS]$/.test(prev);
-      const first = up === "C" || up === "Q" ? [args[0] + ox, args[1] + oy] : reflects ? [2 * x - ctrlX, 2 * y - ctrlY] : [x, y];
+      const first =
+        up === "C" || up === "Q" ? [args[0] + ox, args[1] + oy] : reflects ? [2 * x - ctrlX, 2 * y - ctrlY] : [x, y];
       const rest = up === "C" ? 4 : up === "T" ? 0 : 2;
       const end = [args[rest] + ox, args[rest + 1] + oy];
       if (quad) {

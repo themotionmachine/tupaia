@@ -51,10 +51,11 @@ function fakeGl(supported = true) {
     }
   };
   const finish = (ns: number) => {
-    for (const q of s.ended) if (!available.has(q)) {
-      available.add(q);
-      results.set(q, ns);
-    }
+    for (const q of s.ended)
+      if (!available.has(q)) {
+        available.add(q);
+        results.set(q, ns);
+      }
   };
   return { gl: gl as unknown as WebGL2RenderingContext, s, finish };
 }

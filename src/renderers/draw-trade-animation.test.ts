@@ -11,8 +11,15 @@ function chain(node?: { remove(): void }): any {
   const selection: any = new Proxy(
     {},
     {
-      get: (_, key) =>
-        key === "node" ? () => node : key === "remove" ? () => (node?.remove(), selection) : () => selection
+      get: (_, key) => {
+        if (key === "node") return () => node;
+        if (key === "remove")
+          return () => {
+            node?.remove();
+            return selection;
+          };
+        return () => selection;
+      }
     }
   );
   return selection;
@@ -124,7 +131,9 @@ function selection(nodes: El[]): any {
       selection(
         typeof arg === "function"
           ? arg()
-          : nodes.flatMap(node => node.children.filter(c => (arg === "g" ? c.tagName === "g" : c.className === "highlight")))
+          : nodes.flatMap(node =>
+              node.children.filter(c => (arg === "g" ? c.tagName === "g" : c.className === "highlight"))
+            )
       ),
     interrupt: () => {
       for (const node of nodes) node.interrupted++;

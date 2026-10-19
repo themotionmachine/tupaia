@@ -106,7 +106,9 @@ describe("dashPieces", () => {
     expect(theta(pieces[0], pieces[0].length - 2)).toBeCloseTo(0.5, 2);
     expect(theta(pieces[1], 0)).toBeCloseTo(1, 2);
     expect(theta(pieces[1], pieces[1].length - 2)).toBeCloseTo(1.5, 2);
-    const radial = pieces.flatMap(p => Array.from({ length: p.length / 2 }, (_, k) => Math.abs(Math.hypot(p[2 * k], p[2 * k + 1]) - 100)));
+    const radial = pieces.flatMap(p =>
+      Array.from({ length: p.length / 2 }, (_, k) => Math.abs(Math.hypot(p[2 * k], p[2 * k + 1]) - 100))
+    );
     expect(Math.max(...radial)).toBeLessThan(0.05);
   });
 

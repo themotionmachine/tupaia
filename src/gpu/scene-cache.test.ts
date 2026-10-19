@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { cloneLayers, sameSceneKey, SceneCache, type SceneKey } from "./scene-cache";
 import type { Draw, LayerReport, Scene } from "./scene";
+import { cloneLayers, SceneCache, type SceneKey, sameSceneKey } from "./scene-cache";
 
 const viewbox = {} as object;
 const key = (over: Partial<SceneKey> = {}): SceneKey => ({

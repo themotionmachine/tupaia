@@ -1,11 +1,11 @@
-import { restoreHiddenEmblemClasses } from "@/renderers/emblems/transient-classes";
 // Save the whole .map project to storage, machine or cloud
 import { lazy } from "@/lazy-loaders";
 import { restoreBurgVectorsIn } from "@/renderers/burg-canvas";
-import { restoreZoneHatching } from "@/renderers/zone-hatching";
 import { clearDenseZoom } from "@/renderers/dense-zoom";
+import { restoreHiddenEmblemClasses } from "@/renderers/emblems/transient-classes";
 import { restorePathVectorsIn } from "@/renderers/path-layer-canvas";
 import { materializeRelief, prepareReliefSerialization } from "@/renderers/relief-canvas";
+import { restoreZoneHatching } from "@/renderers/zone-hatching";
 import { ensureEl, link, parseError, rn } from "@/utils";
 import { type BinaryMapSection, encodeBinaryMap, encodeBinarySections } from "./binary-map";
 import { serializeBiomeExtras } from "./biome-extras"; // tupaia-mcp: biome icon density/icons/cost

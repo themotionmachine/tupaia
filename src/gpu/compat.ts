@@ -2,8 +2,8 @@
 // opacity, foreign images, shadowed text...) are rasterized from the detached export clone (prepareMapClone: styles,
 // fonts and images inlined) and composited in DOM order. Never used for elements the native passes draw.
 import { prepareMapClone } from "../io/export";
-import { isolateEmblemDefinitions } from "./compat-assets";
 import { alphaBounds, cropRegion, type PixelBounds, padBounds } from "./budget";
+import { isolateEmblemDefinitions } from "./compat-assets";
 
 export interface Region {
   x: number;
@@ -96,7 +96,9 @@ export async function rasterizeRun(
   const viewbox = clone.querySelector("#viewbox");
   if (!viewbox) throw new Error("clone without #viewbox");
   const undo = isolate(clone, new Set(elements));
-  const saved = ["width", "height", "viewBox", "preserveAspectRatio"].map(name => [name, clone.getAttribute(name)] as const);
+  const saved = ["width", "height", "viewBox", "preserveAspectRatio"].map(
+    name => [name, clone.getAttribute(name)] as const
+  );
   const transform = viewbox.getAttribute("transform");
   let markup: string;
   let undoDefinitions = () => {};

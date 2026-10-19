@@ -29,7 +29,10 @@ describe("glyphCovers", () => {
   });
 
   it("clips exactly at the <use> viewport, with no tolerance band outside", () => {
-    const edge: GlyphHits = { ...glyph, primitives: [{ ...glyph.primitives[0], rings: [[0, 0, 100, 0, 100, 100, 0, 100]] }] };
+    const edge: GlyphHits = {
+      ...glyph,
+      primitives: [{ ...glyph.primitives[0], rings: [[0, 0, 100, 0, 100, 100, 0, 100]] }]
+    };
     expect(glyphCovers(edge, icon, 110, 205, 0)).toBe(true);
     expect(glyphCovers(edge, icon, 110.01, 205, 5)).toBe(false);
   });
@@ -38,7 +41,9 @@ describe("glyphCovers", () => {
     // 200x100 viewBox in a 10 box: scale 0.05, content spans y 2.5..7.5
     const wide: GlyphHits = {
       viewBox: [0, 0, 200, 100],
-      primitives: [{ rings: [[0, 0, 200, 0, 200, 100, 0, 100]], closed: [true], fill: { evenOdd: false }, stroke: null }]
+      primitives: [
+        { rings: [[0, 0, 200, 0, 200, 100, 0, 100]], closed: [true], fill: { evenOdd: false }, stroke: null }
+      ]
     };
     expect(glyphCovers(wide, { x: 0, y: 0, s: 10 }, 5, 3, 0)).toBe(true);
     expect(glyphCovers(wide, { x: 0, y: 0, s: 10 }, 5, 2, 0)).toBe(false);
@@ -86,7 +91,9 @@ describe("glyphTarget", () => {
 
 describe("parseTransform", () => {
   const close = (actual: number[] | null, expected: number[]) =>
-    expected.forEach((v, i) => expect(actual![i]).toBeCloseTo(v, 9));
+    expected.forEach((v, i) => {
+      expect(actual![i]).toBeCloseTo(v, 9);
+    });
 
   it("composes a transform list left to right, like nested groups", () => {
     expect(parseTransform(null)).toEqual([1, 0, 0, 1, 0, 0]);
@@ -156,7 +163,9 @@ function reportFor(symbol: FakeElement) {
     }) as unknown as Element;
   const view = {
     getComputedStyle: (element: { node?: FakeElement }) =>
-      Object.fromEntries(Object.entries(CSS_KEYS).map(([key, attr]) => [key, element.node?.attrs[attr] ?? INITIAL[key]]))
+      Object.fromEntries(
+        Object.entries(CSS_KEYS).map(([key, attr]) => [key, element.node?.attrs[attr] ?? INITIAL[key]])
+      )
   };
   const doc = { defaultView: view, getElementById: (id: string) => (id === "s" ? wrap(symbol) : null) };
   return readGlyphReport({ ownerDocument: doc } as unknown as Element, "#s");
@@ -196,7 +205,9 @@ describe("readGlyphReport", () => {
   it("scales a stroke under a similarity transform", () => {
     const read = reportFor(
       el("symbol", { viewBox: "0 0 100 100" }, [
-        el("g", { transform: "scale(2)" }, [el("line", { x1: "5", y1: "10", x2: "45", y2: "10", stroke: "#000", "stroke-width": "2" })])
+        el("g", { transform: "scale(2)" }, [
+          el("line", { x1: "5", y1: "10", x2: "45", y2: "10", stroke: "#000", "stroke-width": "2" })
+        ])
       ])
     );
     expect(read.reason).toBeNull();
@@ -213,7 +224,9 @@ describe("readGlyphReport", () => {
       );
     expect(stroked("scale(2 1)")).toEqual({ glyph: null, reason: "stroke under non-uniform transform on <path>" });
     expect(stroked("perspective(2)").reason).toBe("unparsed transform on <path>");
-    const masked = reportFor(el("symbol", { viewBox: "0 0 100 100" }, [el("g", { mask: "url(#m)" }, [el("path", { d: "M0,0H9V9Z" })])]));
+    const masked = reportFor(
+      el("symbol", { viewBox: "0 0 100 100" }, [el("g", { mask: "url(#m)" }, [el("path", { d: "M0,0H9V9Z" })])])
+    );
     expect(masked).toEqual({ glyph: null, reason: "mask on <g>" });
     const inner = reportFor(el("symbol", { viewBox: "0 0 100 100" }, [el("use", { href: "#x" })]));
     expect(inner.reason).toBe("element <use>");

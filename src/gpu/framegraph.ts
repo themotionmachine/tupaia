@@ -111,8 +111,8 @@ export function emptyOnView(frame: Frame, batch: Batch, visible: Rect4, pad: num
     case "group":
       // Mask bit 0x80 starts clear and only white items set it, so with no drawable white item on view every masked
       // child fragment fails the stencil test.
-      if (batch.mask && batch.mask.every(({ fill, white }) => !white || emptyOnView(frame, fill, visible, pad))) return true;
-      return batch.children.every((child) => emptyOnView(frame, child, visible, pad));
+      if (batch.mask?.every(({ fill, white }) => !white || emptyOnView(frame, fill, visible, pad))) return true;
+      return batch.children.every(child => emptyOnView(frame, child, visible, pad));
     default:
       return false;
   }
@@ -133,7 +133,7 @@ export class FrameGraph {
     maskFills: 0,
     maskCulled: 0,
     groupsEmpty: 0,
-    opaqueMasked: 0,
+    opaqueMasked: 0
   };
   private visible: Rect4 = [0, 0, 1, 1];
   private programs = {} as Record<Kind, TrackedProgram>;

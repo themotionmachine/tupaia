@@ -1,5 +1,6 @@
-import { expandStates, expandCultures, type ExpansionInput } from "./expansion-kernel";
+import { type ExpansionInput, expandCultures, expandStates } from "./expansion-kernel";
 import type { ExpansionOperation } from "./expansion-worker";
+
 self.onmessage = (
   event: MessageEvent<{
     operation: ExpansionOperation;

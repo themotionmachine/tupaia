@@ -13,7 +13,7 @@ function modelGl() {
     func: [0, 0, 0xff],
     front: [0, 0, 0],
     back: [0, 0, 0],
-    uniforms: new Map<unknown, number[]>(),
+    uniforms: new Map<unknown, number[]>()
   };
   let calls = 0;
   const attrs = () => {
@@ -31,29 +31,72 @@ function modelGl() {
     FRONT_AND_BACK: 1032,
     ARRAY_BUFFER: 34962,
     FLOAT: 5126,
-    useProgram: (p: unknown) => (calls++, (s.program = p)),
-    bindVertexArray: (v: unknown) => (calls++, (s.vao = v)),
-    bindBuffer: (_: number, b: unknown) => (calls++, (s.arrayBuffer = b)),
-    colorMask: (...rgba: boolean[]) => (calls++, (s.color = rgba)),
-    stencilMask: (m: number) => (calls++, (s.writeMask = m)),
-    stencilFunc: (...f: number[]) => (calls++, (s.func = f)),
-    stencilOp: (...o: number[]) => (calls++, (s.front = o), (s.back = o)),
+    useProgram: (p: unknown) => {
+      calls++;
+      s.program = p;
+    },
+    bindVertexArray: (v: unknown) => {
+      calls++;
+      s.vao = v;
+    },
+    bindBuffer: (_: number, b: unknown) => {
+      calls++;
+      s.arrayBuffer = b;
+    },
+    colorMask: (...rgba: boolean[]) => {
+      calls++;
+      s.color = rgba;
+    },
+    stencilMask: (m: number) => {
+      calls++;
+      s.writeMask = m;
+    },
+    stencilFunc: (...f: number[]) => {
+      calls++;
+      s.func = f;
+    },
+    stencilOp: (...o: number[]) => {
+      calls++;
+      s.front = o;
+      s.back = o;
+    },
     stencilOpSeparate: (face: number, ...o: number[]) => {
       calls++;
       if (face !== 1029) s.front = o;
       if (face !== 1028) s.back = o;
     },
-    uniform1i: (l: unknown, v: number) => (calls++, s.uniforms.set(l, [v])),
-    uniform1f: (l: unknown, v: number) => (calls++, s.uniforms.set(l, [Math.fround(v)])),
-    uniform1fv: (l: unknown, v: Float32Array) => (calls++, s.uniforms.set(l, [...v])),
-    uniform4fv: (l: unknown, v: ArrayLike<number>) => (calls++, s.uniforms.set(l, Array.from(v, Math.fround))),
-    uniformMatrix3fv: (l: unknown, _: boolean, v: Float32Array) => (calls++, s.uniforms.set(l, [...v])),
-    enableVertexAttribArray: (l: number) => (calls++, (attr(l).enabled = true)),
+    uniform1i: (l: unknown, v: number) => {
+      calls++;
+      s.uniforms.set(l, [v]);
+    },
+    uniform1f: (l: unknown, v: number) => {
+      calls++;
+      s.uniforms.set(l, [Math.fround(v)]);
+    },
+    uniform1fv: (l: unknown, v: Float32Array) => {
+      calls++;
+      s.uniforms.set(l, [...v]);
+    },
+    uniform4fv: (l: unknown, v: ArrayLike<number>) => {
+      calls++;
+      s.uniforms.set(l, Array.from(v, Math.fround));
+    },
+    uniformMatrix3fv: (l: unknown, _: boolean, v: Float32Array) => {
+      calls++;
+      s.uniforms.set(l, [...v]);
+    },
+    enableVertexAttribArray: (l: number) => {
+      calls++;
+      attr(l).enabled = true;
+    },
     vertexAttribPointer: (l: number, size: number, _t: number, _n: boolean, stride: number, offset: number) => {
       calls++;
       Object.assign(attr(l), { buffer: s.arrayBuffer, size, stride, offset });
     },
-    vertexAttribDivisor: (l: number, divisor: number) => (calls++, (attr(l).divisor = divisor)),
+    vertexAttribDivisor: (l: number, divisor: number) => {
+      calls++;
+      attr(l).divisor = divisor;
+    }
   };
   // ARRAY_BUFFER is left out: draws read the buffer captured by each pointer, not the current binding.
   const snapshot = () =>
@@ -61,7 +104,7 @@ function modelGl() {
       ...s,
       arrayBuffer: undefined,
       uniforms: [...s.uniforms].filter(([location]) => location !== null), // GL ignores a null location
-      attributes: [...attrs()].sort(([a], [b]) => a - b),
+      attributes: [...attrs()].sort(([a], [b]) => a - b)
     });
   return { gl: gl as unknown as WebGL2RenderingContext, snapshot, calls: () => calls, state: s };
 }
@@ -87,12 +130,15 @@ function direct(gl: WebGL2RenderingContext): Omit<GlState, "counts" | "reset"> {
       g.enableVertexAttribArray(location);
       g.vertexAttribPointer(location, size, gl.FLOAT, false, stride, offset);
       g.vertexAttribDivisor(location, divisor);
-    },
+    }
   } as Omit<GlState, "counts" | "reset">;
 }
 
 function random(seed: number) {
-  return () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+  return () => {
+    seed = (seed * 1103515245 + 12345) % 2147483648;
+    return seed / 2147483648;
+  };
 }
 
 describe("GlState", () => {
@@ -114,9 +160,23 @@ describe("GlState", () => {
       for (let step = 0; step < 400; step++) {
         const choice = Math.floor(rand() * 11);
         const apply = (target: Omit<GlState, "counts" | "reset">) => (args: unknown[]) =>
-          (target[["useProgram", "bindVertexArray", "colorMask", "stencilMask", "stencilFunc", "stencilOp",
-            "stencilOpSeparate", "uniform1f", "uniform4fv", "uniformMatrix3fv", "attribute"][choice] as keyof typeof target] as
-            (...a: unknown[]) => void)(...args);
+          (
+            target[
+              [
+                "useProgram",
+                "bindVertexArray",
+                "colorMask",
+                "stencilMask",
+                "stencilFunc",
+                "stencilOp",
+                "stencilOpSeparate",
+                "uniform1f",
+                "uniform4fv",
+                "uniformMatrix3fv",
+                "attribute"
+              ][choice] as keyof typeof target
+            ] as (...a: unknown[]) => void
+          )(...args);
         let args: unknown[];
         if (choice === 0) args = [pick(programs)];
         else if (choice === 1) args = [pick(vaos)];

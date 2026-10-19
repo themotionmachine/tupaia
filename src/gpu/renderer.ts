@@ -1,4 +1,3 @@
-import { HiddenEmblemCulling } from "./emblem-culling";
 // P1 GPU backend (loaded lazily behind ?renderer=gpu). A WebGL2 canvas sits directly above <svg id="map"> with
 // pointer-events:none; the SVG stays underneath as the d3.zoom gesture owner and the canonical, exportable document.
 // During motion the camera only changes uniforms; exact (settled) updates still write the canonical SVG, after which
@@ -18,6 +17,7 @@ import {
   recoverClick,
   routeClick
 } from "./editor-dispatch";
+import { HiddenEmblemCulling } from "./emblem-culling";
 import { FrameGraph } from "./framegraph";
 import { GpuFrameTimer, type TimingTelemetry, timingRequested } from "./gpu-timer";
 import { classify, TRADE_LAYER, TradeMarkers } from "./markers";
@@ -34,9 +34,9 @@ import {
 } from "./prepare";
 import { scaleBucket } from "./raster";
 import { glyphTarget } from "./relief-pick";
+import { RestoreClock, type RestoreTiming } from "./restore-phases";
 import type { Rgba } from "./scene";
 import { SceneCache } from "./scene-cache";
-import { RestoreClock, type RestoreTiming } from "./restore-phases";
 import { type GlyphInfo, type GpuSelection, type ReliefCandidate, selectAt } from "./selection";
 import { GlyphAtlas } from "./text";
 
@@ -537,7 +537,8 @@ export class GpuRenderer {
   }
 
   private observeLongTasks(): void {
-    if (typeof PerformanceObserver !== "function" || !PerformanceObserver.supportedEntryTypes?.includes("longtask")) return;
+    if (typeof PerformanceObserver !== "function" || !PerformanceObserver.supportedEntryTypes?.includes("longtask"))
+      return;
     this.longTaskObserver = new PerformanceObserver(list => {
       for (const task of list.getEntries()) {
         this.longTasks.push({ at: task.startTime, ms: task.duration });
@@ -680,7 +681,11 @@ export class GpuRenderer {
       const done = this.traceJob("overlay", "running");
       let outcome: "committed" | "stale" | "full" | "failed" = "failed";
       try {
-        outcome = await refreshOverlayBatches(prepared, { ...this.ctx(generation, prepared, this.refines), stale }, roots);
+        outcome = await refreshOverlayBatches(
+          prepared,
+          { ...this.ctx(generation, prepared, this.refines), stale },
+          roots
+        );
       } catch (error) {
         if (!stale()) console.warn(`GPU overlay refresh failed, re-preparing: ${errorText(error)}`);
       } finally {
@@ -753,7 +758,8 @@ export class GpuRenderer {
     );
     if (change === "static") {
       this.traceJob("revision", this.invalidations.last)();
-      return this.invalidate();
+      this.invalidate();
+      return;
     }
     if (change === "overlay") {
       for (const root of roots) this.pendingOverlays.add(root);
@@ -853,13 +859,14 @@ export class GpuRenderer {
     const generation = this.generation;
     const revision = this.revision;
     const job = { generation, revision, hadFrame: !!this.prepared };
-    const record = (this.lastPrepare = {
+    const record = {
       reason: this.prepareReason,
       hadFrame: job.hadFrame,
       moving: this.moving,
       outcome: "running" as PrepareOutcome,
       phases: {} as Record<string, number>
-    });
+    };
+    this.lastPrepare = record;
     if (this.moving) this.preparesWhileMoving.starts++;
     const started = performance.now();
     const recovering = this.recovery.prepareStart();
@@ -973,11 +980,7 @@ export class GpuRenderer {
     if (action === "prepare")
       return this.schedulePrepare(
         0,
-        this.prepareWanted
-          ? "settle-wanted"
-          : prepared.revision !== this.revision
-            ? "settle-revision"
-            : "settle-bucket"
+        this.prepareWanted ? "settle-wanted" : prepared.revision !== this.revision ? "settle-revision" : "settle-bucket"
       );
     if (action === "none" || !this.active()) return;
     const [x0, y0, x1, y1] = visibleWorld(this.view, this.viewport, 64);

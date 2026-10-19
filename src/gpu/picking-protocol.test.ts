@@ -60,11 +60,9 @@ describe("picking oracle protocol v2", () => {
 
   it("rejects a run on any structural change or committing call", () => {
     expect(sceneChanges(probe, { ...probe }, none, 0)).toEqual([]);
-    expect(sceneChanges(probe, { ...probe, regime: "materialized", terrainChildren: 9, revision: 4 }, none, 0)).toEqual([
-      "regime: compact -> materialized",
-      "terrainChildren: 1 -> 9",
-      "revision: 3 -> 4"
-    ]);
+    expect(sceneChanges(probe, { ...probe, regime: "materialized", terrainChildren: 9, revision: 4 }, none, 0)).toEqual(
+      ["regime: compact -> materialized", "terrainChildren: 1 -> 9", "revision: 3 -> 4"]
+    );
     expect(sceneChanges(probe, probe, { ...none, childList: 2 }, 1)).toEqual([
       "childList mutations: 2",
       "pickRelief (committing) calls: 1"

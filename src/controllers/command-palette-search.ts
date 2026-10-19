@@ -53,16 +53,22 @@ export interface PaletteLocation {
 }
 
 export function normalizePaletteText(value: string): string {
-  return value.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+  return value
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
 }
 
-export function paletteCandidate(
-  key: PaletteKey,
-  label: string,
-  detail: string,
-  aliases = ""
-): PaletteCandidate {
-  return { key, label, detail, name: normalizePaletteText(label), search: normalizePaletteText(`${label} ${detail} ${aliases}`) };
+export function paletteCandidate(key: PaletteKey, label: string, detail: string, aliases = ""): PaletteCandidate {
+  return {
+    key,
+    label,
+    detail,
+    name: normalizePaletteText(label),
+    search: normalizePaletteText(`${label} ${detail} ${aliases}`)
+  };
 }
 
 function validPoint(point: readonly number[] | undefined): point is readonly number[] {
@@ -70,9 +76,7 @@ function validPoint(point: readonly number[] | undefined): point is readonly num
 }
 
 function burgPoint(burg: SearchBurg | undefined): [number, number] | null {
-  return burg && !burg.removed && Number.isFinite(burg.x) && Number.isFinite(burg.y)
-    ? [burg.x!, burg.y!]
-    : null;
+  return burg && !burg.removed && Number.isFinite(burg.x) && Number.isFinite(burg.y) ? [burg.x!, burg.y!] : null;
 }
 
 function statePoint(world: PaletteWorld, state: SearchState): readonly number[] | null {
@@ -88,7 +92,9 @@ const routeGroups: Record<string, string> = { roads: "Road", trails: "Trail", se
 /** Never generates names, reads SVG geometry, or changes the world. */
 export function buildPaletteIndex(world: PaletteWorld): PaletteCandidate[] {
   const entries: PaletteCandidate[] = [];
-  const stateNames = new Map(world.states.filter(state => state?.i && !state.removed).map(state => [state.i, state.fullName || state.name]));
+  const stateNames = new Map(
+    world.states.filter(state => state?.i && !state.removed).map(state => [state.i, state.fullName || state.name])
+  );
   for (const burg of world.burgs) {
     if (!burg?.i || !burg.name || !burgPoint(burg)) continue;
     const state = stateNames.get(burg.state ?? 0);
@@ -97,12 +103,27 @@ export function buildPaletteIndex(world: PaletteWorld): PaletteCandidate[] {
   }
   for (const state of world.states) {
     if (!state?.i || state.removed || !(state.fullName || state.name) || !statePoint(world, state)) continue;
-    entries.push(paletteCandidate({ kind: "state", id: state.i }, state.fullName || state.name!, "State", `${state.name || ""} ${state.i}`));
+    entries.push(
+      paletteCandidate(
+        { kind: "state", id: state.i },
+        state.fullName || state.name!,
+        "State",
+        `${state.name || ""} ${state.i}`
+      )
+    );
   }
   for (const route of world.routes) {
-    if (!route || route.removed || !Number.isFinite(route.i) || !Array.isArray(route.points) || route.points.length < 2) continue;
+    if (!route || route.removed || !Number.isFinite(route.i) || !Array.isArray(route.points) || route.points.length < 2)
+      continue;
     const group = routeGroups[route.group] || "Route";
-    entries.push(paletteCandidate({ kind: "route", id: route.i }, route.name || `${group} ${route.i}`, `Route · ${group}`, `${route.group} ${route.i}`));
+    entries.push(
+      paletteCandidate(
+        { kind: "route", id: route.i },
+        route.name || `${group} ${route.i}`,
+        `Route · ${group}`,
+        `${route.group} ${route.i}`
+      )
+    );
   }
   return entries;
 }
@@ -118,20 +139,31 @@ export function searchPalette(
   const normalized = normalizePaletteText(query);
   if (!normalized) return { results: [], total: 0 };
   const tokens = normalized.split(" ");
-  const ranked = candidates.filter(candidate => tokens.every(token => candidate.search.includes(token))).map(candidate => {
-    const words = candidate.name.split(" ");
-    const rank = candidate.name === normalized ? 0
-      : candidate.name.startsWith(normalized) ? 1
-      : tokens.every(token => words.some(word => word.startsWith(token))) ? 2
-      : candidate.name.includes(normalized) ? 3 : 4;
-    return { candidate, rank };
-  });
-  ranked.sort((a, b) => a.rank - b.rank
-    || kindOrder[a.candidate.key.kind] - kindOrder[b.candidate.key.kind]
-    || compareText(a.candidate.name, b.candidate.name)
-    || (typeof a.candidate.key.id === "number" && typeof b.candidate.key.id === "number"
-      ? a.candidate.key.id - b.candidate.key.id
-      : compareText(String(a.candidate.key.id), String(b.candidate.key.id))));
+  const ranked = candidates
+    .filter(candidate => tokens.every(token => candidate.search.includes(token)))
+    .map(candidate => {
+      const words = candidate.name.split(" ");
+      const rank =
+        candidate.name === normalized
+          ? 0
+          : candidate.name.startsWith(normalized)
+            ? 1
+            : tokens.every(token => words.some(word => word.startsWith(token)))
+              ? 2
+              : candidate.name.includes(normalized)
+                ? 3
+                : 4;
+      return { candidate, rank };
+    });
+  ranked.sort(
+    (a, b) =>
+      a.rank - b.rank ||
+      kindOrder[a.candidate.key.kind] - kindOrder[b.candidate.key.kind] ||
+      compareText(a.candidate.name, b.candidate.name) ||
+      (typeof a.candidate.key.id === "number" && typeof b.candidate.key.id === "number"
+        ? a.candidate.key.id - b.candidate.key.id
+        : compareText(String(a.candidate.key.id), String(b.candidate.key.id)))
+  );
   return { results: ranked.slice(0, Math.max(0, limit)).map(item => item.candidate), total: ranked.length };
 }
 
@@ -156,7 +188,10 @@ export function resolvePaletteLocation(
   }
   const route = world.routes.find(route => route?.i === key.id);
   if (!route || route.removed || !Array.isArray(route.points) || route.points.length < 2) return null;
-  let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+  let left = Infinity,
+    top = Infinity,
+    right = -Infinity,
+    bottom = -Infinity;
   for (const point of route.points) {
     if (!validPoint(point)) return null;
     left = Math.min(left, point[0]);
@@ -164,7 +199,10 @@ export function resolvePaletteLocation(
     top = Math.min(top, point[1]);
     bottom = Math.max(bottom, point[1]);
   }
-  const fit = Math.min(viewport.width / Math.max(40, (right - left) * 1.3), viewport.height / Math.max(40, (bottom - top) * 1.3));
+  const fit = Math.min(
+    viewport.width / Math.max(40, (right - left) * 1.3),
+    viewport.height / Math.max(40, (bottom - top) * 1.3)
+  );
   if (!Number.isFinite(fit) || fit <= 0) return null;
   return { x: left + (right - left) / 2, y: top + (bottom - top) / 2, scale: clamp(fit) };
 }

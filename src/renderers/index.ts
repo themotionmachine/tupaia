@@ -33,4 +33,3 @@ import "./zone-hatching";
 
 import "./scene-document";
 import "./renderer-mode";
-

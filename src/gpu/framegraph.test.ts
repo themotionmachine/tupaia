@@ -10,7 +10,7 @@ const frame: Frame = {
   segments: buffer,
   sprites: buffer,
   glyphs: buffer,
-  atlas: {} as TrackedTexture,
+  atlas: {} as TrackedTexture
 };
 const view: [number, number, number, number] = [0, 0, 100, 100];
 const on: [number, number, number, number] = [10, 10, 20, 20];
@@ -23,7 +23,7 @@ const fill = (bounds: FillBatch["bounds"], count = 3): FillBatch => ({
   count,
   color: [1, 0, 0, 1],
   tile: null,
-  evenOdd: false,
+  evenOdd: false
 });
 const stroke = (bounds: StrokeBatch["bounds"]): StrokeBatch => ({
   kind: "stroke",
@@ -35,13 +35,13 @@ const stroke = (bounds: StrokeBatch["bounds"]): StrokeBatch => ({
   dashes: new Float32Array(8),
   dashCount: 0,
   dashPeriod: 0,
-  dashOffset: 0,
+  dashOffset: 0
 });
 const group = (children: Batch[], mask: GroupBatch["mask"] = null, opacity = 0.5): GroupBatch => ({
   kind: "group",
   opacity,
   mask,
-  children,
+  children
 });
 const empty = (batch: Batch, f = frame) => emptyOnView(f, batch, view, 1);
 
@@ -97,7 +97,7 @@ describe("emptyOnView", () => {
           children,
           [
             { fill: fill(on), white: true },
-            { fill: fill(on), white: false },
+            { fill: fill(on), white: false }
           ],
           1
         )

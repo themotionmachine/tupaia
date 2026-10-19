@@ -175,7 +175,8 @@ describe("classify: pixel-neutral viewport decoration", () => {
     ...attribute(target, attributeName),
     oldValue
   });
-  const hatch = (value: string) => element("pattern", viewbox, { "data-zone-hatch-clone": "", patternTransform: value });
+  const hatch = (value: string) =>
+    element("pattern", viewbox, { "data-zone-hatch-clone": "", patternTransform: value });
   const label = (value: string) => element("text", viewbox, { class: value });
 
   it("skips zone-hatch clone scale() rewrites and counts them", () => {
@@ -193,19 +194,39 @@ describe("classify: pixel-neutral viewport decoration", () => {
   });
 
   it("skips a camera scale change on a transformed clone only while the inherited tail is identical", () => {
-    const rotated = changed(hatch("scale(0.2857142857142857) rotate(45 0 0)"), "patternTransform", "scale(0.125) rotate(45 0 0)");
+    const rotated = changed(
+      hatch("scale(0.2857142857142857) rotate(45 0 0)"),
+      "patternTransform",
+      "scale(0.125) rotate(45 0 0)"
+    );
     expect(classify([rotated])).toBe("none");
-    const custom = changed(hatch("scale(2e-1) scale(3) translate(4 5)"), "patternTransform", "scale(1) scale(3) translate(4 5)");
+    const custom = changed(
+      hatch("scale(2e-1) scale(3) translate(4 5)"),
+      "patternTransform",
+      "scale(1) scale(3) translate(4 5)"
+    );
     expect(classify([custom])).toBe("none");
     // semantic edits of the tail (angle, spacing, offset) still invalidate
-    expect(classify([changed(hatch("scale(0.25) rotate(30 0 0)"), "patternTransform", "scale(0.5) rotate(45 0 0)")])).toBe("static");
-    expect(classify([changed(hatch("scale(0.25) rotate(45 0 0)"), "patternTransform", "scale(0.25) rotate(-45 0 0)")])).toBe("static");
-    expect(classify([changed(hatch("scale(0.25) scale(2)"), "patternTransform", "scale(0.25) scale(3)")])).toBe("static");
+    expect(
+      classify([changed(hatch("scale(0.25) rotate(30 0 0)"), "patternTransform", "scale(0.5) rotate(45 0 0)")])
+    ).toBe("static");
+    expect(
+      classify([changed(hatch("scale(0.25) rotate(45 0 0)"), "patternTransform", "scale(0.25) rotate(-45 0 0)")])
+    ).toBe("static");
+    expect(classify([changed(hatch("scale(0.25) scale(2)"), "patternTransform", "scale(0.25) scale(3)")])).toBe(
+      "static"
+    );
     expect(classify([changed(hatch("scale(0.25) rotate(45)"), "patternTransform", "scale(0.25)")])).toBe("static");
     // the camera term must stay a positive finite scale
-    expect(classify([changed(hatch("scale(0) rotate(45)"), "patternTransform", "scale(0.5) rotate(45)")])).toBe("static");
-    expect(classify([changed(hatch("scale(-1) rotate(45)"), "patternTransform", "scale(0.5) rotate(45)")])).toBe("static");
-    expect(classify([changed(hatch("scale(0.25)rotate(45)"), "patternTransform", "scale(0.5)rotate(45)")])).toBe("static");
+    expect(classify([changed(hatch("scale(0) rotate(45)"), "patternTransform", "scale(0.5) rotate(45)")])).toBe(
+      "static"
+    );
+    expect(classify([changed(hatch("scale(-1) rotate(45)"), "patternTransform", "scale(0.5) rotate(45)")])).toBe(
+      "static"
+    );
+    expect(classify([changed(hatch("scale(0.25)rotate(45)"), "patternTransform", "scale(0.5)rotate(45)")])).toBe(
+      "static"
+    );
   });
 
   it("keeps user-config and original pattern transforms static even when only the scale changes", () => {

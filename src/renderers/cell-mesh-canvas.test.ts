@@ -5,7 +5,13 @@ afterEach(() => vi.unstubAllGlobals());
 
 function graph() {
   return {
-    cells: { i: [0, 1], v: [[0, 1, 2], [1, 2, 3]] },
+    cells: {
+      i: [0, 1],
+      v: [
+        [0, 1, 2],
+        [1, 2, 3]
+      ]
+    },
     vertices: {
       p: [
         [0, 0],
@@ -54,16 +60,22 @@ describe("cell mesh raster reuse", () => {
       createElement: () => canvas
     });
     vi.stubGlobal("getComputedStyle", () => style);
-    vi.stubGlobal("MutationObserver", class {
-      observe() {}
-      disconnect() {}
-    });
-    const paths: string[] = [];
-    vi.stubGlobal("Path2D", class {
-      constructor(d: string) {
-        paths.push(d);
+    vi.stubGlobal(
+      "MutationObserver",
+      class {
+        observe() {}
+        disconnect() {}
       }
-    });
+    );
+    const paths: string[] = [];
+    vi.stubGlobal(
+      "Path2D",
+      class {
+        constructor(d: string) {
+          paths.push(d);
+        }
+      }
+    );
     vi.stubGlobal("customization", 0);
     vi.stubGlobal("pack", world);
     vi.stubGlobal("graphWidth", 100);

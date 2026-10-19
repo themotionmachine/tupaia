@@ -1,4 +1,3 @@
-import { EMBLEM_RULES, maintainEmblemStyles } from "./styles";
 import { shieldBox } from "./box";
 import { colors } from "./colors";
 import { lines } from "./lines";
@@ -6,6 +5,7 @@ import { shieldPaths } from "./paths";
 import { patterns } from "./patterns";
 import { shieldPositions } from "./shieldPositions";
 import { shieldSize } from "./size";
+import { EMBLEM_RULES, maintainEmblemStyles } from "./styles";
 import { templates } from "./templates";
 
 declare global {

@@ -67,9 +67,9 @@ export class HiddenEmblemPaint {
         seen.add(use);
         const href = use.getAttribute("href") ?? use.getAttribute("xlink:href") ?? "";
         if (!href) continue; // deferred COA placeholders have no referenced paint or native painted-shape hit
-        if (!/^#[^\s]+$/.test(href)) return reject("nonlocal use reference: " + href);
+        if (!/^#[^\s]+$/.test(href)) return reject(`nonlocal use reference: ${href}`);
         const asset = document.getElementById(href.slice(1));
-        if (!asset || !(asset instanceof SVGElement)) return reject("unresolved use reference: " + href);
+        if (!asset || !(asset instanceof SVGElement)) return reject(`unresolved use reference: ${href}`);
         if (!parents.some(owner => owner.contains(asset))) {
           if (!asset.closest("defs")) return reject("referenced asset outside observed definitions");
           parents.push(asset);
@@ -88,10 +88,10 @@ export class HiddenEmblemPaint {
     for (const parent of parents) {
       for (const element of [parent, ...parent.querySelectorAll("*")]) {
         if (element.hasAttribute("visibility") || element.hasAttribute("pointer-events"))
-          return reject("explicit attribute: " + element.tagName + "#" + element.id);
+          return reject(`explicit attribute: ${element.tagName}#${element.id}`);
         const style = (element as SVGElement).style;
         if (style?.visibility || style?.pointerEvents)
-          return reject("explicit inline style: " + element.tagName + "#" + element.id);
+          return reject(`explicit inline style: ${element.tagName}#${element.id}`);
         if (element.getAnimations().some(animation => animation.playState !== "finished"))
           return reject("active source animation");
       }
@@ -129,7 +129,7 @@ export class HiddenEmblemPaint {
           // Strip interaction state before querying so a currently inactive hover/focus rule cannot slip through.
           const selector = rule.selectorText.replace(dynamicState, "");
           if ([...document.querySelectorAll(selector)].some(relevant))
-            return reject("author CSS: " + rule.selectorText);
+            return reject(`author CSS: ${rule.selectorText}`);
         } else if ("cssRules" in rule && !inspect((rule as CSSGroupingRule).cssRules)) return false;
       }
       return true;

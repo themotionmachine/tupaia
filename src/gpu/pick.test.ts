@@ -6,9 +6,9 @@ import {
   PickIndex,
   polylineCovers,
   polylineDistance,
+  type StrokeCap,
   segmentDistance,
   squareMeetsConvex,
-  type StrokeCap,
   strokeCovers,
   windingNumber
 } from "./pick";
@@ -97,7 +97,13 @@ describe("PickIndex", () => {
     const misses = (tolerance: number) => {
       const index = new PickIndex(100, 100);
       const paths = flattenPath(d, tolerance);
-      index.addStroke("routes", "route1", paths.map(p => p.points), paths.map(p => p.closed), 0.05);
+      index.addStroke(
+        "routes",
+        "route1",
+        paths.map(p => p.points),
+        paths.map(p => p.closed),
+        0.05
+      );
       let missed = 0;
       for (let i = 0; i <= 200; i++) if (index.pick(...(curve(i / 200) as [number, number]))?.id !== "route1") missed++;
       return missed;
@@ -109,7 +115,10 @@ describe("PickIndex", () => {
   it("pick returns pickAll's topmost hit, within one bucket and across bucket edges", () => {
     const index = new PickIndex(100, 100, 8);
     let seed = 7;
-    const rand = () => ((seed = (seed * 16807) % 2147483647) / 2147483647) * 100;
+    const rand = () => {
+      seed = (seed * 16807) % 2147483647;
+      return (seed / 2147483647) * 100;
+    };
     for (let i = 0; i < 60; i++) {
       const [x, y, w] = [rand(), rand(), rand() / 4];
       if (i % 2) index.addBox("b", `box${i}`, [x, y, x + w, y, x + w, y + w, x, y + w]);
@@ -117,7 +126,11 @@ describe("PickIndex", () => {
     }
     for (let i = 0; i < 2000; i++) {
       const [x, y] = [rand(), rand()];
-      for (const [tolerance, pixel] of [[0, 0], [0, 1], [3, 0]])
+      for (const [tolerance, pixel] of [
+        [0, 0],
+        [0, 1],
+        [3, 0]
+      ])
         expect(index.pick(x, y, tolerance, undefined, pixel)).toEqual(index.pickAll(x, y, tolerance, pixel)[0] ?? null);
     }
   });
@@ -169,22 +182,40 @@ describe("PickIndex", () => {
   it("stroke outlines skip dash gaps, restart dashes per subpath and cap every dash", () => {
     const index = new PickIndex(100, 100);
     // roads-like: dasharray 2, butt
-    index.addStroke("routes", "road", [[0, 10, 20, 10], [0, 30, 20, 30]], [false, false], 0.35, {
-      dashes: [2],
-      dashOffset: 0,
-      lineCap: "butt"
-    });
+    index.addStroke(
+      "routes",
+      "road",
+      [
+        [0, 10, 20, 10],
+        [0, 30, 20, 30]
+      ],
+      [false, false],
+      0.35,
+      {
+        dashes: [2],
+        dashOffset: 0,
+        lineCap: "butt"
+      }
+    );
     expect(index.pick(1, 10)?.id).toBe("road");
     expect(index.pick(3, 10)).toBeNull(); // in the gap 2..4
     expect(index.pick(5, 10)?.id).toBe("road");
     expect(index.pick(1, 30)?.id).toBe("road"); // the second subpath starts on a dash again
     const offset = new PickIndex(100, 100);
-    offset.addStroke("routes", "offset", [[0, 10, 20, 10]], [false], 0.35, { dashes: [2], dashOffset: 2, lineCap: "butt" });
+    offset.addStroke("routes", "offset", [[0, 10, 20, 10]], [false], 0.35, {
+      dashes: [2],
+      dashOffset: 2,
+      lineCap: "butt"
+    });
     expect(offset.pick(1, 10)).toBeNull();
     expect(offset.pick(3, 10)?.id).toBe("offset");
     // searoutes-like: dasharray 1 2, round caps reach half a width into each gap
     const sea = new PickIndex(100, 100);
-    sea.addStroke("routes", "sea", [[0, 10, 30, 10]], [false], 0.5, { dashes: [1, 2], dashOffset: 0, lineCap: "round" });
+    sea.addStroke("routes", "sea", [[0, 10, 30, 10]], [false], 0.5, {
+      dashes: [1, 2],
+      dashOffset: 0,
+      lineCap: "round"
+    });
     expect(sea.pick(1.3, 10)?.id).toBe("sea");
     expect(sea.pick(1.3, 10.45)).toBeNull();
     expect(sea.pick(2, 10)).toBeNull();
@@ -231,7 +262,14 @@ describe("PickIndex", () => {
     // dasharray 0 5 on a 20-unit line: dots at 0, 5, 10 and 15
     const pieces = dashPieces(measureContour({ segs: [[0, 10, 20, 10]], closed: false }, 1), [0, 5], 0);
     const index = new PickIndex(100, 100);
-    index.addStroke("routes", "dots", pieces, pieces.map(() => false), 1, { dashes: [], dashOffset: 0, lineCap: "round" });
+    index.addStroke(
+      "routes",
+      "dots",
+      pieces,
+      pieces.map(() => false),
+      1,
+      { dashes: [], dashOffset: 0, lineCap: "round" }
+    );
     expect(index.pick(5.5, 10)?.id).toBe("dots");
     expect(index.pick(0.5, 10.5)?.id).toBe("dots");
     expect(index.pick(7.5, 10)).toBeNull(); // between the dots at 5 and 10

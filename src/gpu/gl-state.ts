@@ -47,19 +47,31 @@ export class GlState {
   }
 
   useProgram(program: WebGLProgram): void {
-    if (this.changed(this.program === program)) this.gl.useProgram((this.program = program));
+    if (this.changed(this.program === program)) {
+      this.program = program;
+      this.gl.useProgram(program);
+    }
   }
 
   bindVertexArray(vao: WebGLVertexArrayObject | null): void {
-    if (this.changed(this.vao === vao)) this.gl.bindVertexArray((this.vao = vao));
+    if (this.changed(this.vao === vao)) {
+      this.vao = vao;
+      this.gl.bindVertexArray(vao);
+    }
   }
 
   colorMask(on: boolean): void {
-    if (this.changed(this.colorWrites === on)) this.gl.colorMask((this.colorWrites = on), on, on, on);
+    if (this.changed(this.colorWrites === on)) {
+      this.colorWrites = on;
+      this.gl.colorMask(on, on, on, on);
+    }
   }
 
   stencilMask(mask: number): void {
-    if (this.changed(this.writeMask === mask)) this.gl.stencilMask((this.writeMask = mask));
+    if (this.changed(this.writeMask === mask)) {
+      this.writeMask = mask;
+      this.gl.stencilMask(mask);
+    }
   }
 
   stencilFunc(func: number, ref: number, mask: number): void {
@@ -121,11 +133,21 @@ export class GlState {
   }
 
   // Float attribute on the bound VAO. bindBuffer is only needed when the pointer itself is re-specified.
-  attribute(location: number, buffer: WebGLBuffer, size: number, stride: number, offset: number, divisor: number): void {
+  attribute(
+    location: number,
+    buffer: WebGLBuffer,
+    size: number,
+    stride: number,
+    offset: number,
+    divisor: number
+  ): void {
     const gl = this.gl;
     const vao = this.vao;
     let table = vao ? this.pointers.get(vao) : undefined;
-    if (vao && !table) this.pointers.set(vao, (table = new Map()));
+    if (vao && !table) {
+      table = new Map();
+      this.pointers.set(vao, table);
+    }
     const cached = table?.get(location);
     if (
       this.changed(
@@ -137,7 +159,10 @@ export class GlState {
           cached.divisor === divisor
       )
     ) {
-      if (this.arrayBuffer !== buffer) gl.bindBuffer(gl.ARRAY_BUFFER, (this.arrayBuffer = buffer));
+      if (this.arrayBuffer !== buffer) {
+        this.arrayBuffer = buffer;
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+      }
       if (!cached) gl.enableVertexAttribArray(location);
       gl.vertexAttribPointer(location, size, gl.FLOAT, false, stride, offset);
       if (!cached || cached.divisor !== divisor) gl.vertexAttribDivisor(location, divisor);

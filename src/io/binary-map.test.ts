@@ -150,13 +150,14 @@ describe("native binary sections", () => {
   });
 });
 
-
 it("reads prior deflate section files and rejects unknown compression modes", async () => {
   const text = "legacy project section 世界 ".repeat(1000);
   const raw = new TextEncoder().encode(text);
-  const compressed = new Uint8Array(await new Response(new Blob([raw]).stream().pipeThrough(new CompressionStream("deflate"))).arrayBuffer());
+  const compressed = new Uint8Array(
+    await new Response(new Blob([raw]).stream().pipeThrough(new CompressionStream("deflate"))).arrayBuffer()
+  );
   const bytes = new Uint8Array(36 + compressed.length);
-  bytes.set([84,85,80,65,73,65,0,1]);
+  bytes.set([84, 85, 80, 65, 73, 65, 0, 1]);
   const view = new DataView(bytes.buffer);
   view.setUint16(8, 1, true);
   view.setUint16(10, 24, true);
@@ -172,7 +173,6 @@ it("reads prior deflate section files and rejects unknown compression modes", as
   view.setUint8(13, 3);
   expect(() => new BinaryMapArchive(bytes)).toThrow("Invalid map section");
 });
-
 
 it("keeps decoded typed cells separate from the verified raw-section cache", async () => {
   const sections = map("1,2,3").split("\r\n") as (string | ArrayLike<number>)[];
