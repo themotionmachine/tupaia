@@ -1,5 +1,5 @@
 export type PaletteEntityKey = { kind: "burg" | "state" | "route"; id: number };
-export type PaletteActionId = "add-label" | "draw-route" | "whole-map";
+export type PaletteActionId = "add-label" | "draw-route" | "whole-map" | "navigate-mode" | "edit-mode";
 export type PaletteKey = PaletteEntityKey | { kind: "action"; id: PaletteActionId };
 
 interface SearchBurg {

@@ -656,7 +656,7 @@ export class GpuRenderer {
   private active(): boolean {
     this.suspendedReason = this.editorReason();
     if (!this.suspendedReason) this.resume();
-    const reason = this.hiddenReason(this.suspendedReason);
+    const reason = this.hiddenReason(this.suspendedReason) || (this.intentHeld() ? "edit mode hold" : ""); // MODE: hold
     if (reason === "source replaced" && this.prepared) this.drop();
     if (reason) this.hide();
     return !reason;
@@ -831,12 +831,64 @@ export class GpuRenderer {
     this.canvas.style.display = "none";
   }
 
+  // ---- MODE (W1, decision D10): Navigate/Edit intent. Owned by packet MODE; the state machine is in intent.ts and
+  // the UI in controllers/render-mode.ts. Outside this block MODE only renamed the dialog scan below to editorScan()
+  // (this block's editorReason() wraps it) and added the hold to the visibility test in active().
+  // Edit suspends exactly like an open editor (reason "edit mode"). Leaving a chosen Edit (including through an editor
+  // opened inside it) ends in a hold: the canvas stays hidden, with the canonical SVG shown and usable, until the GPU
+  // frame has caught up with every DOM revision made meanwhile, so the frame from before the edits is never shown as
+  // the map. With no revision in between the hold clears at once. An editor opened from Navigate does not hold: its
+  // close shows the last GPU frame at once and the indicator reads "Updating" until the re-prepare lands (as before
+  // MODE; whether it should hold too is an open question for Ryan/LIFE).
+  private intentEdit = false;
+  private intentHold = false;
+
+  setIntent(edit: boolean): void {
+    const records = this.mutations.takeRecords(); // same-task edits count before the hold is judged
+    if (records.length) this.mutated(records);
+    if (edit || this.intentEdit) this.intentHold = true;
+    this.intentEdit = edit;
+    this.active(); // Edit: hides now (camera synced). Navigate: runs the prepare the suspension deferred, if any.
+    this.requestDraw();
+  }
+
+  // Cheap per-poll state for the mode indicator. editor: an open dialog or customization (not the Edit intent);
+  // ready: the GPU canvas is on screen (not suspended or held, a frame, a live device, no pending markers, the view
+  // inside the bitmap windows: whatever hides it hides "Navigate"); current: that frame has every DOM revision.
+  intentProbe(): { editor: string; ready: boolean; current: boolean; lost: boolean } {
+    const reason = this.editorReason();
+    if (reason && this.canvas.style.display !== "none") this.active();
+    const current = this.prepared?.revision === this.revision;
+    return {
+      editor: reason === "edit mode" ? "" : reason,
+      ready:
+        !reason && !!this.prepared && !this.device.lost && !this.intentHeld() && this.canvas.style.display !== "none",
+      current,
+      lost: this.device.lost
+    };
+  }
+
+  // Why the GPU is suspended: an open editor or customization first (the dialog scan), else the Edit intent.
+  private editorReason(): string {
+    const reason = this.editorScan() || (this.intentEdit ? "edit mode" : "");
+    if (reason && this.intentEdit) this.intentHold = true;
+    return reason;
+  }
+
+  // Only asked while not suspended (active() and intentProbe() test the suspension first), so an edit made in the same
+  // task as an editor's close is still held: the hold never clears during a suspension.
+  private intentHeld(): boolean {
+    if (this.intentHold && this.prepared?.revision === this.revision) this.intentHold = false;
+    return this.intentHold;
+  }
+  // ---- end MODE ----
+
   // Editors draw into and read the live SVG; GPU drawing is suspended (SVG shown) while one is open. Experimental.
   // `customization` is a top-level `let` in classic main.js: a global binding, but not a window property.
   // The dialog scan is cached and recomputed only after a document mutation that can show or hide a dialog (an added or
   // removed node, a style/class/hidden change anywhere): queued records are drained first, so an open() or close() in
   // the same task is seen before the next query. CSSOM rule edits are not observed (no editor uses them).
-  private editorReason(): string {
+  private editorScan(): string {
     const mode = customizationMode();
     if (typeof mode === "number" && mode) return editorState(mode, false);
     if (this.dialogs.takeRecords().length) this.dialogsDirty = true;
