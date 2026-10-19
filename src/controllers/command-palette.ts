@@ -285,7 +285,7 @@ export function initializeCommandPalette(): CommandPalette {
       close();
       if (id === "whole-map") resetZoom(motionDuration());
       else if (id === "navigate-mode" || id === "edit-mode")
-        window.renderMode?.set(id === "edit-mode" ? "edit" : "navigate");
+        window.renderMode?.set(id === "edit-mode" ? "edit" : "navigate", "palette");
       else document.getElementById(id === "add-label" ? "addLabel" : "addRoute")?.click();
       return;
     }

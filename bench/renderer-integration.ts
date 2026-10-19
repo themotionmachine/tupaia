@@ -845,12 +845,14 @@ async function staleClick(page: Page, world: [number, number], step: number, dwe
       x: Math.round(x),
       y: Math.round(y),
       staleBefore: (globalThis as any).gpuRenderer.canonicalCameraStale(),
+      // MODE (W1): the Navigate/Edit indicator sits over the map's bottom-left corner; a click there toggles the mode
+      underIndicator: !!document.elementFromPoint(Math.round(x), Math.round(y))?.closest("#renderModeIndicator"),
       revisions: invalidations?.count ?? null,
       lastRevision: invalidations?.last ?? null
     };
   }, world);
   (point as any).revisionsBefore = revisionsBefore;
-  const inView = point.x >= 2 && point.x <= 1278 && point.y >= 2 && point.y <= 718;
+  const inView = point.x >= 2 && point.x <= 1278 && point.y >= 2 && point.y <= 718 && !point.underIndicator;
   if (inView) await page.mouse.click(point.x, point.y);
   await page.waitForTimeout(60 + dwell);
   const result = inView ? await page.evaluate(before => (globalThis as any).__ix.verifyStale(before), before) : null;

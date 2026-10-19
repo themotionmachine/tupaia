@@ -19,9 +19,12 @@ export interface IntentRenderer {
   intentProbe(): { editor: string; ready: boolean; current?: boolean; lost: boolean };
 }
 
+export type ChangeSource = "key" | "esc" | "click" | "palette" | "api";
+
 export interface RenderModeApi {
-  state(): ModeDisplay & { intent: Intent };
-  set(intent: Intent): ModeDisplay;
+  // lastChange: the most recent request and where it came from (diagnostics: a harness click that lands on the indicator)
+  state(): ModeDisplay & { intent: Intent; lastChange: { intent: Intent; via: ChangeSource; at: number } | null };
+  set(intent: Intent, via?: ChangeSource): ModeDisplay;
   toggle(): ModeDisplay;
   dispose(): void;
 }
@@ -101,6 +104,7 @@ export function installRenderMode(host: Host): RenderModeApi {
   let applied: IntentRenderer | null = null; // the renderer instance that has the current intent
   let appliedIntent: Intent | null = null;
   let display: ModeDisplay | null = null;
+  let lastChange: { intent: Intent; via: ChangeSource; at: number } | null = null;
   const consumed = new Set<string>();
   const styles = createStyles();
   const button = document.createElement("button");
@@ -150,20 +154,21 @@ export function installRenderMode(host: Host): RenderModeApi {
     return next;
   }
 
-  function set(target: Intent): ModeDisplay {
+  function set(target: Intent, via: ChangeSource = "api"): ModeDisplay {
     const outcome = requestMode(target, inputs());
     intent = outcome.intent;
+    lastChange = { intent, via, at: Math.round(performance.now()) };
     if (outcome.notice) host.notice(outcome.notice);
     return update();
   }
 
-  function toggle(): ModeDisplay {
+  function toggle(via: ChangeSource = "api"): ModeDisplay {
     const current = inputs();
     if (!current.available) {
       host.notice("GPU rendering is off; the map is already editable");
       return update();
     }
-    return set(toggleTarget(current));
+    return set(toggleTarget(current), via);
   }
 
   function keydown(event: KeyboardEvent): void {
@@ -180,8 +185,8 @@ export function installRenderMode(host: Host): RenderModeApi {
       event.preventDefault();
       event.stopImmediatePropagation();
       consumed.add(event.code || event.key);
-      toggle();
-    } else set("navigate"); // Esc keyup still reaches FMG, which then has nothing to close
+      toggle("key");
+    } else set("navigate", "esc"); // Esc keyup still reaches FMG, which then has nothing to close
   }
 
   function keyup(event: KeyboardEvent): void {
@@ -192,7 +197,7 @@ export function installRenderMode(host: Host): RenderModeApi {
 
   const click = (event: MouseEvent) => {
     event.stopPropagation();
-    toggle();
+    toggle("click");
   };
   const hover = (event: MouseEvent) => {
     const show = (window as { showDataTip?: (event: MouseEvent) => void }).showDataTip;
@@ -208,9 +213,9 @@ export function installRenderMode(host: Host): RenderModeApi {
   update();
 
   installed = {
-    state: () => ({ ...update(), intent }),
+    state: () => ({ ...update(), intent, lastChange }),
     set,
-    toggle,
+    toggle: () => toggle(),
     dispose() {
       window.clearInterval(timer);
       window.removeEventListener("keydown", keydown, true);

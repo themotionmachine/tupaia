@@ -86,6 +86,17 @@ describe("indicator", () => {
     expect(api.state().mode).toBe("navigate");
   });
 
+  it("records where the last request came from", () => {
+    expect(api.state().lastChange).toBeNull();
+    indicator().click();
+    expect(api.state().lastChange).toMatchObject({ intent: "edit", via: "click" });
+    backslash();
+    expect(api.state().lastChange).toMatchObject({ intent: "navigate", via: "key" });
+    api.set("edit");
+    pressEscape();
+    expect(api.state().lastChange).toMatchObject({ intent: "navigate", via: "esc" });
+  });
+
   it("click toggles Edit and back", () => {
     indicator().click();
     expect(renderer!.edit).toBe(true);
