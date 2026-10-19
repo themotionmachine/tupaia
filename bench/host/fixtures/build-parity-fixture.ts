@@ -174,9 +174,14 @@ function cameras(targets: any): { presets: CameraPreset[]; coast: CameraPreset[]
   const add = (id: string, k: number, cx: number, cy: number, covers: string[]) => out.push(preset(id, k, cx, cy, covers, gw, gh));
   add("k1-world", 1, gw / 2, gh / 2, ["every layer", "halo", "legend", "compass", "scale-bar", "vignette", "fog", "zones-stock-hatch", "ice", "data-layers", "labels", "emblems"]);
   for (const k of [2, 4, 8]) {
-    add(`k${k}-showcase`, k, A.x, A.y, ["regiments", "markers", "measurers", "labels", "coastline-filter", "grid-dashed", "coordinates", "halo", "emblems"]);
-    const berg = targets.ice[0];
+    add(`k${k}-showcase`, k, A.x, A.y, ["regiments", "markers", "measurers", "labels", "coastline-filter", "grid-dashed", "coordinates", "halo"]);
+    // an ice feature the k 8 window (160 x 90) fits around without the clamp pushing it out of frame: the first dragged
+    // iceberg sits above the map edge (y < 0), so framing ice[0] showed empty ocean at k 8
+    const berg = targets.ice.find((b: any) => b.cx >= VIEW.width / 16 && b.cx <= gw - VIEW.width / 16 && b.cy >= VIEW.height / 16 && b.cy <= gh - VIEW.height / 16) ?? targets.ice[0];
     if (berg) add(`k${k}-ice`, k, berg.cx, berg.cy, ["ice"]);
+    if (targets.compass) add(`k${k}-compass`, k, targets.compass.cx, targets.compass.cy, ["compass"]);
+    const emblem = targets.emblems?.[0];
+    if (emblem) add(`k${k}-emblem`, k, emblem.cx + 3, emblem.cy + 3, ["emblems"]);
     for (const n of k === 8 ? [0, 17] : k === 4 ? [0, 5, 29] : [0, 41]) {
       const z = targets.zones[n];
       if (z) add(`k${k}-hatch${n}`, k, z.cx, z.cy, ["zones-stock-hatch"]);
@@ -279,11 +284,12 @@ async function build(origin: string, outDir: string): Promise<void> {
       ]
     };
     const failures = [...failBuild, ...failReload, ...failPre];
+    // refuse to write anything (the default --out is the committed fixture) when an expectation failed
+    if (failures.length) throw new Error(`${failures.length} census expectation(s) failed; nothing written`);
     mkdirSync(outDir, { recursive: true });
     writeFileSync(resolve(outDir, `${C.version}.map`), text);
     writeFileSync(resolve(outDir, `${C.version}.json`), `${JSON.stringify(manifest, null, 2)}\n`);
     console.error(`wrote ${resolve(outDir, `${C.version}.map`)} (${(bytes / 1e6).toFixed(2)} MB, sha256 ${sha.slice(0, 12)})`);
-    if (failures.length) throw new Error(`${failures.length} census expectation(s) failed`);
     if (bytes > 3_000_000) console.error(`WARNING: ${bytes} bytes exceeds the 3 MB budget`);
   } finally {
     await browser.close();

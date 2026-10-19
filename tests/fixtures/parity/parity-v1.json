@@ -74,26 +74,26 @@
   },
   "build": {
     "builtWith": "bench/host/fixtures/build-parity-fixture.ts",
-    "seconds": 16.3,
+    "seconds": 16.6,
     "steps": [
       "generate ok 425ms",
       "canonicalise ok 265ms",
-      "settings ok 4ms",
-      "layers ok 2816ms",
-      "relief ok 967ms",
+      "settings ok 5ms",
+      "layers ok 2871ms",
+      "relief ok 984ms",
       "lakes ok 129ms",
-      "regiments ok 126ms",
-      "markers ok 124ms",
-      "zones ok 126ms",
-      "ice ok 120ms",
-      "grid ok 142ms",
-      "measurers ok 144ms",
-      "legend ok 145ms",
+      "regiments ok 127ms",
+      "markers ok 121ms",
+      "zones ok 131ms",
+      "ice ok 121ms",
+      "grid ok 157ms",
+      "measurers ok 137ms",
+      "legend ok 143ms",
       "labels ok 141ms",
-      "fog ok 144ms",
-      "zoom-styling ok 141ms",
-      "save ok 515ms",
-      "reload ok 1597ms"
+      "fog ok 146ms",
+      "zoom-styling ok 147ms",
+      "save ok 531ms",
+      "reload ok 1619ms"
     ],
     "pageErrors": []
   },
@@ -2866,8 +2866,7 @@
         "coastline-filter",
         "grid-dashed",
         "coordinates",
-        "halo",
-        "emblems"
+        "halo"
       ]
     },
     {
@@ -2879,6 +2878,28 @@
       "y": 0,
       "covers": [
         "ice"
+      ]
+    },
+    {
+      "id": "k2-compass",
+      "k": 2,
+      "cx": 320,
+      "cy": 180,
+      "x": 0,
+      "y": 0,
+      "covers": [
+        "compass"
+      ]
+    },
+    {
+      "id": "k2-emblem",
+      "k": 2,
+      "cx": 553,
+      "cy": 388,
+      "x": -466,
+      "y": -416,
+      "covers": [
+        "emblems"
       ]
     },
     {
@@ -2918,19 +2939,40 @@
         "coastline-filter",
         "grid-dashed",
         "coordinates",
-        "halo",
-        "emblems"
+        "halo"
       ]
     },
     {
       "id": "k4-ice",
+      "k": 4,
+      "cx": 193,
+      "cy": 90,
+      "x": -132,
+      "y": 0,
+      "covers": [
+        "ice"
+      ]
+    },
+    {
+      "id": "k4-compass",
       "k": 4,
       "cx": 160,
       "cy": 90,
       "x": 0,
       "y": 0,
       "covers": [
-        "ice"
+        "compass"
+      ]
+    },
+    {
+      "id": "k4-emblem",
+      "k": 4,
+      "cx": 553,
+      "cy": 388,
+      "x": -1572,
+      "y": -1192,
+      "covers": [
+        "emblems"
       ]
     },
     {
@@ -2981,19 +3023,40 @@
         "coastline-filter",
         "grid-dashed",
         "coordinates",
-        "halo",
-        "emblems"
+        "halo"
       ]
     },
     {
       "id": "k8-ice",
+      "k": 8,
+      "cx": 193,
+      "cy": 59.8,
+      "x": -904,
+      "y": -118.4,
+      "covers": [
+        "ice"
+      ]
+    },
+    {
+      "id": "k8-compass",
       "k": 8,
       "cx": 80,
       "cy": 45,
       "x": 0,
       "y": 0,
       "covers": [
-        "ice"
+        "compass"
+      ]
+    },
+    {
+      "id": "k8-emblem",
+      "k": 8,
+      "cx": 553,
+      "cy": 388,
+      "x": -3784,
+      "y": -2744,
+      "covers": [
+        "emblems"
       ]
     },
     {

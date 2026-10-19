@@ -722,7 +722,8 @@ const DEFS: Record<string, CheckDef> = {
           NODE,
           "--test",
           ...["renderer-ab", "compare", "frame-budget", "trace", "fidelity-metrics", "golden-metrics", "picking-oracle"].map(n => `bench/${n}.test.ts`),
-          "bench/gate/host-lock.test.ts"
+          "bench/gate/host-lock.test.ts",
+          "bench/host/fixtures/fixtures.test.ts"
         ],
         {},
         null,

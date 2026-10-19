@@ -21,6 +21,15 @@
 //   GOLDEN_KEEP      all | fail: keep PNGs for every cell or only failing ones   default all
 //   GOLDEN_CENSUS    census expectations JSON (same shape as the census.json this writes)
 //   GOLDEN_BREAK     none | drop-batch: self-test only, deliberately drops the GPU arm's bottom-most fill/stroke batch
+//   GOLDEN_CAMERAS   fixture | centered: which camera frames a cell. "fixture" (default when GOLDEN_MAP is the parity
+//                    fixture) uses the manifest's recorded presets; "centered" centres the whole map at k
+//
+// With the parity fixture (tests/fixtures/parity, bench/host/fixtures/README.md) the runner also injects the fixture's
+// page script before the first frame and runs `__parity.preamble()` after loading (cells layer, #debug content, the
+// Rendering select), turns the app's hideLabels rule off (it hides every label above k ~6, which would empty the k 8
+// label goldens), and frames each family with the camera preset that covers it. A family with several covering
+// presets (zones: three hatch sets at k 4) yields one cell per preset: the first keeps the plain key, the others get
+// "@<camera id>" appended.
 // Output in GATE_OUT_DIR: golden.json (report; `failure` is null on a pass), census.json, cells/<preset>/d<dpr>/*.png.
 // Exit 0 when a report was written (verdicts are in it), 1 on a harness error.
 import { createHash } from "node:crypto";
@@ -32,6 +41,7 @@ import { type CensusCounts, type CellMetrics, heatmap, judgeCell, measureCell, t
 import { decodePng, encodePng } from "../png.ts";
 import { type Family, parsePresets, parseZooms, selectFamilies } from "./golden-families.ts";
 import { isolateLayer } from "./golden-isolation.ts";
+import { type CameraPreset, resolveFixture } from "./fixtures/index.ts";
 
 const env = process.env;
 const root = resolve(import.meta.dirname, "../..");
@@ -56,9 +66,72 @@ if (!zooms.length) throw Error("GOLDEN_K is empty");
 
 const mapText = readFileSync(mapPath, "utf8");
 const mapSha = createHash("sha256").update(readFileSync(mapPath)).digest("hex");
+// The parity fixture is recognised by content (sha256 of the file), whichever path the gate resolved it to.
+const parity = (() => {
+  try {
+    const fx = resolveFixture("parity");
+    return fx.sha256 === mapSha ? fx : null;
+  } catch {
+    return null;
+  }
+})();
+const cameraMode = env.GOLDEN_CAMERAS || (parity ? "fixture" : "centered");
+if (!["fixture", "centered"].includes(cameraMode)) throw Error("GOLDEN_CAMERAS must be fixture|centered");
+if (cameraMode === "fixture" && !parity) throw Error("GOLDEN_CAMERAS=fixture needs the parity fixture as GOLDEN_MAP");
 const expectations = env.GOLDEN_CENSUS ? JSON.parse(readFileSync(env.GOLDEN_CENSUS, "utf8")) : null;
 const zoomsFor = (family: Family) => [...new Set([...zooms, ...(family.coast ? coastZooms : [])])].sort((a, b) => a - b);
-const allZooms = [...new Set(families.flatMap(zoomsFor))].sort((a, b) => a - b);
+
+// ------------------------------------------------------------------ cameras
+
+interface Camera {
+  id: string;
+  k: number;
+  x?: number; // d3 zoom translate; absent = centre the whole map (graphWidth x graphHeight) at k
+  y?: number;
+}
+// What the manifest's camera `covers` tags say about a family. Families without an entry are framed by the showcase.
+const COVERS: Record<string, string[]> = {
+  ice: ["ice"],
+  zones: ["zones-stock-hatch"],
+  labels: ["labels"],
+  emblems: ["emblems"],
+  compass: ["compass"],
+  markers: ["markers"],
+  military: ["regiments"],
+  rulers: ["measurers"],
+  grid: ["grid-dashed"],
+  coordinates: ["coordinates"],
+  landmass: ["coastline-filter"],
+  lakes: ["coastline-filter"],
+  coastline: ["coastline-filter"],
+  states: ["halo"]
+};
+const fmtId = (k: number) => String(k).replace(".", "p");
+// d3 zoom that centres the whole map at k (the pre-parity framing, and the one for any k without a preset)
+const centered = (k: number): Camera => ({ id: `centered-k${fmtId(k)}`, k });
+const toCamera = (c: CameraPreset): Camera => ({ id: c.id, k: c.k, x: c.x, y: c.y });
+function camerasFor(family: Family, k: number): Camera[] {
+  if (cameraMode === "centered" || !parity?.cameras || !parity.manifest) return [centered(k)];
+  const pool = [...parity.cameras, ...parity.manifest.coastlineSwitch];
+  const atK = pool.filter(c => c.k === k);
+  const covering = atK.filter(c => c.covers.some(t => (COVERS[family.name] ?? []).includes(t)));
+  if (covering.length) return covering.map(toCamera);
+  // the world view at k 1, the showcase at k > 1, the coastline frame for the odd coast zooms; else centred
+  const fallback = atK.find(c => c.id === (k === 1 ? "k1-world" : `k${fmtId(k)}-showcase`)) ?? atK.find(c => c.covers.includes("coastline-filter"));
+  return [fallback ? toCamera(fallback) : centered(k)];
+}
+// Work list: one entry per camera, in zoom order, with the (family, plain-key?) pairs captured there.
+const plan = (() => {
+  const byCamera = new Map<string, { camera: Camera; items: { family: Family; first: boolean }[] }>();
+  for (const family of families)
+    for (const k of zoomsFor(family))
+      camerasFor(family, k).forEach((camera, index) => {
+        const slot = byCamera.get(camera.id) ?? { camera, items: [] };
+        slot.items.push({ family, first: index === 0 });
+        byCamera.set(camera.id, slot);
+      });
+  return [...byCamera.values()].sort((a, b) => a.camera.k - b.camera.k || a.camera.id.localeCompare(b.camera.id));
+})();
 
 interface Cell {
   key: string;
@@ -67,6 +140,7 @@ interface Cell {
   family: string;
   id: string;
   k: number;
+  camera?: string;
   pass: boolean;
   failures: string[];
   notes?: string[];
@@ -87,7 +161,7 @@ const report = {
   schema: 1,
   runStartedUtc: new Date().toISOString(),
   fixture: { path: mapPath, sha256: mapSha },
-  args: { layers: families.map(f => f.name), k: zooms, coastk: coastZooms, dpr: dprs, preset: presets, bg, reading, keep, break: breakMode },
+  args: { layers: families.map(f => f.name), k: zooms, coastk: coastZooms, dpr: dprs, preset: presets, bg, reading, keep, break: breakMode, cameras: cameraMode, parity: !!parity },
   census: env.GOLDEN_CENSUS || null,
   diagnosticBreak: breakMode !== "none" ? `${breakMode}: the GPU arm is deliberately broken; this run is expected to FAIL` : null,
   errors: [] as string[],
@@ -138,6 +212,7 @@ async function openContext(dpr: number): Promise<{ context: BrowserContext; page
   });
   const scripts = ["bridge.js", "bridge-mutations.js", ...readdirSync(resolve(root, "mcp/src/bridge-ext")).filter(n => n.endsWith(".js")).sort().map(n => `bridge-ext/${n}`)];
   await context.addInitScript(scripts.map(n => readFileSync(resolve(root, "mcp/src", n), "utf8")).join("\n"));
+  if (parity?.pageScript) await context.addInitScript(parity.pageScript); // __parity.preamble / census, before the first frame
   await context.route("**/*", route => {
     const url = new URL(route.request().url());
     return url.origin === origin || (route.request().method() === "GET" && url.hostname === "fonts.gstatic.com") ? route.continue() : route.abort();
@@ -177,6 +252,20 @@ async function loadFixture(page: Page, preset: string, toggles: string[]): Promi
     const r = await page.evaluate(p => (globalThis as any).__tupaia.call("display", { stylePreset: p }), preset);
     if (!r.ok) problems.push(`stylePreset ${preset}: ${JSON.stringify(r).slice(0, 300)}`);
   }
+  if (parity) {
+    // what the file does not carry (cells layer, #debug content, Rendering select), then labels at every zoom
+    const did = await page.evaluate(async () => {
+      const w = globalThis as any;
+      const did: string[] = await w.__parity.preamble();
+      if (w.hideLabels.checked) {
+        w.hideLabels.checked = false;
+        w.invokeActiveZooming();
+        did.push("hideLabels-off");
+      }
+      return did;
+    });
+    log(`parity preamble: ${did.join(", ") || "nothing to do"}`);
+  }
   for (const toggle of toggles) {
     const r = await page.evaluate(t => (globalThis as any).__tupaia.call("display", { on: [t] }), toggle);
     if (!r.ok) problems.push(`toggle ${toggle}: ${JSON.stringify(r).slice(0, 300)}`);
@@ -185,15 +274,15 @@ async function loadFixture(page: Page, preset: string, toggles: string[]): Promi
   return problems;
 }
 
-const zoomTo = (page: Page, k: number) =>
-  page.evaluate(async k => {
+const zoomTo = (page: Page, camera: Camera) =>
+  page.evaluate(async ({ k, x, y }) => {
     const w = globalThis as any;
-    w.d3
-      .select("#map")
-      .call((0, eval)("zoom").transform, w.d3.zoomIdentity.translate(640 - (w.graphWidth * k) / 2, 360 - (w.graphHeight * k) / 2).scale(k));
+    const tx = x ?? 640 - (w.graphWidth * k) / 2;
+    const ty = y ?? 360 - (w.graphHeight * k) / 2;
+    w.d3.select("#map").call((0, eval)("zoom").transform, w.d3.zoomIdentity.translate(tx, ty).scale(k));
     await w.__tupaia.settle();
     await Promise.all([w.reliefRenderReady, w.burgRenderReady]);
-  }, k);
+  }, camera);
 
 // Waits for a GPU frame of the current DOM revision, drawn and refined, or for a fallback. Returns the status.
 async function waitGpu(page: Page): Promise<{ active: string; fallbackReason?: string; timedOut?: boolean }> {
@@ -312,7 +401,7 @@ try {
         for (const p of problems) report.warnings.push(p);
         const cellDir = join(outDir, "cells", preset, `d${dpr}`);
         mkdirSync(cellDir, { recursive: true });
-        await zoomTo(page, allZooms[0]);
+        await zoomTo(page, plan[0].camera);
         const blanks = await captureBlanks(page);
         writeFileSync(join(cellDir, "blank-svg.png"), blanks.svg);
         writeFileSync(join(cellDir, "blank-gpu.png"), blanks.gpu);
@@ -321,12 +410,13 @@ try {
         const gpuBlankOk = blanks.gpuStatus.active === "gpu" && !blanks.gpuStatus.timedOut;
         if (!gpuBlankOk) report.warnings.push(`${preset}/d${dpr}: no GPU blank frame (${JSON.stringify(blanks.gpuStatus)}); GPU ink measured against the SVG blank`);
         const blankGpu = gpuBlankOk ? decodePng(blanks.gpu) : blankSvg;
-        for (const k of allZooms) {
-          await zoomTo(page, k);
-          for (const family of families.filter(f => zoomsFor(f).includes(k))) {
+        for (const { camera, items } of plan) {
+          const k = camera.k;
+          await zoomTo(page, camera);
+          for (const { family, first } of items) {
             const started = Date.now();
-            const key = `${preset}/d${dpr}/${family.name}/k${k}`;
-            const cell: Cell = { key, preset, dpr, family: family.name, id: family.id, k, pass: false, failures: [] };
+            const key = `${preset}/d${dpr}/${family.name}/k${k}${first ? "" : `@${camera.id}`}`;
+            const cell: Cell = { key, preset, dpr, family: family.name, id: family.id, k, camera: camera.id, pass: false, failures: [] };
             report.cells.push(cell);
             try {
               const toggleProblem = problems.find(p => family.toggle && p.startsWith(`toggle ${family.toggle}:`));
@@ -368,7 +458,7 @@ try {
               cell.failures.push(...verdict.failures);
               cell.pass = cell.failures.length === 0;
               if (keep === "all" || !cell.pass) {
-                const base = join(cellDir, `${family.name}-k${fmt(k)}`);
+                const base = join(cellDir, `${family.name}-k${fmt(k)}${first ? "" : `@${camera.id}`}`);
                 writeFileSync(`${base}-svg.png`, shots.svg);
                 writeFileSync(`${base}-gpu.png`, shots.gpu);
                 writeFileSync(`${base}-diff.png`, encodePng(heatmap(svg, gpu)));

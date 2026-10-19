@@ -361,8 +361,23 @@
     };
     const zones = {};
     for (const n of [0, 5, 17, 29, 41]) zones[n] = zoneCentre(n);
+    // the burg emblem nearest the anchor (the showcase window at k 4 and 8 holds none: emblems sit beside their burg)
+    const emblems = [...document.querySelectorAll("#burgEmblems > *")]
+      .map(e => ({ cx: +e.getAttribute("x"), cy: +e.getAttribute("y") }))
+      .filter(e => Number.isFinite(e.cx) && Number.isFinite(e.cy))
+      .sort((a, b) => dist2([a.cx, a.cy], [A.x, A.y]) - dist2([b.cx, b.cy], [A.x, A.y]) || a.cx - b.cx || a.cy - b.cy);
+    // the centre of the compass layer's client rect in world space. The rhumb lines are symmetric about the origin, so this
+    // is (0, 0) and the camera clamp frames the top-left corner, where the rose (about 80, 80) sits
+    let compassCentre = null;
+    const rose = document.querySelector("#compass use, #compass > *");
+    if (rose) {
+      const r = rose.getBoundingClientRect();
+      const m = viewbox.node().getScreenCTM().inverse();
+      const pt = new DOMPoint(r.left + r.width / 2, r.top + r.height / 2).matrixTransform(m);
+      compassCentre = { cx: r1(pt.x), cy: r1(pt.y) };
+    }
     const fogged = [...document.querySelectorAll("#fog > path")].map(p => p.id);
-    return { anchor: A, ice, zones, fogged, graph: [graphWidth, graphHeight] };
+    return { anchor: A, ice, zones, emblems, compass: compassCentre, fogged, graph: [graphWidth, graphHeight] };
   };
 
   // ----------------------------------------------------------------- census
