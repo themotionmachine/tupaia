@@ -1276,7 +1276,12 @@ const TIERS: Record<string, Array<[string, Args]>> = {
     // the golden harness can still fail (dropped GPU path) and still pass (ocean k=1), before its verdicts are trusted
     ["golden-selftest", {}],
     // D5 gate scale: default preset, k {1,4}, dpr 2, every layer family, on the parity fixture (FIX packet)
-    ["golden", { layers: "all", k: "1,4", dpr: "2", preset: "default", fixture: "parity" }]
+    ["golden", { layers: "all", k: "1,4", dpr: "2", preset: "default", fixture: "parity", census: "tests/fixtures/parity/census-expectations.json" }],
+    // G-E editor replay (svg recorded, gpu and gpu-select replayed) and the document consumers (rows 31-38, 40)
+    ["replay-selftest", {}],
+    ["replay", {}],
+    ["consumers-selftest", {}],
+    ["consumers", {}]
   ],
   // D5 nightly matrix: k {1,2,4,8} plus the coastline switch points, dpr {1,2}, the 12 built-in presets. One golden
   // step per (dpr, preset) so a failure names its cell and the rest keep going (keep_going is implied). PNGs are kept
