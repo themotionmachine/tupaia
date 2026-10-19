@@ -591,7 +591,8 @@ export class GpuRenderer {
   private active(): boolean {
     this.suspendedReason = this.editorReason();
     if (!this.suspendedReason) this.resume();
-    const visible = !!this.prepared && !this.device.lost && !this.suspendedReason && !this.markers.pending;
+    const visible =
+      !!this.prepared && !this.device.lost && !this.suspendedReason && !this.markers.pending && !this.intentHeld(); // MODE: hold
     if (!visible) this.hide();
     return visible;
   }
@@ -735,12 +736,60 @@ export class GpuRenderer {
     this.canvas.style.display = "none";
   }
 
+  // ---- MODE (W1, decision D10): Navigate/Edit intent. Owned by packet MODE; the state machine is in intent.ts and
+  // the UI in controllers/render-mode.ts. Outside this block MODE only renamed the dialog scan below to editorScan()
+  // (this block's editorReason() wraps it) and added the hold to the visibility test in active().
+  // Edit suspends exactly like an open editor (reason "edit mode"). Any suspension (chosen Edit, an editor,
+  // customization) ends in a hold: the canvas stays hidden, with the canonical SVG shown and usable, until the GPU frame
+  // has caught up with every DOM revision made meanwhile, so a stale pre-edit frame is never shown as the map. With no
+  // revision in between the hold clears at once.
+  private intentEdit = false;
+  private intentHold = false;
+
+  setIntent(edit: boolean): void {
+    const records = this.mutations.takeRecords(); // same-task edits count before the hold is judged
+    if (records.length) this.mutated(records);
+    this.intentEdit = edit;
+    this.intentHold = true;
+    this.active(); // Edit: hides now (camera synced). Navigate: runs the prepare the suspension deferred, if any.
+    this.requestDraw();
+  }
+
+  // Cheap per-poll state for the mode indicator. editor: an open dialog or customization (not the Edit intent);
+  // ready: not suspended, a frame exists, the device is live and the frame is current (no hold).
+  // An editor that opened without a draw since (the dialog observer only redraws an already-suspended renderer) would
+  // leave the canvas over the SVG it edits: the poll hides it, so Edit never shows a GPU frame.
+  intentProbe(): { editor: string; ready: boolean; lost: boolean } {
+    const reason = this.editorReason();
+    if (reason && this.canvas.style.display !== "none") this.active();
+    return {
+      editor: reason === "edit mode" ? "" : reason,
+      ready: !reason && !!this.prepared && !this.device.lost && !this.intentHeld(),
+      lost: this.device.lost
+    };
+  }
+
+  // Why the GPU is suspended: an open editor or customization first (the dialog scan), else the Edit intent.
+  private editorReason(): string {
+    const reason = this.editorScan() || (this.intentEdit ? "edit mode" : "");
+    if (reason) this.intentHold = true;
+    return reason;
+  }
+
+  // Only asked while not suspended (active() and intentProbe() test the suspension first), so an edit made in the same
+  // task as an editor's close is still held: the hold never clears during a suspension.
+  private intentHeld(): boolean {
+    if (this.intentHold && this.prepared?.revision === this.revision) this.intentHold = false;
+    return this.intentHold;
+  }
+  // ---- end MODE ----
+
   // Editors draw into and read the live SVG; GPU drawing is suspended (SVG shown) while one is open. Experimental.
   // `customization` is a top-level `let` in classic main.js: a global binding, but not a window property.
   // The dialog scan is cached and recomputed only after a document mutation that can show or hide a dialog (an added or
   // removed node, a style/class/hidden change anywhere): queued records are drained first, so an open() or close() in
   // the same task is seen before the next query. CSSOM rule edits are not observed (no editor uses them).
-  private editorReason(): string {
+  private editorScan(): string {
     if (typeof customization === "number" && customization) return `editor customization ${customization}`;
     if (this.dialogs.takeRecords().length) this.dialogsDirty = true;
     if (this.dialogsDirty) {

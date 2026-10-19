@@ -104,7 +104,30 @@ function actionCandidates(ready: boolean): PaletteCandidate[] {
   label.disabled = blocked || (!document.getElementById("addLabel") ? "Label tool is unavailable" : undefined);
   route.disabled = blocked || (!document.getElementById("addRoute") ? "Route tool is unavailable" : undefined);
   whole.disabled = !ready ? "The map is not ready yet" : undefined;
-  return [label, route, whole];
+  return [label, route, whole, ...modeCandidates()];
+}
+
+// Navigate/Edit mode commands exist only while controllers/render-mode.ts is installed (?renderer=gpu).
+function modeCandidates(): PaletteCandidate[] {
+  const mode = window.renderMode?.state();
+  if (!mode) return [];
+  const navigate = paletteCandidate(
+    { kind: "action", id: "navigate-mode" },
+    "Navigate mode",
+    "Fast GPU view for panning and zooming (\\)",
+    "gpu fast view browse pan zoom render"
+  );
+  const edit = paletteCandidate(
+    { kind: "action", id: "edit-mode" },
+    "Edit mode",
+    "Editable SVG map with editors and picking (\\)",
+    "svg editors editing pick select canonical"
+  );
+  const off = mode.mode === "unavailable" ? "GPU rendering is off" : undefined;
+  navigate.disabled =
+    off || (mode.intent === "navigate" && mode.mode !== "edit" ? "Already in Navigate mode" : undefined);
+  edit.disabled = off || (mode.intent === "edit" ? "Already in Edit mode" : undefined);
+  return [navigate, edit];
 }
 
 function createStyles(): HTMLStyleElement {
@@ -261,6 +284,8 @@ export function initializeCommandPalette(): CommandPalette {
       const id: PaletteActionId = result.key.id;
       close();
       if (id === "whole-map") resetZoom(motionDuration());
+      else if (id === "navigate-mode" || id === "edit-mode")
+        window.renderMode?.set(id === "edit-mode" ? "edit" : "navigate");
       else document.getElementById(id === "add-label" ? "addLabel" : "addRoute")?.click();
       return;
     }
