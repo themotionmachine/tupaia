@@ -85,11 +85,73 @@ export class GlyphAtlas {
     return glyph;
   }
 
+  // Fonts a layout could not measure with their own face (fontReady reason), with a sample of the text: those labels
+  // took the compat lane. Cleared with the atlas, i.e. per prepare.
+  readonly fontIssues = new Map<string, string>();
+
+  // A face the recorded labels were missing has arrived since (the renderer re-prepares on 'loadingdone').
+  fontsArrived(fonts: FontFaceSet | undefined = globalThis.document?.fonts): boolean {
+    if (!fonts) return false;
+    for (const [font, text] of this.fontIssues) {
+      if (slowLoads.has(font)) continue;
+      try {
+        if (fonts.check(font, text)) return true;
+      } catch {
+        // an unparsable font string never becomes measurable
+      }
+    }
+    return false;
+  }
+
   clear(): void {
     this.context.clearRect(0, 0, ATLAS, ATLAS);
     this.glyphs.clear();
+    this.fontIssues.clear();
     this.x = this.y = this.row = 0;
     this.dirty = true;
+  }
+}
+
+// A label waits at most this long for its web font; a slower face is measured on a later prepare ('loadingdone').
+export const FONT_LOAD_TIMEOUT = 3000;
+// fonts whose load outlived FONT_LOAD_TIMEOUT and is still pending: later labels do not wait for them again
+const slowLoads = new Set<string>();
+
+export function fontFamily(font: string): string {
+  return /\d(?:\.\d+)?px\s+(.*)$/.exec(font)?.[1]?.trim() || font;
+}
+
+// "" when the label's face is loaded and measurable; otherwise a named reason and the label takes the compat lane
+// (whose clone falls back the way the SVG does). One rejected, unparsable or slow web font must never fail the whole
+// prepare, which would send the entire GPU renderer back to SVG.
+export async function fontReady(
+  font: string,
+  text: string,
+  fonts: FontFaceSet | undefined = globalThis.document?.fonts,
+  timeout = FONT_LOAD_TIMEOUT
+): Promise<string> {
+  if (!fonts) return "";
+  const family = fontFamily(font);
+  if (slowLoads.has(font)) return `font loading (${family})`;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const load = fonts.load(font, text);
+    const late = new Promise<"late">(resolve => {
+      timer = setTimeout(() => resolve("late"), timeout);
+    });
+    if ((await Promise.race([load, late])) === "late") {
+      slowLoads.add(font);
+      load.then(
+        () => slowLoads.delete(font),
+        () => slowLoads.delete(font)
+      );
+      return `font load timeout (${family})`;
+    }
+    return fonts.check(font, text) ? "" : `font unavailable (${family})`;
+  } catch {
+    return `font load failed (${family})`;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -336,7 +398,11 @@ async function layoutLabel(
     const join = (style.strokeLinejoin || "miter") as CanvasLineJoin;
     const miter = Number.parseFloat(style.strokeMiterlimit) || 4;
     const font = cssFont(style, px);
-    await document.fonts.load(font, content);
+    const fontIssue = await fontReady(font, content);
+    if (fontIssue) {
+      atlas.fontIssues.set(font, content);
+      return fontIssue;
+    }
     const rasterFont = cssFont(style, px * scale);
     measure.font = rasterFont;
     measure.fontKerning = style.textRendering === "optimizeSpeed" ? "none" : "auto";
