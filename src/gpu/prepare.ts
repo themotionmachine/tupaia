@@ -447,7 +447,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
   const tiles = new Map<string, FillBatch["tile"] | string>();
   // the synchronous draw conversion yields every SLICE_MS so a 100k-element world does not block input for seconds
   const policy = slicePolicy();
-  const slice = createSlicer(policy.budget, undefined, undefined, policy.inputPending);
+  const slice = createSlicer(policy.budget, undefined, undefined, policy.inputPending, policy.floor);
 
   // `layer` is null for screen overlays: they sit outside the world and are not pickable
   const compat = (
