@@ -1,0 +1,58 @@
+# Phase 1: finish P2 parity and the recovery work (Claude, from 2026-10-19)
+
+Branch `gpu/integrate`. Production is still `deploy/2026-10-18-5224b113`, with SVG as the default.
+
+Phase 0 established:
+- An audit of all 43 matrix rows: 9 native, 12 compat, 8 bridge, 14 partial.
+- No row has a passing row-specific acceptance check yet.
+- The renderer is further along than its proof. Several earlier "passes" compared GPU output against GPU output.
+- The remaining performance cost (editor resume 6–10 s, 100K context-loss recovery 7.7 s) comes mostly from
+  re-rasterizing every compat run on any change.
+
+## Decisions
+
+Each one can be overruled by Ryan.
+
+| # | Decision |
+|---|---|
+| D1 | Goldens are judged per layer family on the isolated layer, SVG arm against GPU arm of the same build. The thresholds stay as written: SSIM ≥0.95, over16 ≤1%, ≤0.5% at Δ≤44. A check never compares GPU against GPU. |
+| D2 | REWRITE-PLAN §5 mechanism cells are relabelled to what was built. Compat (C) and bridge (B) are valid at P2. Native ports happen only when a golden fails or a perf target needs them. |
+| D3 | Row 15 picking is gated on the semantic outcome matching SVG `clicked()`. Raw GPU-index agreement is reported but does not gate. |
+| D4 | I-trade = I9 + I11. API smoke = the row-40 three-part check. The customization, row-37 and row-38 smokes belong under G-S. The editor criterion while an editor suspends to SVG is **resume latency**, not frame p95. |
+| D5 | Golden matrix. Gate: k {1,4} × DPR 2 × default preset. Nightly: k {1,2,4,8} (plus coastline switch points) × DPR {1,2} × 12 presets. |
+| D6 | Out of Phase 1, needs hardware: a second GPU family, Windows/iGPU at DPR 1 and 60 Hz, and the second OS for row 43. These are G4 blockers. |
+| D7 | Checks run in three tiers (below). Builders run T0 only. The orchestrator runs T1 when a wave merges. T2 runs at phase boundaries and overnight. |
+| D8 | Performance work runs alongside parity work. The perf packet owns `prepare.ts`/`compat.ts` in W0–W1. The parity packets that touch those files (COMPAT, RES) run later and rebase onto it. |
+
+## Test scheme
+
+| Tier | What | Where | Lock |
+|---|---|---|---|
+| T0 | `npm run gate -- quick` (typecheck, vitest, build), plus the builder's own unit tests and `buildScene` characterization tests | every builder, every change | none |
+| T1 | correctness: per-layer goldens SVG↔GPU, editor replay, consumers (save/export/minimap/3D), palette, canonical, picking | orchestrator at each wave merge; harness builders get one self-test slot | **shared**: several correctness runs at once, capped |
+| T2 | timing: native Metal paired A/B against the previous tag, navigation, recovery, route resume, nightly golden matrix | phase boundaries and overnight | **exclusive**: nothing else in a browser |
+
+Timing evidence must come from a quiet host. Correctness checks do not need one, so they no longer queue behind
+timing runs.
+
+## Waves
+
+The packet definitions are in the Phase 0 synthesis (kept outside git), summarized here.
+
+- **W0:**
+  - GOLD (per-layer golden runner and census; owns `gate.ts`, including the shared/exclusive lock)
+  - FIX (parity fixture that populates every row)
+  - SEAM (happy-dom `buildScene` tests)
+  - RAS (pattern-tile dash and clamp fixes)
+  - PERF-A (compat reuse per dirty run and a lazy clone; owns `prepare.ts`/`compat.ts`)
+  - MCPFIX (the 7 MCP failures inherited from phase 1)
+- **W1:** REPLAY (G-E editor replay), CONS (save/export/consumers), LIFE (renderer lifecycle bugs: font guard
+  first), PRIM (native primitives in `scene.ts`), PERF-B (keep the CPU payload across context loss).
+- **W2:** CENSUS (toggles, presets, resize, print), LABELS, EDIT (the other 15 editors and the undo systems),
+  COMPAT, CORPUS.
+- **W3:** STROKE, PICK, RES, and fixes for whatever the sweeps find.
+- **W4:** acceptance. T2 in full, plus all new checks, as a non-diagnostic receipt. The PARITY-LEDGER is updated
+  from those receipts.
+
+Every packet goes through: build (own worktree, T0) → independent review of the diff → fix → merge → T1 at the
+wave's end.
