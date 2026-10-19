@@ -3,9 +3,11 @@
 // population, goods, markets) and for style filters / masks (row 42: pencil, turbulence, paper, crumpled, splotch
 // filters; fog and vignette masks). Default preset applied; goods/prec start display:none like main.js.
 // Tags: [PRIM] circle/line/rect-rx/% rect become native   [COMPAT] filter and mask handling
-// PRIM (W1): mask content resolves viewport-% rects (default on). Native basic shapes are opt-in (nativeShapes /
-// ?gpu-native-shapes=1) because the parity golden regressed on precipitation and population; the default stays compat.
+// PRIM (W1): native basic shapes (nativeShapes / ?gpu-native-shapes=1) and viewport-% mask rects (maskRects /
+// ?gpu-mask-rects=1) are both opt-in: the parity golden regressed on precipitation/population and on compass, so the
+// default routing stays compat for them.
 const shapes = { nativeShapes: true };
+const masks = { maskRects: true };
 const styled = (options = {}) => {
   applyStylePreset(env);
   return env.build(options);
@@ -117,9 +119,16 @@ describe("row 42 style filters and masks", () => {
     expect(layerRouting(env.build(), "landmass")).toEqual(["shape", "compat(filter)", "shape"]);
   });
 
-  it("[PRIM] the default fog container (#fogging-cont mask=url(#fog)) is a native stencil group, not a compat run", () => {
-    // #fog's 100% rect resolves against the root <svg> viewport (1000x800 in the seam), in the masked user space.
+  it("[COMPAT] the default fog container (#fogging-cont mask=url(#fog)) is ALWAYS one compat run, even with fogging hidden", () => {
+    // maskDraws rejects #fog by default: its <rect> carries x="0" (a truthy string) and percentage size.
     const scene = buildStyled(env);
+    expect(layerRouting(scene, "fogging-cont")).toEqual(["compat(mask #fog)"]);
+    expect(scene.layers["fogging-cont"]).toMatchObject({ native: 0, compat: 1, reasons: ["mask #fog"] });
+  });
+
+  it("[PRIM] opt-in maskRects: the fog container is a native stencil group, not a compat run", () => {
+    // #fog's 100% rect resolves against the root <svg> viewport (1000x800 in the seam), in the masked user space.
+    const scene = styled(masks);
     expect(layerRouting(scene, "fogging-cont")).toEqual(["group{mask:1,op:1}[]"]);
     expect(scene.layers["fogging-cont"]).toMatchObject({ compat: 0 });
     const [group] = scene.draws.filter(d => d.layer === "fogging-cont");
@@ -127,20 +136,12 @@ describe("row 42 style filters and masks", () => {
     expect(rect.kind === "shape" && rect.d).toBe("M0,0h1000v800h-1000Z");
   });
 
-  it("[PRIM] ?gpu-mask-rects=0 (maskRects:false) restores the old rule: #fog and #water masks are compat", () => {
+  it("[PRIM] the #water mask (viewport-% rect plus feature <use>) is compat by default, a native stencil opt-in", () => {
     env.fill("rivers", '<path id="river1" d="M0,0L5,5Z"/>');
     applyStylePreset(env);
     env.set("rivers", { mask: "url(#water)" });
-    const scene = env.build({ maskRects: false });
-    expect(layerRouting(scene, "fogging-cont")).toEqual(["compat(mask #fog)"]);
-    expect(layerRouting(scene, "rivers")).toEqual(["compat(mask #water)"]);
-  });
-
-  it("[PRIM] the #water mask (viewport-% rect plus feature <use>) is a native stencil group", () => {
-    env.fill("rivers", '<path id="river1" d="M0,0L5,5Z"/>');
-    applyStylePreset(env);
-    env.set("rivers", { mask: "url(#water)" });
-    expect(layerRouting(env.build(), "rivers")).toEqual(["group{mask:2,op:1}[shape]"]);
+    expect(layerRouting(env.build(), "rivers")).toEqual(["compat(mask #water)"]);
+    expect(layerRouting(env.build(masks), "rivers")).toEqual(["group{mask:2,op:1}[shape]"]);
   });
 
   it("[PRIM] a mask <use> with a non-zero x/y offset is still rejected", () => {
@@ -148,12 +149,12 @@ describe("row 42 style filters and masks", () => {
     applyStylePreset(env);
     env.layer("land").innerHTML = '<use href="#featurePaths-f1" fill="white" x="3"/>';
     env.set("rivers", { mask: "url(#land)" });
-    expect(layerRouting(env.build(), "rivers")).toEqual(["compat(mask #land)"]);
+    expect(layerRouting(env.build(masks), "rivers")).toEqual(["compat(mask #land)"]);
   });
 
   it("[PRIM] a fog focus path with a stroke (fog() markup) still sends the fog container to compat", () => {
     env.layer("fog").insertAdjacentHTML("beforeend", '<path d="M0,0h10v10z" fill="black"/>');
-    expect(layerRouting(buildStyled(env), "fogging-cont")).toEqual(["compat(mask #fog)"]);
+    expect(layerRouting(styled(masks), "fogging-cont")).toEqual(["compat(mask #fog)"]);
   });
 
   it("[PRIM] the #land mask (feature <use> fills white/black) is accepted as a stencil", () => {
@@ -170,12 +171,13 @@ describe("row 42 style filters and masks", () => {
     expect(Object.keys(scene.layers)).not.toContain("vignette");
   });
 
-  it("[PRIM] a visible #fogging (preset opacity .98) is a compat run inside the native fog stencil group", () => {
+  it("[PRIM] opt-in maskRects: a visible #fogging (preset opacity .98) is a compat run inside the fog stencil group", () => {
     env.fill("fogging", '<path d="M0,0h10v10z" fill="#e8f0f6"/>');
     applyStylePreset(env);
     show("fogging");
     expect(layerOrder(env.build()).at(-1)).toBe("fogging-cont");
-    expect(layerRouting(env.build(), "fogging-cont")).toEqual([
+    expect(layerRouting(env.build(), "fogging-cont")).toEqual(["compat(mask #fog)"]);
+    expect(layerRouting(env.build(masks), "fogging-cont")).toEqual([
       "group{mask:1,op:1}[compat(nested group opacity/mask)]"
     ]);
   });

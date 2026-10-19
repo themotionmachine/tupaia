@@ -201,7 +201,8 @@ function flag(name: string): string | null {
 
 export interface SceneOptions {
   // Mask content geometry (viewport-% rects as in #fog and #water; rect x/y read as geometry, only a <use> x/y is an
-  // offset). Default on; ?gpu-mask-rects=0 restores the previous rule that sent those masks to compat.
+  // offset). Default off (opt in with ?gpu-mask-rects=1): on the parity golden, compass (mask #water) went from pass
+  // to fail at k1 (changed 0.37% -> 1.17%, over16 0 -> 0.41%) because the stencil mask edge is hard where SVG's is soft.
   maskRects?: boolean;
   // <circle>, <ellipse>, <line> and <rect rx/ry> as native shapes. Default off (opt in with ?gpu-native-shapes=1):
   // the parity golden regresses on precipitation (circles) and population (lines) because native edges are not
@@ -248,7 +249,7 @@ export function materializedIcons(group: Element): ReliefSprite[] | null {
 }
 
 export function buildScene(viewbox: Element, curveTolerance = 0.2, options: SceneOptions = {}): Scene {
-  const maskRects = options.maskRects ?? flag("gpu-mask-rects") !== "0";
+  const maskRects = options.maskRects ?? flag("gpu-mask-rects") === "1";
   const nativeShapes = options.nativeShapes ?? flag("gpu-native-shapes") === "1";
   return withCanonicalEmblemPaint(() => canonicalBuildScene(viewbox, curveTolerance, maskRects, nativeShapes));
 }
