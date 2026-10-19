@@ -1,5 +1,6 @@
 import {
   buildPaletteIndex,
+  defaultPaletteActive,
   normalizePaletteText,
   type PaletteActionId,
   type PaletteCandidate,
@@ -181,7 +182,7 @@ export function initializeCommandPalette(): CommandPalette {
       ? searchPalette([...view.index, ...actions], query)
       : { results: actions, total: actions.length };
     view.results = matches.results;
-    view.active = query ? view.results.findIndex(result => !result.disabled) : -1;
+    view.active = defaultPaletteActive(view.results, query);
     view.list.replaceChildren();
     view.results.forEach((result, index) => {
       const option = document.createElement("div");
@@ -211,8 +212,9 @@ export function initializeCommandPalette(): CommandPalette {
 
   function selectActive(): void {
     if (!view) return;
+    const active = view.active;
     Array.from(view.list.children).forEach((option, index) => {
-      option.setAttribute("aria-selected", String(index === view!.active));
+      option.setAttribute("aria-selected", String(index === active));
     });
     const selected = view.list.children[view.active];
     if (selected) {
@@ -239,7 +241,12 @@ export function initializeCommandPalette(): CommandPalette {
   function activate(index: number): void {
     if (!view) return;
     const result = view.results[index];
-    if (!result) return;
+    if (!result) {
+      // Enter with nothing preselected: say why the best match is unavailable instead of guessing.
+      const blocked = index < 0 && normalizePaletteText(view.input.value) && view.results[0]?.disabled;
+      if (blocked) view.status.textContent = `${view.results[0].label} is unavailable: ${blocked}.`;
+      return;
+    }
     const world = currentWorld();
     if (!world || world !== view.world) {
       close();

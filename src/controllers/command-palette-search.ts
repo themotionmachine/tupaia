@@ -167,6 +167,15 @@ export function searchPalette(
   return { results: ranked.slice(0, Math.max(0, limit)).map(item => item.candidate), total: ranked.length };
 }
 
+/**
+ * Enter acts on the best match only. When the best match is disabled (e.g. "Draw a route"
+ * while an editor is open), nothing is preselected: falling through to a weaker match would
+ * turn a blocked tool request into navigation somewhere unrelated.
+ */
+export function defaultPaletteActive(results: readonly PaletteCandidate[], query: string): number {
+  return normalizePaletteText(query) && results.length && !results[0].disabled ? 0 : -1;
+}
+
 /** Resolve the current entity, not a captured object or a rendered element. */
 export function resolvePaletteLocation(
   world: PaletteWorld,

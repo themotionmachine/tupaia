@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildPaletteIndex,
+  defaultPaletteActive,
   normalizePaletteText,
   type PaletteWorld,
   paletteCandidate,
@@ -140,5 +141,26 @@ describe("command palette search", () => {
     ];
     expect(resolvePaletteLocation(data, { kind: "route", id: 0 }, { width: 800, height: 600 })).toBeNull();
     expect(resolvePaletteLocation(data, { kind: "route", id: 17 }, { width: 0, height: 0 })).toBeNull();
+  });
+});
+
+describe("defaultPaletteActive", () => {
+  const route = paletteCandidate({ kind: "route", id: 3 }, "Oom withdrawal from Hysham", "Route · Route");
+  const draw = paletteCandidate({ kind: "action", id: "draw-route" }, "Draw a route", "Connect places on the map");
+
+  it("preselects the best match when it is enabled", () => {
+    expect(defaultPaletteActive([draw, route], "draw a route")).toBe(0);
+  });
+
+  it("does not fall through to a weaker match when the best match is disabled", () => {
+    const blocked = { ...draw, disabled: "Close the current editor first" };
+    const { results } = searchPalette([route, blocked], "Draw a route");
+    expect(results.map(result => result.label)).toEqual(["Draw a route", "Oom withdrawal from Hysham"]);
+    expect(defaultPaletteActive(results, "Draw a route")).toBe(-1);
+  });
+
+  it("preselects nothing for an empty query or no results", () => {
+    expect(defaultPaletteActive([draw], "  ")).toBe(-1);
+    expect(defaultPaletteActive([], "draw")).toBe(-1);
   });
 });
