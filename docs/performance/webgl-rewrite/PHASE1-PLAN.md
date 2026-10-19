@@ -23,6 +23,8 @@ Each one can be overruled by Ryan.
 | D6 | Out of Phase 1, needs hardware: a second GPU family, Windows/iGPU at DPR 1 and 60 Hz, and the second OS for row 43. These are G4 blockers. |
 | D7 | Checks run in three tiers (below). Builders run T0 only. The orchestrator runs T1 when a wave merges. T2 runs at phase boundaries and overnight. |
 | D8 | Performance work runs alongside parity work. The perf packet owns `prepare.ts`/`compat.ts` in W0–W1. The parity packets that touch those files (COMPAT, RES) run later and rebase onto it. |
+| D9 | **Scope (Ryan, 2026-10-19).** "Finished" means GPU is the default display and the hidden SVG stays the editable model. REWRITE-PLAN P3 (SceneDocument ownership) and the P4 step that removes the SVG display path are deferred until a measured need appears. The remaining work is parity, recovery speed, hardening and the default flip. |
+| D10 | **Navigate/Edit modes (Ryan, 2026-10-19).** Switching between navigating (GPU, fast) and editing (canonical SVG and editors) becomes an explicit, visible mode with keyboard shortcuts, instead of only an implicit suspend when an editor opens. Packet MODE (W1). |
 
 ## Test scheme
 
@@ -46,7 +48,7 @@ The packet definitions are in the Phase 0 synthesis (kept outside git), summariz
   - RAS (pattern-tile dash and clamp fixes)
   - PERF-A (compat reuse per dirty run and a lazy clone; owns `prepare.ts`/`compat.ts`)
   - MCPFIX (the 7 MCP failures inherited from phase 1)
-- **W1:** REPLAY (G-E editor replay), CONS (save/export/consumers), LIFE (renderer lifecycle bugs: font guard
+- **W1:** MODE (explicit Navigate/Edit mode: indicator, shortcuts, no collisions with existing hotkeys; uses the navigation-only fast path), REPLAY (G-E editor replay), CONS (save/export/consumers), LIFE (renderer lifecycle bugs: font guard
   first), PRIM (native primitives in `scene.ts`), PERF-B (keep the CPU payload across context loss).
 - **W2:** CENSUS (toggles, presets, resize, print), LABELS, EDIT (the other 15 editors and the undo systems),
   COMPAT, CORPUS.
