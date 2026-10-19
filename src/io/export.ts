@@ -265,6 +265,7 @@ export async function prepareMapClone(type: string, options: GetMapURLOptions = 
   restorePathVectorsIn(cloneEl);
   cloneEl.querySelectorAll(".viewport-culled").forEach(element => {
     element.classList.remove("viewport-culled");
+    if (element.getAttribute("class") === "") element.removeAttribute("class"); // culling must not leave class=""
   });
   // the GPU compat clone stays attached across frames, so caravan copies would be a second live #tradeAnimation that
   // TradeAnimation.stop() cannot reach; the GPU lane mirrors live markers itself. User exports keep their snapshot.

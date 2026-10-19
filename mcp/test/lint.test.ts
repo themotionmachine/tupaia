@@ -841,6 +841,10 @@ describe("tupaia-mcp lint (browser)", () => {
       );
       const idA = Number(hid.a.replace("burgLabel", ""));
       const idB = Number(hid.b.replace("burgLabel", ""));
+      // label culling re-runs a frame after labels move (it toggles viewport-culled): let it settle first
+      await evalv(
+        "await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 50)))); return 1"
+      );
       const dom = () => evalv("return document.getElementById('labels').outerHTML");
       const before = await dom();
       const out = await lint({ checks: ["label-overlap"], limit: 200 });
