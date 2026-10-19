@@ -1,0 +1,3090 @@
+{
+  "fixture": "parity-v1",
+  "file": "parity-v1.map",
+  "sha256": "fd1dd2f3508fbbd7ea325133b2937a328909a84cc38e81c6afc95eef640ba119",
+  "bytes": 2862989,
+  "generator": {
+    "seed": "parity10",
+    "name": "Vavantia",
+    "template": "continents",
+    "graph": {
+      "w": 1280,
+      "h": 720
+    },
+    "cells": 3734,
+    "counts": {
+      "states": 8,
+      "burgs": 88,
+      "provinces": 37,
+      "cultures": 12,
+      "religions": 19,
+      "rivers": 185,
+      "routes": 93,
+      "markers": 38,
+      "zones": 12,
+      "notes": 111,
+      "labels": 0,
+      "biomes": 13,
+      "routeGroups": 3
+    },
+    "features": {
+      "islands": {
+        "continent": 2,
+        "island": 1,
+        "isle": 4,
+        "lake_island": 0
+      },
+      "islandsTotal": 7,
+      "lakes": 7,
+      "oceans": 1
+    },
+    "digest": "1tk6bhr",
+    "optionsUsed": {
+      "template": "continents",
+      "cells": {
+        "density": 3,
+        "cells": 5000
+      },
+      "states": 8,
+      "burgs": 80,
+      "width": 1280,
+      "height": 720
+    },
+    "locked": [
+      "template",
+      "points",
+      "statesNumber",
+      "manors"
+    ],
+    "unlocked": [],
+    "settingsLocked": []
+  },
+  "config": {
+    "version": "parity-v1",
+    "seed": "parity10",
+    "template": "continents",
+    "cells": 5000,
+    "states": 8,
+    "burgs": 80,
+    "reliefDensity": 0.4,
+    "width": 1280,
+    "height": 720,
+    "normalizedDate": "2026-01-01",
+    "normalizedMapId": 1767225600000
+  },
+  "build": {
+    "builtWith": "bench/host/fixtures/build-parity-fixture.ts",
+    "seconds": 16.3,
+    "steps": [
+      "generate ok 425ms",
+      "canonicalise ok 265ms",
+      "settings ok 4ms",
+      "layers ok 2816ms",
+      "relief ok 967ms",
+      "lakes ok 129ms",
+      "regiments ok 126ms",
+      "markers ok 124ms",
+      "zones ok 126ms",
+      "ice ok 120ms",
+      "grid ok 142ms",
+      "measurers ok 144ms",
+      "legend ok 145ms",
+      "labels ok 141ms",
+      "fog ok 144ms",
+      "zoom-styling ok 141ms",
+      "save ok 515ms",
+      "reload ok 1597ms"
+    ],
+    "pageErrors": []
+  },
+  "layersOn": [
+    "texture",
+    "heightmap",
+    "biomes",
+    "grid",
+    "coordinates",
+    "compass",
+    "rivers",
+    "relief",
+    "religions",
+    "cultures",
+    "states",
+    "provinces",
+    "zones",
+    "borders",
+    "routes",
+    "temperature",
+    "ice",
+    "goods",
+    "markets",
+    "trade",
+    "precipitation",
+    "population",
+    "emblems",
+    "burgs",
+    "labels",
+    "military",
+    "markers",
+    "rulers",
+    "scaleBar",
+    "vignette",
+    "lakes"
+  ],
+  "census": {
+    "afterBuild": {
+      "layers": {
+        "ocean": {
+          "display": "inline",
+          "kids": 2,
+          "elements": 7,
+          "tags": {
+            "g": 2,
+            "rect": 2,
+            "path": 3
+          },
+          "layerOff": null
+        },
+        "landmass": {
+          "display": "inline",
+          "kids": 1,
+          "elements": 1,
+          "tags": {
+            "rect": 1
+          },
+          "layerOff": null
+        },
+        "texture": {
+          "display": "inline",
+          "kids": 1,
+          "elements": 1,
+          "tags": {
+            "image": 1
+          },
+          "layerOff": null
+        },
+        "terrs": {
+          "display": "inline",
+          "kids": 2,
+          "elements": 3,
+          "tags": {
+            "g": 2,
+            "image": 1
+          },
+          "layerOff": null
+        },
+        "lakes": {
+          "display": "inline",
+          "kids": 6,
+          "elements": 13,
+          "tags": {
+            "g": 6,
+            "use": 7
+          },
+          "layerOff": null
+        },
+        "biomes": {
+          "display": "inline",
+          "kids": 1,
+          "elements": 1,
+          "tags": {
+            "image": 1
+          },
+          "layerOff": null
+        },
+        "cells": {
+          "display": "inline",
+          "kids": 0,
+          "elements": 0,
+          "tags": {},
+          "layerOff": null
+        },
+        "gridOverlay": {
+          "display": "inline",
+          "kids": 1,
+          "elements": 1,
+          "tags": {
+            "rect": 1
+          },
+          "layerOff": null
+        },
+        "coordinates": {
+          "display": "inline",
+          "kids": 2,
+          "elements": 20,
+          "tags": {
+            "g": 2,
+            "path": 1,
+            "text": 17
+          },
+          "layerOff": null
+        },
+        "compass": {
+          "display": "inline",
+          "kids": 1,
+          "elements": 1,
+          "tags": {
+            "use": 1
+          },
+          "layerOff": null
+        },
+        "rivers": {
+          "display": "inline",
+          "kids": 185,
+          "elements": 185,
+          "tags": {
+            "path": 185
+          },
+          "layerOff": null
+        },
+        "terrain": {
+          "display": "inline",
+          "kids": 1,
+          "elements": 1,
+          "tags": {
+            "image": 1
+          },
+          "layerOff": null
+        },
+        "relig": {
+          "display": "inline",
+          "kids": 32,
+          "elements": 32,
+          "tags": {
+            "path": 32
+          },
+          "layerOff": null
+        },
+        "cults": {
+          "display": "inline",
+          "kids": 21,
+          "elements": 21,
+          "tags": {
+            "path": 21
+          },
+          "layerOff": null
+        },
+        "regions": {
+          "display": "inline",
+          "kids": 2,
+          "elements": 26,
+          "tags": {
+            "g": 2,
+            "path": 24
+          },
+          "layerOff": null
+        },
+        "provs": {
+          "display": "inline",
+          "kids": 2,
+          "elements": 108,
+          "tags": {
+            "g": 2,
+            "path": 69,
+            "text": 37
+          },
+          "layerOff": null
+        },
+        "zones": {
+          "display": "inline",
+          "kids": 58,
+          "elements": 58,
+          "tags": {
+            "path": 58
+          },
+          "layerOff": null
+        },
+        "borders": {
+          "display": "inline",
+          "kids": 2,
+          "elements": 44,
+          "tags": {
+            "g": 2,
+            "path": 42
+          },
+          "layerOff": null
+        },
+        "routes": {
+          "display": "inline",
+          "kids": 3,
+          "elements": 96,
+          "tags": {
+            "g": 3,
+            "path": 93
+          },
+          "layerOff": null
+        },
+        "temperature": {
+          "display": "inline",
+          "kids": 7,
+          "elements": 23,
+          "tags": {
+            "path": 6,
+            "g": 1,
+            "text": 16
+          },
+          "layerOff": null
+        },
+        "coastline": {
+          "display": "inline",
+          "kids": 2,
+          "elements": 9,
+          "tags": {
+            "g": 2,
+            "use": 7
+          },
+          "layerOff": null
+        },
+        "ice": {
+          "display": "inline",
+          "kids": 9,
+          "elements": 9,
+          "tags": {
+            "polygon": 9
+          },
+          "layerOff": null
+        },
+        "goods": {
+          "display": "inline",
+          "kids": 3,
+          "elements": 2672,
+          "tags": {
+            "g": 83,
+            "polygon": 2421,
+            "circle": 80,
+            "use": 80,
+            "rect": 4,
+            "text": 4
+          },
+          "layerOff": null
+        },
+        "markets": {
+          "display": "inline",
+          "kids": 7,
+          "elements": 49,
+          "tags": {
+            "g": 7,
+            "clipPath": 7,
+            "path": 21,
+            "circle": 7,
+            "text": 7
+          },
+          "layerOff": null
+        },
+        "tradeAnimation": {
+          "display": "inline",
+          "kids": 30,
+          "elements": 90,
+          "tags": {
+            "g": 30,
+            "use": 30,
+            "circle": 30
+          },
+          "layerOff": "1"
+        },
+        "prec": {
+          "display": "block",
+          "kids": 2123,
+          "elements": 2128,
+          "tags": {
+            "g": 1,
+            "text": 5,
+            "circle": 2122
+          },
+          "layerOff": null
+        },
+        "population": {
+          "display": "inline",
+          "kids": 2,
+          "elements": 2605,
+          "tags": {
+            "g": 2,
+            "line": 2603
+          },
+          "layerOff": null
+        },
+        "emblems": {
+          "display": "inline",
+          "kids": 3,
+          "elements": 136,
+          "tags": {
+            "g": 3,
+            "use": 133
+          },
+          "layerOff": null
+        },
+        "icons": {
+          "display": "inline",
+          "kids": 2,
+          "elements": 28,
+          "tags": {
+            "g": 20,
+            "image": 8
+          },
+          "layerOff": null
+        },
+        "labels": {
+          "display": "inline",
+          "kids": 4,
+          "elements": 151,
+          "tags": {
+            "g": 13,
+            "text": 102,
+            "textPath": 14,
+            "tspan": 22
+          },
+          "layerOff": null
+        },
+        "armies": {
+          "display": "inline",
+          "kids": 8,
+          "elements": 500,
+          "tags": {
+            "g": 90,
+            "rect": 164,
+            "text": 164,
+            "image": 82
+          },
+          "layerOff": null
+        },
+        "markers": {
+          "display": "inline",
+          "kids": 53,
+          "elements": 306,
+          "tags": {
+            "svg": 53,
+            "g": 53,
+            "path": 52,
+            "circle": 42,
+            "text": 53,
+            "image": 53
+          },
+          "layerOff": null
+        },
+        "fogging-cont": {
+          "display": "inline",
+          "kids": 1,
+          "elements": 3,
+          "tags": {
+            "g": 1,
+            "rect": 2
+          },
+          "layerOff": null
+        },
+        "ruler": {
+          "display": "inline",
+          "kids": 5,
+          "elements": 32,
+          "tags": {
+            "g": 9,
+            "polyline": 4,
+            "circle": 9,
+            "text": 5,
+            "path": 5
+          },
+          "layerOff": null
+        },
+        "debug": {
+          "display": "inline",
+          "kids": 0,
+          "elements": 0,
+          "tags": {},
+          "layerOff": null
+        },
+        "scaleBar": {
+          "display": "inline",
+          "kids": 2,
+          "elements": 13,
+          "tags": {
+            "rect": 1,
+            "g": 3,
+            "line": 3,
+            "text": 6
+          }
+        },
+        "legend": {
+          "display": "inline",
+          "kids": 3,
+          "elements": 20,
+          "tags": {
+            "rect": 9,
+            "g": 2,
+            "text": 9
+          }
+        },
+        "vignette": {
+          "display": "inline",
+          "kids": 1,
+          "elements": 1,
+          "tags": {
+            "rect": 1
+          }
+        }
+      },
+      "features": {
+        "halo": {
+          "shapeRendering": "geometricPrecision",
+          "viewboxShapeRendering": "geometricPrecision",
+          "borderPaths": 8,
+          "clipPaths": 8,
+          "display": "block"
+        },
+        "regiments": {
+          "total": 82,
+          "domGroups": 82,
+          "rotated": 6,
+          "naval": 14,
+          "navalRotated": 2,
+          "imageIcon": 3,
+          "imageElements": 3,
+          "emojiIcon": 79
+        },
+        "markers": {
+          "total": 53,
+          "domSvgs": 53,
+          "emoji": 51,
+          "dataImage": 2,
+          "pinShapes": [
+            "bubble",
+            "circle",
+            "diamond",
+            "heptagon",
+            "hex",
+            "hexy",
+            "pentagon",
+            "pin",
+            "shield",
+            "shieldy",
+            "square",
+            "squarish"
+          ],
+          "pinned": 1,
+          "hidden": 0,
+          "notes": 53
+        },
+        "legend": {
+          "rects": 9,
+          "texts": 9,
+          "box": true,
+          "dataX": "96",
+          "dataY": "91",
+          "transform": "translate(1134,452)"
+        },
+        "measurers": {
+          "Ruler": 2,
+          "Opisometer": 1,
+          "RouteOpisometer": 1,
+          "Planimeter": 1,
+          "domGroups": 5,
+          "serialized": 5
+        },
+        "compass": {
+          "use": 1,
+          "display": "inline"
+        },
+        "grid": {
+          "type": "pointyHex",
+          "dasharray": "5 3",
+          "linecap": "round",
+          "fillRects": 1
+        },
+        "coordinates": {
+          "paths": 1,
+          "texts": 17
+        },
+        "texture": {
+          "images": 1,
+          "href": "./images/textures/marble-big.jpg"
+        },
+        "ice": {
+          "polygons": 9,
+          "glaciers": 1,
+          "icebergs": 8,
+          "dragged": 4,
+          "draggedData": 4,
+          "filter": "url(#dropShadow01)"
+        },
+        "zones": {
+          "total": 58,
+          "paths": 58,
+          "stockHatches": 42,
+          "solid": 4
+        },
+        "coastline": {
+          "autoFilter": "1",
+          "filter": "url(#dropShadow)",
+          "features": 7,
+          "scale": 1
+        },
+        "lakes": {
+          "freshwater": 2,
+          "salt": 1,
+          "sinkhole": 1,
+          "frozen": 1,
+          "lava": 1,
+          "dry": 1
+        },
+        "dataLayers": {
+          "temperature": {
+            "elements": 23,
+            "display": "inline"
+          },
+          "prec": {
+            "elements": 2128,
+            "display": "block"
+          },
+          "population": {
+            "elements": 2605,
+            "display": "inline"
+          },
+          "goods": {
+            "elements": 2672,
+            "display": "inline"
+          },
+          "markets": {
+            "elements": 49,
+            "display": "inline"
+          }
+        },
+        "cells": {
+          "buttonOn": false,
+          "elements": 0
+        },
+        "fog": {
+          "paths": 2,
+          "display": "block",
+          "opacity": "0.3",
+          "contMask": "url(#fog)"
+        },
+        "vignette": {
+          "display": "inline",
+          "rect": true
+        },
+        "labels": {
+          "stateCurvedTextPath": 8,
+          "burgStraight": 88,
+          "custom": 6,
+          "customCurved": 3,
+          "customStraight": 3,
+          "customWithTextPath": 6,
+          "multiLine": 1,
+          "haloGroups": 1,
+          "textPaths": 14
+        },
+        "emblems": {
+          "uses": 133,
+          "groups": 3
+        },
+        "trade": {
+          "deals": 1867,
+          "markets": 7,
+          "animationNodes": 30,
+          "layerOff": "1"
+        },
+        "map": {
+          "cells": 3734,
+          "gridCells": 4982,
+          "states": 8,
+          "burgs": 88,
+          "graph": [
+            1280,
+            720
+          ]
+        }
+      },
+      "buttonsOn": [
+        "toggleBiomes",
+        "toggleBorders",
+        "toggleBurgIcons",
+        "toggleCompass",
+        "toggleCoordinates",
+        "toggleCultures",
+        "toggleEmblems",
+        "toggleGoods",
+        "toggleGrid",
+        "toggleHeight",
+        "toggleIce",
+        "toggleLabels",
+        "toggleLakes",
+        "toggleMarkers",
+        "toggleMarketsLayer",
+        "toggleMilitary",
+        "togglePopulation",
+        "togglePrecipitation",
+        "toggleProvinces",
+        "toggleRelief",
+        "toggleReligions",
+        "toggleRivers",
+        "toggleRoutes",
+        "toggleRulers",
+        "toggleScaleBar",
+        "toggleStates",
+        "toggleTemperature",
+        "toggleTexture",
+        "toggleTrade",
+        "toggleVignette",
+        "toggleZones"
+      ]
+    },
+    "afterReload": {
+      "layers": {
+        "ocean": {
+          "display": "inline",
+          "kids": 2,
+          "elements": 7,
+          "tags": {
+            "g": 2,
+            "rect": 2,
+            "path": 3
+          },
+          "layerOff": null
+        },
+        "landmass": {
+          "display": "inline",
+          "kids": 1,
+          "elements": 1,
+          "tags": {
+            "rect": 1
+          },
+          "layerOff": null
+        },
+        "texture": {
+          "display": "inline",
+          "kids": 1,
+          "elements": 1,
+          "tags": {
+            "image": 1
+          },
+          "layerOff": null
+        },
+        "terrs": {
+          "display": "inline",
+          "kids": 2,
+          "elements": 3,
+          "tags": {
+            "g": 2,
+            "image": 1
+          },
+          "layerOff": null
+        },
+        "lakes": {
+          "display": "inline",
+          "kids": 6,
+          "elements": 13,
+          "tags": {
+            "g": 6,
+            "use": 7
+          },
+          "layerOff": null
+        },
+        "biomes": {
+          "display": "inline",
+          "kids": 1,
+          "elements": 1,
+          "tags": {
+            "image": 1
+          },
+          "layerOff": null
+        },
+        "cells": {
+          "display": "inline",
+          "kids": 0,
+          "elements": 0,
+          "tags": {},
+          "layerOff": null
+        },
+        "gridOverlay": {
+          "display": "inline",
+          "kids": 1,
+          "elements": 1,
+          "tags": {
+            "rect": 1
+          },
+          "layerOff": null
+        },
+        "coordinates": {
+          "display": "inline",
+          "kids": 2,
+          "elements": 20,
+          "tags": {
+            "g": 2,
+            "path": 1,
+            "text": 17
+          },
+          "layerOff": null
+        },
+        "compass": {
+          "display": "inline",
+          "kids": 1,
+          "elements": 1,
+          "tags": {
+            "use": 1
+          },
+          "layerOff": null
+        },
+        "rivers": {
+          "display": "inline",
+          "kids": 185,
+          "elements": 185,
+          "tags": {
+            "path": 185
+          },
+          "layerOff": null
+        },
+        "terrain": {
+          "display": "inline",
+          "kids": 1,
+          "elements": 1,
+          "tags": {
+            "image": 1
+          },
+          "layerOff": null
+        },
+        "relig": {
+          "display": "inline",
+          "kids": 32,
+          "elements": 32,
+          "tags": {
+            "path": 32
+          },
+          "layerOff": null
+        },
+        "cults": {
+          "display": "inline",
+          "kids": 21,
+          "elements": 21,
+          "tags": {
+            "path": 21
+          },
+          "layerOff": null
+        },
+        "regions": {
+          "display": "inline",
+          "kids": 2,
+          "elements": 26,
+          "tags": {
+            "g": 2,
+            "path": 24
+          },
+          "layerOff": null
+        },
+        "provs": {
+          "display": "inline",
+          "kids": 2,
+          "elements": 108,
+          "tags": {
+            "g": 2,
+            "path": 69,
+            "text": 37
+          },
+          "layerOff": null
+        },
+        "zones": {
+          "display": "inline",
+          "kids": 58,
+          "elements": 58,
+          "tags": {
+            "path": 58
+          },
+          "layerOff": null
+        },
+        "borders": {
+          "display": "inline",
+          "kids": 2,
+          "elements": 44,
+          "tags": {
+            "g": 2,
+            "path": 42
+          },
+          "layerOff": null
+        },
+        "routes": {
+          "display": "inline",
+          "kids": 3,
+          "elements": 96,
+          "tags": {
+            "g": 3,
+            "path": 93
+          },
+          "layerOff": null
+        },
+        "temperature": {
+          "display": "inline",
+          "kids": 7,
+          "elements": 23,
+          "tags": {
+            "path": 6,
+            "g": 1,
+            "text": 16
+          },
+          "layerOff": null
+        },
+        "coastline": {
+          "display": "inline",
+          "kids": 2,
+          "elements": 9,
+          "tags": {
+            "g": 2,
+            "use": 7
+          },
+          "layerOff": null
+        },
+        "ice": {
+          "display": "inline",
+          "kids": 9,
+          "elements": 9,
+          "tags": {
+            "polygon": 9
+          },
+          "layerOff": null
+        },
+        "goods": {
+          "display": "inline",
+          "kids": 3,
+          "elements": 2672,
+          "tags": {
+            "g": 83,
+            "polygon": 2421,
+            "circle": 80,
+            "use": 80,
+            "rect": 4,
+            "text": 4
+          },
+          "layerOff": null
+        },
+        "markets": {
+          "display": "inline",
+          "kids": 7,
+          "elements": 49,
+          "tags": {
+            "g": 7,
+            "clipPath": 7,
+            "path": 21,
+            "circle": 7,
+            "text": 7
+          },
+          "layerOff": null
+        },
+        "tradeAnimation": {
+          "display": "inline",
+          "kids": 30,
+          "elements": 90,
+          "tags": {
+            "g": 30,
+            "use": 30,
+            "circle": 30
+          },
+          "layerOff": null
+        },
+        "prec": {
+          "display": "block",
+          "kids": 2123,
+          "elements": 2128,
+          "tags": {
+            "g": 1,
+            "text": 5,
+            "circle": 2122
+          },
+          "layerOff": null
+        },
+        "population": {
+          "display": "inline",
+          "kids": 2,
+          "elements": 2605,
+          "tags": {
+            "g": 2,
+            "line": 2603
+          },
+          "layerOff": null
+        },
+        "emblems": {
+          "display": "inline",
+          "kids": 3,
+          "elements": 136,
+          "tags": {
+            "g": 3,
+            "use": 133
+          },
+          "layerOff": null
+        },
+        "icons": {
+          "display": "inline",
+          "kids": 2,
+          "elements": 28,
+          "tags": {
+            "g": 20,
+            "image": 8
+          },
+          "layerOff": null
+        },
+        "labels": {
+          "display": "inline",
+          "kids": 4,
+          "elements": 151,
+          "tags": {
+            "g": 13,
+            "text": 102,
+            "textPath": 14,
+            "tspan": 22
+          },
+          "layerOff": null
+        },
+        "armies": {
+          "display": "inline",
+          "kids": 8,
+          "elements": 500,
+          "tags": {
+            "g": 90,
+            "rect": 164,
+            "text": 164,
+            "image": 82
+          },
+          "layerOff": null
+        },
+        "markers": {
+          "display": "inline",
+          "kids": 53,
+          "elements": 306,
+          "tags": {
+            "svg": 53,
+            "g": 53,
+            "path": 52,
+            "circle": 42,
+            "text": 53,
+            "image": 53
+          },
+          "layerOff": null
+        },
+        "fogging-cont": {
+          "display": "inline",
+          "kids": 1,
+          "elements": 3,
+          "tags": {
+            "g": 1,
+            "rect": 2
+          },
+          "layerOff": null
+        },
+        "ruler": {
+          "display": "inline",
+          "kids": 5,
+          "elements": 32,
+          "tags": {
+            "g": 9,
+            "polyline": 4,
+            "circle": 9,
+            "text": 5,
+            "path": 5
+          },
+          "layerOff": null
+        },
+        "debug": {
+          "display": "inline",
+          "kids": 0,
+          "elements": 0,
+          "tags": {},
+          "layerOff": null
+        },
+        "scaleBar": {
+          "display": "inline",
+          "kids": 2,
+          "elements": 13,
+          "tags": {
+            "rect": 1,
+            "g": 3,
+            "line": 3,
+            "text": 6
+          }
+        },
+        "legend": {
+          "display": "inline",
+          "kids": 3,
+          "elements": 20,
+          "tags": {
+            "rect": 9,
+            "g": 2,
+            "text": 9
+          }
+        },
+        "vignette": {
+          "display": "inline",
+          "kids": 1,
+          "elements": 1,
+          "tags": {
+            "rect": 1
+          }
+        }
+      },
+      "features": {
+        "halo": {
+          "shapeRendering": "optimizeSpeed",
+          "viewboxShapeRendering": "geometricPrecision",
+          "borderPaths": 8,
+          "clipPaths": 8,
+          "display": "block"
+        },
+        "regiments": {
+          "total": 82,
+          "domGroups": 82,
+          "rotated": 6,
+          "naval": 14,
+          "navalRotated": 2,
+          "imageIcon": 3,
+          "imageElements": 3,
+          "emojiIcon": 79
+        },
+        "markers": {
+          "total": 53,
+          "domSvgs": 53,
+          "emoji": 51,
+          "dataImage": 2,
+          "pinShapes": [
+            "bubble",
+            "circle",
+            "diamond",
+            "heptagon",
+            "hex",
+            "hexy",
+            "pentagon",
+            "pin",
+            "shield",
+            "shieldy",
+            "square",
+            "squarish"
+          ],
+          "pinned": 1,
+          "hidden": 0,
+          "notes": 53
+        },
+        "legend": {
+          "rects": 9,
+          "texts": 9,
+          "box": true,
+          "dataX": "96",
+          "dataY": "91",
+          "transform": "translate(1134,452)"
+        },
+        "measurers": {
+          "Ruler": 2,
+          "Opisometer": 1,
+          "RouteOpisometer": 1,
+          "Planimeter": 1,
+          "domGroups": 5,
+          "serialized": 5
+        },
+        "compass": {
+          "use": 1,
+          "display": "inline"
+        },
+        "grid": {
+          "type": "pointyHex",
+          "dasharray": "5 3",
+          "linecap": "round",
+          "fillRects": 1
+        },
+        "coordinates": {
+          "paths": 1,
+          "texts": 17
+        },
+        "texture": {
+          "images": 1,
+          "href": "./images/textures/marble-big.jpg"
+        },
+        "ice": {
+          "polygons": 9,
+          "glaciers": 1,
+          "icebergs": 8,
+          "dragged": 4,
+          "draggedData": 4,
+          "filter": "url(#dropShadow01)"
+        },
+        "zones": {
+          "total": 58,
+          "paths": 58,
+          "stockHatches": 42,
+          "solid": 4
+        },
+        "coastline": {
+          "autoFilter": "1",
+          "filter": "url(#dropShadow)",
+          "features": 7,
+          "scale": 1
+        },
+        "lakes": {
+          "freshwater": 2,
+          "salt": 1,
+          "sinkhole": 1,
+          "frozen": 1,
+          "lava": 1,
+          "dry": 1
+        },
+        "dataLayers": {
+          "temperature": {
+            "elements": 23,
+            "display": "inline"
+          },
+          "prec": {
+            "elements": 2128,
+            "display": "block"
+          },
+          "population": {
+            "elements": 2605,
+            "display": "inline"
+          },
+          "goods": {
+            "elements": 2672,
+            "display": "inline"
+          },
+          "markets": {
+            "elements": 49,
+            "display": "inline"
+          }
+        },
+        "cells": {
+          "buttonOn": false,
+          "elements": 0
+        },
+        "fog": {
+          "paths": 2,
+          "display": "block",
+          "opacity": "0.3",
+          "contMask": "url(#fog)"
+        },
+        "vignette": {
+          "display": "inline",
+          "rect": true
+        },
+        "labels": {
+          "stateCurvedTextPath": 8,
+          "burgStraight": 88,
+          "custom": 6,
+          "customCurved": 3,
+          "customStraight": 3,
+          "customWithTextPath": 6,
+          "multiLine": 1,
+          "haloGroups": 1,
+          "textPaths": 14
+        },
+        "emblems": {
+          "uses": 133,
+          "groups": 3
+        },
+        "trade": {
+          "deals": 1867,
+          "markets": 7,
+          "animationNodes": 30,
+          "layerOff": null
+        },
+        "map": {
+          "cells": 3734,
+          "gridCells": 4982,
+          "states": 8,
+          "burgs": 88,
+          "graph": [
+            1280,
+            720
+          ]
+        }
+      },
+      "buttonsOn": [
+        "toggleBiomes",
+        "toggleBorders",
+        "toggleBurgIcons",
+        "toggleCompass",
+        "toggleCoordinates",
+        "toggleCultures",
+        "toggleEmblems",
+        "toggleGoods",
+        "toggleGrid",
+        "toggleHeight",
+        "toggleIce",
+        "toggleLabels",
+        "toggleLakes",
+        "toggleMarkers",
+        "toggleMarketsLayer",
+        "toggleMilitary",
+        "togglePopulation",
+        "togglePrecipitation",
+        "toggleProvinces",
+        "toggleRelief",
+        "toggleReligions",
+        "toggleRivers",
+        "toggleRoutes",
+        "toggleRulers",
+        "toggleScaleBar",
+        "toggleStates",
+        "toggleTemperature",
+        "toggleTexture",
+        "toggleTrade",
+        "toggleVignette",
+        "toggleZones"
+      ]
+    },
+    "afterReloadPreamble": {
+      "layers": {
+        "ocean": {
+          "display": "inline",
+          "kids": 2,
+          "elements": 7,
+          "tags": {
+            "g": 2,
+            "rect": 2,
+            "path": 3
+          },
+          "layerOff": null
+        },
+        "landmass": {
+          "display": "inline",
+          "kids": 1,
+          "elements": 1,
+          "tags": {
+            "rect": 1
+          },
+          "layerOff": null
+        },
+        "texture": {
+          "display": "inline",
+          "kids": 1,
+          "elements": 1,
+          "tags": {
+            "image": 1
+          },
+          "layerOff": null
+        },
+        "terrs": {
+          "display": "inline",
+          "kids": 2,
+          "elements": 3,
+          "tags": {
+            "g": 2,
+            "image": 1
+          },
+          "layerOff": null
+        },
+        "lakes": {
+          "display": "inline",
+          "kids": 6,
+          "elements": 13,
+          "tags": {
+            "g": 6,
+            "use": 7
+          },
+          "layerOff": null
+        },
+        "biomes": {
+          "display": "inline",
+          "kids": 1,
+          "elements": 1,
+          "tags": {
+            "image": 1
+          },
+          "layerOff": null
+        },
+        "cells": {
+          "display": "inline",
+          "kids": 1,
+          "elements": 1,
+          "tags": {
+            "image": 1
+          },
+          "layerOff": null
+        },
+        "gridOverlay": {
+          "display": "inline",
+          "kids": 1,
+          "elements": 1,
+          "tags": {
+            "rect": 1
+          },
+          "layerOff": null
+        },
+        "coordinates": {
+          "display": "inline",
+          "kids": 2,
+          "elements": 20,
+          "tags": {
+            "g": 2,
+            "path": 1,
+            "text": 17
+          },
+          "layerOff": null
+        },
+        "compass": {
+          "display": "inline",
+          "kids": 1,
+          "elements": 1,
+          "tags": {
+            "use": 1
+          },
+          "layerOff": null
+        },
+        "rivers": {
+          "display": "inline",
+          "kids": 185,
+          "elements": 185,
+          "tags": {
+            "path": 185
+          },
+          "layerOff": null
+        },
+        "terrain": {
+          "display": "inline",
+          "kids": 1,
+          "elements": 1,
+          "tags": {
+            "image": 1
+          },
+          "layerOff": null
+        },
+        "relig": {
+          "display": "inline",
+          "kids": 32,
+          "elements": 32,
+          "tags": {
+            "path": 32
+          },
+          "layerOff": null
+        },
+        "cults": {
+          "display": "inline",
+          "kids": 21,
+          "elements": 21,
+          "tags": {
+            "path": 21
+          },
+          "layerOff": null
+        },
+        "regions": {
+          "display": "inline",
+          "kids": 2,
+          "elements": 26,
+          "tags": {
+            "g": 2,
+            "path": 24
+          },
+          "layerOff": null
+        },
+        "provs": {
+          "display": "inline",
+          "kids": 2,
+          "elements": 108,
+          "tags": {
+            "g": 2,
+            "path": 69,
+            "text": 37
+          },
+          "layerOff": null
+        },
+        "zones": {
+          "display": "inline",
+          "kids": 58,
+          "elements": 58,
+          "tags": {
+            "path": 58
+          },
+          "layerOff": null
+        },
+        "borders": {
+          "display": "inline",
+          "kids": 2,
+          "elements": 44,
+          "tags": {
+            "g": 2,
+            "path": 42
+          },
+          "layerOff": null
+        },
+        "routes": {
+          "display": "inline",
+          "kids": 3,
+          "elements": 96,
+          "tags": {
+            "g": 3,
+            "path": 93
+          },
+          "layerOff": null
+        },
+        "temperature": {
+          "display": "inline",
+          "kids": 7,
+          "elements": 23,
+          "tags": {
+            "path": 6,
+            "g": 1,
+            "text": 16
+          },
+          "layerOff": null
+        },
+        "coastline": {
+          "display": "inline",
+          "kids": 2,
+          "elements": 9,
+          "tags": {
+            "g": 2,
+            "use": 7
+          },
+          "layerOff": null
+        },
+        "ice": {
+          "display": "inline",
+          "kids": 9,
+          "elements": 9,
+          "tags": {
+            "polygon": 9
+          },
+          "layerOff": null
+        },
+        "goods": {
+          "display": "inline",
+          "kids": 3,
+          "elements": 2672,
+          "tags": {
+            "g": 83,
+            "polygon": 2421,
+            "circle": 80,
+            "use": 80,
+            "rect": 4,
+            "text": 4
+          },
+          "layerOff": null
+        },
+        "markets": {
+          "display": "inline",
+          "kids": 7,
+          "elements": 49,
+          "tags": {
+            "g": 7,
+            "clipPath": 7,
+            "path": 21,
+            "circle": 7,
+            "text": 7
+          },
+          "layerOff": null
+        },
+        "tradeAnimation": {
+          "display": "inline",
+          "kids": 30,
+          "elements": 90,
+          "tags": {
+            "g": 30,
+            "use": 30,
+            "circle": 30
+          },
+          "layerOff": null
+        },
+        "prec": {
+          "display": "block",
+          "kids": 2123,
+          "elements": 2128,
+          "tags": {
+            "g": 1,
+            "text": 5,
+            "circle": 2122
+          },
+          "layerOff": null
+        },
+        "population": {
+          "display": "inline",
+          "kids": 2,
+          "elements": 2605,
+          "tags": {
+            "g": 2,
+            "line": 2603
+          },
+          "layerOff": null
+        },
+        "emblems": {
+          "display": "inline",
+          "kids": 3,
+          "elements": 136,
+          "tags": {
+            "g": 3,
+            "use": 133
+          },
+          "layerOff": null
+        },
+        "icons": {
+          "display": "inline",
+          "kids": 2,
+          "elements": 28,
+          "tags": {
+            "g": 20,
+            "image": 8
+          },
+          "layerOff": null
+        },
+        "labels": {
+          "display": "inline",
+          "kids": 4,
+          "elements": 151,
+          "tags": {
+            "g": 13,
+            "text": 102,
+            "textPath": 14,
+            "tspan": 22
+          },
+          "layerOff": null
+        },
+        "armies": {
+          "display": "inline",
+          "kids": 8,
+          "elements": 500,
+          "tags": {
+            "g": 90,
+            "rect": 164,
+            "text": 164,
+            "image": 82
+          },
+          "layerOff": null
+        },
+        "markers": {
+          "display": "inline",
+          "kids": 53,
+          "elements": 306,
+          "tags": {
+            "svg": 53,
+            "g": 53,
+            "path": 52,
+            "circle": 42,
+            "text": 53,
+            "image": 53
+          },
+          "layerOff": null
+        },
+        "fogging-cont": {
+          "display": "inline",
+          "kids": 1,
+          "elements": 3,
+          "tags": {
+            "g": 1,
+            "rect": 2
+          },
+          "layerOff": null
+        },
+        "ruler": {
+          "display": "inline",
+          "kids": 5,
+          "elements": 32,
+          "tags": {
+            "g": 9,
+            "polyline": 4,
+            "circle": 9,
+            "text": 5,
+            "path": 5
+          },
+          "layerOff": null
+        },
+        "debug": {
+          "display": "inline",
+          "kids": 2,
+          "elements": 2,
+          "tags": {
+            "circle": 1,
+            "path": 1
+          },
+          "layerOff": null
+        },
+        "scaleBar": {
+          "display": "inline",
+          "kids": 2,
+          "elements": 13,
+          "tags": {
+            "rect": 1,
+            "g": 3,
+            "line": 3,
+            "text": 6
+          }
+        },
+        "legend": {
+          "display": "inline",
+          "kids": 3,
+          "elements": 20,
+          "tags": {
+            "rect": 9,
+            "g": 2,
+            "text": 9
+          }
+        },
+        "vignette": {
+          "display": "inline",
+          "kids": 1,
+          "elements": 1,
+          "tags": {
+            "rect": 1
+          }
+        }
+      },
+      "features": {
+        "halo": {
+          "shapeRendering": "geometricPrecision",
+          "viewboxShapeRendering": "geometricPrecision",
+          "borderPaths": 8,
+          "clipPaths": 8,
+          "display": "block"
+        },
+        "regiments": {
+          "total": 82,
+          "domGroups": 82,
+          "rotated": 6,
+          "naval": 14,
+          "navalRotated": 2,
+          "imageIcon": 3,
+          "imageElements": 3,
+          "emojiIcon": 79
+        },
+        "markers": {
+          "total": 53,
+          "domSvgs": 53,
+          "emoji": 51,
+          "dataImage": 2,
+          "pinShapes": [
+            "bubble",
+            "circle",
+            "diamond",
+            "heptagon",
+            "hex",
+            "hexy",
+            "pentagon",
+            "pin",
+            "shield",
+            "shieldy",
+            "square",
+            "squarish"
+          ],
+          "pinned": 1,
+          "hidden": 0,
+          "notes": 53
+        },
+        "legend": {
+          "rects": 9,
+          "texts": 9,
+          "box": true,
+          "dataX": "96",
+          "dataY": "91",
+          "transform": "translate(1134,452)"
+        },
+        "measurers": {
+          "Ruler": 2,
+          "Opisometer": 1,
+          "RouteOpisometer": 1,
+          "Planimeter": 1,
+          "domGroups": 5,
+          "serialized": 5
+        },
+        "compass": {
+          "use": 1,
+          "display": "inline"
+        },
+        "grid": {
+          "type": "pointyHex",
+          "dasharray": "5 3",
+          "linecap": "round",
+          "fillRects": 1
+        },
+        "coordinates": {
+          "paths": 1,
+          "texts": 17
+        },
+        "texture": {
+          "images": 1,
+          "href": "./images/textures/marble-big.jpg"
+        },
+        "ice": {
+          "polygons": 9,
+          "glaciers": 1,
+          "icebergs": 8,
+          "dragged": 4,
+          "draggedData": 4,
+          "filter": "url(#dropShadow01)"
+        },
+        "zones": {
+          "total": 58,
+          "paths": 58,
+          "stockHatches": 42,
+          "solid": 4
+        },
+        "coastline": {
+          "autoFilter": "1",
+          "filter": "url(#dropShadow)",
+          "features": 7,
+          "scale": 1
+        },
+        "lakes": {
+          "freshwater": 2,
+          "salt": 1,
+          "sinkhole": 1,
+          "frozen": 1,
+          "lava": 1,
+          "dry": 1
+        },
+        "dataLayers": {
+          "temperature": {
+            "elements": 23,
+            "display": "inline"
+          },
+          "prec": {
+            "elements": 2128,
+            "display": "block"
+          },
+          "population": {
+            "elements": 2605,
+            "display": "inline"
+          },
+          "goods": {
+            "elements": 2672,
+            "display": "inline"
+          },
+          "markets": {
+            "elements": 49,
+            "display": "inline"
+          }
+        },
+        "cells": {
+          "buttonOn": true,
+          "elements": 1
+        },
+        "fog": {
+          "paths": 2,
+          "display": "block",
+          "opacity": "0.3",
+          "contMask": "url(#fog)"
+        },
+        "vignette": {
+          "display": "inline",
+          "rect": true
+        },
+        "labels": {
+          "stateCurvedTextPath": 8,
+          "burgStraight": 88,
+          "custom": 6,
+          "customCurved": 3,
+          "customStraight": 3,
+          "customWithTextPath": 6,
+          "multiLine": 1,
+          "haloGroups": 1,
+          "textPaths": 14
+        },
+        "emblems": {
+          "uses": 133,
+          "groups": 3
+        },
+        "trade": {
+          "deals": 1867,
+          "markets": 7,
+          "animationNodes": 30,
+          "layerOff": null
+        },
+        "map": {
+          "cells": 3734,
+          "gridCells": 4982,
+          "states": 8,
+          "burgs": 88,
+          "graph": [
+            1280,
+            720
+          ]
+        }
+      },
+      "buttonsOn": [
+        "toggleBiomes",
+        "toggleBorders",
+        "toggleBurgIcons",
+        "toggleCells",
+        "toggleCompass",
+        "toggleCoordinates",
+        "toggleCultures",
+        "toggleEmblems",
+        "toggleGoods",
+        "toggleGrid",
+        "toggleHeight",
+        "toggleIce",
+        "toggleLabels",
+        "toggleLakes",
+        "toggleMarkers",
+        "toggleMarketsLayer",
+        "toggleMilitary",
+        "togglePopulation",
+        "togglePrecipitation",
+        "toggleProvinces",
+        "toggleRelief",
+        "toggleReligions",
+        "toggleRivers",
+        "toggleRoutes",
+        "toggleRulers",
+        "toggleScaleBar",
+        "toggleStates",
+        "toggleTemperature",
+        "toggleTexture",
+        "toggleTrade",
+        "toggleVignette",
+        "toggleZones"
+      ]
+    }
+  },
+  "layerCensus": {
+    "ocean": {
+      "elements": 7,
+      "min": 7,
+      "tags": {
+        "g": 2,
+        "rect": 2,
+        "path": 3
+      }
+    },
+    "landmass": {
+      "elements": 1,
+      "min": 1,
+      "tags": {
+        "rect": 1
+      }
+    },
+    "texture": {
+      "elements": 1,
+      "min": 1,
+      "tags": {
+        "image": 1
+      }
+    },
+    "terrs": {
+      "elements": 3,
+      "min": 3,
+      "tags": {
+        "g": 2,
+        "image": 1
+      }
+    },
+    "lakes": {
+      "elements": 13,
+      "min": 13,
+      "tags": {
+        "g": 6,
+        "use": 7
+      }
+    },
+    "biomes": {
+      "elements": 1,
+      "min": 1,
+      "tags": {
+        "image": 1
+      }
+    },
+    "cells": {
+      "elements": 1,
+      "min": 1,
+      "tags": {
+        "image": 1
+      }
+    },
+    "gridOverlay": {
+      "elements": 1,
+      "min": 1,
+      "tags": {
+        "rect": 1
+      }
+    },
+    "coordinates": {
+      "elements": 20,
+      "min": 20,
+      "tags": {
+        "g": 2,
+        "path": 1,
+        "text": 17
+      }
+    },
+    "compass": {
+      "elements": 1,
+      "min": 1,
+      "tags": {
+        "use": 1
+      }
+    },
+    "rivers": {
+      "elements": 185,
+      "min": 185,
+      "tags": {
+        "path": 185
+      }
+    },
+    "terrain": {
+      "elements": 1,
+      "min": 1,
+      "tags": {
+        "image": 1
+      }
+    },
+    "relig": {
+      "elements": 32,
+      "min": 32,
+      "tags": {
+        "path": 32
+      }
+    },
+    "cults": {
+      "elements": 21,
+      "min": 21,
+      "tags": {
+        "path": 21
+      }
+    },
+    "regions": {
+      "elements": 26,
+      "min": 26,
+      "tags": {
+        "g": 2,
+        "path": 24
+      }
+    },
+    "provs": {
+      "elements": 108,
+      "min": 108,
+      "tags": {
+        "g": 2,
+        "path": 69,
+        "text": 37
+      }
+    },
+    "zones": {
+      "elements": 58,
+      "min": 58,
+      "tags": {
+        "path": 58
+      }
+    },
+    "borders": {
+      "elements": 44,
+      "min": 44,
+      "tags": {
+        "g": 2,
+        "path": 42
+      }
+    },
+    "routes": {
+      "elements": 96,
+      "min": 96,
+      "tags": {
+        "g": 3,
+        "path": 93
+      }
+    },
+    "temperature": {
+      "elements": 23,
+      "min": 23,
+      "tags": {
+        "path": 6,
+        "g": 1,
+        "text": 16
+      }
+    },
+    "coastline": {
+      "elements": 9,
+      "min": 9,
+      "tags": {
+        "g": 2,
+        "use": 7
+      }
+    },
+    "ice": {
+      "elements": 9,
+      "min": 9,
+      "tags": {
+        "polygon": 9
+      }
+    },
+    "goods": {
+      "elements": 2672,
+      "min": 2672,
+      "tags": {
+        "g": 83,
+        "polygon": 2421,
+        "circle": 80,
+        "use": 80,
+        "rect": 4,
+        "text": 4
+      }
+    },
+    "markets": {
+      "elements": 49,
+      "min": 49,
+      "tags": {
+        "g": 7,
+        "clipPath": 7,
+        "path": 21,
+        "circle": 7,
+        "text": 7
+      }
+    },
+    "tradeAnimation": {
+      "elements": 90,
+      "min": 1,
+      "tags": {
+        "g": 30,
+        "use": 30,
+        "circle": 30
+      }
+    },
+    "prec": {
+      "elements": 2128,
+      "min": 2128,
+      "tags": {
+        "g": 1,
+        "text": 5,
+        "circle": 2122
+      }
+    },
+    "population": {
+      "elements": 2605,
+      "min": 2605,
+      "tags": {
+        "g": 2,
+        "line": 2603
+      }
+    },
+    "emblems": {
+      "elements": 136,
+      "min": 136,
+      "tags": {
+        "g": 3,
+        "use": 133
+      }
+    },
+    "icons": {
+      "elements": 28,
+      "min": 28,
+      "tags": {
+        "g": 20,
+        "image": 8
+      }
+    },
+    "labels": {
+      "elements": 151,
+      "min": 151,
+      "tags": {
+        "g": 13,
+        "text": 102,
+        "textPath": 14,
+        "tspan": 22
+      }
+    },
+    "armies": {
+      "elements": 500,
+      "min": 500,
+      "tags": {
+        "g": 90,
+        "rect": 164,
+        "text": 164,
+        "image": 82
+      }
+    },
+    "markers": {
+      "elements": 306,
+      "min": 306,
+      "tags": {
+        "svg": 53,
+        "g": 53,
+        "path": 52,
+        "circle": 42,
+        "text": 53,
+        "image": 53
+      }
+    },
+    "fogging-cont": {
+      "elements": 3,
+      "min": 3,
+      "tags": {
+        "g": 1,
+        "rect": 2
+      }
+    },
+    "ruler": {
+      "elements": 32,
+      "min": 32,
+      "tags": {
+        "g": 9,
+        "polyline": 4,
+        "circle": 9,
+        "text": 5,
+        "path": 5
+      }
+    },
+    "debug": {
+      "elements": 2,
+      "min": 2,
+      "tags": {
+        "circle": 1,
+        "path": 1
+      }
+    },
+    "scaleBar": {
+      "elements": 13,
+      "min": 13,
+      "tags": {
+        "rect": 1,
+        "g": 3,
+        "line": 3,
+        "text": 6
+      }
+    },
+    "legend": {
+      "elements": 20,
+      "min": 20,
+      "tags": {
+        "rect": 9,
+        "g": 2,
+        "text": 9
+      }
+    },
+    "vignette": {
+      "elements": 1,
+      "min": 1,
+      "tags": {
+        "rect": 1
+      }
+    }
+  },
+  "features": [
+    {
+      "id": "halo",
+      "rows": [
+        7
+      ],
+      "what": "State halo: shape rendering geometricPrecision, so #statesHalo and the per-state clip paths are drawn",
+      "expect": [
+        {
+          "path": "features.halo.viewboxShapeRendering",
+          "equals": "geometricPrecision"
+        },
+        {
+          "path": "features.halo.borderPaths",
+          "min": 6
+        },
+        {
+          "path": "features.halo.clipPaths",
+          "min": 6
+        },
+        {
+          "path": "features.halo.display",
+          "equals": "block"
+        }
+      ]
+    },
+    {
+      "id": "halo-setting",
+      "rows": [
+        7
+      ],
+      "what": "Options > Rendering reads Best quality, so the zoom styling keeps scaling the halo (the preamble matches the select to the file)",
+      "expect": [
+        {
+          "path": "features.halo.shapeRendering",
+          "equals": "geometricPrecision"
+        }
+      ],
+      "preamble": true
+    },
+    {
+      "id": "coastline-filter",
+      "rows": [
+        11
+      ],
+      "what": "Coastline with auto-filter=1 and the drop-shadow filter active at k=1 (switches at k 1.5 / 2.6)",
+      "expect": [
+        {
+          "path": "features.coastline.autoFilter",
+          "equals": "1"
+        },
+        {
+          "path": "features.coastline.filter",
+          "equals": "url(#dropShadow)"
+        },
+        {
+          "path": "features.coastline.features",
+          "min": 3
+        }
+      ]
+    },
+    {
+      "id": "lakes",
+      "rows": [
+        11
+      ],
+      "what": "Lakes spread over the six stock groups (freshwater, salt, sinkhole, frozen, lava, dry)",
+      "expect": [
+        {
+          "path": "features.lakes.freshwater",
+          "min": 1
+        },
+        {
+          "path": "features.lakes.salt",
+          "min": 1
+        },
+        {
+          "path": "features.lakes.sinkhole",
+          "min": 1
+        },
+        {
+          "path": "features.lakes.frozen",
+          "min": 1
+        },
+        {
+          "path": "features.lakes.lava",
+          "min": 1
+        },
+        {
+          "path": "features.lakes.dry",
+          "min": 1
+        }
+      ]
+    },
+    {
+      "id": "regiments",
+      "rows": [
+        18
+      ],
+      "what": "Regiments: plain, rotated (4 land, 2 naval), naval, data:image PNG and SVG icons, emoji icons",
+      "expect": [
+        {
+          "path": "features.regiments.domGroups",
+          "min": 9
+        },
+        {
+          "path": "features.regiments.rotated",
+          "min": 6
+        },
+        {
+          "path": "features.regiments.naval",
+          "min": 3
+        },
+        {
+          "path": "features.regiments.navalRotated",
+          "min": 2
+        },
+        {
+          "path": "features.regiments.imageIcon",
+          "min": 3
+        },
+        {
+          "path": "features.regiments.imageElements",
+          "min": 3
+        },
+        {
+          "path": "features.regiments.emojiIcon",
+          "min": 6
+        }
+      ]
+    },
+    {
+      "id": "markers",
+      "rows": [
+        17,
+        43
+      ],
+      "what": "Markers: every pin shape with colour emoji (ZWJ, skin tone, flag), data:image PNG and SVG icons, one pinned, with notes",
+      "expect": [
+        {
+          "path": "features.markers.domSvgs",
+          "min": 20
+        },
+        {
+          "path": "features.markers.emoji",
+          "min": 12
+        },
+        {
+          "path": "features.markers.dataImage",
+          "min": 2
+        },
+        {
+          "path": "features.markers.pinned",
+          "min": 1
+        },
+        {
+          "path": "features.markers.notes",
+          "min": 16
+        }
+      ]
+    },
+    {
+      "id": "legend",
+      "rows": [
+        24
+      ],
+      "what": "A drawn legend (states, two columns) at a non-default data-x/data-y",
+      "expect": [
+        {
+          "path": "features.legend.box",
+          "equals": true
+        },
+        {
+          "path": "features.legend.rects",
+          "min": 9
+        },
+        {
+          "path": "features.legend.texts",
+          "min": 9
+        },
+        {
+          "path": "features.legend.dataX",
+          "equals": "96"
+        },
+        {
+          "path": "features.legend.dataY",
+          "equals": "91"
+        }
+      ]
+    },
+    {
+      "id": "measurers",
+      "rows": [
+        6
+      ],
+      "what": "All four measurers: ruler (the default one plus a polyline), opisometer, route opisometer, planimeter",
+      "expect": [
+        {
+          "path": "features.measurers.Ruler",
+          "min": 2
+        },
+        {
+          "path": "features.measurers.Opisometer",
+          "min": 1
+        },
+        {
+          "path": "features.measurers.RouteOpisometer",
+          "min": 1
+        },
+        {
+          "path": "features.measurers.Planimeter",
+          "min": 1
+        },
+        {
+          "path": "features.measurers.domGroups",
+          "min": 5
+        },
+        {
+          "path": "features.measurers.serialized",
+          "min": 5
+        }
+      ]
+    },
+    {
+      "id": "compass",
+      "rows": [
+        6
+      ],
+      "what": "Compass rose on",
+      "expect": [
+        {
+          "path": "features.compass.use",
+          "min": 1
+        }
+      ]
+    },
+    {
+      "id": "scale-bar",
+      "rows": [
+        6
+      ],
+      "what": "Scale bar on",
+      "expect": [
+        {
+          "path": "layers.scaleBar.elements",
+          "min": 3
+        }
+      ]
+    },
+    {
+      "id": "grid-dashed",
+      "rows": [
+        5
+      ],
+      "what": "Hex grid with a dash pattern, round caps and a pattern offset (patternTransform scale/translate)",
+      "expect": [
+        {
+          "path": "features.grid.dasharray",
+          "equals": "5 3"
+        },
+        {
+          "path": "features.grid.linecap",
+          "equals": "round"
+        },
+        {
+          "path": "features.grid.fillRects",
+          "min": 1
+        }
+      ]
+    },
+    {
+      "id": "coordinates",
+      "rows": [
+        5
+      ],
+      "what": "Coordinate graticule and labels",
+      "expect": [
+        {
+          "path": "features.coordinates.paths",
+          "min": 1
+        },
+        {
+          "path": "features.coordinates.texts",
+          "min": 4
+        }
+      ]
+    },
+    {
+      "id": "texture",
+      "rows": [
+        23
+      ],
+      "what": "Texture layer with a same-origin image",
+      "expect": [
+        {
+          "path": "features.texture.images",
+          "min": 1
+        }
+      ]
+    },
+    {
+      "id": "debug",
+      "rows": [
+        23
+      ],
+      "what": "Runtime-only #debug content (route control point, highlight)",
+      "expect": [
+        {
+          "path": "layers.debug.elements",
+          "min": 2
+        }
+      ],
+      "preamble": true
+    },
+    {
+      "id": "ice",
+      "rows": [
+        19
+      ],
+      "what": "Ice: glaciers and icebergs, three icebergs and one glacier dragged (offset transform)",
+      "expect": [
+        {
+          "path": "features.ice.glaciers",
+          "min": 1
+        },
+        {
+          "path": "features.ice.icebergs",
+          "min": 3
+        },
+        {
+          "path": "features.ice.dragged",
+          "min": 4
+        },
+        {
+          "path": "features.ice.draggedData",
+          "min": 4
+        }
+      ]
+    },
+    {
+      "id": "zones-stock-hatch",
+      "rows": [
+        10
+      ],
+      "what": "Zones using all 42 stock hatches (hatch0..hatch41) plus four solid-colour zones",
+      "expect": [
+        {
+          "path": "features.zones.stockHatches",
+          "min": 42
+        },
+        {
+          "path": "features.zones.solid",
+          "min": 4
+        },
+        {
+          "path": "features.zones.paths",
+          "min": 46
+        }
+      ]
+    },
+    {
+      "id": "data-layers",
+      "rows": [
+        21
+      ],
+      "what": "Temperature, precipitation, population, goods and markets layers populated and visible",
+      "expect": [
+        {
+          "path": "features.dataLayers.temperature.elements",
+          "min": 1
+        },
+        {
+          "path": "features.dataLayers.prec.elements",
+          "min": 1
+        },
+        {
+          "path": "features.dataLayers.population.elements",
+          "min": 1
+        },
+        {
+          "path": "features.dataLayers.goods.elements",
+          "min": 1
+        },
+        {
+          "path": "features.dataLayers.markets.elements",
+          "min": 1
+        }
+      ]
+    },
+    {
+      "id": "cells",
+      "rows": [
+        4
+      ],
+      "what": "Cells layer (raster of the cell mesh); drawn by the preamble, not carried in the file",
+      "expect": [
+        {
+          "path": "features.cells.buttonOn",
+          "equals": true
+        },
+        {
+          "path": "features.cells.elements",
+          "min": 1
+        }
+      ],
+      "preamble": true
+    },
+    {
+      "id": "fog",
+      "rows": [
+        42
+      ],
+      "what": "Fog focus on two states through fog() with the #fogging veil on",
+      "expect": [
+        {
+          "path": "features.fog.paths",
+          "min": 2
+        },
+        {
+          "path": "features.fog.display",
+          "equals": "block"
+        },
+        {
+          "path": "features.fog.contMask",
+          "equals": "url(#fog)"
+        }
+      ]
+    },
+    {
+      "id": "vignette",
+      "rows": [
+        42
+      ],
+      "what": "Vignette on",
+      "expect": [
+        {
+          "path": "features.vignette.rect",
+          "equals": true
+        }
+      ]
+    },
+    {
+      "id": "labels",
+      "rows": [
+        15,
+        16
+      ],
+      "what": "Curved state labels, straight burg labels, custom labels with textPaths (straight, quadratic, cubic, multi-line, letter-spaced, haloed group)",
+      "expect": [
+        {
+          "path": "features.labels.stateCurvedTextPath",
+          "min": 6
+        },
+        {
+          "path": "features.labels.burgStraight",
+          "min": 50
+        },
+        {
+          "path": "features.labels.customCurved",
+          "min": 3
+        },
+        {
+          "path": "features.labels.customStraight",
+          "min": 3
+        },
+        {
+          "path": "features.labels.customWithTextPath",
+          "min": 6
+        },
+        {
+          "path": "features.labels.multiLine",
+          "min": 1
+        },
+        {
+          "path": "features.labels.haloGroups",
+          "min": 1
+        }
+      ]
+    },
+    {
+      "id": "emblems",
+      "rows": [
+        20
+      ],
+      "what": "Emblems (state, province and burg coats of arms)",
+      "expect": [
+        {
+          "path": "features.emblems.uses",
+          "min": 5
+        }
+      ]
+    },
+    {
+      "id": "trade",
+      "rows": [
+        22
+      ],
+      "what": "Trade layer on with markets and deals (the animation starts by itself on load)",
+      "expect": [
+        {
+          "path": "features.trade.deals",
+          "min": 1
+        },
+        {
+          "path": "features.trade.markets",
+          "min": 1
+        }
+      ]
+    },
+    {
+      "id": "trade-animation-running",
+      "rows": [
+        22
+      ],
+      "what": "Animated trade markers present a moment after load",
+      "expect": [
+        {
+          "path": "features.trade.animationNodes",
+          "min": 1
+        }
+      ],
+      "preamble": true
+    }
+  ],
+  "rowsCovered": {
+    "4": [
+      "cells"
+    ],
+    "5": [
+      "grid-dashed",
+      "coordinates"
+    ],
+    "6": [
+      "measurers",
+      "compass",
+      "scale-bar"
+    ],
+    "7": [
+      "halo",
+      "halo-setting"
+    ],
+    "10": [
+      "zones-stock-hatch"
+    ],
+    "11": [
+      "coastline-filter",
+      "lakes"
+    ],
+    "15": [
+      "labels"
+    ],
+    "16": [
+      "labels"
+    ],
+    "17": [
+      "markers"
+    ],
+    "18": [
+      "regiments"
+    ],
+    "19": [
+      "ice"
+    ],
+    "20": [
+      "emblems"
+    ],
+    "21": [
+      "data-layers"
+    ],
+    "22": [
+      "trade",
+      "trade-animation-running"
+    ],
+    "23": [
+      "texture",
+      "debug"
+    ],
+    "24": [
+      "legend"
+    ],
+    "42": [
+      "fog",
+      "vignette"
+    ],
+    "43": [
+      "markers"
+    ]
+  },
+  "cameras": [
+    {
+      "id": "k1-world",
+      "k": 1,
+      "cx": 640,
+      "cy": 360,
+      "x": 0,
+      "y": 0,
+      "covers": [
+        "every layer",
+        "halo",
+        "legend",
+        "compass",
+        "scale-bar",
+        "vignette",
+        "fog",
+        "zones-stock-hatch",
+        "ice",
+        "data-layers",
+        "labels",
+        "emblems"
+      ]
+    },
+    {
+      "id": "k2-showcase",
+      "k": 2,
+      "cx": 557.3,
+      "cy": 392.3,
+      "x": -474.6,
+      "y": -424.6,
+      "covers": [
+        "regiments",
+        "markers",
+        "measurers",
+        "labels",
+        "coastline-filter",
+        "grid-dashed",
+        "coordinates",
+        "halo",
+        "emblems"
+      ]
+    },
+    {
+      "id": "k2-ice",
+      "k": 2,
+      "cx": 320,
+      "cy": 180,
+      "x": 0,
+      "y": 0,
+      "covers": [
+        "ice"
+      ]
+    },
+    {
+      "id": "k2-hatch0",
+      "k": 2,
+      "cx": 593.2,
+      "cy": 180,
+      "x": -546.4,
+      "y": 0,
+      "covers": [
+        "zones-stock-hatch"
+      ]
+    },
+    {
+      "id": "k2-hatch41",
+      "k": 2,
+      "cx": 657.8,
+      "cy": 191.7,
+      "x": -675.6,
+      "y": -23.4,
+      "covers": [
+        "zones-stock-hatch"
+      ]
+    },
+    {
+      "id": "k4-showcase",
+      "k": 4,
+      "cx": 557.3,
+      "cy": 392.3,
+      "x": -1589.2,
+      "y": -1209.2,
+      "covers": [
+        "regiments",
+        "markers",
+        "measurers",
+        "labels",
+        "coastline-filter",
+        "grid-dashed",
+        "coordinates",
+        "halo",
+        "emblems"
+      ]
+    },
+    {
+      "id": "k4-ice",
+      "k": 4,
+      "cx": 160,
+      "cy": 90,
+      "x": 0,
+      "y": 0,
+      "covers": [
+        "ice"
+      ]
+    },
+    {
+      "id": "k4-hatch0",
+      "k": 4,
+      "cx": 593.2,
+      "cy": 90,
+      "x": -1732.8,
+      "y": 0,
+      "covers": [
+        "zones-stock-hatch"
+      ]
+    },
+    {
+      "id": "k4-hatch5",
+      "k": 4,
+      "cx": 962.9,
+      "cy": 174.4,
+      "x": -3211.6,
+      "y": -337.6,
+      "covers": [
+        "zones-stock-hatch"
+      ]
+    },
+    {
+      "id": "k4-hatch29",
+      "k": 4,
+      "cx": 1118.7,
+      "cy": 431.8,
+      "x": -3834.8,
+      "y": -1367.2,
+      "covers": [
+        "zones-stock-hatch"
+      ]
+    },
+    {
+      "id": "k8-showcase",
+      "k": 8,
+      "cx": 557.3,
+      "cy": 392.3,
+      "x": -3818.4,
+      "y": -2778.4,
+      "covers": [
+        "regiments",
+        "markers",
+        "measurers",
+        "labels",
+        "coastline-filter",
+        "grid-dashed",
+        "coordinates",
+        "halo",
+        "emblems"
+      ]
+    },
+    {
+      "id": "k8-ice",
+      "k": 8,
+      "cx": 80,
+      "cy": 45,
+      "x": 0,
+      "y": 0,
+      "covers": [
+        "ice"
+      ]
+    },
+    {
+      "id": "k8-hatch0",
+      "k": 8,
+      "cx": 593.2,
+      "cy": 76.8,
+      "x": -4105.6,
+      "y": -254.4,
+      "covers": [
+        "zones-stock-hatch"
+      ]
+    },
+    {
+      "id": "k8-hatch17",
+      "k": 8,
+      "cx": 277.7,
+      "cy": 302.8,
+      "x": -1581.6,
+      "y": -2062.4,
+      "covers": [
+        "zones-stock-hatch"
+      ]
+    }
+  ],
+  "coastlineSwitch": [
+    {
+      "id": "k1.4-coast",
+      "k": 1.4,
+      "cx": 557.3,
+      "cy": 392.3,
+      "x": -140.22,
+      "y": -189.22,
+      "covers": [
+        "coastline-filter"
+      ],
+      "expect": "url(#dropShadow)"
+    },
+    {
+      "id": "k1.6-coast",
+      "k": 1.6,
+      "cx": 557.3,
+      "cy": 392.3,
+      "x": -251.68,
+      "y": -267.68,
+      "covers": [
+        "coastline-filter"
+      ],
+      "expect": "none"
+    },
+    {
+      "id": "k2.5-coast",
+      "k": 2.5,
+      "cx": 557.3,
+      "cy": 392.3,
+      "x": -753.25,
+      "y": -620.75,
+      "covers": [
+        "coastline-filter"
+      ],
+      "expect": "none"
+    },
+    {
+      "id": "k2.7-coast",
+      "k": 2.7,
+      "cx": 557.3,
+      "cy": 392.3,
+      "x": -864.71,
+      "y": -699.21,
+      "covers": [
+        "coastline-filter"
+      ],
+      "expect": "url(#blurFilter)"
+    },
+    {
+      "id": "k3-coast",
+      "k": 3,
+      "cx": 557.3,
+      "cy": 392.3,
+      "x": -1031.9,
+      "y": -816.9,
+      "covers": [
+        "coastline-filter"
+      ],
+      "expect": "url(#blurFilter)"
+    }
+  ],
+  "preamble": "await __parity.preamble() after loading: draws the cells layer (not stored in the file) and #debug, then wait ~2 s for the trade animation to start",
+  "notes": [
+    "Header date and map id are normalised (see PARITY_CONFIG), so the sha is stable across rebuilds on one host.",
+    "Fonts: every non-local request is aborted, so label and legend metrics use the host's fallback fonts. The same file loaded with web fonts keeps its stored geometry.",
+    "The cells layer is a 0.8 MB raster the app redraws on toggle; it is left off in the file and drawn by __parity.preamble() to stay under the size budget."
+  ]
+}
