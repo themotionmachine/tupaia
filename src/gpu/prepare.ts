@@ -1051,9 +1051,10 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
 // stylesheet state, and clean in the reuse tracker (compat-reuse.ts) with no reference to a non-definition element.
 // A clean run takes the previous texture (shared) and, while their bytes stay within the reused rasters, its settle
 // detail; every other previous detail is released now, as a full re-prepare does at its start.
-// Off by default: on the route-focus run (Metal, DPR 2, k=8/16) a route close dirties every run under the fail-closed
-// ancestor rule, and with a subtree-only rule the budget-scaled world rasters still diverge from their history, so
-// reuse saved nothing there (PERF-A stop-loss). Opt in with ?gpu-compat-reuse=1 or a build with
+// Off by default, pending a decision: with the subtree rule and the world raster ladder (PERF W1), a route close on the
+// route-focus run (Metal, DPR 2, three route closes, single runs) keeps 4/6 world and 2/3 screen runs and the prepare
+// goes 2.9/5.4/5.8 -> 2.2/3.1/2.8 s (integration-20261019T210149-621Z -> 211754-900Z), and canonical passes with it
+// on, but no check yet compares a reused raster against SVG after an edit, and resume stays 5.5-8.1 s. Opt in with ?gpu-compat-reuse=1 or a build with
 // VITE_GPU_COMPAT_REUSE=1. The dirty-run telemetry (lastPrepare.reuse reasons) needs the flag too: off, the renderer
 // installs no tracker feed or outside-input watcher, and the default path matches the pre-reuse renderer.
 export function compatReuseEnabled(): boolean {
