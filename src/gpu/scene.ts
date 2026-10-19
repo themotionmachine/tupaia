@@ -181,26 +181,32 @@ function shapeStyle(cs: Styles, unfilled = false): ShapeStyle | string {
 }
 
 // Path data for a drawable element; null keeps it compat. `viewport` resolves percentage lengths (mask content only).
-function geometry(element: Element, viewport: Viewport | null = null): string | null {
+// Without `nativeShapes` only a rect with no rx/ry is native, as before PRIM.
+function geometry(element: Element, viewport: Viewport | null, nativeShapes: boolean): string | null {
   const tag = element.tagName;
   if (tag === "path") return element.getAttribute("d") || "";
   if (tag === "polygon" || tag === "polyline")
     return pointsToPath(element.getAttribute("points") || "") + (tag === "polygon" ? "Z" : "");
+  if (!nativeShapes && (tag !== "rect" || element.getAttribute("rx") || element.getAttribute("ry"))) return null;
   return basicShapePath(element, viewport);
 }
 
-// Mask content geometry (viewport-% rects as in #fog and #water, rect x/y as geometry rather than an offset) is native
-// unless the page opts out with ?gpu-mask-rects=0, which restores the previous rule that sent those masks to compat.
-function maskRectsDefault(): boolean {
+function flag(name: string): string | null {
   try {
-    return new URLSearchParams(globalThis.location?.search ?? "").get("gpu-mask-rects") !== "0";
+    return new URLSearchParams(globalThis.location?.search ?? "").get(name);
   } catch {
-    return true;
+    return null;
   }
 }
 
 export interface SceneOptions {
+  // Mask content geometry (viewport-% rects as in #fog and #water; rect x/y read as geometry, only a <use> x/y is an
+  // offset). Default on; ?gpu-mask-rects=0 restores the previous rule that sent those masks to compat.
   maskRects?: boolean;
+  // <circle>, <ellipse>, <line> and <rect rx/ry> as native shapes. Default off (opt in with ?gpu-native-shapes=1):
+  // the parity golden regresses on precipitation (circles) and population (lines) because native edges are not
+  // analytically antialiased like the SVG/compat raster, and layers of thousands of tiny primitives are mostly edge.
+  nativeShapes?: boolean;
 }
 
 function reliefIcons(value: string | null): ReliefSprite[] | null {
@@ -242,11 +248,17 @@ export function materializedIcons(group: Element): ReliefSprite[] | null {
 }
 
 export function buildScene(viewbox: Element, curveTolerance = 0.2, options: SceneOptions = {}): Scene {
-  const maskRects = options.maskRects ?? maskRectsDefault();
-  return withCanonicalEmblemPaint(() => canonicalBuildScene(viewbox, curveTolerance, maskRects));
+  const maskRects = options.maskRects ?? flag("gpu-mask-rects") !== "0";
+  const nativeShapes = options.nativeShapes ?? flag("gpu-native-shapes") === "1";
+  return withCanonicalEmblemPaint(() => canonicalBuildScene(viewbox, curveTolerance, maskRects, nativeShapes));
 }
 
-function canonicalBuildScene(viewbox: Element, curveTolerance: number, maskRects: boolean): Scene {
+function canonicalBuildScene(
+  viewbox: Element,
+  curveTolerance: number,
+  maskRects: boolean,
+  nativeShapes: boolean
+): Scene {
   const layers: Record<string, LayerReport> = {};
   // null unless a bench page installed globalThis.__gpuSceneCensus (scene-census.ts); read-only either way
   const census = SceneCensus.open();
@@ -279,7 +291,7 @@ function canonicalBuildScene(viewbox: Element, curveTolerance: number, maskRects
     out: Draw[],
     viewport: Viewport | null = null
   ) => {
-    const d = geometry(source, viewport);
+    const d = geometry(source, viewport, nativeShapes);
     const style = shapeStyle(cs, source.tagName === "line");
     if (d === null) return compat(element, layer, `<${source.tagName}>`, out);
     if (typeof style === "string") return compat(element, layer, style, out);

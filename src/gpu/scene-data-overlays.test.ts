@@ -3,7 +3,14 @@
 // population, goods, markets) and for style filters / masks (row 42: pencil, turbulence, paper, crumpled, splotch
 // filters; fog and vignette masks). Default preset applied; goods/prec start display:none like main.js.
 // Tags: [PRIM] circle/line/rect-rx/% rect become native   [COMPAT] filter and mask handling
-// PRIM (W1) flipped the [PRIM] routings: basic shapes are native, and mask content resolves viewport-% rects.
+// PRIM (W1): mask content resolves viewport-% rects (default on). Native basic shapes are opt-in (nativeShapes /
+// ?gpu-native-shapes=1) because the parity golden regressed on precipitation and population; the default stays compat.
+const shapes = { nativeShapes: true };
+const styled = (options = {}) => {
+  applyStylePreset(env);
+  return env.build(options);
+};
+
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { applyStylePreset, buildStyled, createMapEnv, layerOrder, layerRouting, type MapEnv } from "./test/dom-env";
 
@@ -15,20 +22,22 @@ afterEach(() => env.dispose());
 const show = (id: string) => env.layer(id).setAttribute("style", "display:inline");
 
 describe("row 21 data overlays", () => {
-  it("temperature: isoline paths and <circle> are native; tempLabels <text> is compat", () => {
+  it("temperature: isoline paths are native; tempLabels <text> and <circle> are compat (circle native opt-in)", () => {
     env.fill(
       "temperature",
       '<path d="M0,0h10v10z" fill="#ff0000" stroke="#ff0000"/><g id="tempLabels"><text x="1" y="1">12</text><circle cx="1" cy="1" r="1"/></g>'
     );
-    expect(layerRouting(buildStyled(env), "temperature")).toEqual(["shape", "compat(text)", "shape"]);
+    expect(layerRouting(styled(), "temperature")).toEqual(["shape", "compat(text; <circle>)"]);
+    expect(layerRouting(styled(shapes), "temperature")).toEqual(["shape", "compat(text)", "shape"]);
   });
 
-  it("[PRIM] population rural/urban strokes drawn as <line> are native strokes with no fill", () => {
+  it("[PRIM] population <line> strokes are compat by default; opt-in native strokes with no fill", () => {
     env.fill(
       "population",
       '<g id="rural" stroke="#444444"><line x1="0" y1="0" x2="1" y2="1"/><line x1="2" y1="2" x2="3" y2="3"/></g>'
     );
-    const scene = buildStyled(env);
+    expect(layerRouting(styled(), "population")).toEqual(["compat(<line>)"]);
+    const scene = styled(shapes);
     expect(layerRouting(scene, "population")).toEqual(["shape", "shape"]);
     expect(scene.layers.population).toMatchObject({ native: 2, compat: 0 });
     const [line] = scene.draws.filter(d => d.layer === "population");
@@ -39,26 +48,30 @@ describe("row 21 data overlays", () => {
 
   it("[PRIM] a <line> with no stroke paints nothing and is not drawn", () => {
     env.fill("population", '<g id="rural"><line x1="0" y1="0" x2="1" y2="1" fill="#ff0000" stroke="none"/></g>');
-    expect(layerRouting(buildStyled(env), "population")).toEqual([]);
+    expect(layerRouting(styled(shapes), "population")).toEqual([]);
   });
 
-  it("[PRIM] markets / goods <circle> and <rect rx> are native, as are plain <rect> and <path>", () => {
+  it("[PRIM] markets / goods <circle> and <rect rx> are compat by default, native opt-in; plain <rect>/<path> native", () => {
     show("goods");
     env.fill("goods", '<circle cx="1" cy="1" r="2" fill="#ff0000"/>');
     env.fill("markets", '<rect x="0" y="0" width="5" height="5" rx="1" fill="#000000"/>');
-    const scene = buildStyled(env);
+    const before = styled();
+    expect(layerRouting(before, "goods")).toEqual(["compat(<circle>)"]);
+    expect(layerRouting(before, "markets")).toEqual(["compat(<rect>)"]);
+    const scene = styled(shapes);
     expect(layerRouting(scene, "goods")).toEqual(["shape"]);
     expect(layerRouting(scene, "markets")).toEqual(["shape"]);
     env.fill("markets", '<rect x="0" y="0" width="5" height="5" fill="#000000"/><path d="M0,0h5v5z" fill="#111111"/>');
     expect(layerRouting(env.build(), "markets")).toEqual(["shape", "shape"]);
   });
 
-  it("[PRIM] <ellipse> is native; a percentage-sized rect outside a mask stays compat (no viewport units)", () => {
+  it("[PRIM] <ellipse> is native opt-in; a percentage-sized rect outside a mask stays compat (no viewport units)", () => {
     env.fill(
       "markets",
       '<ellipse cx="1" cy="1" rx="2" ry="1" fill="#000000"/><rect x="0" y="0" width="50%" height="50%" fill="#000000"/>'
     );
-    expect(layerRouting(buildStyled(env), "markets")).toEqual(["shape", "compat(<rect>)"]);
+    expect(layerRouting(styled(), "markets")).toEqual(["compat(<ellipse>; <rect>)"]);
+    expect(layerRouting(styled(shapes), "markets")).toEqual(["shape", "compat(<rect>)"]);
   });
 
   it("[PRIM] shapes it cannot reproduce exactly stay compat: em units, negative radius, auto ellipse radius", () => {
@@ -66,7 +79,7 @@ describe("row 21 data overlays", () => {
       "markets",
       '<circle cx="1em" cy="1" r="2" fill="#000000"/><circle cx="1" cy="1" r="-2" fill="#000000"/><ellipse cx="1" cy="1" rx="2" fill="#000000"/>'
     );
-    expect(layerRouting(buildStyled(env), "markets")).toEqual(["compat(<circle>; <ellipse>)"]);
+    expect(layerRouting(styled(shapes), "markets")).toEqual(["compat(<circle>; <ellipse>)"]);
   });
 
   it("precipitation and goods are display:none by default (main.js) and emit nothing", () => {

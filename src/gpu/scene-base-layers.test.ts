@@ -177,12 +177,13 @@ describe("row 23 texture and debug overlays", () => {
     expect(layerRouting(env.build(), "texture")).toEqual([]);
   });
 
-  it("[PRIM] #debug circles and lines are native shapes, as are debug paths", () => {
+  it("[PRIM] #debug circles and lines are compat by default and native opt-in; debug paths are native", () => {
     env.fill(
       "debug",
       '<circle cx="1" cy="1" r="2" fill="#ff0000"/><line x1="0" y1="0" x2="5" y2="5" stroke="#000000"/>'
     );
-    expect(layerRouting(build(), "debug")).toEqual(["shape", "shape"]);
+    expect(layerRouting(build(), "debug")).toEqual(["compat(<circle>; <line>)"]);
+    expect(layerRouting(env.build({ nativeShapes: true }), "debug")).toEqual(["shape", "shape"]);
     env.fill("debug", '<path d="M0,0L5,5" fill="none" stroke="#000000"/>');
     expect(layerRouting(env.build(), "debug")).toEqual(["shape"]);
   });
