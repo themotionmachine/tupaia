@@ -41,7 +41,7 @@ import {
   type StyleState,
   sharedReleaser
 } from "./compat-reuse";
-import type { GpuDevice, TrackedBuffer, TrackedTexture } from "./device";
+import type { GpuDevice, TextureSource, TrackedBuffer, TrackedTexture } from "./device";
 import type { Batch, FillBatch, Frame, ImageBatch, StrokeBatch } from "./framegraph";
 import { appendSegments, appendStrokeCaps, capCode, F32, normalizeDashes, pathBounds } from "./geometry";
 import { appendStencilMeshes, type MeshStats, newMeshStats } from "./mesh";
@@ -51,7 +51,7 @@ import { buildReliefAtlas, cachedReliefImage, meetImageRect, rasterizePattern } 
 import { type GlyphHits, glyphCovers, readGlyphReport } from "./relief-pick";
 import type { PrepareStep } from "./restore-phases";
 import { buildScene, type Draw, type LayerReport, type Scene, type ShapeStyle } from "./scene";
-import type { SceneCache, SceneKey } from "./scene-cache";
+import { cloneLayers, type SceneCache, type SceneKey } from "./scene-cache";
 import { createSlicer, slicePolicy } from "./slice";
 import { flattenPath, type Subpath } from "./svg-path";
 import { GLYPH_FLOATS, type GlyphAtlas, layoutLabels } from "./text";
@@ -72,6 +72,9 @@ export interface PrepareContext {
   picking?: boolean; // false: presentation only; canonical SVG remains responsible for editor targets
   // the frame on screen: clean compat runs reuse its rasters and settle details (compat-reuse.ts); absent: none
   previous?: Prepared | null;
+  // the CPU payload of the frame a context loss destroyed (retainFrame): a restore at the same key re-uploads it
+  // instead of walking and converting the scene again; absent or stale: a full prepare
+  retained?: RetainedFrame | null;
 }
 
 // The scene curve tolerance; buildScene's own default, passed explicitly so the cache key cannot drift from it.
@@ -128,6 +131,7 @@ export interface CompatReuse {
   structural: string; // the sibling-dependent stylesheet selector that widened invalidation, "" when none
   reasons: Record<string, number>;
   ms: number; // evaluation cost (style state, tracker, references)
+  retained: boolean; // restored from a frame's retained CPU payload (retainFrame): no scene walk or conversion
 }
 
 // Hit shapes of a root overlay in the root <svg>'s user space (SVG-local CSS px: #map has no viewBox).
@@ -173,7 +177,189 @@ export interface Prepared {
   windows: BitmapWindows | null;
   cpuBytes: number;
   tessellation: MeshStats;
+  // what retainFrame keeps across a context loss (B1 step 1): references only, the vertex arrays included
+  payload: Payload;
   release(): void;
+}
+
+// ---- retention across context loss (research B1 step 1) -------------------------------------------------------
+// A frame's CPU side survives a WebGL context loss; only its GPU objects die. A restore at the same revision, world,
+// raster bucket, viewport and picking mode would rebuild an identical scene, conversion and pick index, so the payload
+// keeps them (the batch tree, the vertex and glyph instance arrays, the sources of every texture the conversion made,
+// the bitmap-window sources and the compat runs) and the restore only re-uploads them. Compat rasters are still cut
+// again (from the export clone, cached per revision): their pixels are not retained (step 2).
+
+interface PayloadKey {
+  revision: number;
+  worldEpoch: number | undefined;
+  bucket: number;
+  picking: boolean;
+  world: string;
+  screen: string;
+  scale: number; // camera scale when picking: dashed-stroke hit rings follow it (dash-measure.ts)
+}
+
+interface Recipe {
+  label: string;
+  source: TextureSource;
+  options: { repeat?: boolean; mipmap?: boolean };
+}
+
+interface WindowSource {
+  slot: ImageBatch;
+  image: HTMLImageElement;
+  rect: [number, number, number, number];
+  opacity?: number;
+  detail: ImageBatch["detail"]; // the relief viewport's sharper canonical image (a recipe texture), at commit
+}
+
+interface Payload {
+  key: PayloadKey;
+  layers: Record<string, LayerReport>;
+  reasons: string[];
+  pick: PickIndex;
+  relief: Prepared["relief"];
+  tessellation: MeshStats;
+  batches: Batch[]; // the committed batch tree: its textures are matched to recipes, window slots and compat runs
+  vertices: { fans: Float32Array; segments: Float32Array; caps: Float32Array; sprites: Float32Array };
+  glyphs: Float32Array;
+  glyphCount: number;
+  // the glyph atlas canvas the instances index: the renderer's live atlas (the next prepare clears it), or the copy a
+  // retained restore uploaded (owned by this payload)
+  atlasCanvas: HTMLCanvasElement | null;
+  atlasCopy: boolean;
+  recipes: Map<TrackedTexture, Recipe>;
+  windows: WindowSource[];
+}
+
+export interface RetainedFrame extends Payload {
+  runs: { slot: ImageBatch; elements: Element[]; screen: boolean; sharp: boolean; hits?: HitShape[] }[];
+  atlas: HTMLCanvasElement | null; // a copy of the glyph atlas the frame's instances index
+}
+
+const payloadKey = (ctx: PrepareContext, picking: boolean): PayloadKey => ({
+  revision: ctx.revision,
+  worldEpoch: ctx.worldEpoch,
+  bucket: ctx.bucket,
+  picking,
+  world: `${ctx.world.x},${ctx.world.y},${ctx.world.width},${ctx.world.height}`,
+  screen: `${ctx.screen.width}x${ctx.screen.height}@${ctx.screen.dpr}`,
+  scale: picking ? ctx.camera.k : 0
+});
+
+const sameKey = (a: PayloadKey, b: PayloadKey) =>
+  (Object.keys(a) as (keyof PayloadKey)[]).every(key => a[key] === b[key]);
+
+// Opt-out for the A/B (bench/host/restore-timing.ts): ?gpu-restore-retain=0 makes every restore a full prepare.
+export function retainEnabled(): boolean {
+  try {
+    return new URLSearchParams(globalThis.location?.search ?? "").get("gpu-restore-retain") !== "0";
+  } catch {
+    return true;
+  }
+}
+
+const walk = (batches: Batch[], visit: (batch: Batch) => void) => {
+  for (const batch of batches) {
+    visit(batch);
+    if (batch.kind === "group") {
+      for (const item of batch.mask ?? []) visit(item.fill);
+      walk(batch.children, visit);
+    }
+  }
+};
+
+// Every texture of the tree has a source and every image slot is a window or a compat run: rehydrate can rebuild it.
+export function complete(retained: RetainedFrame): boolean {
+  const slots = new Set<ImageBatch>([
+    ...retained.windows.map(item => item.slot),
+    ...retained.runs.map(run => run.slot)
+  ]);
+  let ok = true;
+  walk(retained.batches, batch => {
+    if (batch.kind === "fill" && batch.tile) ok &&= retained.recipes.has(batch.tile.texture);
+    else if (batch.kind === "sprites") ok &&= retained.recipes.has(batch.texture);
+    else if (batch.kind === "image") ok &&= slots.has(batch);
+  });
+  for (const item of retained.windows) if (item.detail?.texture) ok &&= retained.recipes.has(item.detail.texture);
+  return ok;
+}
+
+// Re-uploads a retained frame's texture sources, re-adds its bitmap windows and gives its compat runs empty slots (the
+// world loop cuts their rasters as usual); returns the runs and a copy of the batch tree that points at all of them.
+export function rehydrate(
+  retained: RetainedFrame,
+  make: (label: string, source: TextureSource, options?: Recipe["options"]) => TrackedTexture,
+  addWindow: (image: HTMLImageElement, rect: [number, number, number, number], opacity?: number) => ImageBatch
+): { runs: CompatRun[]; batches: Batch[] } {
+  const textures = new Map<TrackedTexture, TrackedTexture>();
+  for (const [old, recipe] of retained.recipes) textures.set(old, make(recipe.label, recipe.source, recipe.options));
+  const slots = new Map<ImageBatch, ImageBatch>();
+  for (const item of retained.windows) {
+    const slot = addWindow(item.image, item.rect, item.opacity);
+    const detail = item.detail;
+    if (detail?.texture)
+      slot.detail = { texture: textures.get(detail.texture)!, rect: [...detail.rect], covers: [...detail.covers] };
+    slots.set(item.slot, slot);
+  }
+  const runs = retained.runs.map(run => {
+    const slot: ImageBatch = { kind: "image", texture: null, rect: [0, 0, 0, 0], screen: run.screen, detail: null };
+    slots.set(run.slot, slot);
+    return {
+      slot,
+      elements: [...run.elements],
+      screen: run.screen,
+      sharp: run.sharp,
+      hits: run.hits,
+      stamp: 0,
+      key: ""
+    };
+  });
+  const copy = (batch: Batch): Batch => {
+    switch (batch.kind) {
+      case "fill":
+        return batch.tile
+          ? { ...batch, tile: { ...batch.tile, texture: textures.get(batch.tile.texture)! } }
+          : { ...batch };
+      case "sprites":
+        return { ...batch, texture: textures.get(batch.texture)! };
+      case "image":
+        return slots.get(batch)!;
+      case "group":
+        return {
+          ...batch,
+          mask: batch.mask?.map(item => ({ fill: copy(item.fill) as FillBatch, white: item.white })) ?? null,
+          children: batch.children.map(copy)
+        };
+      default:
+        return { ...batch };
+    }
+  };
+  return { runs, batches: retained.batches.map(copy) };
+}
+
+// Called on context loss, before the frame is dropped. `liveAtlas`: the renderer's glyph atlas still holds the glyphs
+// this frame indexes (false while a prepare is in flight: it cleared the atlas). A frame that was itself restored from a
+// payload indexes that payload's own copy instead.
+export function retainFrame(prepared: Prepared | null, liveAtlas: boolean): RetainedFrame | null {
+  if (!prepared) return null;
+  const { glyphCount, atlasCanvas, atlasCopy } = prepared.payload;
+  let copy: HTMLCanvasElement | null = null;
+  if (glyphCount && atlasCopy) copy = atlasCanvas;
+  else if (glyphCount) {
+    if (!liveAtlas || !atlasCanvas) return null;
+    copy = document.createElement("canvas");
+    copy.width = atlasCanvas.width;
+    copy.height = atlasCanvas.height;
+    const context = copy.getContext("2d");
+    if (!context) return null;
+    context.drawImage(atlasCanvas, 0, 0);
+  }
+  return {
+    ...prepared.payload,
+    runs: prepared.runs.map(({ slot, elements, screen, sharp, hits }) => ({ slot, elements, screen, sharp, hits })),
+    atlas: copy
+  };
 }
 
 interface Graph {
@@ -211,7 +397,13 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
   const picking = ctx.picking !== false;
   const viewbox = svg.querySelector("#viewbox");
   if (!viewbox) throw new Error("missing #viewbox");
-  const scene = sceneFor(viewbox, ctx);
+  const payloadAt = payloadKey(ctx, picking);
+  const retained =
+    ctx.retained && retainEnabled() && sameKey(ctx.retained.key, payloadAt) && complete(ctx.retained)
+      ? ctx.retained
+      : null;
+  // a retained restore converts nothing: its scene is the payload's layer reports
+  const scene: Scene = retained ? { draws: [], layers: cloneLayers(retained.layers) } : sceneFor(viewbox, ctx);
   const textures: TrackedTexture[] = [];
   const buffers: TrackedBuffer[] = [];
   const windows = new BitmapWindows(device, 640, WINDOW_BUDGET);
@@ -234,8 +426,22 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
   const sprites = new F32(1 << 10);
   const glyphs: Float32Array[] = [];
   let glyphCount = 0;
-  const pick = new PickIndex(ctx.world.width, ctx.world.height);
-  let relief: Prepared["relief"] = null;
+  const pick = retained?.pick ?? new PickIndex(ctx.world.width, ctx.world.height);
+  let relief: Prepared["relief"] = retained?.relief ?? null;
+  // texture sources and bitmap-window sources the conversion used, for retainFrame
+  const recipes = new Map<TrackedTexture, Recipe>();
+  const windowSources: WindowSource[] = [];
+  const make = (label: string, source: TextureSource, options: Recipe["options"] = {}) => {
+    const texture = device.texture(label, source, options);
+    recipes.set(texture, { label, source, options });
+    textures.push(texture);
+    return texture;
+  };
+  const addWindow = (image: HTMLImageElement, rect: [number, number, number, number], opacity?: number) => {
+    const slot = windows.add(image, rect, opacity);
+    windowSources.push({ slot, image, rect: [...rect], opacity, detail: null });
+    return slot;
+  };
   const runs: CompatRun[] = [];
   const reasons: string[] = [];
   const tiles = new Map<string, FillBatch["tile"] | string>();
@@ -325,8 +531,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
       const result = pattern ? await rasterizePattern(pattern, ctx.bucket) : `missing pattern #${id}`;
       if (typeof result === "string") tiles.set(key, result);
       else {
-        const texture = device.texture(`pattern ${id}`, result.canvas, { repeat: true });
-        textures.push(texture);
+        const texture = make(`pattern ${id}`, result.canvas, { repeat: true });
         tiles.set(key, { texture, worldToUv: mat3(result.worldToUv), referenceZoom: result.referenceZoom });
       }
     }
@@ -425,7 +630,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
         // displays the canonical PNG (viewport crops). SVG hit testing sees that <image>, not its retained vectors
         // (they are an attribute, not DOM): pointer-events="none" (path-layer-canvas) makes the layer click-through,
         // otherwise the image rect is the hit area. The vectors are not hit regions in either case.
-        out.push(windows.add(image, meetImageRect(rect, image.naturalWidth, image.naturalHeight), draw.opacity));
+        out.push(addWindow(image, meetImageRect(rect, image.naturalWidth, image.naturalHeight), draw.opacity));
         if (picking && rasterHits(draw.element)) {
           const [x, y, w, h] = rect;
           pick.setDepth(pick.addBox(draw.layer, id, [x, y, x + w, y, x + w, y + h, x, y + h]), depth, path);
@@ -467,7 +672,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
         const width = Number(draw.element.getAttribute("width"));
         const height = Number(draw.element.getAttribute("height"));
         if (cached && width > 0 && height > 0) {
-          const slot = windows.add(
+          const slot = addWindow(
             cached,
             meetImageRect(
               [Number(draw.element.getAttribute("x") || 0), Number(draw.element.getAttribute("y") || 0), width, height],
@@ -486,8 +691,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
               Number(viewport.getAttribute("height"))
             ];
             if (detail && rect.every(Number.isFinite) && rect[2] > 0 && rect[3] > 0) {
-              const sharper = device.texture("canonical relief viewport", detail);
-              textures.push(sharper);
+              const sharper = make("canonical relief viewport", detail);
               slot.detail = {
                 texture: sharper,
                 rect: meetImageRect(rect, detail.naturalWidth, detail.naturalHeight),
@@ -510,10 +714,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
           continue;
         }
         // cells are 1-2× the on-screen icon size at this bucket: plain linear sampling, no trilinear mip blur
-        const texture = device.texture("relief atlas", atlas.canvas, { mipmap: true });
-        device.gl.bindTexture(device.gl.TEXTURE_2D, texture.handle);
-        device.gl.texParameteri(device.gl.TEXTURE_2D, device.gl.TEXTURE_MIN_FILTER, device.gl.LINEAR_MIPMAP_LINEAR);
-        textures.push(texture);
+        const texture = make("relief atlas", atlas.canvas, { mipmap: true }); // device: LINEAR_MIPMAP_LINEAR
         const first = sprites.length / 7;
         draw.icons.forEach((icon, k) => {
           const [u0, v0, u1, v1] = atlas.uv.get(icon.i)!;
@@ -571,24 +772,46 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
   try {
     const before: Batch[] = [];
     const after: Batch[] = [];
-    let seen = false;
-    for (const child of svg.children) {
-      if (child === viewbox) seen = true;
-      else if (!ignoredRoot.has(child.tagName) && getComputedStyle(child).display !== "none") {
-        compat(child, "screen overlay", seen ? after : before, null, true);
-        if (picking && seen) runs[runs.length - 1].hits = overlayShapes(child, svg);
+    const batches: Batch[] = [];
+    if (retained) {
+      const restored = rehydrate(retained, make, addWindow);
+      runs.push(...restored.runs);
+      batches.push(...restored.batches);
+      reasons.push(...retained.reasons);
+    } else {
+      let seen = false;
+      for (const child of svg.children) {
+        if (child === viewbox) seen = true;
+        else if (!ignoredRoot.has(child.tagName) && getComputedStyle(child).display !== "none") {
+          compat(child, "screen overlay", seen ? after : before, null, true);
+          if (picking && seen) runs[runs.length - 1].hits = overlayShapes(child, svg);
+        }
+      }
+      if (!(await convert(scene.draws, batches))) {
+        release();
+        return null;
       }
     }
-    const batches: Batch[] = [];
-    if (!(await convert(scene.draws, batches))) {
-      release();
-      return null;
-    }
     ctx.mark?.("scene");
+    const vertices = retained?.vertices ?? {
+      fans: fans.view(),
+      segments: segments.view(),
+      caps: caps.view(),
+      sprites: sprites.view()
+    };
+    let glyphData = retained?.glyphs ?? null;
+    if (retained) glyphCount = retained.glyphCount;
+    const atlasCanvas = retained ? retained.atlas : ctx.atlas.canvas;
 
     // Still to upload after the compat rasters: glyph atlas and vertex data (≈ CPU arrays).
-    const glyphBytes = glyphCount ? ctx.atlas.canvas.width * ctx.atlas.canvas.height * 4 : 0;
-    const vertexBytes = (fans.length + segments.length + caps.length + sprites.length + glyphCount * GLYPH_FLOATS) * 4;
+    const glyphBytes = glyphCount && atlasCanvas ? atlasCanvas.width * atlasCanvas.height * 4 : 0;
+    const vertexBytes =
+      (vertices.fans.length +
+        vertices.segments.length +
+        vertices.caps.length +
+        vertices.sprites.length +
+        glyphCount * GLYPH_FLOATS) *
+      4;
     const pending = glyphBytes + vertexBytes;
     const owned = () => textures.reduce((sum, texture) => sum + texture.bytes, 0) + windows.bytes;
 
@@ -606,6 +829,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
     // reachable changed since that raster was cut, takes its texture (and its settle detail) instead of a new raster.
     const reuse = adoptRuns(device, svg, runs, ctx.previous ?? null);
     const { adopted, report } = reuse;
+    report.retained = !!retained;
     for (const [run] of adopted) if (!run.screen && run.slot.texture) reused.push(run.slot.texture);
     const reusedScreen = [...adopted.keys()].reduce((n, run) => (run.screen ? n + rgba(run.slot.texture) : n), 0);
     // Tracked bytes as a full re-prepare sees them: it releases every previous detail at its start. A carried detail
@@ -736,34 +960,56 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
     report.worldKept = kept.size;
     ctx.mark?.("world");
 
-    const upload = (label: string, data: F32 | Float32Array, length: number) => {
-      if (!length) return null;
-      const buffer = device.buffer(label, data instanceof F32 ? data.view() : data);
+    const upload = (label: string, data: Float32Array) => {
+      if (!data.length) return null;
+      const buffer = device.buffer(label, data);
       buffers.push(buffer);
       return buffer;
     };
-    const glyphData = new Float32Array(glyphCount * GLYPH_FLOATS);
-    let offset = 0;
-    for (const chunk of glyphs) {
-      glyphData.set(chunk, offset);
-      offset += chunk.length;
+    if (!glyphData) {
+      glyphData = new Float32Array(glyphCount * GLYPH_FLOATS);
+      let offset = 0;
+      for (const chunk of glyphs) {
+        glyphData.set(chunk, offset);
+        offset += chunk.length;
+      }
     }
     let atlas: TrackedTexture | null = null;
-    if (glyphCount) {
-      atlas = device.texture("glyph atlas", ctx.atlas.canvas);
+    if (glyphCount && atlasCanvas) {
+      atlas = device.texture("glyph atlas", atlasCanvas);
       textures.push(atlas);
     }
+    const tree = [...before, ...batches, ...after];
     const frame: Frame = {
-      batches: [...before, ...batches, ...after],
-      fans: upload("fans", fans, fans.length),
-      segments: upload("segments", segments, segments.length),
-      caps: upload("stroke caps", caps, caps.length),
-      sprites: upload("sprites", sprites, sprites.length),
-      glyphs: upload("glyphs", glyphData, glyphData.length),
+      batches: tree,
+      fans: upload("fans", vertices.fans),
+      segments: upload("segments", vertices.segments),
+      caps: upload("stroke caps", vertices.caps),
+      sprites: upload("sprites", vertices.sprites),
+      glyphs: upload("glyphs", glyphData),
       atlas
     };
     ctx.mark?.("buffers");
-    const atlasBytes = ctx.atlas.canvas.width * ctx.atlas.canvas.height * 4; // CPU glyph canvas, counted once here
+    // CPU glyph canvas, counted once here (the renderer's atlas, or the retained copy it was restored from)
+    const atlasBytes = atlasCanvas ? atlasCanvas.width * atlasCanvas.height * 4 : 0;
+    // kept for retainFrame: views of the conversion's arrays (their capacity, up to twice the used length)
+    const vertexHeld = Object.values(vertices).reduce((n, array) => n + array.buffer.byteLength, 0);
+    const payload: Payload = {
+      key: payloadAt,
+      layers: retained?.layers ?? cloneLayers(scene.layers),
+      reasons: [...reasons],
+      pick,
+      relief,
+      tessellation: retained?.tessellation ?? tessellation,
+      batches: tree,
+      vertices,
+      glyphs: glyphData,
+      glyphCount,
+      atlasCanvas: glyphCount ? atlasCanvas : null,
+      atlasCopy: !!retained,
+      recipes,
+      windows: windowSources.map(item => ({ ...item, detail: item.slot.detail && { ...item.slot.detail } }))
+    };
     const overlays = indexOverlays(runs, ctx.screen);
     // tracker entries older than every raster this frame or the previous one still draws can no longer matter
     compatDirt.prune(
@@ -789,9 +1035,10 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
       overlays,
       relief,
       windows: windows.size ? windows : null,
-      // retained CPU memory: pick index and glyph atlas canvas (vertex arrays are dropped after upload)
-      cpuBytes: pick.bytes() + overlays.bytes() + atlasBytes,
-      tessellation,
+      // retained CPU memory: pick index, glyph atlas canvas and the vertex arrays kept for a context restore
+      cpuBytes: pick.bytes() + overlays.bytes() + atlasBytes + vertexHeld + glyphData.byteLength,
+      tessellation: payload.tessellation,
+      payload,
       release
     };
   } catch (error) {
@@ -833,7 +1080,8 @@ function adoptRuns(device: GpuDevice, svg: SVGSVGElement, runs: CompatRun[], pre
     aborted: "",
     structural: "",
     reasons: {},
-    ms: 0
+    ms: 0,
+    retained: false
   };
   const count = (reason: string) => {
     const keys = Object.keys(report.reasons);

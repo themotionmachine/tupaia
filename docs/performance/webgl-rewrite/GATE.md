@@ -60,7 +60,7 @@ The files involved:
 |---|---|
 | none | `typecheck`, `unit`, `build`, `bench`, `boundary-before`, `boundary-after`, `paired-summary`, `lock-probe` (it takes the lock itself, in its `mode`) |
 | shared | `smoke`, `fidelity`, `context`, `lifecycle`, `hatch`, `canonical`, `palette`, `package-smoke`, `paint`, `picking`, `integration`, `metrics`, `golden`, `golden-selftest` |
-| exclusive | `navigation`, `native-recovery`, `timing`, `profile`, `gpu-timing`, `paired` |
+| exclusive | `navigation`, `native-recovery`, `restore`, `timing`, `profile`, `gpu-timing`, `paired` |
 
 Two classifications are judgement calls. `integration` is shared because it gates on correctness cohorts; when a
 route-resume latency criterion (D4) lands, that measurement belongs in its own exclusive check. `native-recovery`
@@ -118,6 +118,7 @@ The runtimes are typical M1 Max wall times, without lock wait.
 | `hatch` | shared | `bench/host/hatch-motion.ts`: hatch pitch and phase stay stable across camera-only zoom and pan, with no re-prepare. | ~30 s |
 | `navigation` | exclusive | `bench/host/native-navigation-pilot.ts`: CDP-injected pan-near, pan-wide and wheel-zoom on shared and 100k. Reports frame p95, event-to-rAF p95 and the GPU-presented fraction. Fails only on errors; timings are descriptive. | ~2–3 min |
 | `native-recovery` | exclusive | `bench/host/native-recovery.ts`: moving-pick proof, recovery CPU profile and context loss while moving (defaults to world 100k, gesture wheel-zoom). | ~1–2 min |
+| `restore` | exclusive | `bench/host/restore-timing.ts`: WebGL context loss **at rest** on a settled camera (world `100k` generated, or `shared`), restored `reps` times per arm. Reads the renderer's restore clock (`lossToDrawMs`, `prepareMs`, prepare steps) and hover event-to-rAF while restoring, and diffs the settled frame before the loss against the one after (over16 count). `arms` is a comma list of URL-parameter sets applied with `history.replaceState` and interleaved ABBA, e.g. `arms=gpu-restore-retain=0,base` or `arms=gpu-slice-ms=12,gpu-slice-ms=50`; `cold=1` bumps the DOM revision right before each loss. Timings are descriptive; it fails only on errors or a restore that does not draw. | ~4–8 min |
 | `metrics` | shared | G-C fidelity (PROOF-PLAN §4). By default (`manifest=fresh`) it captures the 8 dpr×zoom cells from the current `dist/` with the smoke harness, then runs `bench/fidelity-metrics-run.ts`. It **fails if any pair misses SSIM ≥ 0.95**. over16 and the conservative reference gate are reported but do not fail it (the P2 baseline is 5/8 over16). `manifest=<path>` re-measures existing captures. | ~6–9 min |
 | `paired` | exclusive | One immutable ABBA block (2 SVG + 2 GPU slots) of `bench/renderer-ab-run.ts`, headful Chromium Metal, for `block=1..5`. Records the dist fingerprint before and after; a block fails if dist changed. | ~3.5 min |
 | `paired-summary` | no | `bench/host/paired-summary.ts` over five passing blocks from one dist, either the newest set or `dirs=a,b,c,d,e`. Fails if any metric is not comparable. Timing deltas are descriptive. | ~1 s |

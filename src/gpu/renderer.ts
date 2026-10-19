@@ -31,9 +31,11 @@ import {
   hasDetail,
   type Prepared,
   prepareFrame,
+  type RetainedFrame,
   refineCompat,
   refreshOverlays as refreshOverlayBatches,
-  releaseDetail
+  releaseDetail,
+  retainFrame
 } from "./prepare";
 import { scaleBucket } from "./raster";
 import { glyphTarget } from "./relief-pick";
@@ -192,6 +194,7 @@ export class GpuRenderer {
   private world = 0;
   private worldEpoch = 0; // bumped with the world (worldReplaced, dispose); keys the CPU scene cache
   private readonly scenes = new SceneCache(); // one CPU scene reused by context-restore prepares (scene-cache.ts)
+  private retained: RetainedFrame | null = null; // CPU payload of the frame a context loss destroyed (PERF B1)
   private preparing = false;
   private moving = false;
   private prepareWanted = false; // deferred or aborted by motion; the next settle prepares
@@ -435,6 +438,7 @@ export class GpuRenderer {
     this.generation++;
     this.worldEpoch++;
     this.scenes.clear();
+    this.retained = null;
     const current = document.querySelector<SVGSVGElement>("#map");
     if (current && current !== this.svg) {
       this.mutations.disconnect();
@@ -565,6 +569,7 @@ export class GpuRenderer {
     this.generation++;
     this.worldEpoch++;
     this.scenes.clear();
+    this.retained = null;
     cancelAnimationFrame(this.raf);
     clearTimeout(this.prepareTimer);
     clearTimeout(this.settleTimer);
@@ -931,7 +936,8 @@ export class GpuRenderer {
         scenes: this.scenes,
         worldEpoch: this.worldEpoch,
         picking: this.pickingEnabled,
-        previous: this.prepared
+        previous: this.prepared,
+        retained: this.retained
       });
       if (next) record.reuse = next.compat.reuse;
       if (!next) {
@@ -946,6 +952,7 @@ export class GpuRenderer {
       }
       this.drop();
       this.prepared = next;
+      this.retained = null;
       this.stats.prepares++;
       record.outcome = "committed";
       if (this.moving) this.preparesWhileMoving.commits++;
@@ -1134,6 +1141,8 @@ export class GpuRenderer {
     this.recovery.lost();
     this.generation++;
     this.prepareWanted = this.suspendWanted = false; // restored() prepares unconditionally
+    // PERF B1: keep the frame's CPU payload for a same-revision restore; an in-flight prepare has cleared the glyph atlas
+    this.retained = retainFrame(this.prepared, !this.preparing) ?? this.retained;
     this.drop();
     this.markers.forget();
     this.timer?.lose();

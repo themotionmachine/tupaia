@@ -16,10 +16,14 @@
 //   RESTORE_COLD   "1": bump the DOM revision (gpuRenderer.invalidate) right before each loss: a cold restore
 //   RESTORE_ZOOM   camera zoom (default 3.5, native-recovery's wheel camera); RESTORE_DPR (default 2)
 //   RESTORE_INPUT  "0" disables the hover input
+// Each sample also screenshots the settled frame before the loss and after the restore and counts the pixels that
+// differ by more than 16 (trade caravans move between the two shots, so a small count is expected): a restore that
+// rebuilds a different frame (a retained payload gone wrong) shows up there.
 import { createServer } from "node:http";
 import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { extname, resolve } from "node:path";
 import { chromium } from "playwright";
+import { decodePng } from "../png.ts";
 
 const root = resolve(import.meta.dirname, "../..");
 const dist = resolve(root, "dist");
@@ -54,6 +58,19 @@ const summarize = (values: number[]) => {
   const s = [...values].sort((a, b) => a - b);
   const at = (q: number) => s[Math.min(s.length - 1, Math.floor(s.length * q))] ?? null;
   return { n: s.length, p50: at(0.5), p95: at(0.95), max: s.at(-1) ?? null };
+};
+const diff = (a: Buffer, b: Buffer) => {
+  const [p, q] = [decodePng(a), decodePng(b)];
+  if (p.width !== q.width || p.height !== q.height) return { pixels: p.width * p.height, over16: -1, max: -1 };
+  let over16 = 0;
+  let max = 0;
+  for (let i = 0; i < p.data.length; i += 4) {
+    let d = 0;
+    for (let j = 0; j < 3; j++) d = Math.max(d, Math.abs(p.data[i + j] - q.data[i + j]));
+    if (d > 16) over16++;
+    if (d > max) max = d;
+  }
+  return { pixels: p.width * p.height, over16, max };
 };
 const median = (values: (number | null | undefined)[]) => {
   const s = values.filter((v): v is number => typeof v === "number").sort((a, b) => a - b);
@@ -127,6 +144,7 @@ try {
   });
   report.world = { name: WORLD, ...(await page.evaluate(() => ({ cells: (globalThis as any).pack?.cells?.i?.length, emblems: document.querySelectorAll("#emblems use").length, labels: document.querySelectorAll("#labels text").length }))) };
   const session = await context.newCDPSession(page);
+  await session.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 2, y: 2 });
   const allKeys = [...new Set(ARMS.flatMap(arm => (arm === "base" ? [] : arm.split("&").map(p => p.split("=")[0]))))];
 
   for (let rep = 0; rep < REPS; rep++) {
@@ -143,6 +161,7 @@ try {
       }, { arm, allKeys });
       await settled();
       await page.waitForTimeout(500);
+      const shotBefore = await page.screenshot();
       const before = await page.evaluate(({ cold }) => {
         const w = globalThis as any;
         const g = w.rendererStatus().gpu;
@@ -197,7 +216,10 @@ try {
       });
       moving = false;
       await mover;
+      await session.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 2, y: 2 });
       await settled();
+      await page.waitForTimeout(300);
+      const shotAfter = await page.screenshot();
       const after = await page.evaluate(({ drawnAt }) => {
         const w = globalThis as any;
         const s = w.__restoreProbe;
@@ -223,10 +245,11 @@ try {
         phases: drawn.lastPrepare?.phases,
         reason: drawn.lastPrepare?.reason,
         reuse: drawn.lastPrepare?.reuse && { cloned: drawn.lastPrepare.reuse.cloned, worldKept: drawn.lastPrepare.reuse.worldKept, reasons: drawn.lastPrepare.reuse.reasons },
-        retained: drawn.lastPrepare?.retained ?? null,
+        retained: drawn.lastPrepare?.reuse?.retained ?? null,
         eventToRaf: summarize(after.events),
         longTasks: { ...summarize(after.tasks), totalMs: Math.round(after.tasks.reduce((n: number, t: number) => n + t, 0)) },
         settleAfterDrawMs: Math.round(after.settledMs),
+        pixelsVsBeforeLoss: diff(shotBefore, shotAfter),
         memory: drawn.memory
       };
       report.samples.push(sample);
@@ -248,7 +271,9 @@ try {
         eventToRafP95: median(rows.map((s: any) => s.eventToRaf.p95)),
         eventToRafMax: Math.max(...rows.map((s: any) => s.eventToRaf.max ?? 0)),
         longTaskMs: median(rows.map((s: any) => s.longTasks.totalMs)),
-        sameRevision: rows.every((s: any) => s.sameRevision)
+        sameRevision: rows.every((s: any) => s.sameRevision),
+        retained: rows.map((s: any) => s.retained),
+        over16VsBeforeLossMax: Math.max(...rows.map((s: any) => s.pixelsVsBeforeLoss.over16))
       }];
     })
   );
