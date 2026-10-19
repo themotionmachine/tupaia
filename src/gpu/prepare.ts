@@ -890,7 +890,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
         const i = resolved.indexOf(missing);
         const e = run.elements[i];
         throw new Error(
-          `compat: ${missing} for <${e.tagName}> #${e.id} parent #${e.parentElement?.id} attrs ${e.getAttributeNames().join(",")} source siblings ${[...(e.parentElement?.children || [])].map(c => c.tagName).join(",")} clone siblings ${[...(source.querySelector(`#${CSS.escape(e.parentElement?.id || "")}`)?.children || [])].map(c => c.tagName).join(",")}`
+          `compat: ${missing} for <${e.tagName}> #${e.id} parent #${e.parentElement?.id} attrs ${e.getAttributeNames().join(",")} source siblings ${[...(e.parentElement?.children || [])].map(c => c.tagName).join(",")} clone siblings ${[...((e.parentElement?.id && source.querySelector(`#${CSS.escape(e.parentElement.id)}`)?.children) || [])].map(c => c.tagName).join(",")}`
         );
       }
       const region = run.screen ? { x: 0, y: 0, ...ctx.screen } : ctx.world;
@@ -1427,7 +1427,8 @@ function overlayCopy(live: Element, clone: SVGSVGElement): Element | null {
       const value = element.getAttribute(name) || "";
       const ids = [...value.matchAll(reference)].map(match => match[1]);
       if (/^(xlink:)?href$/.test(name) && value.startsWith("#")) ids.push(value.slice(1));
-      if (ids.some(id => !clone.querySelector(`#${CSS.escape(id)}`))) return null;
+      // href="#" (an empty fragment) references nothing in either tree
+      if (ids.some(id => id && !clone.querySelector(`#${CSS.escape(id)}`))) return null;
     }
   return copy;
 }
