@@ -5,9 +5,11 @@
 // judged on its own, SVG against GPU of the same build, with the PROOF-PLAN §4 thresholds as written:
 //   SSIM ≥ 0.95, over16 ≤ 1 %, and "≤ 0.5 % of pixels at Δ ≤ 44".
 // The last clause has two readings (P2-FIDELITY-MEASUREMENT.md §1):
-//   - "over44" (default): at most 0.5 % of pixels differ by more than 44;
-//   - "conservative": changed (Δ > 0) ≤ 0.5 % AND maxDelta ≤ 44.
-// Both are always reported; `reading` picks the one that gates. Choosing the reading is Ryan's call.
+//   - "conservative" (default, the repo's convention: fidelity-metrics.ts GATES, P2-FIDELITY-MEASUREMENT.md):
+//     changed (Δ > 0) ≤ 0.5 % AND maxDelta ≤ 44;
+//   - "over44" (opt-in only): at most 0.5 % of pixels differ by more than 44. Looser; nobody has approved it as the
+//     gate ("do not retune silently"), so it gates only when asked for.
+// Both are always reported; `reading` picks the one that gates. Changing the default is Ryan's call.
 // A layer that paints nothing in either arm fails ("empty layer is a failure, not a pass").
 import { GATES, type Rgba, rgbDiff, ssim } from "./fidelity-metrics.ts";
 
@@ -22,6 +24,9 @@ export const D1 = {
 export type Reading = "over44" | "conservative";
 // Fewer differing pixels than this against the blank means the arm painted nothing.
 export const MIN_INK_PIXELS = 4;
+// Not gated (D1 gates whole-frame fractions, so a small layer can lose much of its ink and still pass). A cell under
+// either bound carries a note next to its verdict so a per-layer PASS for a small family is not read as "all there".
+export const INK_NOTE = { inkRatioMin: 0.9, over16OfInkMax: 0.1 } as const;
 
 export interface CellMetrics {
   width: number;
@@ -40,6 +45,8 @@ export interface CellMetrics {
   // diagnostics normalised by the layer's own footprint (not gated: D1 gates whole-frame fractions)
   over16OfInk: number;
   over44OfInk: number;
+  // min(inkSvg, inkGpu) / max(...): 1 when both arms paint the same footprint, 0 when one is empty
+  inkRatio: number;
 }
 
 const delta = (a: ArrayLike<number>, b: ArrayLike<number>, i: number) =>
@@ -74,7 +81,8 @@ export function measureCell(svg: Rgba, gpu: Rgba, blank: Rgba, gpuBlank: Rgba = 
     inkGpu,
     inkUnion,
     over16OfInk: inkUnion ? diff.over16 / inkUnion : 0,
-    over44OfInk: inkUnion ? diff.over44 / inkUnion : 0
+    over44OfInk: inkUnion ? diff.over44 / inkUnion : 0,
+    inkRatio: Math.max(inkSvg, inkGpu) ? Math.min(inkSvg, inkGpu) / Math.max(inkSvg, inkGpu) : 0
   };
 }
 
@@ -95,12 +103,14 @@ export interface CellInput {
 export interface CellVerdict {
   pass: boolean;
   failures: string[];
+  // non-gating observations (ink footprint mismatch on a layer the whole-frame gates cannot see)
+  notes: string[];
   gates: { ssim: boolean; over16: boolean; over44: boolean; conservative: boolean; populated: boolean; census: boolean };
 }
 
 const pct = (v: number) => `${(v * 100).toFixed(3)}%`;
 
-export function judgeCell(input: CellInput, reading: Reading = "over44"): CellVerdict {
+export function judgeCell(input: CellInput, reading: Reading = "conservative"): CellVerdict {
   const m = input.metrics;
   for (const v of [m.ssim, m.over16Fraction, m.over44Fraction, m.changedFraction]) if (!Number.isFinite(v)) throw new Error("non-finite metric");
   const failures: string[] = [];
@@ -129,7 +139,12 @@ export function judgeCell(input: CellInput, reading: Reading = "over44"): CellVe
       failures.push(`census changed: ${drift.join(", ")}`);
     }
   }
-  return { pass: failures.length === 0, failures, gates };
+  const notes: string[] = [];
+  if (!svgEmpty && !gpuEmpty) {
+    if (m.inkRatio < INK_NOTE.inkRatioMin) notes.push(`ink footprint ${m.inkGpu} GPU vs ${m.inkSvg} SVG px (ratio ${m.inkRatio.toFixed(2)})`);
+    if (m.over16OfInk > INK_NOTE.over16OfInkMax) notes.push(`over16 is ${pct(m.over16OfInk)} of the layer's ink`);
+  }
+  return { pass: failures.length === 0, failures, notes, gates };
 }
 
 export function censusDrift(expected: CensusCounts, observed: CensusCounts | null): string[] {

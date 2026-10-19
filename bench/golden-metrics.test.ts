@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { crc32, deflateSync } from "node:zlib";
 import type { Rgba } from "./fidelity-metrics.ts";
-import { type CellMetrics, censusDrift, D1, heatmap, judgeCell, measureCell, MIN_INK_PIXELS } from "./golden-metrics.ts";
+import { type CellMetrics, censusDrift, D1, heatmap, INK_NOTE, judgeCell, measureCell, MIN_INK_PIXELS } from "./golden-metrics.ts";
 import { decodePng, encodePng } from "./png.ts";
 
 function image(width: number, height: number, f: (x: number, y: number) => [number, number, number]): Rgba {
@@ -65,23 +65,38 @@ test("over16 is Δ > 16 over the whole frame and gates at ≤ 1 %", () => {
   assert.match(over.failures.join(), /over16 1\.010%/);
 });
 
-test("over44 reading: at most 0.5 % of pixels beyond Δ 44", () => {
+test("over44 reading (opt-in): at most 0.5 % of pixels beyond Δ 44", () => {
   assert.equal(measureCell(svg, perturb(svg, 60, 44), white).over44Fraction, 0, "Δ = 44 is within");
-  assert.equal(judge(perturb(svg, 50, 45)).gates.over44, true);
-  const over = judge(perturb(svg, 51, 45));
+  assert.equal(judge(perturb(svg, 50, 45), {}, "over44").gates.over44, true);
+  const over = judge(perturb(svg, 51, 45), {}, "over44");
   assert.equal(over.pass, false);
   assert.match(over.failures.join(), /over44 0\.510%/);
 });
 
-test("conservative reading: changed ≤ 0.5 % and max Δ ≤ 44, only gating when chosen", () => {
+test("conservative reading is the default: changed ≤ 0.5 % and max Δ ≤ 44", () => {
   const few = perturb(svg, 50, 44);
-  assert.equal(judge(few, {}, "conservative").pass, true);
+  assert.equal(judge(few).pass, true);
   const many = perturb(svg, 51, 1); // tiny deltas, but more than 0.5 % changed
-  assert.equal(judge(many, {}, "conservative").gates.conservative, false);
-  assert.equal(judge(many, {}, "conservative").pass, false);
-  assert.equal(judge(many).pass, true, "the over44 reading ignores sub-16 deltas");
+  assert.equal(judge(many).gates.conservative, false);
+  assert.equal(judge(many).pass, false, "the default gates on the conservative reading");
+  assert.match(judge(many).failures.join(), /conservative: changed 0\.510%/);
+  assert.equal(judge(many, {}, "over44").pass, true, "only the opt-in over44 reading ignores sub-16 deltas");
   const spike = perturb(svg, 1, 100);
-  assert.equal(judge(spike, {}, "conservative").gates.conservative, false, "one pixel over Δ44 fails it");
+  assert.equal(judge(spike).gates.conservative, false, "one pixel over Δ44 fails it");
+  assert.equal(judge(spike).pass, false);
+});
+
+test("ink-footprint notes are reported next to the verdict but do not gate", () => {
+  // GPU arm loses the right half of the layer's ink: whole-frame fractions are small, the footprint is not
+  const half = image(W, H, (x, y) => (x < W / 2 ? layer(x, y) : [255, 255, 255]));
+  const m = measureCell(svg, half, white);
+  assert.ok(m.inkRatio < INK_NOTE.inkRatioMin, `ink ratio ${m.inkRatio}`);
+  const v = judgeCell({ metrics: { ...m, ssim: 1, over16Fraction: 0, changedFraction: 0, maxDelta: 0 }, census: counts, domDrawables: 4 });
+  assert.equal(v.pass, true, "notes never fail a cell");
+  assert.match(v.notes.join(), /ink footprint/);
+  assert.match(v.notes.join(), /of the layer's ink/);
+  assert.deepEqual(judge(svg).notes, [], "identical arms carry no note");
+  assert.equal(measureCell(svg, svg, white).inkRatio, 1);
 });
 
 test("SSIM catches a structural change that stays under the pixel-count gates' radar", () => {

@@ -120,7 +120,8 @@ const ARG_SPEC: Record<string, Spec> = {
   fixture: { type: "string", default: "shared" },
   census: { type: "string" },
   bg: { type: "string", default: "#ffffff", check: listOf(text => { if (!/^#[\da-f]{6}$/i.test(text)) throw new Error("bg must be #rrggbb"); }) },
-  reading: { type: "enum", values: ["over44", "conservative"], default: "over44" },
+  // "conservative" is the repo convention (P2-FIDELITY-MEASUREMENT.md); over44 is an unapproved, looser opt-in
+  reading: { type: "enum", values: ["conservative", "over44"], default: "conservative" },
   keep: { type: "enum", values: ["all", "fail"], default: "all" },
   break: { type: "enum", values: ["none", "drop-batch"], default: "none" }
 };
@@ -160,6 +161,9 @@ function parseArgs(check: string, raw: string[], allowed: string[], overrides: R
 }
 
 class UsageError extends Error {}
+// A usage error about the environment rather than one step (dist/ missing): every later step would hit it too, so a
+// tier stops with exit 2 instead of recording a FAIL and going on.
+class EnvError extends UsageError {}
 
 // ---------------------------------------------------------------- host lock
 
@@ -600,6 +604,9 @@ async function goldenCheck(ctx: Ctx): Promise<Partial<Result>> {
         summary: data.summary,
         fixture: data.fixture?.sha256?.slice(0, 12),
         break: data.args?.break,
+        reading: data.args?.reading,
+        // passing cells with a non-gating ink-footprint note: read these before trusting a small family's PASS
+        notes: (data?.cells ?? []).filter((c: Json) => c.pass && c.notes?.length).slice(0, 20).map((c: Json) => `${c.key}: ${c.notes.join("; ")}`),
         failing: failing.slice(0, 20).map((c: Json) => ({
           cell: c.key,
           ssim: round(c.metrics?.ssim, 4),
@@ -617,6 +624,52 @@ async function goldenCheck(ctx: Ctx): Promise<Partial<Result>> {
     if (!cell.pass && cell.images) for (const [kind, path] of Object.entries(cell.images)) images[`${cell.key}/${kind}`] = join(ctx.dir, String(path));
   result.images = images;
   return result;
+}
+
+// Re-proves that the golden harness can still tell pass from fail: ocean at k=1 must pass, and the same cell with the
+// GPU arm's bottom-most fill batch dropped (break=drop-batch) must fail on a metric gate (not on a harness error, and
+// only after a batch was actually dropped). Runs on the shared fixture so it does not wait for the parity map.
+async function goldenSelftestCheck(ctx: Ctx): Promise<Partial<Result>> {
+  const base = {
+    GOLDEN_MAP: ctx.map(),
+    GOLDEN_LAYERS: "ocean",
+    GOLDEN_K: "1",
+    GOLDEN_DPR: "2",
+    GOLDEN_PRESET: "default",
+    GOLDEN_READING: String(ctx.args.reading),
+    GOLDEN_KEEP: "all"
+  };
+  const arms: Record<string, Json> = {};
+  for (const arm of ["clean", "broken"] as const) {
+    const dir = join(ctx.dir, arm);
+    mkdirSync(dir, { recursive: true });
+    const report = join(dir, "golden.json");
+    const env = { ...base, GATE_OUT_DIR: dir, GOLDEN_BREAK: arm === "broken" ? "drop-batch" : "none" };
+    const code = await exec(nodeScript("bench/host/layer-golden.ts"), ctx.env(env), ctx.log, DEFS["golden-selftest"].timeout, true);
+    arms[arm] = { code, data: readJson(report) };
+  }
+  const cellOf = (arm: string): Json | undefined => arms[arm].data?.cells?.[0];
+  const clean = cellOf("clean");
+  const broken = cellOf("broken");
+  const problems: string[] = [];
+  if (arms.clean.code !== 0 || !arms.clean.data) problems.push(`clean run exit ${arms.clean.code}, report ${arms.clean.data ? "written" : "missing"}`);
+  else if (!clean?.pass || arms.clean.data.failure) problems.push(`ocean k=1 should pass and failed: ${arms.clean.data.failure ?? clean?.failures?.[0] ?? "no cell"}`);
+  if (arms.broken.code !== 0 || !arms.broken.data) problems.push(`broken run exit ${arms.broken.code}, report ${arms.broken.data ? "written" : "missing"}`);
+  else if (!broken) problems.push("broken run captured no cell");
+  else if (!broken.dropped?.dropped) problems.push("break=drop-batch dropped nothing: the self-test is vacuous");
+  else if (broken.pass) problems.push("break=drop-batch passed: the golden can no longer see a dropped path");
+  else if ((broken.failures ?? []).some((f: string) => f.startsWith("harness:"))) problems.push(`broken run failed on a harness error, not a metric: ${broken.failures[0]}`);
+  else if (broken.gates && broken.gates.ssim && broken.gates.over16 && broken.gates[String(ctx.args.reading)]) problems.push(`broken run failed but no metric gate tripped: ${broken.failures?.[0]}`);
+  const metricsOf = (c: Json) => c && { pass: c.pass, ssim: round(c.metrics?.ssim, 4), over16: round(c.metrics?.over16Fraction, 5), changed: round(c.metrics?.changedFraction, 5), why: c.failures?.[0] ?? null };
+  const images: Record<string, string> = {};
+  for (const [arm, cell] of [["clean", clean], ["broken", broken]] as const)
+    if (cell?.images) for (const [kind, path] of Object.entries(cell.images)) images[`${arm}/${kind}`] = join(ctx.dir, arm, String(path));
+  return {
+    exit_code: problems.length ? 1 : 0,
+    failure: problems.length ? problems.join(" | ") : null,
+    metrics: { reading: ctx.args.reading, clean: metricsOf(clean), broken: { ...metricsOf(broken), dropped: broken?.dropped?.dropped ?? null } },
+    images
+  };
 }
 
 // ---------------------------------------------------------------- check table
@@ -850,6 +903,7 @@ const DEFS: Record<string, CheckDef> = {
       return { exit_code: 0, failure: null, metrics };
     }
   },
+  "golden-selftest": { lock: "shared", keys: ["reading"], timeout: 600, run: goldenSelftestCheck },
   golden: {
     lock: "shared",
     keys: ["layers", "k", "coastk", "dpr", "preset", "fixture", "census", "bg", "reading", "keep", "break"],
@@ -958,7 +1012,7 @@ async function runCheck(check: string, args: Args, mode: LockMode | null = null,
   let lockWait = 0;
   let partial: Partial<Result>;
   try {
-    if (def.lock && !existsSync(join(REPO, "dist/index.html"))) throw new UsageError("dist/ is missing: run `gate build` first");
+    if (def.lock && !existsSync(join(REPO, "dist/index.html"))) throw new EnvError("dist/ is missing: run `gate build` first");
     if (def.lock) ctx.map(); // a missing fixture is a usage error before any lock wait
     if (def.lock && !lock.held) {
       await lock.acquire(mode ?? def.lock);
@@ -1020,6 +1074,8 @@ const TIERS: Record<string, Array<[string, Args]>> = {
     ["palette", {}],
     ["picking", {}],
     ["integration", { cohort: "short" }],
+    // the golden harness can still fail (dropped GPU path) and still pass (ocean k=1), before its verdicts are trusted
+    ["golden-selftest", {}],
     // D5 gate scale: default preset, k {1,4}, dpr 2, every layer family, on the parity fixture (FIX packet)
     ["golden", { layers: "all", k: "1,4", dpr: "2", preset: "default", fixture: "parity" }]
   ],
@@ -1054,6 +1110,7 @@ async function runTier(tier: string, args: Args): Promise<number> {
   let failedAt: string | null = null;
   const pairedDirs: string[] = [];
   // One lock for the whole tier, taken at its first browser step: exclusive if any step that will run needs it.
+  // (nightly releases it after each step; see below.)
   const modes = TIERS[tier].filter(([check]) => !skip.has(check)).map(([check]) => DEFS[check].lock);
   const mode: LockMode | null = modes.includes("exclusive") ? "exclusive" : modes.includes("shared") ? "shared" : null;
   const keepGoing = Boolean(args.keep_going) || tier === "nightly";
@@ -1075,7 +1132,10 @@ async function runTier(tier: string, args: Args): Promise<number> {
     try {
       result = await runCheck(check, stepArgs, mode);
     } catch (error) {
-      if (!(error instanceof UsageError)) throw error;
+      if (!(error instanceof UsageError) || error instanceof EnvError) {
+        await lock.release();
+        throw error;
+      }
       // e.g. the parity fixture is not there yet: this step fails, the tier reports it and goes on as configured
       steps.push({ check: label, status: "FAIL", exit_code: 2, failure: `usage: ${error.message}` });
       failedAt ??= label;
@@ -1084,6 +1144,9 @@ async function runTier(tier: string, args: Args): Promise<number> {
     if (check === "paired" && !result.failure) pairedDirs.push(result.dir);
     steps.push({ check: label, status: result.failure ? "FAIL" : "PASS", seconds: result.seconds, exit_code: result.exit_code, failure: result.failure, metrics: result.metrics, dir: result.dir });
     if (result.failure) failedAt ??= label;
+    // nightly: give the host lock back between golden steps, so a queued exclusive (timing) run gets in between
+    // instead of waiting out the 3-4 h matrix behind one tier-wide shared hold
+    if (tier === "nightly") await lock.release();
   }
   await lock.release();
   const seconds = Number(((Date.now() - started) / 1000).toFixed(1));

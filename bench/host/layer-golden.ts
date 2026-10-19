@@ -17,7 +17,7 @@
 //   GOLDEN_DPR       comma list of device pixel ratios                           default 2
 //   GOLDEN_PRESET    "map" (keep the fixture's style), "all" or comma list       default default
 //   GOLDEN_BG        backdrop #rrggbb                                            default #ffffff
-//   GOLDEN_READING   over44 | conservative (which "≤0.5 % at Δ≤44" reading gates) default over44
+//   GOLDEN_READING   conservative | over44 (which "≤0.5 % at Δ≤44" reading gates) default conservative
 //   GOLDEN_KEEP      all | fail: keep PNGs for every cell or only failing ones   default all
 //   GOLDEN_CENSUS    census expectations JSON (same shape as the census.json this writes)
 //   GOLDEN_BREAK     none | drop-batch: self-test only, deliberately drops the GPU arm's bottom-most fill/stroke batch
@@ -44,11 +44,11 @@ const coastZooms = parseZooms(env.GOLDEN_COAST_K || "");
 const dprs = parseZooms(env.GOLDEN_DPR || "2");
 const presets = parsePresets(env.GOLDEN_PRESET || "default");
 const bg = env.GOLDEN_BG || "#ffffff";
-const reading = (env.GOLDEN_READING || "over44") as Reading;
+const reading = (env.GOLDEN_READING || "conservative") as Reading;
 const keep = env.GOLDEN_KEEP || "all";
 const breakMode = env.GOLDEN_BREAK || "none";
 if (!/^#[\da-f]{6}$/i.test(bg)) throw Error(`GOLDEN_BG must be #rrggbb, got ${bg}`);
-if (!["over44", "conservative"].includes(reading)) throw Error(`GOLDEN_READING must be over44|conservative`);
+if (!["over44", "conservative"].includes(reading)) throw Error(`GOLDEN_READING must be conservative|over44`);
 if (!["all", "fail"].includes(keep)) throw Error(`GOLDEN_KEEP must be all|fail`);
 if (!["none", "drop-batch"].includes(breakMode)) throw Error(`GOLDEN_BREAK must be none|drop-batch`);
 if (dprs.some(d => d !== 1 && d !== 2)) throw Error("GOLDEN_DPR must be 1 and/or 2");
@@ -69,6 +69,7 @@ interface Cell {
   k: number;
   pass: boolean;
   failures: string[];
+  notes?: string[];
   gates?: Record<string, boolean>;
   metrics?: CellMetrics;
   census?: CensusCounts | null;
@@ -253,12 +254,15 @@ const readCensus = (page: Page, family: Family) =>
       const layer = status?.gpu?.layers?.[id] ?? null;
       const sink = w.__gpuSceneCensus?.last?.layers?.[id] ?? null;
       let compatRunElements = 0;
-      for (const run of w.gpuRenderer?.prepared?.runs ?? []) for (const e of run.elements ?? []) if (target && (e === target || target.contains(e))) compatRunElements++;
+      // gpuRenderer.prepared is renderer-internal: if its shape changes, say so instead of counting 0
+      const runs = w.gpuRenderer?.prepared?.runs;
+      const runsReadable = Array.isArray(runs);
+      for (const run of runsReadable ? runs : []) for (const e of run.elements ?? []) if (target && (e === target || target.contains(e))) compatRunElements++;
       let domDrawables = 0;
       if (target)
         for (const e of target.querySelectorAll("path,polygon,polyline,rect,circle,ellipse,line,text,use,image"))
           if ((e as any).checkVisibility ? (e as any).checkVisibility({ visibilityProperty: true }) : true) domDrawables++;
-      return { layer, sink, compatRunElements, domDrawables, build: w.__gpuSceneCensus?.last?.build ?? null };
+      return { layer, sink, compatRunElements, runsReadable, domDrawables, build: w.__gpuSceneCensus?.last?.build ?? null };
     },
     { id: family.id, root: !!family.root }
   );
@@ -334,8 +338,14 @@ try {
               cell.renderer = status;
               if (status.active !== "gpu") cell.failures.push(`GPU not active: ${status.fallbackReason ?? "no frame"}`);
               else if (status.timedOut) cell.failures.push("GPU frame did not settle within 60 s");
-              if (breakMode === "drop-batch") cell.dropped = await dropBatch(page);
+              if (breakMode === "drop-batch") {
+                const dropped = await dropBatch(page);
+                cell.dropped = dropped;
+                // the self-test must break something; a no-op here would make it vacuous
+                if (!dropped.dropped) cell.failures.push("harness: break=drop-batch found no gpuRenderer.prepared.frame.batches to drop");
+              }
               const seen = await readCensus(page, family);
+              if (family.root && !seen.runsReadable) cell.failures.push("harness: gpuRenderer.prepared.runs is not readable; root-family GPU census unknown");
               cell.domDrawables = seen.domDrawables;
               cell.compatRunElements = seen.compatRunElements;
               cell.censusKinds = seen.sink?.kinds ?? null;
@@ -354,6 +364,7 @@ try {
               cell.metrics = measureCell(svg, gpu, blankSvg, blankGpu);
               const verdict = judgeCell({ metrics: cell.metrics, census: cell.census, domDrawables: cell.domDrawables, expected: cell.expected }, reading);
               cell.gates = verdict.gates;
+              if (verdict.notes.length) cell.notes = verdict.notes;
               cell.failures.push(...verdict.failures);
               cell.pass = cell.failures.length === 0;
               if (keep === "all" || !cell.pass) {
@@ -371,7 +382,7 @@ try {
             const m = cell.metrics;
             log(
               `${cell.pass ? "PASS" : "FAIL"} ${key}${m ? ` ssim ${m.ssim.toFixed(4)} over16 ${(m.over16Fraction * 100).toFixed(3)}% over44 ${(m.over44Fraction * 100).toFixed(3)}% changed ${(m.changedFraction * 100).toFixed(2)}%` : ""}` +
-                `${cell.census ? ` census n${cell.census.native}/c${cell.census.compat}/s${cell.census.skipped}` : ""}${cell.pass ? "" : ` :: ${cell.failures.join("; ")}`}`
+                `${cell.census ? ` census n${cell.census.native}/c${cell.census.compat}/s${cell.census.skipped}` : ""}${cell.pass ? "" : ` :: ${cell.failures.join("; ")}`}${cell.notes ? ` [note: ${cell.notes.join("; ")}]` : ""}`
             );
             write();
           }
@@ -398,6 +409,8 @@ try {
     pass: report.cells.length - failed.length,
     fail: failed.length,
     empty: report.cells.filter(c => c.gates && !c.gates.populated).length,
+    // passing cells whose layer footprint differs between arms (not gated; see INK_NOTE in golden-metrics.ts)
+    passWithNotes: report.cells.filter(c => c.pass && c.notes?.length).map(c => c.key),
     byFamily
   };
   const validation = report.warnings.some(w => /GL_INVALID_|Feedback loop/i.test(w));

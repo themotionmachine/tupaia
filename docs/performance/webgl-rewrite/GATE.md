@@ -59,7 +59,7 @@ The files involved:
 | Lock | Checks |
 |---|---|
 | none | `typecheck`, `unit`, `build`, `bench`, `boundary-before`, `boundary-after`, `paired-summary`, `lock-probe` (it takes the lock itself, in its `mode`) |
-| shared | `smoke`, `fidelity`, `context`, `lifecycle`, `hatch`, `canonical`, `palette`, `package-smoke`, `paint`, `picking`, `integration`, `metrics`, `golden` |
+| shared | `smoke`, `fidelity`, `context`, `lifecycle`, `hatch`, `canonical`, `palette`, `package-smoke`, `paint`, `picking`, `integration`, `metrics`, `golden`, `golden-selftest` |
 | exclusive | `navigation`, `native-recovery`, `timing`, `profile`, `gpu-timing`, `paired` |
 
 Two classifications are judgement calls. `integration` is shared because it gates on correctness cohorts; when a
@@ -69,6 +69,11 @@ is exclusive because its recovery CPU profile is a timing.
 - A tier takes one lock at its first browser step and holds it until the tier ends, so nothing slips in between its
   steps. It takes the strongest mode any of its steps (minus `skip=`) needs: `browser` and `nightly` take a shared
   slot, and `full` takes the exclusive lock. The build runs before any lock is taken.
+- `nightly` is the exception: it releases its shared slot after every golden step and takes it again for the next.
+  A timing run queued during the 3–4 h matrix holds the turnstile, so it gets the host at the next step boundary
+  instead of freezing every job until morning. **Open for Ryan:** PHASE1-PLAN's T2 table lists the nightly golden
+  as exclusive; it is shared here because it is correctness work. Change `DEFS.golden.lock` or give `nightly` its
+  own mode if you want it exclusive.
 - A fixture problem (such as a missing parity map) is reported before any wait for the lock.
 - If the gate is itself running under `hostlock.py` (detected from the process ancestry) or under another gate
   (`TUPAIA_GATE_LOCK_HELD` set), it does not lock again, because locking again would deadlock against the parent.
@@ -106,7 +111,7 @@ The runtimes are typical M1 Max wall times, without lock wait.
 | `palette` | shared | `bench/host/palette.ts`: command-palette and keyboard creation flows across the svg, gpu and gpu-select arms, with exact settled-paint parity between rendering-only GPU and GPU-select. **Known failing on gpu/rewrite (2026-10-19)**: `#commandPaletteResults` never shows an option in the svg arm. Being fixed separately. | ~45 s |
 | `picking` | shared | `bench/picking-parity.ts`: GPU pick against the SVG `elementFromPoint` oracle on the shared and 100k worlds. Arguments are `dpr`, `zoom`, `phase=settled\|motion`, `reliefMode` and `denseLabels`. | 30–110 s |
 | `integration` | shared | `bench/renderer-integration.ts`: editors, stale-fallback, save/export round trip, resync, marker, route and undo cohorts under the GPU renderer. Arguments are `cohort=short\|full`, `focus=all\|route` and `preamble`. | ~7–9 min (short) |
-| `smoke` | shared | `bench/host/gpu-smoke.ts`: the GPU path activates without fallback, trade animation advances, and the GPU frame is compared with the SVG frame (`diff`). `layer=` isolates one layer (the golden's isolation, `golden-isolation.ts`) for diagnosis only. | ~40 s |
+| `smoke` | shared | `bench/host/gpu-smoke.ts`: the GPU path activates without fallback, trade animation advances, and the GPU frame is compared with the SVG frame (`diff`). `layer=` isolates one layer (the golden's isolation, `golden-isolation.ts`) for diagnosis only. Unlike `golden`, smoke and fidelity switch on only heightmap and relief: any other family whose app toggle is off (biomes, for one) captures a blank frame, and smoke has no emptiness check, so it does not fail. Use `golden layers=<family>` for a judged single-layer run. | ~40 s |
 | `fidelity` | shared | `bench/host/gpu-fidelity.ts`: smoke plus a diff heatmap PNG and the top 20 error hotspots. Diagnostic only. | ~40 s |
 | `context` | shared | Smoke plus an injected WebGL context loss, then restore. | ~45 s |
 | `lifecycle` | shared | Smoke plus 20 map reloads with forced GC. Reports JS heap growth and context loss/restore. | ~3 min |
@@ -122,6 +127,7 @@ The runtimes are typical M1 Max wall times, without lock wait.
 | `boundary-after` | no | `bench/renderer-bundle-boundary.ts`: the static module graph for default boot and save/export contains no GPU presentation code (the GPU stays lazy). | ~1 s |
 | `boundary-before` | no | The same analysis, but expects GPU code to be **present**. Run it only against a pre-split baseline build; it fails on current builds by design. | ~1 s |
 | `golden` | shared | `bench/host/layer-golden.ts`: the per-layer golden (D1, D5). See "Per-layer golden" below. | ~3–4 min for all families at k {1,4}, dpr 2 |
+| `golden-selftest` | shared | Proves the golden can still fail and pass: `layers=ocean k=1` on the shared fixture must pass, and the same cell with `break=drop-batch` must fail on a metric gate after a batch was actually dropped. A harness error or a no-op break fails the check. `reading=` as for golden. | ~40 s |
 | `lock-probe` | (takes it) | Acquires and releases the host lock in `mode=shared\|exclusive` (default exclusive) and launches nothing. Shows whether another job holds the lock, which slot you got, and how long you waited. | 0 s + wait |
 
 The scripts in `bench/host/` are ports of the Codex `control/*.ts` checks. They resolve the repo root from
@@ -138,12 +144,17 @@ Each tier runs its steps serially and stops at the first failure. Pass `keep_goi
 | Tier | Steps | Runtime |
 |---|---|---|
 | `quick` | typecheck → unit → build | ~15 s |
-| `browser` | build → *shared lock* → canonical → palette → picking → integration (short cohort) → golden (D5 gate scale: all families, k 1,4, dpr 2, default preset, `fixture=parity`) | ~15–17 min |
-| `nightly` | *shared lock* → golden × 24: dpr {1,2} × the 12 built-in presets, each step all families at k {1,2,4,8} plus the coastline switch points 1.4/1.6/2.5/2.7 (`coastk`), `fixture=parity`, `keep=fail`. Always runs every step (`keep_going` is implied). | ~3–4 h |
+| `browser` | build → *shared lock* → canonical → palette → picking → integration (short cohort) → golden-selftest → golden (D5 gate scale: all families, k 1,4, dpr 2, default preset, `fixture=parity`) | ~15–17 min |
+| `nightly` | golden × 24, each under its own *shared slot* (released between steps): dpr {1,2} × the 12 built-in presets, each step all families at k {1,2,4,8} plus the coastline switch points 1.4/1.6/2.5/2.7 (`coastk`), `fixture=parity`, `keep=fail`. Always runs every step (`keep_going` is implied). | ~3–4 h |
 | `full` | *exclusive lock* → browser → fidelity → navigation → metrics (fresh) → paired blocks 1–5 at dpr 2 → paired-summary | ~45–50 min |
 
 The `golden` step of `browser` and the whole of `nightly` need the parity fixture from the FIX packet. Until it
 exists, the step fails with a usage message. Run `gate browser skip=golden` and report the skip.
+(`golden-selftest` uses the shared fixture and does not wait for it.)
+
+Inside a tier, a usage error that belongs to one step (a missing parity fixture) is recorded as that step's FAIL and
+the tier goes on as configured. An environment error that every later step would hit too (`dist/` missing) stops
+the tier with exit 2.
 
 ## Which tier a stage runs
 
@@ -176,7 +187,7 @@ Arguments:
 | `preset` | a built-in style preset, a comma list, `all`, or `map` (keep the fixture's own style) | `default` |
 | `fixture` | `shared` (shared-v8), `parity` (`TUPAIA_GATE_PARITY_MAP`, `tests/fixtures/parity/parity.map` or `~/.tupaia-gates/fixtures/parity.map`), or a path to a `.map` | `shared` |
 | `census` | path to a census expectations JSON | none |
-| `reading` | `over44` or `conservative` (see the verdict) | `over44` |
+| `reading` | `conservative` or `over44` (see the verdict) | `conservative` |
 | `keep` | `all`, or `fail` to keep PNGs for failing cells only | `all` |
 | `bg` | backdrop `#rrggbb` | `#ffffff` |
 | `break` | `none`, or `drop-batch` (self-test only, see below) | `none` |
@@ -194,9 +205,17 @@ Arguments:
     compat raster became an opaque sheet over the native draws (the ocean pattern hid the native ocean fill).
 - **Verdict per cell (D1).**
   - SSIM ≥ 0.95, over16 ≤ 1 %, and "≤ 0.5 % at Δ ≤ 44", all on the isolated layer's whole frame.
-  - The default reading of the last clause, `reading=over44`, is: at most 0.5 % of pixels differ by more than 44.
-  - `reading=conservative` is P2-FIDELITY-MEASUREMENT's reading: changed ≤ 0.5 % and max Δ ≤ 44.
-  - Both readings are always reported. **Which reading gates is Ryan's decision.**
+  - The default reading of the last clause, `reading=conservative`, is P2-FIDELITY-MEASUREMENT's reading and the
+    repo convention (`fidelity-metrics.ts` GATES): changed ≤ 0.5 % and max Δ ≤ 44.
+  - `reading=over44` (at most 0.5 % of pixels differ by more than 44) is a looser, **opt-in** reading. Nobody has
+    approved it as the gate (P2-FIDELITY-MEASUREMENT: "do not retune silently"), so the `browser` and `nightly`
+    tiers never use it. On the 2026-10-19 shared-fixture run it would have passed `temperature` with 47–65 % of
+    pixels changed. Making it the default is Ryan's decision.
+  - Both readings are always reported (`gates.conservative`, `gates.over44` per cell).
+  - All gates are whole-frame fractions, so a small or faint family can lose much of its ink and still pass. Each
+    cell therefore reports `inkRatio` (min/max of the two arms' ink pixels) and `over16OfInk`, and carries a
+    non-gating `notes` entry when the ratio is under 0.9 or over16 exceeds 10 % of the layer's ink. The result line
+    lists passing cells with notes; read them before trusting a PASS for compass, burgs, markers or scaleBar.
   - A family that paints nothing in either arm fails: an empty layer is a failure, not a pass. Each arm's ink is
     counted against its own blank capture (every family hidden). Page chrome over the canvas blends differently
     from the same chrome over the SVG.
@@ -209,6 +228,9 @@ Arguments:
   - the visible drawable SVG elements in the family.
   `census.json` in the evidence directory has the shape of an expectations file. Copy it and pass it as `census=`
   to turn any change in native, compat or skipped counts into a cell failure.
+  The native/compat counts are the renderer's (after `prepare.ts`), not the scene walk's: for ocean the walk counts
+  5 native while the renderer reports 4 native + 1 compat, because `prepare.ts` re-routes the pattern fill. A change
+  to `prepare.ts` routing (PERF-A) therefore shows up as census drift; regenerate the expectations file then.
 - **Evidence.**
   - `golden.json`: every cell's metrics, gates, census and failures.
   - `census.json`.
@@ -220,4 +242,8 @@ Arguments:
     0.04 % of pixels changed by 1 code value.
   - The same run with `break=drop-batch` fails at SSIM 0.82 and over16 99.7 %. That mode removes the bottom-most
     fill/stroke batch from the GPU frame only, which is a dropped path. Use it only to show the harness can fail.
+  - `gate golden-selftest` re-runs both of those as one check (and it is a step of `browser`), so the harness's
+    ability to fail is re-proven on every tier run rather than once by hand.
   - The metric math (`bench/golden-metrics.test.ts`) and the PNG codec (`bench/png.ts`) are covered by `gate bench`.
+  - `break=drop-batch` and the root-family census read the renderer's internal `gpuRenderer.prepared`. If its shape
+    changes, the cell fails with a `harness:` message instead of silently counting zero.
