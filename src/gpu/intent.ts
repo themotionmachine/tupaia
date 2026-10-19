@@ -5,8 +5,10 @@
 // Edit: the canonical SVG is shown with its picking and editors; the GPU is suspended exactly as an open editor
 // suspends it. Edit is either chosen (the user asked: it stays until they leave) or automatic (an editor or
 // customization opened from Navigate: Navigate returns when the last one closes, as before this mode existed).
-// Preparing: Navigate was asked for, but the GPU frame is not current yet (first prepare, a resume after edits, a
-// context restore). The canonical SVG stays on screen, correct and usable, until the GPU frame catches up.
+// Preparing: Navigate was asked for, but the GPU frame is not on screen yet (first prepare, leaving Edit after edits,
+// a context restore, a pan outside the bitmap windows): the canonical SVG stays on screen, correct and usable, until
+// the GPU frame catches up. "Updating" (also the preparing view): the GPU frame is on screen but predates an edit
+// (an editor opened from Navigate, a remote or scripted change) and a re-prepare is on its way.
 
 export type Intent = "navigate" | "edit";
 export type ModeView = "navigate" | "edit" | "preparing" | "unavailable";
@@ -14,7 +16,8 @@ export type ModeView = "navigate" | "edit" | "preparing" | "unavailable";
 export interface IntentInputs {
   intent: Intent; // what the user last asked for
   editor: string; // non-empty while an editor dialog or customization is open
-  ready: boolean; // the GPU frame is drawable and current
+  ready: boolean; // the GPU canvas is on screen (a Navigate hold keeps it hidden until its frame is current)
+  current?: boolean; // that frame has every DOM revision (false: an edit is still being prepared); default true
   available: boolean; // a GPU renderer exists (false after a fallback to SVG)
 }
 
@@ -56,6 +59,13 @@ export function modeView(inputs: IntentInputs): ModeDisplay {
       auto: false,
       label: "Preparing",
       tip: "Preparing the GPU view. The editable SVG map stays on screen until it is ready"
+    };
+  if (inputs.current === false)
+    return {
+      mode: "preparing",
+      auto: false,
+      label: "Updating",
+      tip: "Updating the GPU view with the latest edits. Until then it shows the map from before them"
     };
   return {
     mode: "navigate",
@@ -104,6 +114,19 @@ export interface KeyContext {
 
 export type KeyAction = "toggle" | "leave-edit" | null;
 
+// The toggle is the \ character, wherever the layout puts it. The physical Backslash key counts only when the browser
+// cannot name the character it typed: on UK, German and other ISO layouts that key types # (FMG's add-river hotkey),
+// on AZERTY * and on Swiss $ (FMG's add-route), so matching the code would steal those bindings.
+export function isModeKey(event: Pick<KeyLike, "code" | "key">): boolean {
+  if (event.key === MODE_KEY_LABEL) return true;
+  return event.code === MODE_KEY_CODE && (event.key === "Unidentified" || event.key === "");
+}
+
+// Only these keys can produce an action: callers test this before building the (costlier) KeyContext.
+export function maybeModeKey(event: Pick<KeyLike, "code" | "key">): boolean {
+  return event.key === "Escape" || isModeKey(event);
+}
+
 // \ toggles; Esc leaves a chosen Edit only when nothing that Esc closes is open (FMG's Esc closes dialogs and the menu
 // on keyup, so a first Esc closes the editor and a second one leaves Edit). Never while typing, composing, with
 // modifiers (Ctrl/Cmd/Alt combos belong to the browser and FMG) or on auto-repeat.
@@ -112,7 +135,7 @@ export function keyAction(event: KeyLike, context: KeyContext): KeyAction {
   if (event.isComposing || event.keyCode === 229) return null;
   if (event.ctrlKey || event.metaKey || event.altKey) return null;
   if (context.editable || context.selection) return null;
-  if ((event.code === MODE_KEY_CODE || event.key === MODE_KEY_LABEL) && !event.shiftKey) return "toggle";
+  if (isModeKey(event) && !event.shiftKey) return "toggle";
   if (event.key === "Escape" && !event.shiftKey) {
     if (context.blocking || context.inputs.editor) return null;
     return context.inputs.intent === "edit" ? "leave-edit" : null;

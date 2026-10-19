@@ -739,32 +739,38 @@ export class GpuRenderer {
   // ---- MODE (W1, decision D10): Navigate/Edit intent. Owned by packet MODE; the state machine is in intent.ts and
   // the UI in controllers/render-mode.ts. Outside this block MODE only renamed the dialog scan below to editorScan()
   // (this block's editorReason() wraps it) and added the hold to the visibility test in active().
-  // Edit suspends exactly like an open editor (reason "edit mode"). Any suspension (chosen Edit, an editor,
-  // customization) ends in a hold: the canvas stays hidden, with the canonical SVG shown and usable, until the GPU frame
-  // has caught up with every DOM revision made meanwhile, so a stale pre-edit frame is never shown as the map. With no
-  // revision in between the hold clears at once.
+  // Edit suspends exactly like an open editor (reason "edit mode"). Leaving a chosen Edit (including through an editor
+  // opened inside it) ends in a hold: the canvas stays hidden, with the canonical SVG shown and usable, until the GPU
+  // frame has caught up with every DOM revision made meanwhile, so the frame from before the edits is never shown as
+  // the map. With no revision in between the hold clears at once. An editor opened from Navigate does not hold: its
+  // close shows the last GPU frame at once and the indicator reads "Updating" until the re-prepare lands (as before
+  // MODE; whether it should hold too is an open question for Ryan/LIFE).
   private intentEdit = false;
   private intentHold = false;
 
   setIntent(edit: boolean): void {
     const records = this.mutations.takeRecords(); // same-task edits count before the hold is judged
     if (records.length) this.mutated(records);
+    if (edit || this.intentEdit) this.intentHold = true;
     this.intentEdit = edit;
-    this.intentHold = true;
     this.active(); // Edit: hides now (camera synced). Navigate: runs the prepare the suspension deferred, if any.
     this.requestDraw();
   }
 
   // Cheap per-poll state for the mode indicator. editor: an open dialog or customization (not the Edit intent);
-  // ready: not suspended, a frame exists, the device is live and the frame is current (no hold).
-  // An editor that opened without a draw since (the dialog observer only redraws an already-suspended renderer) would
-  // leave the canvas over the SVG it edits: the poll hides it, so Edit never shows a GPU frame.
-  intentProbe(): { editor: string; ready: boolean; lost: boolean } {
+  // ready: the GPU canvas is on screen (not suspended or held, a frame, a live device, no pending markers, the view
+  // inside the bitmap windows: whatever hides it hides "Navigate"); current: that frame has every DOM revision.
+  // TODO(LIFE): an editor that opened without a draw since (the dialog observer only redraws an already-suspended
+  // renderer) leaves the canvas over the SVG it edits; the probe hides it until the dialog-open transition does.
+  intentProbe(): { editor: string; ready: boolean; current: boolean; lost: boolean } {
     const reason = this.editorReason();
     if (reason && this.canvas.style.display !== "none") this.active();
+    const current = this.prepared?.revision === this.revision;
     return {
       editor: reason === "edit mode" ? "" : reason,
-      ready: !reason && !!this.prepared && !this.device.lost && !this.intentHeld(),
+      ready:
+        !reason && !!this.prepared && !this.device.lost && !this.intentHeld() && this.canvas.style.display !== "none",
+      current,
       lost: this.device.lost
     };
   }
@@ -772,7 +778,7 @@ export class GpuRenderer {
   // Why the GPU is suspended: an open editor or customization first (the dialog scan), else the Edit intent.
   private editorReason(): string {
     const reason = this.editorScan() || (this.intentEdit ? "edit mode" : "");
-    if (reason) this.intentHold = true;
+    if (reason && this.intentEdit) this.intentHold = true;
     return reason;
   }
 

@@ -8,6 +8,7 @@ import {
   keyAction,
   MODE_KEY_LABEL,
   type ModeDisplay,
+  maybeModeKey,
   modeView,
   requestMode,
   toggleTarget
@@ -15,7 +16,7 @@ import {
 
 export interface IntentRenderer {
   setIntent(edit: boolean): void;
-  intentProbe(): { editor: string; ready: boolean; lost: boolean };
+  intentProbe(): { editor: string; ready: boolean; current?: boolean; lost: boolean };
 }
 
 export interface RenderModeApi {
@@ -106,7 +107,7 @@ export function installRenderMode(host: Host): RenderModeApi {
   button.type = "button";
   button.id = "renderModeIndicator";
   button.setAttribute("aria-live", "polite");
-  button.setAttribute("aria-keyshortcuts", "Backslash");
+  button.setAttribute("aria-keyshortcuts", MODE_KEY_LABEL);
   button.dataset.shortcut = MODE_KEY_LABEL;
   button.innerHTML = `<span class="mode-dot" aria-hidden="true"></span><span class="mode-label"></span><kbd aria-hidden="true">${MODE_KEY_LABEL}</kbd>`;
   const label = button.querySelector<HTMLSpanElement>(".mode-label")!;
@@ -116,7 +117,7 @@ export function installRenderMode(host: Host): RenderModeApi {
     const renderer = host.renderer();
     if (!renderer) return { intent, editor: "", ready: false, available: host.gpuActive() };
     const probe = renderer.intentProbe();
-    return { intent, editor: probe.editor, ready: probe.ready, available: true };
+    return { intent, editor: probe.editor, ready: probe.ready, current: probe.current ?? true, available: true };
   }
 
   // Pushes the intent to a renderer that lacks it: a change, or a renderer that appeared after the request.
@@ -166,6 +167,7 @@ export function installRenderMode(host: Host): RenderModeApi {
   }
 
   function keydown(event: KeyboardEvent): void {
+    if (!maybeModeKey(event)) return; // every other keystroke (typing included) costs one comparison, no probe
     const action = keyAction(event, {
       editable: editableTarget(event),
       selection: !!window.getSelection()?.toString(),

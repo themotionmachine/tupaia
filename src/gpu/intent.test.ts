@@ -4,6 +4,7 @@ import {
   type KeyContext,
   type KeyLike,
   keyAction,
+  maybeModeKey,
   modeView,
   requestMode,
   toggleTarget
@@ -40,6 +41,13 @@ describe("modeView", () => {
   it("Navigate only with a ready frame, no editor and the navigate intent", () => {
     expect(modeView(base).mode).toBe("navigate");
     expect(modeView(with_({ ready: false })).mode).toBe("preparing");
+  });
+
+  it("a GPU frame on screen that predates an edit reads Updating, not Navigate", () => {
+    expect(modeView(with_({ current: false }))).toMatchObject({ mode: "preparing", label: "Updating" });
+    expect(modeView(with_({ current: false, ready: false })).label).toBe("Preparing"); // SVG on screen
+    expect(modeView(with_({ current: false, editor: "x" }))).toMatchObject({ mode: "edit", auto: true });
+    expect(toggleTarget(with_({ current: false }))).toBe("edit");
   });
 
   it("chosen Edit wins over everything but a fallback, and is not auto", () => {
@@ -113,8 +121,26 @@ describe("keyAction", () => {
   });
 
   it("matches the \\ character on layouts where it sits elsewhere", () => {
-    expect(keyAction(key({ code: "IntlBackslash" }), ctx())).toBe("toggle");
-    expect(keyAction(key({ key: "#", code: "Backslash" }), ctx())).toBe("toggle"); // physical key, other layout
+    expect(keyAction(key({ code: "IntlBackslash" }), ctx())).toBe("toggle"); // UK ISO: \ left of Z
+    expect(keyAction(key({ code: "IntlRo" }), ctx())).toBe("toggle"); // JIS: \ left of right Shift
+  });
+
+  it("never takes the Backslash key when it types another character (UK/German #: FMG's add-river)", () => {
+    for (const typed of ["#", "~", "*", "$", "'", "ç", "ù", "|"])
+      expect(keyAction(key({ key: typed, code: "Backslash" }), ctx())).toBeNull();
+  });
+
+  it("falls back to the Backslash code only when the browser cannot name the character", () => {
+    expect(keyAction(key({ key: "Unidentified" }), ctx())).toBe("toggle");
+    expect(keyAction(key({ key: "" }), ctx())).toBe("toggle");
+    expect(keyAction(key({ key: "Unidentified", code: "KeyA" }), ctx())).toBeNull();
+  });
+
+  it("maybeModeKey pre-filters every key that can never act", () => {
+    expect(maybeModeKey({ code: "Backslash", key: "\\" })).toBe(true);
+    expect(maybeModeKey({ code: "Escape", key: "Escape" })).toBe(true);
+    expect(maybeModeKey({ code: "Backslash", key: "#" })).toBe(false);
+    expect(maybeModeKey({ code: "KeyA", key: "a" })).toBe(false);
   });
 
   it("never while typing, selecting, composing or repeating", () => {
