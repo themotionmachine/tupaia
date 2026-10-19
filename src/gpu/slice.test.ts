@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createSlicer, yieldToMain } from "./slice";
+import { createSlicer, SLICE_INPUT_CAP_MS, SLICE_MS, slicePolicy, yieldToMain } from "./slice";
 
 function clock() {
   let t = 0;
@@ -95,5 +95,63 @@ describe("yieldToMain", () => {
     expect(settled).toBe(false);
     await pending;
     expect(settled).toBe(true);
+  });
+});
+
+describe("slicePolicy (B2 experiment override)", () => {
+  it("keeps SLICE_MS without a valid override", () => {
+    for (const search of ["", "?gpu-slice-ms=", "?gpu-slice-ms=0", "?gpu-slice-ms=-5", "?gpu-slice-ms=abc"])
+      expect(slicePolicy(search)).toEqual({ budget: SLICE_MS, inputPending: null });
+  });
+
+  it("reads a slice budget in ms", () => {
+    expect(slicePolicy("?local&gpu-slice-ms=50")).toEqual({ budget: 50, inputPending: null });
+  });
+
+  it("yields on pending input, else at the cap, when isInputPending exists", () => {
+    const navigator = globalThis.navigator as unknown as { scheduling?: unknown };
+    const saved = navigator.scheduling;
+    let pending = false;
+    Object.defineProperty(navigator, "scheduling", { value: { isInputPending: () => pending }, configurable: true });
+    try {
+      const policy = slicePolicy("?gpu-slice-ms=input");
+      expect(policy.budget).toBe(SLICE_INPUT_CAP_MS);
+      pending = true;
+      expect(policy.inputPending?.()).toBe(true);
+    } finally {
+      Object.defineProperty(navigator, "scheduling", { value: saved, configurable: true });
+    }
+    // without the API the override falls back to the default budget
+    Object.defineProperty(navigator, "scheduling", { value: undefined, configurable: true });
+    try {
+      expect(slicePolicy("?gpu-slice-ms=input")).toEqual({ budget: SLICE_MS, inputPending: null });
+    } finally {
+      Object.defineProperty(navigator, "scheduling", { value: saved, configurable: true });
+    }
+  });
+
+  it("a slicer with an input probe yields early only while input is pending", async () => {
+    let t = 0;
+    let pending = false;
+    const yieldFn = vi.fn(async () => {});
+    const slice = createSlicer(
+      200,
+      () => t,
+      yieldFn,
+      () => pending
+    );
+    t = 5;
+    await slice.tick();
+    expect(yieldFn).not.toHaveBeenCalled();
+    pending = true;
+    await slice.tick();
+    expect(yieldFn).toHaveBeenCalledTimes(1);
+    pending = false;
+    t = 204;
+    await slice.tick();
+    expect(yieldFn).toHaveBeenCalledTimes(1);
+    t = 206;
+    await slice.tick();
+    expect(yieldFn).toHaveBeenCalledTimes(2);
   });
 });

@@ -3,21 +3,16 @@
 // await: a superseded job releases what it allocated and returns null.
 import type { ReliefSprite } from "../renderers/relief-canvas";
 import { BitmapWindows } from "./bitmap-window";
-import {
-  compatAllowance,
-  fitScale,
-  GPU_BUDGET,
-  MIN_COMPAT_BUDGET,
-  refineOrder,
-  reliefCell,
-  windowAllowance
-} from "./budget";
+import { compatAllowance, GPU_BUDGET, MIN_COMPAT_BUDGET, refineOrder, reliefCell, windowAllowance } from "./budget";
 import type { Camera } from "./camera";
 import { resolveManyInClone } from "./clone-map";
 import {
   compatClone,
   compatResolution,
   cropRaster,
+  LADDER_HEADROOM,
+  ladderFit,
+  ladderScale,
   type Region,
   rasterizeRun,
   resolveInClone,
@@ -57,7 +52,7 @@ import { type GlyphHits, glyphCovers, readGlyphReport } from "./relief-pick";
 import type { PrepareStep } from "./restore-phases";
 import { buildScene, type Draw, type LayerReport, type Scene, type ShapeStyle } from "./scene";
 import type { SceneCache, SceneKey } from "./scene-cache";
-import { createSlicer } from "./slice";
+import { createSlicer, slicePolicy } from "./slice";
 import { flattenPath, type Subpath } from "./svg-path";
 import { GLYPH_FLOATS, type GlyphAtlas, layoutLabels } from "./text";
 
@@ -110,13 +105,12 @@ interface CompatRun {
   sharp: boolean; // holds text, marker <svg> or burg icon vectors: refined before smooth fills (refineOrder)
   hits?: HitShape[]; // screen overlay above #viewbox: its hit area in SVG-local CSS px, as of its current raster
   stamp: number; // reuse-tracker epoch of the DOM state its raster was cut from (compat-reuse.ts)
-  key: string; // what else its raster depends on: world region, resolution and bucket, or viewport size and DPR
+  key: string; // what else its raster depends on: world region, base resolution and bucket, or viewport size and DPR
   // its detail: the settle request it answers, the alpha-cropped size it was cut at (null: fully transparent) and the
   // downscale factor applied to fit the budget (1: none); replayed by refineCompat to keep it
   detailMeta?: { request: string; size: [number, number] | null; fit: number };
-  // world run: the resolution at its turn in the world loop, its alpha-cropped size then (null: fully transparent)
-  // and every shrink factor applied after it; replayed to prove a reused raster equals a fresh one
-  history?: { turn: number; size: [number, number] | null; scales: number[] };
+  // world run: the ladder level its raster is at (compat.ts ladderScale); a reused raster must be at the frame's level
+  level?: number;
 }
 
 // Per-prepare compat reuse (telemetry). `reasons` counts dirty runs by why they were dirty (at most 8 distinct).
@@ -125,11 +119,12 @@ export interface CompatReuse {
   enabled: boolean;
   world: number;
   worldClean: number;
+  worldKept: number; // clean world runs whose raster the frame kept (a step down the ladder re-cuts them)
   screen: number;
   screenClean: number;
   details: number; // settle details carried over from the previous frame
   cloned: boolean; // false: every run reused its raster and no export clone was cut
-  aborted: string; // reuse abandoned mid-prepare (world rasters had to shrink), "" otherwise
+  aborted: string; // why clean world runs were re-cut (world rasters stepped down the ladder), "" otherwise
   structural: string; // the sibling-dependent stylesheet selector that widened invalidation, "" when none
   reasons: Record<string, number>;
   ms: number; // evaluation cost (style state, tracker, references)
@@ -154,6 +149,7 @@ export interface Prepared {
     elements: number;
     reasons: string[];
     resolution: number;
+    level: number; // world raster ladder level (resolution = base · ladderScale(level))
     // last settle refinement, in refine order: source id and drawn px per world unit (base resolution when kept)
     detail?: { id: string; density: number }[];
     reuse?: CompatReuse;
@@ -244,7 +240,8 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
   const reasons: string[] = [];
   const tiles = new Map<string, FillBatch["tile"] | string>();
   // the synchronous draw conversion yields every SLICE_MS so a 100k-element world does not block input for seconds
-  const slice = createSlicer();
+  const policy = slicePolicy();
+  const slice = createSlicer(policy.budget, undefined, undefined, policy.inputPending);
 
   // `layer` is null for screen overlays: they sit outside the world and are not pickable
   const compat = (
@@ -596,13 +593,12 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
     const owned = () => textures.reduce((sum, texture) => sum + texture.bytes, 0) + windows.bytes;
 
     const worldRuns = runs.filter(run => !run.screen);
-    let resolution = compatResolution(worldRuns.length, ctx.world, 2, device.maxTextureSize);
+    const base = compatResolution(worldRuns.length, ctx.world, 2, device.maxTextureSize);
     const { world: region } = ctx;
-    const worldKey = (ratio: number) =>
-      `${region.x},${region.y},${region.width},${region.height}@${ratio}/${ctx.bucket}`;
+    const worldKey = `${region.x},${region.y},${region.width},${region.height}@${base}/${ctx.bucket}`;
     const screenKey = `${ctx.screen.width}x${ctx.screen.height}@${ctx.screen.dpr}`;
-    // world rasters depend on the base resolution; the shrink steps under budget pressure are replayed (below)
-    for (const run of runs) run.key = run.screen ? screenKey : worldKey(resolution);
+    // world rasters depend on the base resolution; the ladder level they shrank to is checked in the world loop
+    for (const run of runs) run.key = run.screen ? screenKey : worldKey;
     const mib = (bytes: number) => `${(bytes / 2 ** 20).toFixed(1)} MiB`;
     const rgba = (texture: TrackedTexture | null | undefined) => (texture ? texture.width * texture.height * 4 : 0);
 
@@ -616,12 +612,17 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
     // stays allocated instead, but its bytes never exceed the reused rasters a full re-prepare would allocate again.
     const tracked = () => device.memory().total - reuse.detailBytes;
 
+    // World ladder level: a frame that reuses world rasters starts where the previous frame ended (they are at that
+    // level); any other starts at the base resolution. The level only steps down within a prepare.
+    let level = 0;
+    for (const [run, old] of adopted) if (!run.screen) level = old.level ?? 0;
+    let resolution = base * ladderScale(level);
     const held: { run: CompatRun; canvas: HTMLCanvasElement; rect: Region }[] = [];
-    // reused world rasters the world loop has passed, at the size their replayed history gives them so far
-    let replayedBytes = () => 0;
+    // clean world runs counted at the current level with their reused texture
+    const kept = new Set<CompatRun>();
     const sum = (screen: boolean) =>
       held.reduce((n, item) => (item.run.screen === screen ? n + item.canvas.width * item.canvas.height * 4 : n), 0) +
-      (screen ? reusedScreen : replayedBytes());
+      (screen ? reusedScreen : [...kept].reduce((n, run) => n + rgba(run.slot.texture), 0));
     // Built only when some run needs a raster: a prepare that reuses every run cuts no export clone.
     let clone: SVGSVGElement | null = null;
     let cloneStamp = 0;
@@ -652,10 +653,9 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
       const canvas = await rasterizeRun(source, resolved as Element[], region, w, h, run.screen);
       if (ctx.stale()) return false;
       run.stamp = cloneStamp;
+      if (!run.screen) run.level = level;
       const cropped = cropRaster(canvas, region);
       if (cropped) held.push({ run, ...cropped }); // fully transparent: slot keeps texture null and draws nothing
-      if (!run.screen)
-        run.history = { turn: ratio, size: cropped && [cropped.canvas.width, cropped.canvas.height], scales: [] };
       return true;
     };
     // Screen overlays first (fixed size at the screen DPR): their bytes are known before the window crops take room.
@@ -685,88 +685,55 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
 
     // This frame's compat share: the steady budget minus the group target reserve, what it already uploaded (bitmap
     // window crops included) and what is still pending, and never past the peak beside the previous frame. Over it,
-    // world rasters shrink; a share too small for useful world rasters (or for the screen overlays) fails the
-    // prepare, and the renderer shows the SVG. Reused rasters count where a full re-prepare would allocate them, so
-    // every scaling decision is the one it would make; one that must shrink rasters abandons world reuse instead.
+    // world rasters step down the ladder; a share too small for useful world rasters (or for the screen overlays)
+    // fails the prepare, and the renderer shows the SVG. Reused rasters count where a full re-prepare would allocate
+    // them.
     const budget = compatAllowance(tracked(), owned(), pending);
     if (budget < sum(true))
       throw new BudgetError(`compat: screen overlays need ${mib(sum(true))}, ${mib(budget)} fits`);
-    // World rasters in run order; whenever the held bytes exceed the room, every held world raster shrinks by the
-    // same factor (scaleRaster) and later runs rasterize at the lower resolution. A reused raster is exactly the one a
-    // full re-prepare would cut only if it would arrive at the same turn resolution and then see the same shrink
-    // steps: its recorded history is replayed (its pixel size simulated), and any divergence rasterizes every world
-    // run afresh, so the frame always equals a full re-prepare's.
-    if (runs.length) {
-      const base = resolution;
-      let again = true;
-      while (again) {
-        again = false;
-        resolution = base;
-        const replayed: { run: CompatRun; width: number; height: number; expected: number[] }[] = [];
-        const diverged = () => {
-          reuse.dropWorld(reused);
-          for (let i = held.length - 1; i >= 0; i--) if (!held[i].run.screen) held.splice(i, 1)[0].canvas.width = 0;
-          again = true;
-        };
-        replayedBytes = () => replayed.reduce((n, item) => n + item.width * item.height * 4, 0);
-        for (const run of runs) {
-          if (run.screen) continue;
-          const history = adopted.get(run)?.history;
-          if (adopted.has(run)) {
-            if (!history || history.turn !== resolution) {
-              diverged();
-              break;
-            }
-            run.history = { turn: resolution, size: history.size, scales: [] };
-            if (history.size)
-              replayed.push({ run, width: history.size[0], height: history.size[1], expected: history.scales });
-          } else if (ctx.stale() || !(await rasterize(run))) {
-            release();
-            return null;
-          }
-          const worldRoom = budget - sum(true);
-          const scale = fitScale(sum(false), worldRoom);
-          if (scale < 1 && worldRoom < MIN_COMPAT_BUDGET)
-            throw new BudgetError(
-              `compat: world rasters need ${mib(sum(false))}, ${mib(worldRoom)} fits the GPU budget`
-            );
-          if (scale < 1) {
-            if (replayed.some(item => item.expected[item.run.history!.scales.length] !== scale)) {
-              diverged();
-              break;
-            }
-            for (const item of held)
-              if (!item.run.screen) {
-                item.canvas = scaleRaster(item.canvas, scale);
-                item.run.history!.scales.push(scale);
-              }
-            for (const item of replayed) {
-              item.width = Math.max(1, Math.floor(item.width * scale)); // scaleRaster's own rounding
-              item.height = Math.max(1, Math.floor(item.height * scale));
-              item.run.history!.scales.push(scale);
-            }
-            resolution *= scale;
-          }
+    // World rasters in run order at the current level. Whenever their bytes exceed the room, the level steps down to
+    // one that fits under LADDER_HEADROOM of it: every held fresh raster is resampled to it (scaleRaster), later runs
+    // are cut at it, and a kept raster (a GPU texture, which cannot shrink) is cut again at it after the queue.
+    const queue = [...worldRuns];
+    for (let i = 0; i < queue.length; i++) {
+      const run = queue[i];
+      if (adopted.has(run) && adopted.get(run)!.level === level) {
+        run.level = level;
+        kept.add(run);
+      } else {
+        if (adopted.has(run)) reuse.drop(run, reused, "world level changed");
+        if (ctx.stale() || !(await rasterize(run))) {
+          release();
+          return null;
         }
-        if (
-          !again &&
-          replayed.some(
-            item =>
-              item.run.history!.scales.length !== item.expected.length ||
-              item.width !== item.run.slot.texture?.width ||
-              item.height !== item.run.slot.texture?.height
-          )
-        )
-          diverged();
       }
-      replayedBytes = () => 0;
-      for (const { run, canvas, rect } of held) {
-        run.slot.texture = device.texture(run.screen ? "compat screen" : "compat world", canvas);
-        if (!run.screen) textures.push(run.slot.texture);
-        run.slot.rect = [rect.x, rect.y, rect.width, rect.height];
-        canvas.width = canvas.height = 0;
+      const worldRoom = budget - sum(true);
+      const bytes = sum(false);
+      if (bytes <= worldRoom) continue;
+      if (worldRoom < MIN_COMPAT_BUDGET)
+        throw new BudgetError(`compat: world rasters need ${mib(bytes)}, ${mib(worldRoom)} fits the GPU budget`);
+      const next = ladderFit(bytes, worldRoom * LADDER_HEADROOM, level);
+      const scale = ladderScale(next) / ladderScale(level);
+      for (const item of held)
+        if (!item.run.screen) {
+          item.canvas = scaleRaster(item.canvas, scale);
+          item.run.level = next;
+        }
+      for (const run of kept) {
+        reuse.drop(run, reused, "world rasters stepped down the ladder");
+        queue.push(run);
       }
+      kept.clear();
+      level = next;
+      resolution = base * ladderScale(level);
     }
+    for (const { run, canvas, rect } of held) {
+      run.slot.texture = device.texture(run.screen ? "compat screen" : "compat world", canvas);
+      if (!run.screen) textures.push(run.slot.texture);
+      run.slot.rect = [rect.x, rect.y, rect.width, rect.height];
+      canvas.width = canvas.height = 0;
+    }
+    report.worldKept = kept.size;
     ctx.mark?.("world");
 
     const upload = (label: string, data: F32 | Float32Array, length: number) => {
@@ -814,6 +781,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
         elements: runs.reduce((n, run) => n + run.elements.length, 0),
         reasons,
         resolution,
+        level,
         reuse: report
       },
       styleKey: reuse.style?.key,
@@ -857,6 +825,7 @@ function adoptRuns(device: GpuDevice, svg: SVGSVGElement, runs: CompatRun[], pre
     enabled: compatReuseEnabled(),
     world: runs.filter(run => !run.screen).length,
     worldClean: 0,
+    worldKept: 0,
     screen: runs.filter(run => run.screen).length,
     screenClean: 0,
     details: 0,
@@ -947,34 +916,33 @@ function adoptRuns(device: GpuDevice, svg: SVGSVGElement, runs: CompatRun[], pre
     report,
     style,
     detailBytes,
-    // Abandons world reuse (reused textures cannot shrink): drops the shared textures and carried details from this
-    // frame, and the carried details from the previous one too, so both look as a full re-prepare leaves them.
-    dropWorld(reused: TrackedTexture[]) {
-      for (const [run, old] of adopted) {
-        if (run.screen) continue;
-        const texture = run.slot.texture;
-        const at = texture ? reused.indexOf(texture) : -1;
-        if (at >= 0) reused.splice(at, 1);
-        releaseShared(device, texture);
-        run.slot.texture = null;
-        run.slot.rect = [0, 0, 0, 0];
-        const detail = run.slot.detail;
-        if (detail) {
-          result.detailBytes -= detail.texture ? detail.texture.width * detail.texture.height * 4 : 0;
+    // Re-cuts a clean world run after all (its raster is at another ladder level than the frame): drops its shared
+    // texture and carried detail from this frame, and the carried detail from the previous one too, so both look as a
+    // full re-prepare leaves them.
+    drop(run: CompatRun, reused: TrackedTexture[], why: string) {
+      const old = adopted.get(run);
+      if (!old || run.screen) return;
+      const texture = run.slot.texture;
+      const at = texture ? reused.indexOf(texture) : -1;
+      if (at >= 0) reused.splice(at, 1);
+      releaseShared(device, texture);
+      run.slot.texture = null;
+      run.slot.rect = [0, 0, 0, 0];
+      const detail = run.slot.detail;
+      if (detail) {
+        result.detailBytes -= detail.texture ? detail.texture.width * detail.texture.height * 4 : 0;
+        releaseShared(device, detail.texture);
+        if (old.slot.detail?.texture === detail.texture) {
           releaseShared(device, detail.texture);
-          if (old.slot.detail?.texture === detail.texture) {
-            releaseShared(device, detail.texture);
-            old.slot.detail = null;
-            old.detailMeta = undefined;
-          }
-          run.slot.detail = null;
-          run.detailMeta = undefined;
-          report.details--;
+          old.slot.detail = null;
+          old.detailMeta = undefined;
         }
-        adopted.delete(run);
-        report.worldClean--;
+        run.slot.detail = null;
+        run.detailMeta = undefined;
+        report.details--;
       }
-      report.aborted = "world rasters had to shrink";
+      adopted.delete(run);
+      report.aborted ||= why;
     }
   };
   return result;

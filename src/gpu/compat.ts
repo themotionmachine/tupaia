@@ -147,6 +147,23 @@ export function compatResolution(
   return Math.min(desired, bySize, byPixels);
 }
 
+// World rasters shrink under budget pressure along a fixed ladder, base·2^(-level/LADDER_STEPS), never to an exact fit.
+// A frame's world rasters all sit at one level, so two prepares whose budgets differ a little (a cells mesh, a route
+// edit, the previous frame's size) land on the same level and a clean run's raster stays reusable (compat-reuse.ts).
+export const LADDER_STEPS = 4;
+// A step down aims this far under the room, so the next prepare's slightly different budget still fits at that level.
+export const LADDER_HEADROOM = 0.85;
+
+export const ladderScale = (level: number): number => 2 ** (-level / LADDER_STEPS);
+
+// The lowest level ≥ `from` at which `bytes`, measured at level `from`, fit `room` (bytes scale with the square of the
+// linear density; scaleRaster floors each side, so the result never exceeds the estimate).
+export function ladderFit(bytes: number, room: number, from: number): number {
+  let level = from;
+  while (level < from + 64 && bytes * (ladderScale(level) / ladderScale(from)) ** 2 > room) level++;
+  return level;
+}
+
 // Crops a decoded raster to its non-transparent pixels plus 1 px transparent padding and returns the world rect of the
 // kept pixels: copied, never resampled. null when fully transparent; the raster unchanged when it cannot be read back.
 export function cropRaster(
