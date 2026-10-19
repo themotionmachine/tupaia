@@ -102,7 +102,7 @@ const COVERS: Record<string, string[]> = {
   grid: ["grid-dashed"],
   coordinates: ["coordinates"],
   landmass: ["coastline-filter"],
-  lakes: ["coastline-filter"],
+  lakes: ["lakes"],
   coastline: ["coastline-filter"],
   states: ["halo"]
 };

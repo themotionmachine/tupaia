@@ -179,6 +179,7 @@ function cameras(targets: any): { presets: CameraPreset[]; coast: CameraPreset[]
     // iceberg sits above the map edge (y < 0), so framing ice[0] showed empty ocean at k 8
     const berg = targets.ice.find((b: any) => b.cx >= VIEW.width / 16 && b.cx <= gw - VIEW.width / 16 && b.cy >= VIEW.height / 16 && b.cy <= gh - VIEW.height / 16) ?? targets.ice[0];
     if (berg) add(`k${k}-ice`, k, berg.cx, berg.cy, ["ice"]);
+    if (targets.lakes?.[0]) add(`k${k}-lake`, k, targets.lakes[0].cx, targets.lakes[0].cy, ["lakes"]);
     if (targets.compass) add(`k${k}-compass`, k, targets.compass.cx, targets.compass.cy, ["compass"]);
     const emblem = targets.emblems?.[0];
     if (emblem) add(`k${k}-emblem`, k, emblem.cx + 3, emblem.cy + 3, ["emblems"]);

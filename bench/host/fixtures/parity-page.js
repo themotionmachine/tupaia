@@ -376,8 +376,18 @@
       const pt = new DOMPoint(r.left + r.width / 2, r.top + r.height / 2).matrixTransform(m);
       compassCentre = { cx: r1(pt.x), cy: r1(pt.y) };
     }
+    // the largest lake: the showcase window at k 8 holds none
+    const lakes = pack.features
+      .filter(f => f && f.type === "lake" && f.cells > 0)
+      .sort((a, b) => b.cells - a.cells || a.i - b.i)
+      .map(f => {
+        const pts = [];
+        for (let c = 0; c < pack.cells.i.length; c++) if (pack.cells.f[c] === f.i) pts.push(pack.cells.p[c]);
+        const [cx, cy] = centre(pts);
+        return { feature: f.i, cx, cy };
+      });
     const fogged = [...document.querySelectorAll("#fog > path")].map(p => p.id);
-    return { anchor: A, ice, zones, emblems, compass: compassCentre, fogged, graph: [graphWidth, graphHeight] };
+    return { anchor: A, ice, zones, emblems, lakes, compass: compassCentre, fogged, graph: [graphWidth, graphHeight] };
   };
 
   // ----------------------------------------------------------------- census

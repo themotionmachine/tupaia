@@ -74,26 +74,26 @@
   },
   "build": {
     "builtWith": "bench/host/fixtures/build-parity-fixture.ts",
-    "seconds": 16.6,
+    "seconds": 17.4,
     "steps": [
-      "generate ok 425ms",
-      "canonicalise ok 265ms",
-      "settings ok 5ms",
-      "layers ok 2871ms",
-      "relief ok 984ms",
-      "lakes ok 129ms",
-      "regiments ok 127ms",
-      "markers ok 121ms",
-      "zones ok 131ms",
-      "ice ok 121ms",
-      "grid ok 157ms",
-      "measurers ok 137ms",
-      "legend ok 143ms",
-      "labels ok 141ms",
-      "fog ok 146ms",
-      "zoom-styling ok 147ms",
-      "save ok 531ms",
-      "reload ok 1619ms"
+      "generate ok 462ms",
+      "canonicalise ok 283ms",
+      "settings ok 18ms",
+      "layers ok 2852ms",
+      "relief ok 1001ms",
+      "lakes ok 133ms",
+      "regiments ok 132ms",
+      "markers ok 132ms",
+      "zones ok 128ms",
+      "ice ok 120ms",
+      "grid ok 143ms",
+      "measurers ok 152ms",
+      "legend ok 154ms",
+      "labels ok 142ms",
+      "fog ok 151ms",
+      "zoom-styling ok 151ms",
+      "save ok 541ms",
+      "reload ok 1718ms"
     ],
     "pageErrors": []
   },
@@ -2881,6 +2881,17 @@
       ]
     },
     {
+      "id": "k2-lake",
+      "k": 2,
+      "cx": 776.4,
+      "cy": 435.1,
+      "x": -912.8,
+      "y": -510.2,
+      "covers": [
+        "lakes"
+      ]
+    },
+    {
       "id": "k2-compass",
       "k": 2,
       "cx": 320,
@@ -2951,6 +2962,17 @@
       "y": 0,
       "covers": [
         "ice"
+      ]
+    },
+    {
+      "id": "k4-lake",
+      "k": 4,
+      "cx": 776.4,
+      "cy": 435.1,
+      "x": -2465.6,
+      "y": -1380.4,
+      "covers": [
+        "lakes"
       ]
     },
     {
@@ -3035,6 +3057,17 @@
       "y": -118.4,
       "covers": [
         "ice"
+      ]
+    },
+    {
+      "id": "k8-lake",
+      "k": 8,
+      "cx": 776.4,
+      "cy": 435.1,
+      "x": -5571.2,
+      "y": -3120.8,
+      "covers": [
+        "lakes"
       ]
     },
     {

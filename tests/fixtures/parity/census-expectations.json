@@ -1,0 +1,811 @@
+{
+ "schema": 1,
+ "fixtureSha256": "fd1dd2f3508fbbd7ea325133b2937a328909a84cc38e81c6afc95eef640ba119",
+ "notes": [
+  "Routing snapshot of the GPU scene classifier per golden cell on the parity fixture (default preset, dpr 2, k 1/2/4/8 plus the coastline switch frames), taken at gpu/w1-glue after the camera fixes. A cell fails when native/compat/skipped drift, so a routing change (new native primitive, a layer sliding to compat) must update this file in the same commit.",
+  "Regenerate: node bench/gate/gate.ts golden fixture=parity k=1,2,4,8 coastk=1.4,1.6,2.5,2.7, then keep the census.json of that run without the kinds field.",
+  "Lake k 2/4/8 cells use the k*-lake cameras added after this snapshot; their counts are identical to the k 1 cell."
+ ],
+ "cells": {
+  "default/d2/biomes/k1": {
+   "native": 15,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/biomes/k2": {
+   "native": 15,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/biomes/k4": {
+   "native": 15,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/biomes/k8": {
+   "native": 15,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/borders/k1": {
+   "native": 42,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/borders/k2": {
+   "native": 42,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/borders/k4": {
+   "native": 42,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/borders/k8": {
+   "native": 42,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/burgs/k1": {
+   "native": 0,
+   "compat": 8,
+   "skipped": 0
+  },
+  "default/d2/burgs/k2": {
+   "native": 0,
+   "compat": 8,
+   "skipped": 0
+  },
+  "default/d2/burgs/k4": {
+   "native": 0,
+   "compat": 8,
+   "skipped": 0
+  },
+  "default/d2/burgs/k8": {
+   "native": 0,
+   "compat": 8,
+   "skipped": 0
+  },
+  "default/d2/cells/k1": {
+   "native": 1,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/cells/k2": {
+   "native": 1,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/cells/k4": {
+   "native": 1,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/cells/k8": {
+   "native": 1,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/coastline/k1": {
+   "native": 0,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/coastline/k1.4": {
+   "native": 0,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/coastline/k1.6": {
+   "native": 7,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/coastline/k2": {
+   "native": 7,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/coastline/k2.5": {
+   "native": 7,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/coastline/k2.7": {
+   "native": 0,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/coastline/k4": {
+   "native": 0,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/coastline/k8": {
+   "native": 0,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/compass/k1": {
+   "native": 0,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/compass/k2": {
+   "native": 0,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/compass/k4": {
+   "native": 0,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/compass/k8": {
+   "native": 0,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/coordinates/k1": {
+   "native": 0,
+   "compat": 18,
+   "skipped": 0
+  },
+  "default/d2/coordinates/k2": {
+   "native": 0,
+   "compat": 27,
+   "skipped": 0
+  },
+  "default/d2/coordinates/k4": {
+   "native": 0,
+   "compat": 52,
+   "skipped": 0
+  },
+  "default/d2/coordinates/k8": {
+   "native": 0,
+   "compat": 127,
+   "skipped": 0
+  },
+  "default/d2/cultures/k1": {
+   "native": 35,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/cultures/k2": {
+   "native": 35,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/cultures/k4": {
+   "native": 35,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/cultures/k8": {
+   "native": 35,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/emblems/k1": {
+   "native": 0,
+   "compat": 8,
+   "skipped": 2
+  },
+  "default/d2/emblems/k2": {
+   "native": 0,
+   "compat": 8,
+   "skipped": 2
+  },
+  "default/d2/emblems/k4": {
+   "native": 0,
+   "compat": 133,
+   "skipped": 0
+  },
+  "default/d2/emblems/k8": {
+   "native": 0,
+   "compat": 133,
+   "skipped": 0
+  },
+  "default/d2/fog/k1": {
+   "native": 0,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/fog/k2": {
+   "native": 0,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/fog/k4": {
+   "native": 0,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/fog/k8": {
+   "native": 0,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/goods/k1": {
+   "native": 2421,
+   "compat": 17,
+   "skipped": 0
+  },
+  "default/d2/goods/k2": {
+   "native": 2421,
+   "compat": 17,
+   "skipped": 0
+  },
+  "default/d2/goods/k4": {
+   "native": 2421,
+   "compat": 17,
+   "skipped": 0
+  },
+  "default/d2/goods/k8": {
+   "native": 2421,
+   "compat": 17,
+   "skipped": 0
+  },
+  "default/d2/grid/k1": {
+   "native": 1,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/grid/k2": {
+   "native": 1,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/grid/k4": {
+   "native": 1,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/grid/k8": {
+   "native": 1,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/ice/k1": {
+   "native": 0,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/ice/k2": {
+   "native": 0,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/ice/k4": {
+   "native": 0,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/ice/k8": {
+   "native": 0,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/labels/k1": {
+   "native": 2,
+   "compat": 100,
+   "skipped": 0
+  },
+  "default/d2/labels/k2": {
+   "native": 2,
+   "compat": 100,
+   "skipped": 0
+  },
+  "default/d2/labels/k4": {
+   "native": 2,
+   "compat": 100,
+   "skipped": 0
+  },
+  "default/d2/labels/k8": {
+   "native": 2,
+   "compat": 100,
+   "skipped": 0
+  },
+  "default/d2/lakes/k1": {
+   "native": 0,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/lakes/k1.4": {
+   "native": 0,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/lakes/k1.6": {
+   "native": 0,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/lakes/k2": {
+   "native": 0,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/lakes/k2.5": {
+   "native": 0,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/lakes/k2.7": {
+   "native": 0,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/lakes/k4": {
+   "native": 0,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/lakes/k8": {
+   "native": 0,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/landmass/k1": {
+   "native": 15,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/landmass/k1.4": {
+   "native": 15,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/landmass/k1.6": {
+   "native": 15,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/landmass/k2": {
+   "native": 15,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/landmass/k2.5": {
+   "native": 15,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/landmass/k2.7": {
+   "native": 15,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/landmass/k4": {
+   "native": 15,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/landmass/k8": {
+   "native": 15,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/legend/k1": {
+   "native": 0,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/legend/k2": {
+   "native": 0,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/legend/k4": {
+   "native": 0,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/legend/k8": {
+   "native": 0,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/markers/k1": {
+   "native": 0,
+   "compat": 53,
+   "skipped": 0
+  },
+  "default/d2/markers/k2": {
+   "native": 0,
+   "compat": 53,
+   "skipped": 0
+  },
+  "default/d2/markers/k4": {
+   "native": 0,
+   "compat": 53,
+   "skipped": 0
+  },
+  "default/d2/markers/k8": {
+   "native": 0,
+   "compat": 53,
+   "skipped": 0
+  },
+  "default/d2/markets/k1": {
+   "native": 7,
+   "compat": 21,
+   "skipped": 7
+  },
+  "default/d2/markets/k2": {
+   "native": 7,
+   "compat": 21,
+   "skipped": 7
+  },
+  "default/d2/markets/k4": {
+   "native": 7,
+   "compat": 21,
+   "skipped": 7
+  },
+  "default/d2/markets/k8": {
+   "native": 7,
+   "compat": 21,
+   "skipped": 7
+  },
+  "default/d2/military/k1": {
+   "native": 152,
+   "compat": 234,
+   "skipped": 0
+  },
+  "default/d2/military/k2": {
+   "native": 152,
+   "compat": 234,
+   "skipped": 0
+  },
+  "default/d2/military/k4": {
+   "native": 152,
+   "compat": 234,
+   "skipped": 0
+  },
+  "default/d2/military/k8": {
+   "native": 152,
+   "compat": 234,
+   "skipped": 0
+  },
+  "default/d2/ocean/k1": {
+   "native": 4,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/ocean/k2": {
+   "native": 4,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/ocean/k4": {
+   "native": 4,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/ocean/k8": {
+   "native": 4,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/population/k1": {
+   "native": 0,
+   "compat": 2603,
+   "skipped": 0
+  },
+  "default/d2/population/k2": {
+   "native": 0,
+   "compat": 2603,
+   "skipped": 0
+  },
+  "default/d2/population/k4": {
+   "native": 0,
+   "compat": 2603,
+   "skipped": 0
+  },
+  "default/d2/population/k8": {
+   "native": 0,
+   "compat": 2603,
+   "skipped": 0
+  },
+  "default/d2/precipitation/k1": {
+   "native": 0,
+   "compat": 2127,
+   "skipped": 0
+  },
+  "default/d2/precipitation/k2": {
+   "native": 0,
+   "compat": 2127,
+   "skipped": 0
+  },
+  "default/d2/precipitation/k4": {
+   "native": 0,
+   "compat": 2127,
+   "skipped": 0
+  },
+  "default/d2/precipitation/k8": {
+   "native": 0,
+   "compat": 2127,
+   "skipped": 0
+  },
+  "default/d2/provinces/k1": {
+   "native": 0,
+   "compat": 1,
+   "skipped": 1
+  },
+  "default/d2/provinces/k2": {
+   "native": 0,
+   "compat": 1,
+   "skipped": 1
+  },
+  "default/d2/provinces/k4": {
+   "native": 0,
+   "compat": 1,
+   "skipped": 1
+  },
+  "default/d2/provinces/k8": {
+   "native": 0,
+   "compat": 1,
+   "skipped": 1
+  },
+  "default/d2/relief/k1": {
+   "native": 1,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/relief/k2": {
+   "native": 1,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/relief/k4": {
+   "native": 1,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/relief/k8": {
+   "native": 1,
+   "compat": 0,
+   "skipped": 1
+  },
+  "default/d2/religions/k1": {
+   "native": 46,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/religions/k2": {
+   "native": 46,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/religions/k4": {
+   "native": 46,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/religions/k8": {
+   "native": 46,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/rivers/k1": {
+   "native": 199,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/rivers/k2": {
+   "native": 199,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/rivers/k4": {
+   "native": 199,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/rivers/k8": {
+   "native": 199,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/routes/k1": {
+   "native": 93,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/routes/k2": {
+   "native": 93,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/routes/k4": {
+   "native": 93,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/routes/k8": {
+   "native": 93,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/rulers/k1": {
+   "native": 9,
+   "compat": 14,
+   "skipped": 0
+  },
+  "default/d2/rulers/k2": {
+   "native": 9,
+   "compat": 14,
+   "skipped": 0
+  },
+  "default/d2/rulers/k4": {
+   "native": 9,
+   "compat": 14,
+   "skipped": 0
+  },
+  "default/d2/rulers/k8": {
+   "native": 9,
+   "compat": 14,
+   "skipped": 0
+  },
+  "default/d2/scaleBar/k1": {
+   "native": 0,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/scaleBar/k2": {
+   "native": 0,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/scaleBar/k4": {
+   "native": 0,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/scaleBar/k8": {
+   "native": 0,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/states/k1": {
+   "native": 30,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/states/k2": {
+   "native": 30,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/states/k4": {
+   "native": 30,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/states/k8": {
+   "native": 30,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/temperature/k1": {
+   "native": 6,
+   "compat": 16,
+   "skipped": 0
+  },
+  "default/d2/temperature/k2": {
+   "native": 6,
+   "compat": 16,
+   "skipped": 0
+  },
+  "default/d2/temperature/k4": {
+   "native": 6,
+   "compat": 16,
+   "skipped": 0
+  },
+  "default/d2/temperature/k8": {
+   "native": 6,
+   "compat": 16,
+   "skipped": 0
+  },
+  "default/d2/terrs/k1": {
+   "native": 15,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/terrs/k2": {
+   "native": 15,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/terrs/k4": {
+   "native": 15,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/terrs/k8": {
+   "native": 15,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/texture/k1": {
+   "native": 14,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/texture/k2": {
+   "native": 14,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/texture/k4": {
+   "native": 14,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/texture/k8": {
+   "native": 14,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/vignette/k1": {
+   "native": 0,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/vignette/k2": {
+   "native": 0,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/vignette/k4": {
+   "native": 0,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/vignette/k8": {
+   "native": 0,
+   "compat": 1,
+   "skipped": 0
+  },
+  "default/d2/zones/k1": {
+   "native": 58,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/zones/k2": {
+   "native": 58,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/zones/k2@k2-hatch41": {
+   "native": 58,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/zones/k4": {
+   "native": 58,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/zones/k4@k4-hatch29": {
+   "native": 58,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/zones/k4@k4-hatch5": {
+   "native": 58,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/zones/k8": {
+   "native": 58,
+   "compat": 0,
+   "skipped": 0
+  },
+  "default/d2/zones/k8@k8-hatch17": {
+   "native": 58,
+   "compat": 0,
+   "skipped": 0
+  }
+ }
+}
