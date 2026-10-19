@@ -154,7 +154,7 @@ try {
   const errors: string[] = [];
   page.on("pageerror", error => errors.push(error.message));
   page.on("dialog", dialog => dialog.dismiss());
-  await page.goto(origin + "/?local&seed=7319&width=1280&height=720&renderer=gpu");
+  await page.goto(origin + "/?local&seed=7319&width=1280&height=720&renderer=gpu&gpu-select");
   await page.evaluate(async () => {
     const result = await (globalThis as any).__tupaia.call("ready", { timeoutMs: 120000 });
     if (!result.ok) throw new Error(JSON.stringify(result));

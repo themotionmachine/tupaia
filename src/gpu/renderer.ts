@@ -246,7 +246,8 @@ export class GpuRenderer {
 
   constructor(
     private svg: SVGSVGElement,
-    private fallBack: (reason: string) => void
+    private fallBack: (reason: string) => void,
+    private readonly pickingEnabled = true
   ) {
     const style = this.canvas.style;
     Object.assign(style, { position: "fixed", pointerEvents: "none", display: "none" });
@@ -331,6 +332,7 @@ export class GpuRenderer {
   // The index is world-space vector data read through the current camera, so a cached unchanged frame stays valid
   // during camera motion and outside the bitmap windows (those only crop paint). Per query, never per frame.
   pickStatus(): string | null {
+    if (!this.pickingEnabled) return "GPU selection disabled; canonical SVG targeting";
     const records = this.mutations.takeRecords();
     if (records.length) this.mutated(records);
     const prepared = this.prepared;
@@ -903,7 +905,8 @@ export class GpuRenderer {
           if (recovering) this.recovery.prepareStep(recovering, step);
         },
         scenes: this.scenes,
-        worldEpoch: this.worldEpoch
+        worldEpoch: this.worldEpoch,
+        picking: this.pickingEnabled
       });
       if (!next) {
         record.outcome = "stale";
@@ -1144,7 +1147,8 @@ let detachRecover: (() => void) | null = null;
 export function createGpuRenderer(fallBack: (reason: string) => void): GpuRenderer {
   const svg = document.getElementById("map");
   if (!(svg instanceof SVGSVGElement)) throw new Error("missing <svg id=map>");
-  const renderer = new GpuRenderer(svg, fallBack);
+  const gpuSelection = new URLSearchParams(location.search).has("gpu-select");
+  const renderer = new GpuRenderer(svg, fallBack, gpuSelection);
   page.gpuRenderer = renderer;
   page.gpuPick = (x, y, tolerance) => renderer.pick(x, y, tolerance);
   // canvas fallbacks are read per call: their modules may load after the renderer. Read-only: the relief leg peeks
@@ -1170,7 +1174,6 @@ export function createGpuRenderer(fallBack: (reason: string) => void): GpuRender
   // Canonical click recovery is required whenever the GPU defers SVG camera writes. Only GPU target selection
   // is experimental: without ?gpu-select the handler never queries the index and re-runs the native SVG hit test.
   {
-    const gpuSelection = new URLSearchParams(location.search).has("gpu-select");
     const telemetry = createTelemetry();
     const select = page.gpuSelect;
     const stale = () => renderer.canonicalCameraStale();

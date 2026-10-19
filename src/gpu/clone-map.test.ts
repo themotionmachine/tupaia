@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveInClone } from "./clone-map";
+import { resolveInClone, resolveManyInClone } from "./clone-map";
 
 function element(tagName: string, id = "", children: Element[] = [], attributes: string[] = []): Element {
   const node = {
@@ -52,5 +52,65 @@ describe("canonical clone matching", () => {
     const source = element("use");
     element("g", "freshwater", [source]);
     expect(resolveInClone(source, element("svg", "fantasyMap"))).toBe("detached element");
+  });
+});
+
+
+describe("batched canonical clone matching", () => {
+  it("preserves scalar identity and error behavior across duplicate IDs and anonymous siblings", () => {
+    const cases = [
+      [],
+      [element("use", "same"), element("path", "same"), element("use", "same"), element("use")],
+      [element("image", "", [], ["data-path-vectors"]), element("path"), element("path", "named")],
+      [element("path"), element("image", "", [], ["data-dense-zoom"]), element("path", "named")],
+      [element("path"), element("image", "", [], ["data-path-vectors"])],
+      [element("path", "named"), element("path"), element("image", "", [], ["data-dense-zoom"])]
+    ];
+    for (const siblings of cases) {
+      const sourceGroup = element("g", "group", siblings);
+      const root = element("svg", "map", [element("g", "other", [element("use", "same")]), sourceGroup]);
+      for (const missing of [false, true]) {
+        const copies = siblings.map(child => element(child.tagName, child.id));
+        if (missing) copies.pop();
+        const clone = element("svg", "fantasyMap", [
+          element("g", "other", [element("use", "same")]),
+          element("g", "group", copies)
+        ]);
+        const lives = [root, root.children[0].children[0], sourceGroup, ...siblings, element("path", "detached")];
+        const expected = lives.map(live => resolveInClone(live, clone));
+        const actual = resolveManyInClone(lives, clone);
+        actual.forEach((result, i) => expect(result).toBe(expected[i]));
+      }
+    }
+  });
+
+  it("rebuilds indexes after replacement of clone children in the same revision", () => {
+    const live = element("use", "emblem");
+    element("svg", "map", [element("g", "emblems", [live])]);
+    const old = element("use", "emblem");
+    const group = element("g", "emblems", [old]);
+    const clone = element("svg", "fantasyMap", [group]);
+    expect(resolveManyInClone([live], clone)[0]).toBe(old);
+    const replacement = element("use", "emblem");
+    Object.assign(group, { children: [replacement] });
+    Object.assign(replacement, { parentElement: group });
+    expect(resolveManyInClone([live], clone)[0]).toBe(replacement);
+    Object.assign(group, { children: [] });
+    expect(resolveManyInClone([live], clone)[0]).toBe("missing #emblem");
+  });
+
+  it("scans sibling collections once per parent instead of once per requested child", () => {
+    const lives = Array.from({ length: 2000 }, (_, i) => element("use", i % 2 ? "duplicate" : ""));
+    const copies = lives.map(child => element(child.tagName, child.id));
+    const liveGroup = element("g", "emblems", lives);
+    element("svg", "map", [liveGroup]);
+    const cloneGroup = element("g", "emblems", copies);
+    const clone = element("svg", "fantasyMap", [cloneGroup]);
+    let reads = 0;
+    Object.defineProperty(liveGroup, "children", { get: () => { reads++; return lives; } });
+    Object.defineProperty(cloneGroup, "children", { get: () => { reads++; return copies; } });
+    const actual = resolveManyInClone(lives, clone);
+    actual.forEach((result, i) => expect(result).toBe(copies[i]));
+    expect(reads).toBe(2);
   });
 });

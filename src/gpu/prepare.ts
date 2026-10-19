@@ -13,6 +13,7 @@ import {
   windowAllowance
 } from "./budget";
 import type { Camera } from "./camera";
+import { resolveManyInClone } from "./clone-map";
 import {
   compatClone,
   compatResolution,
@@ -63,6 +64,7 @@ export interface PrepareContext {
   // optional scene reuse across context restores (scene-cache.ts); absent: every prepare walks the DOM
   scenes?: SceneCache;
   worldEpoch?: number;
+  picking?: boolean; // false: presentation only; canonical SVG remains responsible for editor targets
 }
 
 // The scene curve tolerance; buildScene's own default, passed explicitly so the cache key cannot drift from it.
@@ -105,6 +107,7 @@ export const overlayShapes = (root: Element, svg: SVGSVGElement) =>
 export const SHARP_COMPAT = new Set(["text", "<svg>", "restored burg vectors"]);
 
 export interface Prepared {
+  picking?: boolean; // absent on older callers means enabled
   frame: Frame;
   pick: PickIndex;
   bucket: number;
@@ -169,6 +172,7 @@ export class BudgetError extends Error {}
 
 export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Promise<Prepared | null> {
   const { device } = ctx;
+  const picking = ctx.picking !== false;
   const viewbox = svg.querySelector("#viewbox");
   if (!viewbox) throw new Error("missing #viewbox");
   const scene = sceneFor(viewbox, ctx);
@@ -200,7 +204,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
   // `layer` is null for screen overlays: they sit outside the world and are not pickable
   const compat = (element: Element, reason: string, out: Batch[], layer: string | null, screen = false, shapes?: HitShape[]) => {
     if (reasons.length < 16 && !reasons.includes(reason)) reasons.push(reason);
-    if (layer !== null)
+    if (picking && layer !== null)
       for (const shape of shapes ?? compatShapes(element as unknown as CompatRoot, viewbox as SVGGraphicsElement))
         pick.addShape(layer, shape);
     const last = runs[runs.length - 1];
@@ -282,13 +286,13 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
 
   const convert = async (draws: Draw[], out: Batch[]): Promise<boolean> => {
     // CSS px per world unit at prepare time; sets dashed-stroke chord tolerance (0.5 / scale), see dash-measure.ts
-    const viewScale = viewScaleOf(viewbox as SVGGraphicsElement);
+    const viewScale = picking ? viewScaleOf(viewbox as SVGGraphicsElement) : 1;
     const positions = new Map<Element, Map<Element, number>>();
     for (const draw of draws) {
       await slice.tick(); // a superseded job is caught by the check below, right after the yield
       if (ctx.stale()) return false;
-      const id = pickId(draw.element);
-      const depth = pickDepth(draw.element);
+      const id = picking ? pickId(draw.element) : "";
+      const depth = picking ? pickDepth(draw.element) : 0;
       const path = depth ? leafPath(draw.element, depth, positions) : null;
       if (draw.kind === "shape") {
         const { style, subpaths } = draw;
@@ -296,7 +300,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
         // Hit areas follow the element's computed pointer-events (stylesheet rules such as #regions { none }), read
         // once at prepare time; the painted style alone would index click-through layers above selectable ones.
         const view = draw.element.ownerDocument.defaultView;
-        const hits = view ? sensitivity(view.getComputedStyle(draw.element)) : { fill: true, stroke: true, box: false };
+        const hits = !picking ? null : view ? sensitivity(view.getComputedStyle(draw.element)) : { fill: true, stroke: true, box: false };
         // Hit geometry is flattened at the compat pick tolerance, not the paint tolerance: a 0.2-unit chord error is
         // comparable to a thin route's half width (dashed strokes: see strokeHitRings).
         let hitPaths: Subpath[] | null = null;
@@ -360,7 +364,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
         // (they are an attribute, not DOM): pointer-events="none" (path-layer-canvas) makes the layer click-through,
         // otherwise the image rect is the hit area. The vectors are not hit regions in either case.
         out.push(windows.add(image, meetImageRect(rect, image.naturalWidth, image.naturalHeight), draw.opacity));
-        if (rasterHits(draw.element)) {
+        if (picking && rasterHits(draw.element)) {
           const [x, y, w, h] = rect;
           pick.setDepth(pick.addBox(draw.layer, id, [x, y, x + w, y, x + w, y + h, x, y + h]), depth, path);
         }
@@ -372,9 +376,9 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
         // outside the supported subset keeps its whole box as hit area (no narrowphase); its instance k is still
         // recorded for diagnostics, and the renderer never resolves it to a target, so selection reports it
         // terrain-unsupported with the href's reason.
-        const sensitive = rasterHits(draw.element);
+        const sensitive = picking && rasterHits(draw.element);
         const materialized = draw.element.tagName.toLowerCase() === "g";
-        const id = pickId(draw.element);
+        const id = picking ? pickId(draw.element) : "";
         const glyphs = new Map<string, GlyphHits | null>();
         const support: NonNullable<Prepared["relief"]>["support"] = new Map();
         if (sensitive && materialized) relief = { group: draw.element, icons: draw.icons, support };
@@ -464,7 +468,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
           continue;
         }
         // hit areas are the DOM text's character cells (SVG hit testing), not the glyph-ink quads painted here
-        for (const shape of compatShapes(draw.element as unknown as CompatRoot, viewbox as SVGGraphicsElement))
+        if (picking) for (const shape of compatShapes(draw.element as unknown as CompatRoot, viewbox as SVGGraphicsElement))
           pick.addShape(draw.layer, shape);
         glyphs.push(batch.instances);
         const last = out[out.length - 1];
@@ -490,7 +494,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
         if (draw.opacity < 1) out.push({ kind: "group", opacity: draw.opacity, mask: null, children });
         else out.push(...children);
       } else {
-        const shapes = compatShapesBatch(draw.elements as unknown as CompatRoot[], viewbox as SVGGraphicsElement);
+        const shapes = picking ? compatShapesBatch(draw.elements as unknown as CompatRoot[], viewbox as SVGGraphicsElement) : [];
         draw.elements.forEach((element, i) => compat(element, draw.reason, out, draw.layer, false, shapes[i]));
       }
     }
@@ -505,7 +509,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
       if (child === viewbox) seen = true;
       else if (!ignoredRoot.has(child.tagName) && getComputedStyle(child).display !== "none") {
         compat(child, "screen overlay", seen ? after : before, null, true);
-        if (seen) runs[runs.length - 1].hits = overlayShapes(child, svg);
+        if (picking && seen) runs[runs.length - 1].hits = overlayShapes(child, svg);
       }
     }
     const batches: Batch[] = [];
@@ -530,7 +534,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
     const clone = runs.length ? await compatClone(ctx.revision) : null;
     ctx.mark?.("clone");
     const rasterize = async (run: CompatRun): Promise<boolean> => {
-      const resolved = run.elements.map(element => resolveInClone(element, clone!));
+      const resolved = resolveManyInClone(run.elements, clone!);
       const missing = resolved.find(item => typeof item === "string");
       if (missing) {
         const i = resolved.indexOf(missing);
@@ -635,6 +639,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
     const overlays = indexOverlays(runs, ctx.screen);
     return {
       frame,
+      picking,
       pick,
       bucket: ctx.bucket,
       revision: ctx.revision,
@@ -690,7 +695,7 @@ export async function refineCompat(
     const entry = { id: element.id || `${element.parentElement?.id ?? ""}>${element.tagName}`, density: prepared.compat.resolution };
     report.push(entry);
     if (ctx.stale()) return false;
-    const resolved = run.elements.map(element => resolveInClone(element, clone));
+    const resolved = resolveManyInClone(run.elements, clone);
     if (resolved.some(item => typeof item === "string")) return false;
     const canvas = await rasterizeRun(clone, resolved as Element[], visible, pixels.width, pixels.height, false);
     if (ctx.stale()) return false;
@@ -809,7 +814,8 @@ export async function refreshOverlays(prepared: Prepared, ctx: PrepareContext, r
   // hit areas read from the live roots in the same task the clone copies were taken, committed with the rasters
   const hits = runs.map(run => {
     const root = run.elements[0];
-    return run.hits && root.parentElement instanceof SVGSVGElement ? overlayShapes(root, root.parentElement) : run.hits;
+    return prepared.picking !== false && run.hits && root.parentElement instanceof SVGSVGElement
+      ? overlayShapes(root, root.parentElement) : run.hits;
   });
   const region = { x: 0, y: 0, ...ctx.screen };
   const [w, h] = [Math.max(1, Math.round(region.width * region.dpr)), Math.max(1, Math.round(region.height * region.dpr))];

@@ -32,3 +32,66 @@ export function resolveInClone(live: Element, clone: Element): Element | string 
   }
   return target;
 }
+
+
+// Indexes live and clone siblings once per synchronous batch. Nothing survives this call: rasterization can
+// restructure the export clone between runs, even when the map revision itself has not changed.
+export function resolveManyInClone(lives: readonly Element[], clone: Element): (Element | string)[] {
+  interface Position {
+    tagOrdinal: number;
+    idOrdinal: number;
+    transientBefore: boolean;
+  }
+  interface Children {
+    tags: Map<string, Element[]>;
+    ids: Map<string, Map<string, Element[]>>;
+    positions: Map<Element, Position>;
+    dense: boolean;
+  }
+  const parents = new Map<Element, Children>();
+  const childrenOf = (parent: Element): Children => {
+    const cached = parents.get(parent);
+    if (cached) return cached;
+    const result: Children = { tags: new Map(), ids: new Map(), positions: new Map(), dense: false };
+    let transientBefore = false;
+    for (const child of parent.children) {
+      let tags = result.tags.get(child.tagName);
+      if (!tags) result.tags.set(child.tagName, (tags = []));
+      let ids = result.ids.get(child.tagName);
+      if (!ids) result.ids.set(child.tagName, (ids = new Map()));
+      let matches = ids.get(child.id);
+      if (!matches) ids.set(child.id, (matches = []));
+      result.positions.set(child, { tagOrdinal: tags.length, idOrdinal: matches.length, transientBefore });
+      tags.push(child);
+      matches.push(child);
+      transientBefore ||= transient(child);
+      result.dense ||= child.hasAttribute("data-dense-zoom");
+    }
+    parents.set(parent, result);
+    return result;
+  };
+  return lives.map(live => {
+    const chain: Element[] = [];
+    let node: Element | null = live;
+    while (node && !(node.tagName === "svg" && node.id === "map")) {
+      chain.push(node);
+      node = node.parentElement;
+    }
+    if (!node) return "detached element";
+    let target = clone;
+    for (let i = chain.length - 1; i >= 0; i--) {
+      const source = chain[i];
+      const siblings = childrenOf(source.parentElement!);
+      const position = siblings.positions.get(source)!;
+      if (!source.id && (position.transientBefore || siblings.dense)) return "restructured parent";
+      const candidates = childrenOf(target);
+      const matches = source.id
+        ? candidates.ids.get(source.tagName)?.get(source.id)
+        : candidates.tags.get(source.tagName);
+      const next = matches?.[source.id ? position.idOrdinal : position.tagOrdinal];
+      if (!next) return source.id ? `missing #${source.id}` : `unresolved <${source.tagName}>`;
+      target = next;
+    }
+    return target;
+  });
+}

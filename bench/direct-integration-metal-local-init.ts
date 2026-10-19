@@ -641,9 +641,12 @@ function installEditorChecks() {
         "elSelected " + ix.describe(selected) + " key " + (selected && reliefKey(selected)) + " != " + cur.key);
     else expect(selected === cur.element, "elSelected " + ix.describe(selected) + " != " + ix.describe(cur.element));
     expect(ix.openDialogs().includes(dialog), "dialog not open: " + dialog);
-    // fail-closed while editing: the pick is unavailable (never an empty hit), reported as the editor suspension
+    // Selection remains disabled in presentation-only mode; explicit GPU selection is suspended while editing.
     const pick = ix.gpuAt(cur.x, cur.y);
-    expect(pick.branch === "unavailable" && pick.kind === "none" && String(pick.unavailable).startsWith("suspended"),
+    const selectionEnabled = new URLSearchParams(location.search).has("gpu-select");
+    const expectedUnavailable = selectionEnabled ? String(pick.unavailable).startsWith("suspended")
+      : pick.unavailable === "GPU selection disabled; canonical SVG targeting";
+    expect(pick.branch === "unavailable" && pick.kind === "none" && expectedUnavailable,
       "pick while editing " + JSON.stringify(pick));
     const observed: any = { kind, editor, agree: { agree: delta("agree"), disagree: delta("disagree") }, pickWhileOpen: pick };
     try {
@@ -1486,7 +1489,11 @@ try {
       report.editors.push({ target, ...verdict.observed, problems: verdict.problems });
       await prepare(page);
       const resumed = await page.evaluate(({ x, y }) => (globalThis as any).__ix.gpuAt(x, y), target);
-      check(resumed.branch !== "unavailable", kind + ": pick still unavailable after close " + JSON.stringify(resumed));
+      check(renderingOnly
+        ? resumed.branch === "unavailable" && resumed.kind === "none"
+          && resumed.unavailable === "GPU selection disabled; canonical SVG targeting"
+        : resumed.branch !== "unavailable",
+        kind + ": selection availability after close " + JSON.stringify(resumed));
     }
   }
 
