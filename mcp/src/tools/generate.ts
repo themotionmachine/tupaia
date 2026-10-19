@@ -146,7 +146,7 @@ export function register(ctx: ToolContext): void {
           "Options for part emblems: new coats of arms with each culture's shield; locked and custom emblems are kept (the notes name locked states skipped); a Wildlands burg or province takes its state's culture shield. Turns no layer on"
         ),
         relief: ReliefParams.optional().describe(
-          "Options for part relief: {density | matchIcons, perBiome, minHeight, exclude | excludeAdd/excludeRemove, nearBurgs, seed, onLoad}. Stored with the map and used by every later draw; keys left out keep their stored value. parts:['relief'] alone takes dryRun (the stored settings before/after; with no relief keys it just reads them)"
+          "Options for part relief: {density | matchIcons, perBiome, minHeight, exclude | excludeAdd/excludeRemove, nearBurgs, seed, onLoad (deprecated legacy compatibility)}. Saves preserve drawn icons. Stored with the map and used by every later draw; keys left out keep their stored value. parts:['relief'] alone takes dryRun (the stored settings before/after; with no relief keys it just reads them)"
         ),
         dryRun: z
           .boolean()

@@ -46,7 +46,7 @@
     "vulcan"
   ];
   /**
-   * What happens to the relief icons drawn now. A map that draws them on load (reliefOnLoad,
+   * What happens to relief drawn now. The deprecated compatibility flag (reliefOnLoad,
    * bridge-ext/relief.js) has them redrawn after this MCP call when its relief layer is on.
    */
   function reliefNote() {
@@ -54,7 +54,7 @@
     const onLoad = !!el?.hasAttribute("data-regenerate");
     const shown = typeof layerIsOn !== "function" || layerIsOn("toggleRelief");
     if (onLoad && shown)
-      return "iconsDensity and icons are drawn now: this map draws its relief icons on load (reliefOnLoad), so they are redrawn after this call (see the 'relief icons redrawn' note)";
+      return "iconsDensity and icons are drawn now: this map carries the deprecated reliefOnLoad compatibility flag, so icons are redrawn after this call (see the 'relief icons redrawn' note)";
     return "iconsDensity and icons take effect when relief icons are next drawn (regenerate {parts:['relief']} redraws them, seeded, for every biome); the icons on the map now are unchanged";
   }
 

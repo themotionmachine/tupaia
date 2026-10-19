@@ -1,4 +1,5 @@
 import type { Burg } from "../generators/burgs-generator";
+import { compactBurgIcons, invalidateBurgIndex, restoreBurgVectors } from "./burg-canvas";
 
 declare global {
   var drawBurgIcons: () => void;
@@ -33,17 +34,20 @@ const burgIconsRenderer = (): void => {
       .join("");
   }
 
+  invalidateBurgIndex();
+  compactBurgIcons();
   TIME && console.timeEnd("drawBurgIcons");
 };
 
 const drawBurgIconRenderer = (burg: Burg): void => {
+  restoreBurgVectors();
   const iconGroup = burgIcons.select<SVGGElement>(`#${burg.group}`);
   if (iconGroup.empty()) {
     drawBurgIcons();
     return; // redraw all icons if group is missing
   }
 
-  removeBurgIconRenderer(burg.i!);
+  removeBurgIconRenderer(burg.i!, false);
   const icon = iconGroup.attr("data-icon") || "#icon-circle";
   burgIcons
     .select(`#${burg.group}`)
@@ -64,14 +68,19 @@ const drawBurgIconRenderer = (burg: Burg): void => {
       .attr("x", burg.x)
       .attr("y", burg.y);
   }
+  invalidateBurgIndex();
+  compactBurgIcons();
 };
 
-const removeBurgIconRenderer = (burgId: number): void => {
+const removeBurgIconRenderer = (burgId: number, compact = true): void => {
+  restoreBurgVectors();
   const existingIcon = document.getElementById(`burg${burgId}`);
   if (existingIcon) existingIcon.remove();
 
   const existingAnchor = document.getElementById(`anchor${burgId}`);
   if (existingAnchor) existingAnchor.remove();
+  invalidateBurgIndex();
+  if (compact) compactBurgIcons();
 };
 
 function createIconGroups(): void {

@@ -1,0 +1,64 @@
+{
+  "cells": 47885,
+  "camera": {
+    "k": 8,
+    "x": -7360,
+    "y": -8120
+  },
+  "tileCount": 1,
+  "denseReadyAPI": true,
+  "saveExact": true,
+  "zonesUnchanged": true,
+  "labelHitsExact": true,
+  "visibleLabelHits": 1,
+  "transientSaveClean": true,
+  "reliefPick": {
+    "href": "#relief-hill-2",
+    "x": 1009.5,
+    "y": 1017.5,
+    "size": 12
+  },
+  "serializedBytes": 7781900,
+  "imagePath": "bench/results/navigation-atlas-quality-head.png",
+  "pixelDiff": {
+    "changedPixelsOver16": 4476,
+    "fraction": 0.004856770833333334,
+    "meanAbsoluteChannelDelta": 0.17123083043981482,
+    "maximum": 44
+  },
+  "coldCrossing": {
+    "nativeWheel": true,
+    "startScale": 3.9,
+    "endScale": 4.357419838481658,
+    "timeToCrispMs": 99.7000000007447,
+    "first10IntervalsMs": [
+      8.89999999925476,
+      16.800000000000182,
+      7.899999999999636,
+      8.400000000000546,
+      33.30000000000018,
+      8.399999999999636,
+      8.300000000000182,
+      7.599999999999454,
+      9.300000000000182,
+      8.100000000000364
+    ],
+    "maxIntervalMs": 33.30000000000018,
+    "baseFallbackSafe": true,
+    "tileCount": 1
+  },
+  "hatching": {
+    "testedPatterns": 14,
+    "screenPitchStable": true
+  },
+  "asynchronous": {
+    "applicable": true,
+    "delayedEncodingJobs": 1,
+    "staleWorldDecodeRejected": true,
+    "pendingBaseHandoffSafe": true
+  },
+  "errors": [],
+  "pendingChecks": [
+    "delayed initial sprite handoff"
+  ]
+}

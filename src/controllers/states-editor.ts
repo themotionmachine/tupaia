@@ -1,13 +1,13 @@
 import { color, drag, interpolateString, max, pack as packLayout, pointer, select, stratify } from "d3";
 import type { Province } from "@/generators/provinces-generator";
 import type { State } from "@/generators/states-generator";
+import { type CellPaintOverlay, createCellPaintOverlay } from "@/renderers/cell-paint-overlay";
 import {
   ensureEl,
   findAllCellsInRadius,
   formatPrice,
   getAdjective,
   getMixedColor,
-  getPackPolygon,
   getRandomColor,
   isLand,
   P,
@@ -19,7 +19,9 @@ import {
 
 const $body = insertEditorHtml();
 addListeners();
-let statesManualHistory: string[] = [];
+let statesManualHistory: Uint32Array[] = [];
+let pendingStates = new Map<number, number>();
+let statePaint: CellPaintOverlay | undefined;
 // tupaia-mcp: expose module-private helpers to the MCP bridge (mcp/src/bridge-mutations.js)
 (window as any).__tupaiaInternals = { ...(window as any).__tupaiaInternals, adjustProvinces, stateRemove };
 
@@ -964,10 +966,10 @@ function openRegenerationMenu(): void {
   $("#statesEditor").dialog({ position: { my: "right top", at: "right-10 top+10", of: "svg", collision: "fit" } });
 }
 
-function recalculateStates(must?: boolean): void {
+async function recalculateStates(must?: boolean): Promise<void> {
   if (!must && !ensureEl<HTMLInputElement>("statesAutoChange").checked) return;
 
-  States.expandStates();
+  await States.expandStatesAsync();
   Provinces.generate();
   Provinces.getPoles();
   States.getPoles();
@@ -1009,7 +1011,9 @@ function exitRegenerationMenu(): void {
 function enterStatesManualAssignent(): void {
   if (!layerIsOn("toggleStates")) toggleStates();
   customization = 2;
-  statesBody.append("g").attr("id", "temp");
+  const temp = statesBody.append("g").attr("id", "temp").node()!;
+  pendingStates = new Map();
+  statePaint = createCellPaintOverlay(temp, id => pack.states[id].color || "#ffffff");
   document.querySelectorAll<HTMLElement>("#statesBottom > button").forEach(el => {
     el.style.display = "none";
   });
@@ -1050,8 +1054,7 @@ function selectStateOnMapClick(this: any, event: any): void {
   const i = findCell(point[0], point[1]);
   if (pack.cells.h[i!] < 20) return;
 
-  const assigned = statesBody.select("#temp").select(`polygon[data-cell='${i}']`);
-  const state = assigned.size() ? +assigned.attr("data-state") : pack.cells.state[i!];
+  const state = pendingStates.get(i!) ?? pack.cells.state[i!];
 
   $body.querySelector("div.selected")?.classList.remove("selected");
   $body.querySelector(`div[data-id='${state}']`)?.classList.add("selected");
@@ -1074,31 +1077,17 @@ function dragStateBrush(this: any, event: any): void {
 
 // change state within selection
 function changeStateForSelection(selection: number[]): void {
-  const temp = statesBody.select("#temp");
-
-  const $selected = $body.querySelector<HTMLElement>("div.selected")!;
-  const stateNew = +$selected.dataset.id!;
-  const color = pack.states[stateNew].color || "#ffffff";
-  const preventOverwrite = (document.getElementById("statesManuallyProtect") as HTMLInputElement | null)?.checked;
-
-  selection.forEach(i => {
-    const exists = temp.select(`polygon[data-cell='${i}']`);
-    const stateOld = exists.size() ? +exists.attr("data-state") : pack.cells.state[i];
-    if (stateNew === stateOld) return;
-    if (preventOverwrite && stateOld) return;
-    if (i === pack.states[stateOld].center) return;
-
-    // change of append new element
-    if (exists.size()) exists.attr("data-state", stateNew).attr("fill", color).attr("stroke", color);
-    else
-      temp
-        .append("polygon")
-        .attr("data-cell", i)
-        .attr("data-state", stateNew)
-        .attr("points", getPackPolygon(i, pack))
-        .attr("fill", color)
-        .attr("stroke", color);
-  });
+  const selected = $body.querySelector<HTMLElement>("div.selected")!;
+  const nextState = +selected.dataset.id!;
+  const protect = (document.getElementById("statesManuallyProtect") as HTMLInputElement | null)?.checked;
+  const dirty: number[] = [];
+  for (const cell of selection) {
+    const previous = pendingStates.get(cell) ?? pack.cells.state[cell];
+    if (nextState === previous || (protect && previous) || cell === pack.states[previous].center) continue;
+    pendingStates.set(cell, nextState);
+    dirty.push(cell);
+  }
+  statePaint?.paint(pendingStates, dirty);
 }
 
 function moveStateBrush(this: any, event: any): void {
@@ -1113,23 +1102,20 @@ function applyStatesManualAssignent(): void {
   const affectedStates: number[] = [];
   const affectedProvinces: number[] = [];
 
-  statesBody
-    .select("#temp")
-    .selectAll<SVGPolygonElement, unknown>("polygon")
-    .each(function () {
-      const i = +this.dataset.cell!;
-      const c = +this.dataset.state!;
-      affectedStates.push(cells.state[i], c);
-      affectedProvinces.push(cells.province[i]);
-      cells.state[i] = c;
-      if (cells.burg[i]) pack.burgs[cells.burg[i]].state = c;
-    });
+  for (const [i, c] of pendingStates) {
+    affectedStates.push(cells.state[i], c);
+    affectedProvinces.push(cells.province[i]);
+    cells.state[i] = c;
+    if (cells.burg[i]) pack.burgs[cells.burg[i]].state = c;
+  }
 
   if (affectedStates.length) {
     refreshStatesEditor();
     States.getPoles();
-    layerIsOn("toggleStates") ? drawStates() : toggleStates();
-    if (ensureEl<HTMLInputElement>("adjustLabels").checked) drawStateLabels([...new Set(affectedStates)]);
+    layerIsOn("toggleStates") ? drawStates([...new Set(affectedStates)]) : toggleStates();
+    // Painting territory preserves existing label text, path and manual placement.
+    const missingLabels = [...new Set(affectedStates)].filter(id => id && !document.getElementById(`stateLabel${id}`));
+    if (missingLabels.length) drawStateLabels(missingLabels);
     adjustProvinces([...new Set(affectedProvinces)]);
     layerIsOn("toggleBorders") ? drawBorders() : toggleBorders();
     if (layerIsOn("toggleProvinces")) drawProvinces();
@@ -1291,6 +1277,8 @@ function exitStatesManualAssignment(close: boolean): void {
   customization = 0;
   statesManualHistory = [];
   statesBody.select("#temp").remove();
+  pendingStates.clear();
+  statePaint = undefined;
   removeCircle();
   document.querySelectorAll<HTMLElement>("#statesBottom > button").forEach(el => {
     el.style.display = "inline-block";
@@ -1317,18 +1305,22 @@ function exitStatesManualAssignment(close: boolean): void {
 }
 
 function saveStatesManualSnapshot(): void {
-  const temp = statesBody.select("#temp").node() as HTMLElement | null;
-  if (!temp) return;
-
-  statesManualHistory.push(temp.innerHTML);
+  const snapshot = new Uint32Array(pendingStates.size * 2);
+  let offset = 0;
+  for (const [cell, state] of pendingStates) {
+    snapshot[offset++] = cell;
+    snapshot[offset++] = state;
+  }
+  statesManualHistory.push(snapshot);
   if (statesManualHistory.length > 100) statesManualHistory.shift();
 }
 
 function undoStatesManualAssignment(): void {
-  const temp = statesBody.select("#temp").node() as HTMLElement | null;
-  if (!temp || !statesManualHistory.length) return;
-
-  temp.innerHTML = statesManualHistory.pop()!;
+  const snapshot = statesManualHistory.pop();
+  if (!snapshot) return;
+  pendingStates.clear();
+  for (let offset = 0; offset < snapshot.length; offset += 2) pendingStates.set(snapshot[offset], snapshot[offset + 1]);
+  statePaint?.reset(pendingStates);
 }
 
 function enterAddStateMode(this: HTMLElement): void {

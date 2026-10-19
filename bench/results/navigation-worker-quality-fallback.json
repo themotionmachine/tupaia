@@ -1,0 +1,87 @@
+{
+  "cells": 47885,
+  "camera": {
+    "k": 8,
+    "x": -7360,
+    "y": -8120
+  },
+  "tileCount": 1,
+  "denseReadyAPI": true,
+  "backend": {
+    "backend": "main",
+    "fallbackReason": "Worker canvas features unavailable",
+    "completed": 0,
+    "pending": 0,
+    "atlasEntries": 0
+  },
+  "saveExact": true,
+  "zonesUnchanged": true,
+  "labelHitsExact": true,
+  "visibleLabelHits": 1,
+  "transientSaveClean": true,
+  "reliefPick": {
+    "href": "#relief-hill-2",
+    "x": 1009.5,
+    "y": 1017.5,
+    "size": 12
+  },
+  "serializedBytes": 7781900,
+  "workerDisabled": true,
+  "workerOptIn": true,
+  "workerCheck": {
+    "applicable": true,
+    "expected": "main",
+    "backend": "main",
+    "fallbackReason": "Worker canvas features unavailable",
+    "completed": 0,
+    "pending": 0,
+    "atlasEntries": 0
+  },
+  "initialSpriteDelay": {
+    "applicable": true,
+    "uncachedSpriteAlias": true,
+    "delayedJobs": 1,
+    "overviewVisibleWhilePending": true,
+    "readyTilePublished": true
+  },
+  "imagePath": "bench/results/navigation-worker-quality-fallback.png",
+  "pixelDiff": {
+    "changedPixelsOver16": 2,
+    "fraction": 0.000002170138888888889,
+    "meanAbsoluteChannelDelta": 0.0034877748842592595,
+    "maximum": 25
+  },
+  "coldCrossing": {
+    "nativeWheel": true,
+    "startScale": 3.9,
+    "endScale": 4.357419838481658,
+    "timeToCrispMs": 116.3000000029806,
+    "first10IntervalsMs": [
+      7.800000001489934,
+      8.300000000000182,
+      16.199999999999818,
+      8.800000000000182,
+      8.399999999999636,
+      25,
+      8.300000000000182,
+      8.400000000000546,
+      8.299999999999272,
+      8.400000000000546
+    ],
+    "maxIntervalMs": 25,
+    "baseFallbackSafe": true,
+    "tileCount": 1
+  },
+  "hatching": {
+    "testedPatterns": 14,
+    "screenPitchStable": true
+  },
+  "asynchronous": {
+    "applicable": true,
+    "delayedDecodeJobs": 1,
+    "staleWorldDecodeRejected": true,
+    "pendingBaseHandoffSafe": true
+  },
+  "errors": [],
+  "pendingChecks": []
+}

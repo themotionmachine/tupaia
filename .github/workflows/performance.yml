@@ -1,0 +1,61 @@
+name: Map performance
+on:
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: performance-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  benchmark:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: current
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          path: baseline
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+      - name: Install and build current
+        working-directory: current
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+          npm run build
+      - name: Install and build baseline
+        working-directory: baseline
+        run: |
+          npm ci
+          npm run build
+      - name: Use identical proposed harness on baseline
+        run: |
+          mkdir -p baseline/bench
+          cp current/bench/map.ts current/bench/package.json baseline/bench/
+      - name: Verify regression gate
+        working-directory: current
+        run: node --test bench/compare.test.ts
+      - name: Measure baseline
+        working-directory: baseline
+        env:
+          BENCH_OUTPUT: ../performance-results/base.json
+        run: node bench/map.ts
+      - name: Measure current
+        working-directory: current
+        env:
+          BENCH_OUTPUT: ../performance-results/current.json
+        run: node bench/map.ts
+      - name: Fail timing regressions
+        working-directory: current
+        run: node bench/compare.ts ../performance-results/base.json ../performance-results/current.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: map-performance
+          path: performance-results

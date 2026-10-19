@@ -20,7 +20,7 @@ function editHeightmap(options) {
   ensureEl("convertImage").on("click", openImageConverter);
   ensureEl("heightmapPreview").on("click", toggleHeightmapPreview);
   ensureEl("heightmap3DView").on("click", changeViewMode);
-  ensureEl("finalizeHeightmap").on("click", finalizeHeightmap);
+  ensureEl("finalizeHeightmap").on("click", () => finalizeHeightmap().catch(error => tip(error.message, false, "error")));
   ensureEl("renderOcean").on("click", mockHeightmap);
   ensureEl("templateUndo").on("click", () => restoreHistory(edits.n - 1));
   ensureEl("templateRedo").on("click", () => restoreHistory(edits.n + 1));
@@ -166,8 +166,8 @@ function editHeightmap(options) {
   }
 
   // Exit customization mode
-  function finalizeHeightmap() {
-    if (viewbox.select("#heights").selectAll("*").size() < 200)
+  async function finalizeHeightmap() {
+    if (grid.cells.h.reduce((count, height) => count + (height >= 20), 0) < 200)
       return tip("Insufficient land area. There should be at least 200 land cells!", null, "error");
     if (ensureEl("imageConverter").offsetParent)
       return tip("Please exit the Image Conversion mode first", null, "error");
@@ -192,9 +192,9 @@ function editHeightmap(options) {
     if (document.getElementById("canvas3d")) enterStandardView();
 
     const mode = heightmapEditMode.innerHTML;
-    if (mode === "erase") regenerateErasedData();
+    if (mode === "erase") await regenerateErasedData({async: true});
     else if (mode === "keep") restoreKeptData();
-    else if (mode === "risk") restoreRiskedData();
+    else if (mode === "risk") await restoreRiskedData({async: true});
 
     // restore initial layers
     drawFeatures();
@@ -218,7 +218,18 @@ function editHeightmap(options) {
     getCurrentPreset();
   }
 
-  function regenerateErasedData() {
+  function runHeightmapSteps(steps, asynchronous) {
+    if (asynchronous) return (async () => {
+      for (let step = steps.next(); !step.done; step = steps.next()) await step.value;
+    })();
+    for (let step = steps.next(); !step.done; step = steps.next()) {}
+  }
+
+  function regenerateErasedData(opts) {
+    return runHeightmapSteps(regenerateErasedSteps(opts), opts?.async);
+  }
+
+  function* regenerateErasedSteps(opts) {
     INFO && console.group("Edit Heightmap");
     TIME && console.time("regenerateErasedData");
 
@@ -241,7 +252,7 @@ function editHeightmap(options) {
     reGraph();
     Features.markupPack();
 
-    Rivers.generate(erosionAllowed);
+    yield opts?.async ? Rivers.generateAsync(erosionAllowed) : Rivers.generate(erosionAllowed);
 
     if (!erosionAllowed) {
       for (const i of pack.cells.i) {
@@ -251,17 +262,17 @@ function editHeightmap(options) {
       }
     }
 
-    Biomes.define();
+    yield opts?.async ? Biomes.defineAsync() : Biomes.define();
     Features.defineGroups();
 
     Goods.generate();
 
     rankCells();
     Cultures.generate();
-    Cultures.expand();
+    yield opts?.async ? Cultures.expandAsync() : Cultures.expand();
 
     Burgs.generate();
-    States.generate();
+    yield opts?.async ? States.generateAsync() : States.generate();
     Routes.generate();
     Religions.generate();
 
@@ -299,6 +310,10 @@ function editHeightmap(options) {
   // regenerate rivers without erosion, recompute every biome, and run a hook right after the
   // rivers. Called without opts (the editor) it behaves exactly as before.
   function restoreRiskedData(opts) {
+    return runHeightmapSteps(restoreRiskedSteps(opts), opts?.async);
+  }
+
+  function* restoreRiskedSteps(opts) {
     INFO && console.group("Edit Heightmap");
     TIME && console.time("restoreRiskedData");
     const erosionAllowed = opts?.erosion ?? allowErosion.checked;
@@ -373,7 +388,7 @@ function editHeightmap(options) {
     Features.markupPack();
 
     if (regenerateRivers) {
-      Rivers.generate(erosionAllowed);
+      yield opts?.async ? Rivers.generateAsync(erosionAllowed) : Rivers.generate(erosionAllowed);
       Features.defineGroups();
     }
     opts?.afterRivers?.(); // tupaia-mcp
@@ -426,7 +441,7 @@ function editHeightmap(options) {
       pack.cells.religion[i] = religion[g];
     }
 
-    if (opts?.redefineBiomes) Biomes.define(); // tupaia-mcp: every biome from the new heights and climate
+    if (opts?.redefineBiomes) yield opts?.async ? Biomes.defineAsync() : Biomes.define(); // tupaia-mcp: every biome from the new heights and climate
 
     // find closest land cell to burg
     const findBurgCell = function (x, y) {
@@ -551,34 +566,12 @@ function editHeightmap(options) {
 
   // draw or update heightmap
   function mockHeightmap() {
-    const data = renderOcean.checked ? grid.cells.i : grid.cells.i.filter(i => grid.cells.h[i] >= 20);
-
-    viewbox
-      .select("#heights")
-      .selectAll("polygon")
-      .data(data)
-      .join("polygon")
-      .attr("points", d => getGridPolygon(d))
-      .attr("id", d => "cell" + d)
-      .attr("fill", d => getColor(grid.cells.h[d]));
+    window.renderHeightmapCanvas(renderOcean.checked, getColor);
   }
 
-  // draw or update heightmap for a selection of cells
+  // Dirty cells redraw only their clipped neighborhood; labels and entity layers stay mounted.
   function mockHeightmapSelection(selection) {
-    const ocean = renderOcean.checked;
-
-    selection.forEach(function (i) {
-      let cell = viewbox.select("#heights").select("#cell" + i);
-      if (!ocean && grid.cells.h[i] < 20) return cell.remove();
-
-      if (!cell.size())
-        cell = viewbox
-          .select("#heights")
-          .append("polygon")
-          .attr("points", getGridPolygon(i))
-          .attr("id", "cell" + i);
-      cell.attr("fill", getColor(grid.cells.h[i]));
-    });
+    window.redrawHeightmapCells(selection);
   }
 
   function updateStatistics() {

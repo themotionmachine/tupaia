@@ -8,6 +8,7 @@ function editBiomes() {
   if (layerIsOn("toggleReligions")) toggleReligions();
   if (layerIsOn("toggleProvinces")) toggleProvinces();
 
+  window.preparePathLayer?.("biomes");
   const body = document.getElementById("biomesBody");
   const animate = d3.transition().duration(2000).ease(d3.easeSinIn);
   refreshBiomesEditor();
@@ -31,7 +32,7 @@ function editBiomes() {
   document.getElementById("biomesManually").addEventListener("click", enterBiomesCustomizationMode);
   document.getElementById("biomesManuallyApply").addEventListener("click", applyBiomesChange);
   document.getElementById("biomesManuallyCancel").addEventListener("click", () => exitBiomesCustomizationMode());
-  document.getElementById("biomesRestore").addEventListener("click", restoreInitialBiomes);
+  document.getElementById("biomesRestore").addEventListener("click", () => restoreInitialBiomes().catch(error => tip(error.message, false, "error")));
   document.getElementById("biomesAdd").addEventListener("click", addCustomBiome);
   document.getElementById("biomesRegenerateReliefIcons").addEventListener("click", regenerateIcons);
   document.getElementById("biomesExport").addEventListener("click", downloadBiomesData);
@@ -470,9 +471,9 @@ function editBiomes() {
     if (selected) selected.classList.remove("selected");
   }
 
-  function restoreInitialBiomes() {
+  async function restoreInitialBiomes() {
     biomesData = Biomes.getDefault();
-    Biomes.define();
+    await Biomes.defineAsync();
     drawBiomes();
     recalculatePopulation();
     refreshBiomesEditor();
@@ -481,5 +482,6 @@ function editBiomes() {
 
   function closeBiomesEditor() {
     exitBiomesCustomizationMode("close");
+    window.finishPathLayer?.("biomes");
   }
 }

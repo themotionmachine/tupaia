@@ -131,6 +131,19 @@
    * The relief layer as a redraw at the current density would draw it (it is put back as it
    * was right after: the dry run changes nothing); other layers as they are.
    */
+  function canonicalReliefHTML() {
+    const terrain = document.getElementById("terrain");
+    if (!terrain) return null;
+    const clone = terrain.cloneNode(true);
+    for (const overlay of clone.querySelectorAll("[data-dense-zoom]")) overlay.remove();
+    for (const image of clone.querySelectorAll("image[data-zoom-hidden]")) {
+      image.style.removeProperty("visibility");
+      image.removeAttribute("data-zoom-hidden");
+    }
+    for (const element of clone.querySelectorAll(".viewport-culled")) element.classList.remove("viewport-culled");
+    return clone.innerHTML;
+  }
+
   function freshLength(g, now) {
     if (g.id !== "terrain" || !g.querySelector("use") || typeof drawReliefIcons !== "function") return now;
     const saved = g.innerHTML;
@@ -453,7 +466,7 @@
     return {
       empty,
       layers: layerCounts(),
-      reliefHTML: document.getElementById("terrain")?.innerHTML ?? null,
+      reliefHTML: canonicalReliefHTML(),
       textPathIds: new Set([...(document.getElementById("textPaths")?.children || [])].map(e => e.id)),
       notes: Array.isArray(notes) ? notes : [],
       labelNodes,
@@ -2348,8 +2361,8 @@
     if (report.carve?.cells) report.carve.lakesLowered = lowerCarvedLakes(report.carve.lowered);
     // before the redraw, so relief:'redraw' (and a reliefOnLoad map's next draw) leaves it out
     const reliefExclusion = remapReliefExclusion(reliefEx);
-    // a map that draws its relief icons on load (reliefOnLoad, bridge-ext/relief.js) saves none:
-    // keeping the old drawing would show icons the next load does not draw, so it is redrawn
+    // Legacy reliefOnLoad compatibility retains its redraw behavior during regrid.
+    // Current saves preserve drawn icons regardless of this deprecated flag.
     const reliefOnLoad = !!document.getElementById("terrain")?.hasAttribute("data-regenerate");
     const keepRelief = P.relief === "keep" && !reliefOnLoad;
     const regenerated = [
@@ -2359,7 +2372,7 @@
       keepRelief
         ? "every drawn layer from the data except relief icons, kept as drawn (relief:'redraw' places them on the new cells)"
         : P.relief === "keep"
-          ? "every drawn layer from the data, relief icons included: this map draws them on load (reliefOnLoad, with its stored settings), so they are drawn as a load would, not kept"
+          ? "every drawn layer from the data, relief icons included: this map carries the deprecated reliefOnLoad compatibility flag, so its stored settings are used to redraw them"
           : "every drawn layer from the data, relief icons included (their count follows the cells; see layers)"
     ];
     if (reliefExclusion)
@@ -2472,7 +2485,7 @@
       );
     else {
       // biomes move with the cells (each new cell takes its old cell's biome), not from the climate
-      const stale = T.settings?.replacesReport?.("biomes")?.replaces?.biomeCellsEdited;
+      const stale = (await T.settings?.replacesReport?.("biomes"))?.replaces?.biomeCellsEdited;
       if (stale)
         warnings.push(
           `biomes were carried over by position (biomes:'keep'), so ${stale} cell(s) differ from what the climate gives on the new cells (old cell edges show at the finer grid, and hand-painted cells count too): regrid {biomes:'redefine'} next time, or regenerate {parts:['biomes']} (keeps custom and painted cells)`

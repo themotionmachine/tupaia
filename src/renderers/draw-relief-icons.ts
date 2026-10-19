@@ -1,5 +1,6 @@
 import { extent, polygonArea, polygonContains, quadtree } from "d3";
 import { minmax, rand, rn } from "../utils";
+import { renderReliefCanvas } from "./relief-canvas";
 import { cellRandom, gridKey, hashString, keepOdds, packCellKey, readReliefSettings } from "./relief-settings";
 
 interface ReliefIcon {
@@ -117,11 +118,7 @@ const reliefIconsRenderer = (): void => {
   // sort relief icons by y+size
   relief.sort((a, b) => a.y + a.s - (b.y + b.s));
 
-  const reliefHTML: string[] = [];
-  for (const r of relief) {
-    reliefHTML.push(`<use href="${r.i}" x="${r.x}" y="${r.y}" width="${r.s}" height="${r.s}"/>`);
-  }
-  terrain.html(reliefHTML.join(""));
+  window.reliefRenderReady = renderReliefCanvas(relief);
 
   TIME && console.timeEnd("drawRelief");
 

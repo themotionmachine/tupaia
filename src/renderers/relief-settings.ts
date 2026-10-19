@@ -11,9 +11,8 @@
 //                    the neighbour e whose midpoint it is. Ignored on another grid (the key is gridKey:
 //                    cell count and a hash of the grid points)
 //   data-near-burgs  no icons within this many px of a burg
-//   data-regenerate  saves drop the icons (save.ts) and a load draws them again (load.ts); in the app
-//                    it is the Style > Relief checkbox (style.js, setReliefOnLoad), and the biomes and
-//                    heightmap editors redraw such a map's icons (syncReliefOnLoad)
+//   data-regenerate  legacy compatibility flag: old empty layers regenerate on load; new saves
+//                    retain rendered glyphs. Biome/heightmap edits still refresh flagged layers.
 // A new map (generate) clears them all (main.js).
 
 /** Every #terrain attribute this file defines. */
@@ -248,6 +247,11 @@ const reliefPage = (): ReliefPage => ({
  * the stored settings when the layer is shown, else drop them (the Relief toggle draws them when it
  * finds none). Returns null, changing nothing, on any other map (upstream behaviour).
  */
+function reliefIconCount(el: Element): number {
+  const count = Number(el.querySelector?.("image[data-relief-count]")?.getAttribute("data-relief-count"));
+  return Number.isFinite(count) ? count : el.childElementCount;
+}
+
 export function syncReliefOnLoad(page: ReliefPage = reliefPage()): ReliefSync | null {
   const { el } = page;
   if (!el?.hasAttribute("data-regenerate")) return null;
@@ -256,14 +260,12 @@ export function syncReliefOnLoad(page: ReliefPage = reliefPage()): ReliefSync | 
     return { action: "cleared", icons: 0 };
   }
   page.draw();
-  return { action: "drawn", icons: el.childElementCount };
+  return { action: "drawn", icons: reliefIconCount(el) };
 }
 
 /**
- * tupaia-mcp: the in-app switch (Style > Relief "Redraw relief icons on load"), the same setting as
- * MCP edit map {set:{reliefOnLoad}}. On: saves drop the icons and loads draw them again; the draw is
- * seeded (data-seed, the map seed unless one is stored) and the page is redrawn to show what a load
- * will draw. Off: saves store the icons again; the page keeps them.
+ * Deprecated MCP compatibility setter. On seeds and refreshes the current layer, and allows
+ * old empty saved layers to load. New saves always retain rendered glyphs and individual edits.
  */
 export function setReliefOnLoad(
   on: boolean,
@@ -272,7 +274,7 @@ export function setReliefOnLoad(
 ): (ReliefSync & { before: number }) | null {
   const { el } = page;
   if (!el) return null;
-  const before = el.childElementCount;
+  const before = reliefIconCount(el);
   if (!on) {
     el.removeAttribute("data-regenerate");
     return null;

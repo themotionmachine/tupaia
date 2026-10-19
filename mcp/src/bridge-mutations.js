@@ -1218,7 +1218,7 @@
           capitalBurg: q.burgId || "(new burg)",
           name: q.name ? (q.name.text ?? `(generated from ${q.name.gen.label})`) : "(generated)"
         }),
-      apply(q, c, item) {
+      async apply(q, c, item) {
         const C = pack.cells;
         const states = pack.states;
         const burgs = pack.burgs;
@@ -1304,7 +1304,7 @@
         if (q.form || q.formName) s.fullName = States.getFullName(s);
         if (oldProvince) c.internals.adjustProvinces([oldProvince]);
         if (q.expand) {
-          States.expandStates();
+          await States.expandStatesAsync();
           Provinces.generate();
           Provinces.getPoles();
           States.getPoles();
@@ -1629,7 +1629,7 @@
         return { p, fs, expand: !!item.expand };
       },
       plan: (q, row) => Object.assign(row, { x: q.p.x, y: q.p.y, cell: q.p.cell }),
-      apply(q, c, item) {
+      async apply(q, c, item) {
         Cultures.add(q.p.cell);
         const x = pack.cultures[pack.cultures.length - 1];
         applyFields(q.fs, x, c, item);
@@ -1637,7 +1637,7 @@
         // cultures always have one (COA.getShield otherwise logs an error and falls back to heater)
         if (!x.shield) x.shield = cultureShield(x);
         if (q.expand) {
-          Cultures.expand();
+          await Cultures.expandAsync();
           for (const b of pack.burgs) if (b?.i && !b.removed) b.culture = pack.cells.culture[b.cell];
           c.notes.add("expand:true re-expanded every unlocked culture and updated burg cultures");
         }
@@ -2111,6 +2111,11 @@
       by[label] = (by[label] || 0) + 1;
       changedCells.push(c);
       if (!write) continue;
+      if (key === "province") {
+        info.affectedStates.add(C.state[c]);
+        info.affectedProvinces.add(old);
+        info.affectedProvinces.add(target);
+      }
       if (key === "state") {
         info.affectedStates.add(old);
         info.affectedStates.add(target);
@@ -2155,17 +2160,20 @@
           else if (b && x && b.state !== x.state) adj.changedOwner.push(k);
         }
         out.state.provincesAdjusted = adj;
-        c.R.add("states");
-        c.R.add("borders");
-        c.R.add("provinces");
-        c.R.add(
-          "stateLabels",
-          [...info.affectedStates].filter(s => s > 0)
-        );
+        const dirtyStates = [...info.affectedStates];
+        const dirtyProvinces = [
+          ...new Set([...info.affectedProvinces, ...adj.changedOwner, ...adj.removed, ...adj.created])
+        ];
+        c.R.add("states", dirtyStates);
+        c.R.add("borders", dirtyStates);
+        c.R.add("provinces", dirtyProvinces);
+        // Territorial edits must preserve manually placed labels. Only create absent labels.
+        const missingLabels = dirtyStates.filter(id => id > 0 && !document.getElementById(`stateLabel${id}`));
+        if (missingLabels.length) c.R.add("stateLabels", missingLabels);
       } else if (key === "province") {
         Provinces.getPoles?.();
-        c.R.add("borders");
-        c.R.add("provinces");
+        c.R.add("borders", [...info.affectedStates]);
+        c.R.add("provinces", [...info.affectedProvinces]);
       } else if (key === "culture") c.R.add("cultures");
       else c.R.add("religions");
     }
@@ -2605,11 +2613,11 @@
    * restoreRiskedData plus the carrying above. opts: {restore (restoreRiskedData's opts),
    * keepRivers (the app keeps the rivers: map their cells back by grid), keepBiomes}.
    */
-  function riskRebuild(opts = {}) {
+  async function riskRebuild(opts = {}) {
     const old = captureCells();
     const riverGrid = opts.keepRivers ? saveRiversAsGrid() : null;
     clearFeatureShapes();
-    heightmapInternals().restoreRiskedData(opts.restore);
+    await heightmapInternals().restoreRiskedData({ ...opts.restore, async: true });
     const info = {};
     if (riverGrid) {
       const dropped = restoreRiversFromGrid(riverGrid);
@@ -2873,7 +2881,7 @@
           // the old graph; reGraph renumbers cells, so drawRivers would read p[staleId] and
           // throw: riskRebuild records them as grid ids and maps them back (keepRivers). It also
           // moves routes, markers and the other cell references to the new cells.
-          const carried = riskRebuild({ keepRivers: !H.erosion });
+          const carried = await riskRebuild({ keepRivers: !H.erosion });
           if (carried.riversDropped)
             c.notes.add(`${carried.riversDropped} rivers lost their course in the rebuild and were removed`);
           stats.carried = carried;
@@ -2882,7 +2890,7 @@
           );
         } else {
           undraw();
-          hm.regenerateErasedData();
+          await hm.regenerateErasedData({ async: true });
           c.notes.add("rebuild:'erase' regenerated every entity from the new heightmap");
         }
       } finally {
@@ -3187,12 +3195,12 @@
   const REGEN = [
     [
       "rivers",
-      () => {
+      async () => {
         // Rivers.generate erodes pack.cells.h, which a .map file does not keep (a load rebuilds pack
         // heights from the grid): put the heights back so the page stays what a save holds and a
         // second regenerate does not cut deeper (Configure World's updateWorld does the same)
         const h = pack.cells.h;
-        regenerateRivers();
+        await regenerateRivers();
         if (pack.cells.h !== h && pack.cells.h.length === h.length) pack.cells.h = h;
       }
     ],

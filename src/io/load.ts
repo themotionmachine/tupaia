@@ -1,7 +1,9 @@
 import { lazy } from "@/lazy-loaders";
 import { restoreReliefOnLoad } from "@/renderers/relief-settings";
 import { calculateVoronoi, ensureEl, last, link, minmax, parseError, rn } from "@/utils";
+import { decodeBinaryMap, isBinaryMap, type MapCellArray } from "./binary-map";
 import { applyBiomeExtras } from "./biome-extras"; // tupaia-mcp: biome icon density/icons/cost
+import { assignMapRecords } from "./lazy-map-records";
 import { repairInvalidCultures, repairStateCapital } from "./load-repairs"; // tupaia-mcp: load repairs
 
 export async function quickLoad(): Promise<void> {
@@ -118,6 +120,11 @@ export function showUploadErrorMessage(error: string, maplink: string, random?: 
   });
 }
 
+const binaryCells = new WeakMap<string[], Map<number, MapCellArray>>();
+function cellValues(data: string[], index: number): ArrayLike<number | string> {
+  return binaryCells.get(data)?.get(index) ?? data[index].split(",");
+}
+
 let uploadTimeStart = 0;
 
 export function uploadMap(file: Blob, callback?: () => void): void {
@@ -155,12 +162,7 @@ async function uncompress(compressedData: ArrayBuffer): Promise<Uint8Array | nul
   try {
     const uncompressedStream = new Blob([compressedData]).stream().pipeThrough(new DecompressionStream("gzip"));
 
-    let uncompressedData: number[] = [];
-    for await (const chunk of uncompressedStream) {
-      uncompressedData = uncompressedData.concat(Array.from(chunk));
-    }
-
-    return new Uint8Array(uncompressedData);
+    return new Uint8Array(await new Response(uncompressedStream).arrayBuffer());
   } catch (error) {
     ERROR && console.error(error);
     return null;
@@ -171,7 +173,13 @@ async function parseLoadedResult(
   result: ArrayBuffer | Uint8Array
 ): Promise<{ mapData: string[] | null; mapVersion: string | null }> {
   try {
-    const resultAsString = new TextDecoder().decode(result);
+    const bytes = result instanceof Uint8Array ? result : new Uint8Array(result);
+    if (isBinaryMap(bytes)) {
+      const decoded = await decodeBinaryMap(bytes);
+      binaryCells.set(decoded.sections, decoded.cells);
+      return { mapData: decoded.sections, mapVersion: parseMapVersion(decoded.sections[0].split("|")[0]) };
+    }
+    const resultAsString = new TextDecoder().decode(bytes);
 
     // data can be in FMG internal format or base64 encoded
     const isDelimited = resultAsString.substring(0, 10).includes("|");
@@ -419,11 +427,11 @@ async function parseLoadedData(data: string[], mapVersion: string | null): Promi
       const { cells, vertices } = calculateVoronoi(grid.points, grid.boundary);
       grid.cells = cells;
       grid.vertices = vertices;
-      grid.cells.h = Uint8Array.from(data[7].split(","), Number);
-      grid.cells.prec = Uint8Array.from(data[8].split(","), Number);
-      grid.cells.f = Uint16Array.from(data[9].split(","), Number);
-      grid.cells.t = Int8Array.from(data[10].split(","), Number);
-      grid.cells.temp = Int8Array.from(data[11].split(","), Number);
+      grid.cells.h = Uint8Array.from(cellValues(data, 7), Number);
+      grid.cells.prec = Uint8Array.from(cellValues(data, 8), Number);
+      grid.cells.f = Uint16Array.from(cellValues(data, 9), Number);
+      grid.cells.t = Int8Array.from(cellValues(data, 10), Number);
+      grid.cells.temp = Int8Array.from(cellValues(data, 11), Number);
     }
     reGraph();
     Features.markupPack();
@@ -436,31 +444,37 @@ async function parseLoadedData(data: string[], mapVersion: string | null): Promi
     pack.rivers = data[32] ? JSON.parse(data[32]) : [];
     pack.markers = data[35] ? JSON.parse(data[35]) : [];
     pack.routes = data[37] ? JSON.parse(data[37]) : [];
-    pack.zones = data[38] ? JSON.parse(data[38]) : [];
-    pack.cells.biome = Uint8Array.from(data[16].split(","), Number);
-    pack.cells.burg = Uint16Array.from(data[17].split(","), Number);
-    pack.cells.conf = Uint8Array.from(data[18].split(","), Number);
-    pack.cells.culture = Uint16Array.from(data[19].split(","), Number);
-    pack.cells.fl = Uint16Array.from(data[20].split(","), Number);
-    pack.cells.pop = Float32Array.from(data[21].split(","), Number);
-    pack.cells.r = Uint16Array.from(data[22].split(","), Number);
+    const layerHidden = (id: string) => {
+      const node = document.getElementById(id);
+      return !node?.hasChildNodes() || getComputedStyle(node).display === "none";
+    };
+    assignMapRecords(pack, "zones", data[38] || "", [], layerHidden("zones"));
+    pack.cells.biome = Uint8Array.from(cellValues(data, 16), Number);
+    pack.cells.burg = Uint16Array.from(cellValues(data, 17), Number);
+    pack.cells.conf = Uint8Array.from(cellValues(data, 18), Number);
+    pack.cells.culture = Uint16Array.from(cellValues(data, 19), Number);
+    pack.cells.fl = Uint16Array.from(cellValues(data, 20), Number);
+    pack.cells.pop = Float32Array.from(cellValues(data, 21), Number);
+    pack.cells.r = Uint16Array.from(cellValues(data, 22), Number);
     // data[23] had deprecated cells.road
-    pack.cells.s = Uint16Array.from(data[24].split(","), Number);
-    pack.cells.state = Uint16Array.from(data[25].split(","), Number);
+    pack.cells.s = Uint16Array.from(cellValues(data, 24), Number);
+    pack.cells.state = Uint16Array.from(cellValues(data, 25), Number);
     pack.cells.religion = data[26]
-      ? Uint16Array.from(data[26].split(","), Number)
+      ? Uint16Array.from(cellValues(data, 26), Number)
       : new Uint16Array(pack.cells.i.length);
     pack.cells.province = data[27]
-      ? Uint16Array.from(data[27].split(","), Number)
+      ? Uint16Array.from(cellValues(data, 27), Number)
       : new Uint16Array(pack.cells.i.length);
     // data[28] had deprecated cells.crossroad
     pack.cells.routes = data[36] ? JSON.parse(data[36]) : {};
-    pack.ice = data[39] ? JSON.parse(data[39]) : [];
-    pack.cells.good = data[40] ? Uint16Array.from(data[40].split(","), Number) : new Uint16Array(pack.cells.i.length);
+    assignMapRecords(pack, "ice", data[39] || "", [], layerHidden("ice"));
+    pack.cells.good = data[40] ? Uint16Array.from(cellValues(data, 40), Number) : new Uint16Array(pack.cells.i.length);
     pack.goods = data[41] ? JSON.parse(data[41]) : [];
     pack.markets = data[42] ? JSON.parse(data[42]) : [];
     pack.deals = data[43] ? JSON.parse(data[43]) : [];
-    pack.cells.market = data[44] ? Uint16Array.from(data[44].split(","), Number) : new Uint16Array(pack.cells.i.length);
+    pack.cells.market = data[44]
+      ? Uint16Array.from(cellValues(data, 44), Number)
+      : new Uint16Array(pack.cells.i.length);
 
     if (data[31]) {
       const namesDL = data[31].split("/");
@@ -777,7 +791,11 @@ async function parseLoadedData(data: string[], mapVersion: string | null): Promi
     // draw data layers (not kept in svg)
     if (rulers && layerIsOn("toggleRulers")) rulers.draw();
     if (layerIsOn("toggleGrid")) drawGrid();
-    restoreReliefOnLoad(); // tupaia-mcp: icons of a #terrain[data-regenerate] map are not kept in svg
+    window.compactBurgIcons?.();
+    for (const id of ["biomes", "landHeights", "oceanHeights"]) window.compactPathLayer?.(id);
+    if (layerIsOn("toggleCells")) window.drawCellsCanvas?.();
+    restoreReliefOnLoad(); // Compatibility for old maps with an empty regenerating relief layer.
+    window.compactRelief?.(); // Legacy per-glyph SVG enters the same bounded overview renderer.
     if (typeof window.restoreDefaultEvents === "function") restoreDefaultEvents();
     focusOn(); // based on searchParams focus on point, cell or burg
     invokeActiveZooming();

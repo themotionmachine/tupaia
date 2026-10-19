@@ -1,0 +1,579 @@
+{
+  "note": "Primary Metal GPU baseline: three measured 120-frame repetitions per gesture and world using the preserved build. Synthetic gestures and headless cadence are not physical FPS. First-iteration logs were retained, but this baseline predates full cold-start persistence.",
+  "environment": {
+    "gpu": {
+      "devices": [
+        {
+          "vendorString": "Google Inc. (Apple)",
+          "deviceString": "ANGLE (Apple, ANGLE Metal Renderer: Apple M1 Max, Version 26.7.1 (Build 25G241))",
+          "driverVendor": "Apple",
+          "driverVersion": "26.7.1"
+        }
+      ],
+      "featureStatus": {
+        "2d_canvas": "enabled",
+        "direct_rendering_display_compositor": "disabled_off_ok",
+        "gpu_compositing": "enabled",
+        "multiple_raster_threads": "enabled_on",
+        "opengl": "enabled_on",
+        "rasterization": "enabled",
+        "raw_draw": "disabled_off_ok",
+        "skia_graphite": "enabled_on",
+        "trees_in_viz": "disabled_off",
+        "video_decode": "enabled",
+        "video_encode": "enabled",
+        "webgl": "enabled",
+        "webgpu": "enabled",
+        "webnn": "disabled_off"
+      }
+    },
+    "launchConfig": {
+      "headless": true,
+      "channel": "chromium",
+      "angle": "metal",
+      "enableGpu": true
+    },
+    "fixtureHash": "f5c0d703e4a21dc608981285644ba05618ed01f45d3d45fb34827087b679f5c0",
+    "fixtureMetadata": {
+      "label": "shared",
+      "version": "8",
+      "updatedAt": "2026-10-10T00:36:37.565Z"
+    },
+    "loadAverageStart": [
+      13.21240234375,
+      20.06201171875,
+      19.75439453125
+    ],
+    "loadAverageEnd": [
+      13.212890625,
+      17.123046875,
+      18.56494140625
+    ]
+  },
+  "summaries": [
+    {
+      "world": "shared",
+      "gesture": "pan-near",
+      "cells": 47885,
+      "frameP95Ms": 26.399999999999636,
+      "idleFrameP95Ms": 15.100000000000364,
+      "inputDispatchP95Ms": 0.5,
+      "callbackP95Ms": 0.19999999925494194,
+      "missed16_7": 15,
+      "missed8_3": 60
+    },
+    {
+      "world": "shared",
+      "gesture": "pan-wide",
+      "cells": 47885,
+      "frameP95Ms": 24.899999999997817,
+      "idleFrameP95Ms": 13.69999999999709,
+      "inputDispatchP95Ms": 1.1000000014901161,
+      "callbackP95Ms": 0.8999999985098839,
+      "missed16_7": 8,
+      "missed8_3": 51
+    },
+    {
+      "world": "shared",
+      "gesture": "wheel-zoom",
+      "cells": 47885,
+      "frameP95Ms": 25,
+      "idleFrameP95Ms": 23.10000000000582,
+      "inputDispatchP95Ms": 13.699999999254942,
+      "callbackP95Ms": 9.299999997019768,
+      "missed16_7": 21,
+      "missed8_3": 107
+    },
+    {
+      "world": "100k",
+      "gesture": "pan-near",
+      "cells": 53194,
+      "frameP95Ms": 25.40000000000873,
+      "idleFrameP95Ms": 25.60000000000582,
+      "inputDispatchP95Ms": 0.5,
+      "callbackP95Ms": 0.30000000074505806,
+      "missed16_7": 26,
+      "missed8_3": 151
+    },
+    {
+      "world": "100k",
+      "gesture": "pan-wide",
+      "cells": 53194,
+      "frameP95Ms": 41.5,
+      "idleFrameP95Ms": 25,
+      "inputDispatchP95Ms": 9.399999998509884,
+      "callbackP95Ms": 8.100000001490116,
+      "missed16_7": 53,
+      "missed8_3": 199
+    },
+    {
+      "world": "100k",
+      "gesture": "wheel-zoom",
+      "cells": 53194,
+      "frameP95Ms": 133.69999999998254,
+      "idleFrameP95Ms": 16.70000000001164,
+      "inputDispatchP95Ms": 34.400000002235174,
+      "callbackP95Ms": 47.5,
+      "missed16_7": 652,
+      "missed8_3": 1376
+    }
+  ],
+  "traces": [
+    {
+      "world": "shared",
+      "gesture": "pan-near",
+      "path": "/tmp/tupaia-butter-traces/navigation-butter-metal-base/shared-pan-near.json",
+      "attribution": {
+        "gestureDurationMs": 1626.643,
+        "input": {
+          "count": 1,
+          "totalMs": 0.973,
+          "maxMs": 0.973
+        },
+        "syntheticInput": {
+          "count": 122,
+          "totalMs": 55.76499999999998,
+          "maxMs": 2.129
+        },
+        "layoutInsideSyntheticInput": {
+          "count": 121,
+          "totalMs": 26.188999999999997,
+          "maxMs": 0.695
+        },
+        "javascriptByEvent": {
+          "EventDispatch": {
+            "count": 1,
+            "totalMs": 0.973,
+            "maxMs": 0.973
+          },
+          "FunctionCall": {
+            "count": 695,
+            "totalMs": 92.91100000000003,
+            "maxMs": 1.478
+          },
+          "FireAnimationFrame": {
+            "count": 401,
+            "totalMs": 98.18200000000004,
+            "maxMs": 1.49
+          },
+          "TimerFire": {
+            "count": 4,
+            "totalMs": 1.494,
+            "maxMs": 1.382
+          }
+        },
+        "layout": {
+          "count": 163,
+          "totalMs": 34.80799999999999,
+          "maxMs": 0.695
+        },
+        "layoutInsideInput": {
+          "count": 1,
+          "totalMs": 0.332,
+          "maxMs": 0.332
+        },
+        "layoutInsideJavascript": {
+          "count": 121,
+          "totalMs": 26.188999999999997,
+          "maxMs": 0.695
+        },
+        "style": {
+          "count": 163,
+          "totalMs": 20.857999999999993,
+          "maxMs": 0.307
+        },
+        "paint": {
+          "count": 652,
+          "totalMs": 320.1459999999994,
+          "maxMs": 13.127
+        },
+        "raster": {
+          "count": 519,
+          "totalMs": 39.592000000000056,
+          "maxMs": 0.283
+        },
+        "notes": "Native EventDispatch may omit synthetic DOM events; syntheticInput marks instrument the dispatch wrapper. Event duration totals may overlap and must not be summed. Layout nested in an input/JS event is forced-layout evidence; raster totals span worker threads, not main-thread wall time."
+      }
+    },
+    {
+      "world": "shared",
+      "gesture": "pan-wide",
+      "path": "/tmp/tupaia-butter-traces/navigation-butter-metal-base/shared-pan-wide.json",
+      "attribution": {
+        "gestureDurationMs": 1708.629,
+        "input": {
+          "count": 1,
+          "totalMs": 1.861,
+          "maxMs": 1.861
+        },
+        "syntheticInput": {
+          "count": 122,
+          "totalMs": 66.37499999999999,
+          "maxMs": 1.892
+        },
+        "layoutInsideSyntheticInput": {
+          "count": 121,
+          "totalMs": 30.826999999999995,
+          "maxMs": 1.398
+        },
+        "javascriptByEvent": {
+          "EventDispatch": {
+            "count": 1,
+            "totalMs": 1.861,
+            "maxMs": 1.861
+          },
+          "FunctionCall": {
+            "count": 722,
+            "totalMs": 117.67000000000002,
+            "maxMs": 1.842
+          },
+          "FireAnimationFrame": {
+            "count": 400,
+            "totalMs": 121.8659999999999,
+            "maxMs": 1.813
+          },
+          "TimerFire": {
+            "count": 4,
+            "totalMs": 1.64,
+            "maxMs": 1.513
+          }
+        },
+        "layout": {
+          "count": 162,
+          "totalMs": 39.133999999999986,
+          "maxMs": 1.398
+        },
+        "layoutInsideInput": {
+          "count": 1,
+          "totalMs": 1.398,
+          "maxMs": 1.398
+        },
+        "layoutInsideJavascript": {
+          "count": 121,
+          "totalMs": 30.826999999999995,
+          "maxMs": 1.398
+        },
+        "style": {
+          "count": 162,
+          "totalMs": 29.640000000000015,
+          "maxMs": 1.142
+        },
+        "paint": {
+          "count": 648,
+          "totalMs": 302.4619999999999,
+          "maxMs": 1.546
+        },
+        "raster": {
+          "count": 519,
+          "totalMs": 49.88900000000006,
+          "maxMs": 0.577
+        },
+        "notes": "Native EventDispatch may omit synthetic DOM events; syntheticInput marks instrument the dispatch wrapper. Event duration totals may overlap and must not be summed. Layout nested in an input/JS event is forced-layout evidence; raster totals span worker threads, not main-thread wall time."
+      }
+    },
+    {
+      "world": "shared",
+      "gesture": "wheel-zoom",
+      "path": "/tmp/tupaia-butter-traces/navigation-butter-metal-base/shared-wheel-zoom.json",
+      "attribution": {
+        "gestureDurationMs": 2310.385,
+        "input": {
+          "count": 120,
+          "totalMs": 829.8459999999999,
+          "maxMs": 24.183
+        },
+        "syntheticInput": {
+          "count": 120,
+          "totalMs": 834.8239999999998,
+          "maxMs": 24.217
+        },
+        "layoutInsideSyntheticInput": {
+          "count": 120,
+          "totalMs": 780.6310000000007,
+          "maxMs": 23.969
+        },
+        "javascriptByEvent": {
+          "EventDispatch": {
+            "count": 120,
+            "totalMs": 829.8459999999999,
+            "maxMs": 24.183
+          },
+          "FunctionCall": {
+            "count": 764,
+            "totalMs": 1111.860000000002,
+            "maxMs": 24.26
+          },
+          "FireAnimationFrame": {
+            "count": 405,
+            "totalMs": 1118.9939999999992,
+            "maxMs": 24.269
+          },
+          "TimerFire": {
+            "count": 5,
+            "totalMs": 1.6500000000000001,
+            "maxMs": 1.475
+          }
+        },
+        "layout": {
+          "count": 215,
+          "totalMs": 1001.4980000000005,
+          "maxMs": 23.969
+        },
+        "layoutInsideInput": {
+          "count": 120,
+          "totalMs": 780.6310000000007,
+          "maxMs": 23.969
+        },
+        "layoutInsideJavascript": {
+          "count": 172,
+          "totalMs": 981.8240000000006,
+          "maxMs": 23.969
+        },
+        "style": {
+          "count": 392,
+          "totalMs": 49.632999999999974,
+          "maxMs": 3.928
+        },
+        "paint": {
+          "count": 652,
+          "totalMs": 461.6280000000008,
+          "maxMs": 5.473
+        },
+        "raster": {
+          "count": 550,
+          "totalMs": 170.67400000000012,
+          "maxMs": 1.542
+        },
+        "notes": "Native EventDispatch may omit synthetic DOM events; syntheticInput marks instrument the dispatch wrapper. Event duration totals may overlap and must not be summed. Layout nested in an input/JS event is forced-layout evidence; raster totals span worker threads, not main-thread wall time."
+      }
+    },
+    {
+      "world": "100k",
+      "gesture": "pan-near",
+      "path": "/tmp/tupaia-butter-traces/navigation-butter-metal-base/100k-pan-near.json",
+      "attribution": {
+        "gestureDurationMs": 2570.571,
+        "input": {
+          "count": 1,
+          "totalMs": 1.1,
+          "maxMs": 1.1
+        },
+        "syntheticInput": {
+          "count": 122,
+          "totalMs": 140.58499999999998,
+          "maxMs": 2.104
+        },
+        "layoutInsideSyntheticInput": {
+          "count": 121,
+          "totalMs": 106.83699999999995,
+          "maxMs": 1.672
+        },
+        "javascriptByEvent": {
+          "EventDispatch": {
+            "count": 1,
+            "totalMs": 1.1,
+            "maxMs": 1.1
+          },
+          "FunctionCall": {
+            "count": 710,
+            "totalMs": 206.83600000000007,
+            "maxMs": 2.16
+          },
+          "FireAnimationFrame": {
+            "count": 385,
+            "totalMs": 211.14400000000006,
+            "maxMs": 2.17
+          },
+          "TimerFire": {
+            "count": 6,
+            "totalMs": 5.952,
+            "maxMs": 4.815
+          }
+        },
+        "layout": {
+          "count": 145,
+          "totalMs": 130.54799999999994,
+          "maxMs": 4.018
+        },
+        "layoutInsideInput": {
+          "count": 1,
+          "totalMs": 0.85,
+          "maxMs": 0.85
+        },
+        "layoutInsideJavascript": {
+          "count": 121,
+          "totalMs": 106.83699999999995,
+          "maxMs": 1.672
+        },
+        "style": {
+          "count": 145,
+          "totalMs": 23.066999999999986,
+          "maxMs": 1
+        },
+        "paint": {
+          "count": 580,
+          "totalMs": 1772.237999999999,
+          "maxMs": 18.903
+        },
+        "raster": {
+          "count": 501,
+          "totalMs": 245.77199999999996,
+          "maxMs": 2.279
+        },
+        "notes": "Native EventDispatch may omit synthetic DOM events; syntheticInput marks instrument the dispatch wrapper. Event duration totals may overlap and must not be summed. Layout nested in an input/JS event is forced-layout evidence; raster totals span worker threads, not main-thread wall time."
+      }
+    },
+    {
+      "world": "100k",
+      "gesture": "pan-wide",
+      "path": "/tmp/tupaia-butter-traces/navigation-butter-metal-base/100k-pan-wide.json",
+      "attribution": {
+        "gestureDurationMs": 3023.901,
+        "input": {
+          "count": 1,
+          "totalMs": 1.299,
+          "maxMs": 1.299
+        },
+        "syntheticInput": {
+          "count": 122,
+          "totalMs": 295.95799999999997,
+          "maxMs": 11.702
+        },
+        "layoutInsideSyntheticInput": {
+          "count": 121,
+          "totalMs": 158.34299999999996,
+          "maxMs": 3.924
+        },
+        "javascriptByEvent": {
+          "EventDispatch": {
+            "count": 1,
+            "totalMs": 1.299,
+            "maxMs": 1.299
+          },
+          "FunctionCall": {
+            "count": 780,
+            "totalMs": 539.8049999999993,
+            "maxMs": 11.793
+          },
+          "FireAnimationFrame": {
+            "count": 383,
+            "totalMs": 545.4719999999993,
+            "maxMs": 11.99
+          },
+          "TimerFire": {
+            "count": 8,
+            "totalMs": 9.07,
+            "maxMs": 6.237
+          }
+        },
+        "layout": {
+          "count": 142,
+          "totalMs": 182.16099999999997,
+          "maxMs": 3.939
+        },
+        "layoutInsideInput": {
+          "count": 1,
+          "totalMs": 1.039,
+          "maxMs": 1.039
+        },
+        "layoutInsideJavascript": {
+          "count": 121,
+          "totalMs": 158.34299999999996,
+          "maxMs": 3.924
+        },
+        "style": {
+          "count": 142,
+          "totalMs": 124.98800000000001,
+          "maxMs": 7.532
+        },
+        "paint": {
+          "count": 568,
+          "totalMs": 2047.4370000000013,
+          "maxMs": 11.059
+        },
+        "raster": {
+          "count": 498,
+          "totalMs": 260.88599999999985,
+          "maxMs": 1.826
+        },
+        "notes": "Native EventDispatch may omit synthetic DOM events; syntheticInput marks instrument the dispatch wrapper. Event duration totals may overlap and must not be summed. Layout nested in an input/JS event is forced-layout evidence; raster totals span worker threads, not main-thread wall time."
+      }
+    },
+    {
+      "world": "100k",
+      "gesture": "wheel-zoom",
+      "path": "/tmp/tupaia-butter-traces/navigation-butter-metal-base/100k-wheel-zoom.json",
+      "attribution": {
+        "gestureDurationMs": 12771.416,
+        "input": {
+          "count": 120,
+          "totalMs": 553.0680000000002,
+          "maxMs": 39.847
+        },
+        "syntheticInput": {
+          "count": 120,
+          "totalMs": 559.57,
+          "maxMs": 39.9
+        },
+        "layoutInsideSyntheticInput": {
+          "count": 120,
+          "totalMs": 505.80499999999984,
+          "maxMs": 35.861
+        },
+        "javascriptByEvent": {
+          "EventDispatch": {
+            "count": 120,
+            "totalMs": 553.0680000000002,
+            "maxMs": 39.847
+          },
+          "FunctionCall": {
+            "count": 967,
+            "totalMs": 5600.590000000017,
+            "maxMs": 154.251
+          },
+          "FireAnimationFrame": {
+            "count": 397,
+            "totalMs": 5604.689000000001,
+            "maxMs": 154.866
+          },
+          "TimerFire": {
+            "count": 32,
+            "totalMs": 19.661,
+            "maxMs": 6.311
+          }
+        },
+        "layout": {
+          "count": 365,
+          "totalMs": 4896.7199999999975,
+          "maxMs": 137.091
+        },
+        "layoutInsideInput": {
+          "count": 120,
+          "totalMs": 505.80499999999984,
+          "maxMs": 35.861
+        },
+        "layoutInsideJavascript": {
+          "count": 344,
+          "totalMs": 4826.404999999997,
+          "maxMs": 137.091
+        },
+        "style": {
+          "count": 2816,
+          "totalMs": 336.68899999997757,
+          "maxMs": 43.932
+        },
+        "paint": {
+          "count": 564,
+          "totalMs": 3882.197999999997,
+          "maxMs": 39.844
+        },
+        "raster": {
+          "count": 560,
+          "totalMs": 1491.3599999999988,
+          "maxMs": 17.893
+        },
+        "notes": "Native EventDispatch may omit synthetic DOM events; syntheticInput marks instrument the dispatch wrapper. Event duration totals may overlap and must not be summed. Layout nested in an input/JS event is forced-layout evidence; raster totals span worker threads, not main-thread wall time."
+      }
+    }
+  ]
+}

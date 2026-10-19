@@ -4,6 +4,7 @@ import { rn } from "../utils";
 
 declare global {
   var drawScaleBar: (scaleBar: Selection<SVGGElement, unknown, HTMLElement, unknown>, scaleLevel: number) => void;
+  var drawScaleBarFast: typeof drawScaleBar;
   var fitScaleBar: (
     scaleBar: Selection<SVGGElement, unknown, HTMLElement, unknown>,
     fullWidth: number,
@@ -13,7 +14,14 @@ declare global {
 
 type ScaleBarSelection = d3.Selection<SVGGElement, unknown, HTMLElement, unknown>;
 
-const scaleBarRenderer = (scaleBar: ScaleBarSelection, scaleLevel: number): void => {
+interface MeasuredBounds {
+  width: number;
+  height: number;
+  length: number;
+}
+const measuredBounds = new WeakMap<SVGGElement, MeasuredBounds>();
+
+const scaleBarRenderer = (scaleBar: ScaleBarSelection, scaleLevel: number, fast = false): void => {
   if (!scaleBar.size() || scaleBar.style("display") === "none") return;
 
   const unit = distanceUnitInput.value;
@@ -75,7 +83,13 @@ const scaleBarRenderer = (scaleBar: ScaleBarSelection, scaleLevel: number): void
 
   const scaleBarBack = scaleBar.select<SVGRectElement>("#scaleBarBack");
   if (scaleBarBack.size()) {
-    const bbox = (content.node() as SVGGElement).getBBox();
+    const node = scaleBar.node()!;
+    const previous = fast && measuredBounds.get(node);
+    // Only the background bounds are approximated during motion. Distances and line geometry remain exact.
+    const bbox = previous
+      ? { width: Math.max(0, length + previous.width - previous.length), height: previous.height }
+      : (content.node() as SVGGElement).getBBox();
+    if (!previous) measuredBounds.set(node, { width: bbox.width, height: bbox.height, length });
     const paddingTop = +scaleBarBack.attr("data-top") || 0;
     const paddingLeft = +scaleBarBack.attr("data-left") || 0;
     const paddingRight = +scaleBarBack.attr("data-right") || 0;
@@ -111,7 +125,18 @@ const scaleBarResize = (scaleBar: ScaleBarSelection, fullWidth: number, fullHeig
 
   const posX = +scaleBar.attr("data-x") || 99;
   const posY = +scaleBar.attr("data-y") || 99;
-  const bbox = (scaleBar.select("rect").node() as SVGRectElement).getBBox();
+  const rect = scaleBar.select<SVGRectElement>("rect");
+  const plain = (value: string | null): number | undefined => {
+    if (value === null || !/^[+]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(value.trim())) return;
+    const number = Number(value);
+    return Number.isFinite(number) && number >= 0 ? number : undefined;
+  };
+  const width = plain(rect.attr("width")),
+    height = plain(rect.attr("height"));
+  const customSizing = /(?:^|;)\s*(?:width|height)\s*:/i.test(rect.attr("style") || "");
+  const bbox = width !== undefined && height !== undefined && !customSizing
+    ? { width, height }
+    : rect.node()!.getBBox();
 
   const x = rn((fullWidth * posX) / 100 - bbox.width + 10);
   const y = rn((fullHeight * posY) / 100 - bbox.height + 20);
@@ -119,4 +144,5 @@ const scaleBarResize = (scaleBar: ScaleBarSelection, fullWidth: number, fullHeig
 };
 
 window.drawScaleBar = scaleBarRenderer;
+window.drawScaleBarFast = (scaleBar, scaleLevel) => scaleBarRenderer(scaleBar, scaleLevel, true);
 window.fitScaleBar = scaleBarResize;

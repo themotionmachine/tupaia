@@ -1,9 +1,10 @@
-// Headless Chromium ownership: lazy launch, one context + one page at /?local, the route
+// Shared Chromium connection: lazy acquisition, one isolated context + page at /?local, the route
 // firewall, the console ring, the call mutex and the bridge caller with hang/timeout recovery.
 import fs from "node:fs";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { type Browser, type BrowserContext, chromium, type Page, type Route } from "playwright";
+import type { Browser, BrowserContext, Page, Route } from "playwright";
+import { acquireBrowser } from "./browser-pool.ts";
 import { type Config, type ModeState, readDistEntry, readDistVersion } from "./config.ts";
 import { type Envelope, ToolError } from "./result.ts";
 import { TIMEOUT_CAP_MS } from "./schemas.ts";
@@ -281,12 +282,7 @@ export class BrowserManager {
     checkDist(this.config.distDir, this.config.repoRoot);
     this.#server ??= await startStaticServer(this.config.distDir);
     if (!this.#browser?.isConnected()) {
-      this.#browser = await chromium.launch({
-        headless: !this.config.headed,
-        handleSIGINT: false,
-        handleSIGTERM: false,
-        handleSIGHUP: false
-      });
+      this.#browser = await acquireBrowser(this.config.headed);
       const b = this.#browser;
       b.on("disconnected", () => {
         if (this.#browser === b) {
@@ -494,10 +490,9 @@ export class BrowserManager {
   async close(): Promise<void> {
     this.#closing = true;
     this.state = "closed";
+    await this.#teardownContext();
     const b = this.#browser;
     this.#browser = null;
-    this.#page = null;
-    this.#context = null;
     if (b) await b.close().catch(() => {});
     if (this.#server) await this.#server.close().catch(() => {});
     this.#server = null;

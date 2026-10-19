@@ -57,7 +57,8 @@ describe("tupaia-mcp smoke (core layer)", () => {
   let shotQ = "";
 
   before(async () => {
-    h = await startServer();
+    // This suite asserts descendant PIDs and shutdown ownership; exercise dedicated mode.
+    h = await startServer({ TUPAIA_BROWSER_POOL: "0" });
   });
 
   after(async () => {

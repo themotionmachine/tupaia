@@ -18,3 +18,16 @@ import "./draw-trade-animation";
 import "./ocean-layers";
 import "./trade-animation";
 import "./emblems";
+
+import "./heightmap-canvas";
+
+import "./label-culling";
+
+import "./cell-mesh-canvas";
+
+import "./dense-zoom";
+
+import "./zoom-update-scheduler";
+
+import "./zone-hatching";
+

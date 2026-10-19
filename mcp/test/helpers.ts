@@ -7,6 +7,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
+import type { BrowserManager } from "../src/browser.ts";
+import { acquireBrowser } from "../src/browser-pool.ts";
+import { loadConfig } from "../src/config.ts";
+import { ToolContext } from "../src/context.ts";
 
 export const MCP_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const REPO_ROOT = path.resolve(MCP_ROOT, "..");
@@ -28,7 +32,8 @@ export function safeEnv(extra: Record<string, string> = {}): Record<string, stri
     TUPAIA_TEST_HOOKS: "1",
     ...extra
   };
-  for (const k of ["PLAYWRIGHT_BROWSERS_PATH", "TUPAIA_DEBUG"]) if (process.env[k]) env[k] = process.env[k] as string;
+  for (const k of ["PLAYWRIGHT_BROWSERS_PATH", "TUPAIA_DEBUG", "TUPAIA_BROWSER_POOL", "TUPAIA_DIST"])
+    if (process.env[k] && !(k in extra)) env[k] = process.env[k] as string;
   if (FORBIDDEN_ORIGIN.test(env.TUPAIA_LIVE_ORIGIN) || FORBIDDEN_ORIGIN.test(env.TUPAIA_DIST ?? "")) {
     throw new Error(`refusing to run tests against ${env.TUPAIA_LIVE_ORIGIN}: tests never touch the live shared map`);
   }
@@ -256,9 +261,8 @@ export async function openViewer(url: string): Promise<{
   close(): Promise<void>;
 }> {
   if (FORBIDDEN_ORIGIN.test(url)) throw new Error(`refusing to open ${url}: tests never touch the live shared map`);
-  const { chromium } = await import("playwright");
-  const browser = await chromium.launch();
-  const context = await browser.newContext({ viewport: { width: 1280, height: 720 } });
+  const browser = await acquireBrowser();
+  const context = await browser.newContext({ viewport: { width: 1280, height: 720 }, serviceWorkers: "block" });
   await context.route(
     u => (u.protocol === "http:" || u.protocol === "https:") && !["127.0.0.1", "localhost"].includes(u.hostname),
     r => r.abort("blockedbyclient")
@@ -273,7 +277,13 @@ export async function openViewer(url: string): Promise<{
   const page = await context.newPage();
   page.on("dialog", d => void d.dismiss().catch(() => {}));
   await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60_000 });
-  return { page, close: () => browser.close() };
+  return {
+    page,
+    close: async () => {
+      await context.close();
+      await browser.close();
+    }
+  };
 }
 
 /** Wait until the viewer page completed `n` map loads. */
@@ -298,4 +308,111 @@ export async function viewerDialog(
       buttons: (Array.from(d.querySelectorAll(".ui-dialog-buttonset button")) as HTMLElement[]).map(b => b.innerText)
     };
   });
+}
+
+/** Warm bridge fixture. Only map/bridge mutations are allowed; protocol/lifecycle tests use startServer. */
+export interface DemoFixture {
+  browser: BrowserManager;
+  bootMs: number;
+  resetMs: number;
+  call<T = unknown>(name: string, args?: unknown): Promise<T>;
+  /** Real tool runner and Node history; restricted to read/edit/snapshot operations. */
+  tool<T = Record<string, unknown>>(name: string, args?: Record<string, unknown>): Promise<T>;
+  reset(): Promise<void>;
+  close(): Promise<void>;
+}
+
+let demoFixture: Promise<DemoFixture> | null = null;
+
+/** All bridge cases in one worker share the preloaded page and restore a serialized baseline. */
+export function sharedDemoFixture(): Promise<DemoFixture> {
+  demoFixture ??= (async () => {
+    const started = performance.now();
+    const config = loadConfig(safeEnv());
+    const context = new ToolContext(config);
+    for (const name of ["edit", "history", "query", "persist"]) {
+      const module = (await import(`../src/tools/${name}.ts`)) as { register(ctx: ToolContext): void };
+      module.register(context);
+    }
+    const browser = context.browser;
+    const runTool = async <T = Record<string, unknown>>(
+      name: string,
+      args: Record<string, unknown> = {}
+    ): Promise<T> => {
+      const result = await context.callTool(name, args, { timeoutMs: 120_000 });
+      const text = result.content
+        .filter(part => part.type === "text")
+        .map(part => part.text)
+        .join("\n");
+      if (result.isError) throw new Error(`${name}: ${text}`);
+      return JSON.parse(text) as T;
+    };
+    const call = async <T = unknown>(name: string, args: unknown = {}): Promise<T> => {
+      const result = await browser.callBridge<T>(name, args, { timeoutMs: 120_000 });
+      if (!result.ok) throw new Error(`${name}: ${result.error?.code}: ${result.error?.message}`);
+      return result.value as T;
+    };
+    try {
+      await browser.getPage();
+      await runTool("load_map", { path: DEMO_MAP });
+      const baseline = (await call<{ text: string }>("mapData")).text;
+      const page = await browser.getPage();
+      const storage = await page.evaluate(() => Object.fromEntries(Object.entries(localStorage)));
+      const fixture: DemoFixture = {
+        browser,
+        bootMs: performance.now() - started,
+        resetMs: 0,
+        call,
+        tool: <T = Record<string, unknown>>(name: string, args: Record<string, unknown> = {}) => {
+          if (!["edit", "find", "inspect", "map_info", "snapshot"].includes(name) || args.saveTo !== undefined)
+            throw new Error("warm fixture allows only in-memory read/edit/snapshot tools");
+          return runTool<T>(name, args);
+        },
+        reset: () =>
+          browser.exclusive(async () => {
+            const resetStarted = performance.now();
+            const current = await browser.getPage();
+            await current.context().clearCookies();
+            await current.evaluate(values => {
+              localStorage.clear();
+              for (const [key, value] of Object.entries(values)) localStorage.setItem(key, value);
+              sessionStorage.clear();
+              const bridge = (globalThis as unknown as { __tupaia: { testFaults: Record<string, unknown> } }).__tupaia;
+              bridge.testFaults = {};
+            }, storage);
+            await browser.setViewport(config.viewport.width, config.viewport.height);
+            const summary = await call<{ mapId: number }>("loadMap", { text: baseline });
+            const dropped = context.snapshots.afterRestore("snapshot");
+            for (const entry of [...context.snapshots.undoStack].reverse()) {
+              const key = context.snapshots.popUndo(entry.id);
+              if (key) dropped.push(key);
+            }
+            for (const snapshot of [...context.snapshots.snapshots]) {
+              context.snapshots.drop(snapshot.id);
+              dropped.push(snapshot.baselineKey);
+            }
+            context.snapshots.restorePoint = null;
+            context.snapshots.checkpointEpoch = undefined;
+            context.snapshots.setProvenance({ kind: "file", path: DEMO_MAP, mapId: summary.mapId });
+            context.sketches.current = null;
+            context.lastRedraw = null;
+            await call("dropBaseline", { keys: [...dropped, "checkpoint"] });
+            browser.clearConsole();
+            browser.outward.length = 0;
+            browser.blocked.length = 0;
+            fixture.resetMs = performance.now() - resetStarted;
+          }),
+        close: async () => {
+          await browser.close();
+          demoFixture = null;
+        }
+      };
+      return fixture;
+    } catch (e) {
+      await browser.close();
+      demoFixture = null;
+      throw e;
+    }
+  })();
+  return demoFixture;
 }

@@ -288,13 +288,13 @@ function toggleTemperature(event) {
 }
 
 function toggleBiomes(event) {
-  if (!biomes.selectAll("path").size()) {
+  if (!layerIsOn("toggleBiomes")) {
     turnButtonOn("toggleBiomes");
     drawBiomes();
     if (event && isCtrlClick(event)) editStyle("biomes");
   } else {
     if (event && isCtrlClick(event)) return editStyle("biomes");
-    biomes.selectAll("path").remove();
+    biomes.selectAll("*").remove();
     turnButtonOff("toggleBiomes");
   }
 }
@@ -312,6 +312,7 @@ function drawBiomes() {
 
   ensureEl("biomes").innerHTML = bodyPaths.join("");
 
+  window.compactPathLayer?.("biomes");
   TIME && console.timeEnd("drawBiomes");
 }
 
@@ -432,22 +433,19 @@ function drawPopulation() {
 }
 
 function toggleCells(event) {
-  if (!cells.selectAll("path").size()) {
+  if (!layerIsOn("toggleCells")) {
     turnButtonOn("toggleCells");
     drawCells();
     if (event && isCtrlClick(event)) editStyle("cells");
   } else {
     if (event && isCtrlClick(event)) return editStyle("cells");
-    cells.selectAll("path").remove();
+    cells.selectAll("*").remove();
     turnButtonOff("toggleCells");
   }
 }
 
 function drawCells() {
-  const cells = customization === 1 ? grid.cells.i : pack.cells.i;
-  const polygon = customization === 1 ? getGridPolygon : getPackPolygon;
-  const paths = Array.from(cells).map(i => "M" + polygon(i));
-  ensureEl("cells").innerHTML = `<path d="${paths.join("")}" />`;
+  window.drawCellsCanvas();
 }
 
 function toggleIce(event) {
@@ -534,9 +532,10 @@ function toggleStates(event) {
   }
 }
 
-function drawStates() {
+function drawStates(affectedStates) {
   TIME && console.time("drawStates");
   const { cells, states } = pack;
+  const selected = affectedStates ? new Set(affectedStates) : null;
 
   const maxLength = states.length - 1;
   const bodyPaths = new Array(maxLength);
@@ -544,7 +543,7 @@ function drawStates() {
   const haloPaths = new Array(maxLength);
 
   const renderHalo = shapeRendering.value === "geometricPrecision";
-  const isolines = getIsolines(pack, cellId => cells.state[cellId], { fill: true, waterGap: true, halo: renderHalo });
+  const isolines = getIsolines(pack, cellId => !selected || selected.has(cells.state[cellId]) ? cells.state[cellId] : 0, { fill: true, waterGap: true, halo: renderHalo });
   Object.entries(isolines).forEach(([index, { fill, waterGap, halo }]) => {
     const color = states[index].color;
     bodyPaths.push(getGappedFillPaths("state", fill, waterGap, color, index));
@@ -558,9 +557,20 @@ function drawStates() {
     }
   });
 
-  ensureEl("statesBody").innerHTML = bodyPaths.join("");
-  ensureEl("statePaths").innerHTML = renderHalo ? clipPaths.join("") : "";
-  ensureEl("statesHalo").innerHTML = renderHalo ? haloPaths.join("") : "";
+  if (selected) {
+    for (const id of selected) {
+      for (const prefix of ["state", "state-gap", "state-clip", "state-border"]) document.getElementById(prefix + id)?.remove();
+    }
+    ensureEl("statesBody").insertAdjacentHTML("beforeend", bodyPaths.join(""));
+    if (renderHalo) {
+      ensureEl("statePaths").insertAdjacentHTML("beforeend", clipPaths.join(""));
+      ensureEl("statesHalo").insertAdjacentHTML("beforeend", haloPaths.join(""));
+    }
+  } else {
+    ensureEl("statesBody").innerHTML = bodyPaths.join("");
+    ensureEl("statePaths").innerHTML = renderHalo ? clipPaths.join("") : "";
+    ensureEl("statesHalo").innerHTML = renderHalo ? haloPaths.join("") : "";
+  }
 
   TIME && console.timeEnd("drawStates");
 }
@@ -589,28 +599,41 @@ function toggleProvinces(event) {
   }
 }
 
-function drawProvinces() {
+function drawProvinces(affectedProvinces) {
   TIME && console.time("drawProvinces");
   const { cells, provinces } = pack;
 
+  const selective = Array.isArray(affectedProvinces) && document.getElementById("provincesBody");
+  const dirty = selective ? new Set(affectedProvinces) : null;
   const bodyPaths = new Array(provinces.length - 1);
-  const isolines = getIsolines(pack, cellId => cells.province[cellId], { fill: true, waterGap: true });
+  const isolines = getIsolines(pack, cellId => !dirty || dirty.has(cells.province[cellId]) ? cells.province[cellId] : 0, { fill: true, waterGap: true });
   Object.entries(isolines).forEach(([index, { fill, waterGap }]) => {
     const color = provinces[index].color;
     bodyPaths.push(getGappedFillPaths("province", fill, waterGap, color, index));
   });
 
   const labels = provinces
-    .filter(p => p.i && !p.removed)
+    .filter(p => p.i && !p.removed && (!dirty || dirty.has(p.i)))
     .map(p => {
       const [x, y] = p.pole || cells.p[p.center];
       return /* html */ `<text x="${x}" y="${y}" id="provinceLabel${p.i}">${p.name}</text>`;
     });
 
-  ensureEl("provs").innerHTML = /* html */ `
-    <g id='provincesBody'>${bodyPaths.join("")}</g>
-    <g id='provinceLabels'>${labels.join("")}</g>
-  `;
+  if (dirty) {
+    const parent = ensureEl("provincesBody");
+    const labelParent = ensureEl("provinceLabels");
+    for (const id of dirty) {
+      for (const suffix of ["", "-gap", "-clip"]) document.getElementById(`province${suffix}${id}`)?.remove();
+      if (!provinces[id] || provinces[id].removed) document.getElementById(`provinceLabel${id}`)?.remove();
+    }
+    parent.insertAdjacentHTML("beforeend", bodyPaths.join(""));
+    for (const label of labels) {
+      const id = label.match(/id="([^"]+)"/)[1];
+      if (!document.getElementById(id)) labelParent.insertAdjacentHTML("beforeend", label);
+    }
+  } else {
+    ensureEl("provs").innerHTML = `<g id='provincesBody'>${bodyPaths.join("")}</g><g id='provinceLabels'>${labels.join("")}</g>`;
+  }
   ensureEl("provinceLabels").style.display = ensureEl("provs").dataset.labels === "1" ? "block" : "none";
 
   TIME && console.timeEnd("drawProvinces");
@@ -982,6 +1005,7 @@ function drawZones() {
     ({ hidden, cells, type }) => !hidden && cells.length && (!isFiltered || type === filterBy)
   );
   zones.html(visibleZones.map(drawZone).join(""));
+  window.updateZoneHatching?.(scale);
 }
 
 function drawZone({ i, cells, type, color }) {

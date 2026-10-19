@@ -10,7 +10,8 @@
   "scripts": {
     "start": "node src/server.ts",
     "typecheck": "tsc -p .",
-    "test": "node --test \"test/**/*.test.ts\"",
+    "test:bridge": "node --test --test-concurrency=1 --test-isolation=none test/bridge.test.ts test/bridge-fixture.test.ts",
+    "test": "node --test --test-concurrency=1 \"test/**/*.test.ts\"",
     "lint": "../node_modules/.bin/biome check --write --config-path=biome.lint.jsonc src test"
   },
   "dependencies": {

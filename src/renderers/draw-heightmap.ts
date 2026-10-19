@@ -22,6 +22,7 @@ import {
   range
 } from "d3";
 import { round } from "../utils";
+import { compactPathLayer } from "./path-layer-canvas";
 
 const CURVE_MAP: Record<string, CurveFactory> = {
   curveBasis,
@@ -191,6 +192,8 @@ const heightmapRenderer = (): void => {
     return chain.filter((_d, i) => i % n === 0);
   }
 
+  compactPathLayer("oceanHeights");
+  compactPathLayer("landHeights");
   TIME && console.timeEnd("drawHeightmap");
 };
 

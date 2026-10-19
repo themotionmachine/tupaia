@@ -138,8 +138,8 @@ function regenerateRoutes() {
   if (layerIsOn("toggleRoutes")) drawRoutes();
 }
 
-function regenerateRivers() {
-  Rivers.generate();
+async function regenerateRivers() {
+  await Rivers.generateAsync();
   Rivers.specify();
   Features.defineGroups();
   Lakes.defineNames();
@@ -162,12 +162,12 @@ function recalculatePopulation() {
   layerIsOn("togglePopulation") ? drawPopulation() : togglePopulation();
 }
 
-function regenerateStates() {
+async function regenerateStates() {
   const newStates = recreateStates();
   if (!newStates) return;
 
   pack.states = newStates;
-  States.expandStates();
+  await States.expandStatesAsync();
   States.normalize();
   States.getPoles();
   States.findNeighbors();
@@ -590,9 +590,9 @@ function regenerateReligions() {
   refreshAllEditors();
 }
 
-function regenerateCultures() {
+async function regenerateCultures() {
   Cultures.generate();
-  Cultures.expand();
+  await Cultures.expandAsync();
 
   // update culture for states
   pack.states = pack.states.map(state => {

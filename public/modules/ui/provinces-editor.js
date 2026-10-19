@@ -830,8 +830,8 @@ function editProvinces() {
     if (!layerIsOn("toggleBorders")) toggleBorders();
 
     // make province and state borders more visible
-    provinceBorders.select("path").attr("stroke", "#000").attr("stroke-width", 0.5);
-    stateBorders.select("path").attr("stroke", "#000").attr("stroke-width", 1.2);
+    provinceBorders.selectAll("path").attr("stroke", "#000").attr("stroke-width", 0.5);
+    stateBorders.selectAll("path").attr("stroke", "#000").attr("stroke-width", 1.2);
 
     customization = 11;
     provs.select("g#provincesBody").append("g").attr("id", "temp").attr("stroke-width", 0.3);
@@ -984,8 +984,8 @@ function editProvinces() {
     removeCircle();
 
     // restore borders style
-    provinceBorders.select("path").attr("stroke", null).attr("stroke-width", null);
-    stateBorders.select("path").attr("stroke", null).attr("stroke-width", null);
+    provinceBorders.selectAll("path").attr("stroke", null).attr("stroke-width", null);
+    stateBorders.selectAll("path").attr("stroke", null).attr("stroke-width", null);
     debug.selectAll("path.selected").remove();
 
     document.querySelectorAll("#provincesBottom > *").forEach(el => (el.style.display = "inline-block"));

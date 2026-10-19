@@ -775,11 +775,12 @@
     if (o.keepHeights) info.heightsRestored = packHeightsOff(target, true);
   }
 
-  function rebuildRisk(target, o, info) {
+  async function rebuildRisk(target, o, info) {
     const gh = grid.cells.h;
     for (let g = 0; g < gh.length; g++) gh[g] = target[g];
-    return M.riskRebuild({
+    return await M.riskRebuild({
       restore: {
+        async: true,
         erosion: o.erosion,
         regenerateRivers: true,
         redefineBiomes: o.biomes === "redefine",
@@ -796,7 +797,7 @@
    * generator on the current precipitation and recomputes the biome of cells whose river or flux
    * changed; the economy is still not re-rolled.
    */
-  function rebuildKeep(target, o, info) {
+  async function rebuildKeep(target, o, info) {
     const C = pack.cells;
     const gh = grid.cells.h;
     const edited = [];
@@ -810,7 +811,7 @@
     const r0 = Uint8Array.from(C.r, v => (v ? 1 : 0));
     const fl0 = Uint16Array.from(C.fl);
     const saved = M.captureRivers();
-    Rivers.generate(o.erosion);
+    await Rivers.generateAsync(o.erosion);
     Features.defineGroups();
     afterRivers(target, o, info);
     Rivers.specify();
@@ -905,7 +906,7 @@
     Math.random = aleaPRNG(`${seed}:heights:${heightsDigest}`);
     let carried;
     try {
-      carried = o.rebuild === "risk" ? rebuildRisk(target, o, info) : rebuildKeep(target, o, info);
+      carried = o.rebuild === "risk" ? await rebuildRisk(target, o, info) : await rebuildKeep(target, o, info);
     } finally {
       Math.random = prevRandom;
     }

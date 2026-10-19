@@ -79,16 +79,32 @@ function editWorld() {
     if (ensureEl("wcAutoChange").checked) updateWorld();
   }
 
+  let worldUpdate = null;
+  let worldUpdatePending = false;
   function updateWorld() {
+    worldUpdatePending = true;
+    if (worldUpdate) return worldUpdate;
+    worldUpdate = (async () => {
+      while (worldUpdatePending) {
+        worldUpdatePending = false;
+        await updateWorldNow();
+      }
+    })().catch(error => {
+      if (error.name !== "AbortError") tip(error.message, false, "error");
+    }).finally(() => { worldUpdate = null; });
+    return worldUpdate;
+  }
+
+  async function updateWorldNow() {
     updateGlobeTemperature();
     updateGlobePosition();
     calculateTemperatures();
     generatePrecipitation();
     const heights = new Uint8Array(pack.cells.h);
-    Rivers.generate();
+    await Rivers.generateAsync();
     Rivers.specify();
     pack.cells.h = new Float32Array(heights);
-    Biomes.define();
+    await Biomes.defineAsync();
     Features.defineGroups();
     Lakes.defineNames();
 

@@ -1,0 +1,87 @@
+{
+  "cells": 47885,
+  "camera": {
+    "k": 8,
+    "x": -7360,
+    "y": -8120
+  },
+  "tileCount": 1,
+  "denseReadyAPI": true,
+  "backend": {
+    "backend": "worker",
+    "fallbackReason": "",
+    "completed": 5,
+    "pending": 0,
+    "atlasEntries": 17
+  },
+  "saveExact": true,
+  "zonesUnchanged": true,
+  "labelHitsExact": true,
+  "visibleLabelHits": 1,
+  "transientSaveClean": true,
+  "reliefPick": {
+    "href": "#relief-hill-2",
+    "x": 1009.5,
+    "y": 1017.5,
+    "size": 12
+  },
+  "serializedBytes": 7781900,
+  "workerDisabled": false,
+  "workerOptIn": true,
+  "workerCheck": {
+    "applicable": true,
+    "expected": "worker",
+    "backend": "worker",
+    "fallbackReason": "",
+    "completed": 11,
+    "pending": 0,
+    "atlasEntries": 22
+  },
+  "initialSpriteDelay": {
+    "applicable": true,
+    "uncachedSpriteAlias": true,
+    "delayedJobs": 1,
+    "overviewVisibleWhilePending": true,
+    "readyTilePublished": true
+  },
+  "imagePath": "bench/results/navigation-worker-quality-head.png",
+  "pixelDiff": {
+    "changedPixelsOver16": 71,
+    "fraction": 0.00007703993055555555,
+    "meanAbsoluteChannelDelta": 0.006595413773148148,
+    "maximum": 44
+  },
+  "coldCrossing": {
+    "nativeWheel": true,
+    "startScale": 3.9,
+    "endScale": 4.357419838481658,
+    "timeToCrispMs": 100,
+    "first10IntervalsMs": [
+      7.899999999999636,
+      16.700000000000728,
+      8.299999999999272,
+      8.5,
+      6.700000000000728,
+      18.199999999999818,
+      8.300000000000182,
+      7.799999999999272,
+      7.700000000000728,
+      9.899999999999636
+    ],
+    "maxIntervalMs": 18.199999999999818,
+    "baseFallbackSafe": true,
+    "tileCount": 1
+  },
+  "hatching": {
+    "testedPatterns": 14,
+    "screenPitchStable": true
+  },
+  "asynchronous": {
+    "applicable": true,
+    "delayedDecodeJobs": 1,
+    "staleWorldDecodeRejected": true,
+    "pendingBaseHandoffSafe": true
+  },
+  "errors": [],
+  "pendingChecks": []
+}

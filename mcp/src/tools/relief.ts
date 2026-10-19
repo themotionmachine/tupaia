@@ -1,6 +1,6 @@
 // Relief icons (track 'relief'): regenerate {parts:['relief'], relief:{...}} draws them seeded with
 // a density multiplier, per-biome multipliers, a minimum height and exclusions; relief.onLoad (or
-// edit map {set:{reliefOnLoad:true}}) makes every save drop them and every load draw them again.
+// edit map {set:{reliefOnLoad:true}}) is deprecated compatibility for old maps saved without icons.
 // The settings live on #terrain (mcp/src/bridge-ext/relief.js writes them, the app's renderer
 // reads them: src/renderers/relief-settings.ts). No tools of its own: generate.ts's regenerate
 // calls regenerateRelief and registers RELIEF_REPLAY.
@@ -69,7 +69,7 @@ export const ReliefParams = z
       .boolean()
       .optional()
       .describe(
-        "true: saves drop the icons and loads draw them again (same as edit map {set:{reliefOnLoad:true}}); false: saves store them"
+        "Deprecated legacy compatibility flag for old maps saved with empty relief; saves now preserve drawn icons. Same as edit map {set:{reliefOnLoad:true|false}}"
       )
   })
   .describe(
@@ -164,18 +164,29 @@ NOT_REPLAYABLE.regenerate =
 
 const TERRAIN_TAG = /<g\b[^>]*\bid="terrain"[^>]*>/;
 
-/** Does this .map text draw its relief icons on load (#terrain[data-regenerate])? */
+/** Does this .map text carry the deprecated legacy relief flag (#terrain[data-regenerate])? */
 export function drawsReliefOnLoad(text: string): boolean {
   const tag = TERRAIN_TAG.exec(text)?.[0];
   return !!tag && /\sdata-regenerate=/.test(tag);
+}
+
+/** Legacy files need the load hook only when their marked relief group has no saved drawing. */
+export function needsReliefLoadHook(text: string): boolean {
+  if (!drawsReliefOnLoad(text)) return false;
+  const tag = TERRAIN_TAG.exec(text)!;
+  if (/\/\s*>$/.test(tag[0])) return true;
+  const contentStart = tag.index + tag[0].length;
+  const contentEnd = text.indexOf("</g>", contentStart);
+  const content = text.slice(contentStart, contentEnd < 0 ? contentStart : contentEnd);
+  return !/<(?:use|image)\b/i.test(content);
 }
 
 /** Per deployed entry chunk: does it hold the relief load hook? */
 const hookByEntry = new Map<string, boolean>();
 
 /**
- * shared_save / sketch_promote gate: a map that draws its relief icons on load needs the load hook
- * in the deployed app, or live users get no relief (and their next save stores unseeded icons).
+ * shared_save / sketch_promote compatibility gate for the deprecated relief flag.
+ * Older files with empty relief groups need a deployed legacy load hook. Current saves keep icons.
  * The local build has the hook, so an identical deployed build ('ok') passes; otherwise the
  * deployed entry chunk is fetched once (a read-only GET) and searched for the hook's marker.
  */
@@ -185,7 +196,7 @@ export async function reliefOnLoadRefusal(
   build: { verdict: string; liveEntry: string | null },
   skipBuildCheck: boolean
 ): Promise<{ code: string; message: string } | null> {
-  if (!drawsReliefOnLoad(text) || build.verdict === "ok") return null;
+  if (!needsReliefLoadHook(text) || build.verdict === "ok") return null;
   const entry = build.liveEntry;
   let has = entry ? (hookByEntry.get(entry) ?? null) : null;
   let why = entry ? "" : "the deployed entry chunk is unknown";
@@ -202,15 +213,15 @@ export async function reliefOnLoadRefusal(
   }
   if (has) return null;
   const fix =
-    "Deploy the app first, or store the icons with edit map {set:{reliefOnLoad:false}} (a bigger file that every build shows)";
+    "Deploy an app with legacy relief compatibility, or clear the deprecated flag with edit map {set:{reliefOnLoad:false}}; current saves preserve drawn icons";
   if (has === false)
     return {
       code: "BUILD",
-      message: `the page map draws its relief icons on load (reliefOnLoad), but the deployed app (${entry}) has no relief load hook: live users would see no relief until they toggle it, and their next save would store unseeded icons. ${fix}.`
+      message: `the page map carries the deprecated reliefOnLoad flag, but the deployed app (${entry}) has no legacy relief load hook; older files with empty relief groups would need their icons redrawn. ${fix}.`
     };
   if (skipBuildCheck) return null;
   return {
     code: "BUILD",
-    message: `the page map draws its relief icons on load (reliefOnLoad) and the deployed app could not be checked for the relief load hook (${why}). ${fix}; skipBuildCheck:true saves anyway only if the human agrees.`
+    message: `the page map carries the deprecated reliefOnLoad flag and the deployed app could not be checked for its legacy relief load hook (${why}). ${fix}; skipBuildCheck:true saves anyway only if the human agrees.`
   };
 }

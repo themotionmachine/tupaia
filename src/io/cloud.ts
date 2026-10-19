@@ -23,7 +23,7 @@ interface DropboxProvider {
   call(name: string, param?: unknown): Promise<any>;
   initialize(): Promise<void>;
   connect(token: string): Promise<void>;
-  save(fileName: string, contents: string): Promise<boolean>;
+  save(fileName: string, contents: string | Uint8Array<ArrayBuffer>): Promise<boolean>;
   load(path: string): Promise<Blob>;
   list(): Promise<CloudFile[]>;
   auth(): Promise<void>;

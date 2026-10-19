@@ -1,0 +1,168 @@
+{
+  "schema": 1,
+  "samples": 3,
+  "platform": "darwin",
+  "arch": "arm64",
+  "cpu": "Apple M1 Max",
+  "chromium": "148.0.7778.96",
+  "viewport": [
+    1280,
+    720
+  ],
+  "seed": "7319",
+  "measurements": [
+    {
+      "cells": 10000,
+      "operation": "generate",
+      "samplesMs": [
+        910.5999999642372,
+        936.1999999880791,
+        909.1999999880791
+      ],
+      "medianMs": 910.5999999642372
+    },
+    {
+      "cells": 10000,
+      "operation": "save",
+      "samplesMs": [
+        19.400000035762787,
+        18.69999998807907,
+        19.399999976158142
+      ],
+      "medianMs": 19.399999976158142
+    },
+    {
+      "cells": 10000,
+      "operation": "load",
+      "samplesMs": [
+        183.5999999642372,
+        151.89999997615814,
+        165.80000001192093
+      ],
+      "medianMs": 165.80000001192093
+    },
+    {
+      "cells": 10000,
+      "operation": "redraw",
+      "samplesMs": [
+        108.10000002384186,
+        108.10000002384186,
+        117.19999998807907
+      ],
+      "medianMs": 108.10000002384186
+    },
+    {
+      "cells": 10000,
+      "operation": "regrid",
+      "samplesMs": [
+        589.8999999761581,
+        594.5,
+        607.8000000119209
+      ],
+      "medianMs": 594.5
+    },
+    {
+      "cells": 50000,
+      "operation": "generate",
+      "samplesMs": [
+        3423.100000023842,
+        3626.5,
+        3073.800000011921
+      ],
+      "medianMs": 3423.100000023842
+    },
+    {
+      "cells": 50000,
+      "operation": "save",
+      "samplesMs": [
+        41.39999997615814,
+        41,
+        37.59999996423721
+      ],
+      "medianMs": 41
+    },
+    {
+      "cells": 50000,
+      "operation": "load",
+      "samplesMs": [
+        448,
+        505.5,
+        422.4000000357628
+      ],
+      "medianMs": 448
+    },
+    {
+      "cells": 50000,
+      "operation": "redraw",
+      "samplesMs": [
+        183,
+        211.19999998807907,
+        179.89999997615814
+      ],
+      "medianMs": 183
+    },
+    {
+      "cells": 50000,
+      "operation": "regrid",
+      "samplesMs": [
+        1690.199999988079,
+        1769.800000011921,
+        1679.9000000357628
+      ],
+      "medianMs": 1690.199999988079
+    },
+    {
+      "cells": 100000,
+      "operation": "generate",
+      "samplesMs": [
+        6287,
+        6305.300000011921,
+        6238.300000011921
+      ],
+      "medianMs": 6287
+    },
+    {
+      "cells": 100000,
+      "operation": "save",
+      "samplesMs": [
+        54.5,
+        55.5,
+        59.30000001192093
+      ],
+      "medianMs": 55.5
+    },
+    {
+      "cells": 100000,
+      "operation": "load",
+      "samplesMs": [
+        679,
+        655.3000000119209,
+        727.6000000238419
+      ],
+      "medianMs": 679
+    },
+    {
+      "cells": 100000,
+      "operation": "redraw",
+      "samplesMs": [
+        252.79999995231628,
+        238.5999999642372,
+        267.69999998807907
+      ],
+      "medianMs": 252.79999995231628
+    },
+    {
+      "cells": 100000,
+      "operation": "regrid",
+      "samplesMs": [
+        3015.600000023842,
+        2661.300000011921,
+        3186.300000011921
+      ],
+      "medianMs": 3015.600000023842
+    }
+  ],
+  "sourceRevision": "unknown: pre-existing dist",
+  "note": "default layers, pre-change dist",
+  "node": "v25.6.1"
+}

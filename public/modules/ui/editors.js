@@ -38,6 +38,13 @@ function clicked() {
   else if (grand.id === "coastline") editCoastline();
   else if (grand.id === "lakes") editLake();
   else if (great.id === "armies") editRegiment("#" + parent.id);
+  else if (window.pickRelief) {
+    const [x, y] = d3.mouse(viewbox.node());
+    const burg = window.pickBurg?.(x, y);
+    if (burg) return editBurg(burg);
+    const icon = window.pickRelief(x, y);
+    if (icon) editReliefIcon(icon);
+  }
 }
 
 // clear elSelected variable

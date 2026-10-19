@@ -1,0 +1,173 @@
+{
+  "schema": 1,
+  "layers": [
+    "default",
+    "heightmap",
+    "relief"
+  ],
+  "samples": 3,
+  "platform": "darwin",
+  "arch": "arm64",
+  "cpu": "Apple M1 Max",
+  "chromium": "148.0.7778.96",
+  "viewport": [
+    1280,
+    720
+  ],
+  "seed": "7319",
+  "measurements": [
+    {
+      "cells": 10000,
+      "operation": "generate",
+      "samplesMs": [
+        1280.699999988079,
+        1266.5,
+        1051.5
+      ],
+      "medianMs": 1266.5
+    },
+    {
+      "cells": 10000,
+      "operation": "save",
+      "samplesMs": [
+        31.69999998807907,
+        33.700000047683716,
+        27.399999976158142
+      ],
+      "medianMs": 31.69999998807907
+    },
+    {
+      "cells": 10000,
+      "operation": "load",
+      "samplesMs": [
+        257.80000001192093,
+        258.89999997615814,
+        208.60000002384186
+      ],
+      "medianMs": 257.80000001192093
+    },
+    {
+      "cells": 10000,
+      "operation": "redraw",
+      "samplesMs": [
+        359.5,
+        340.60000002384186,
+        258.5
+      ],
+      "medianMs": 340.60000002384186
+    },
+    {
+      "cells": 10000,
+      "operation": "regrid",
+      "samplesMs": [
+        787.6000000238419,
+        744.5,
+        844.9000000357628
+      ],
+      "medianMs": 787.6000000238419
+    },
+    {
+      "cells": 50000,
+      "operation": "generate",
+      "samplesMs": [
+        4161.400000035763,
+        4409.099999964237,
+        4263.800000011921
+      ],
+      "medianMs": 4263.800000011921
+    },
+    {
+      "cells": 50000,
+      "operation": "save",
+      "samplesMs": [
+        61.19999998807907,
+        58.10000002384186,
+        58.09999996423721
+      ],
+      "medianMs": 58.10000002384186
+    },
+    {
+      "cells": 50000,
+      "operation": "load",
+      "samplesMs": [
+        479.89999997615814,
+        552.3000000119209,
+        542.6000000238419
+      ],
+      "medianMs": 542.6000000238419
+    },
+    {
+      "cells": 50000,
+      "operation": "redraw",
+      "samplesMs": [
+        803.5,
+        482.5,
+        703.5
+      ],
+      "medianMs": 703.5
+    },
+    {
+      "cells": 50000,
+      "operation": "regrid",
+      "samplesMs": [
+        2134.199999988079,
+        2264.399999976158,
+        2407.399999976158
+      ],
+      "medianMs": 2264.399999976158
+    },
+    {
+      "cells": 100000,
+      "operation": "generate",
+      "samplesMs": [
+        9139.5,
+        8656.300000011921,
+        8368.899999976158
+      ],
+      "medianMs": 8656.300000011921
+    },
+    {
+      "cells": 100000,
+      "operation": "save",
+      "samplesMs": [
+        87.30000001192093,
+        87.19999998807907,
+        83.80000001192093
+      ],
+      "medianMs": 87.19999998807907
+    },
+    {
+      "cells": 100000,
+      "operation": "load",
+      "samplesMs": [
+        1023.5999999642372,
+        931.3999999761581,
+        923.3000000119209
+      ],
+      "medianMs": 931.3999999761581
+    },
+    {
+      "cells": 100000,
+      "operation": "redraw",
+      "samplesMs": [
+        1415.2000000476837,
+        1402.9000000357628,
+        1290.5999999642372
+      ],
+      "medianMs": 1402.9000000357628
+    },
+    {
+      "cells": 100000,
+      "operation": "regrid",
+      "samplesMs": [
+        3595.899999976158,
+        3456.600000023842,
+        3590.100000023842
+      ],
+      "medianMs": 3590.100000023842
+    }
+  ],
+  "sourceRevision": "e73840e0df7460a790479819aa6b4a2df525bcdc",
+  "note": "First working-tree renderer pass; 100K redraw regression caught, retained for audit",
+  "node": "v25.6.1"
+}

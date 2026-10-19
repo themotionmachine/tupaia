@@ -183,69 +183,60 @@ let scale = 1;
 let viewX = 0;
 let viewY = 0;
 
-let rafId = null;
-let pendingScaleChange = false;
-let pendingPositionChange = false;
+let zoomWorld = null;
+const navigationUpdates = new window.ZoomUpdateScheduler({
+  valid: () => zoomWorld === grid,
+  camera() {
+    viewbox.attr("transform", `translate(${viewX} ${viewY}) scale(${scale})`);
+    if (customization === 1) {
+      const canvas = ensureEl("canvas");
+      const img = ensureEl("imageToConvert");
+      if (canvas && canvas.style.opacity !== "0" && img) {
+        const ctx = canvas.getContext("2d");
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.setTransform(scale, 0, 0, scale, viewX, viewY);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      }
+    }
+  },
+  style() { updateZoomStyling(); },
+  visible() {
+    window.updateZoneHatching?.(scale);
+    window.cullMapLabels?.(scale, viewX, viewY, svgWidth, svgHeight);
+    window.refreshDenseZoom?.(scale, viewX, viewY, svgWidth, svgHeight);
+  },
+  details(update) {
+    if (update.positionChanged && layerIsOn("toggleCoordinates")) drawCoordinates();
+    if (update.scaleChanged || update.exact) {
+      if (update.exact || !window.drawScaleBarFast) drawScaleBar(scaleBar, scale);
+      else window.drawScaleBarFast(scaleBar, scale);
+      fitScaleBar(scaleBar, svgWidth, svgHeight);
+    }
+    window.updateMinimap && updateMinimap();
+  }
+}, {
+  now: () => performance.now(),
+  request: callback => requestAnimationFrame(callback),
+  cancel: id => cancelAnimationFrame(id)
+});
+
 function zoomRaf() {
   const { k, x, y } = d3.event.transform;
-
-  const isScaleChanged = Boolean(scale - k);
-  const isPositionChanged = Boolean(viewX - x || viewY - y);
-  if (!isScaleChanged && !isPositionChanged) return;
-
+  const scaleChanged = scale !== k;
+  const positionChanged = viewX !== x || viewY !== y;
+  if (!scaleChanged && !positionChanged) return;
+  if (zoomWorld !== grid) {
+    navigationUpdates.cancel();
+    zoomWorld = grid;
+  }
   scale = k;
   viewX = x;
   viewY = y;
-
-  // Coalesce multiple zoom events into one paint.
-  // While a RAF is pending, keep updating latest transform state and OR-change flags.
-  // The scheduled RAF consumes these accumulated flags and then resets them.
-  pendingScaleChange = pendingScaleChange || isScaleChanged;
-  pendingPositionChange = pendingPositionChange || isPositionChanged;
-
-  if (rafId) return;
-  rafId = requestAnimationFrame(() => {
-    rafId = null;
-
-    // Safely clears these flags for future renders
-    const didScaleChange = pendingScaleChange;
-    const didPositionChange = pendingPositionChange;
-    pendingScaleChange = false;
-    pendingPositionChange = false;
-
-    // Uses global values, so each frame always draws using the latest positioning values
-    viewbox.attr("transform", `translate(${viewX} ${viewY}) scale(${scale})`);
-
-    if (didPositionChange) {
-      if (layerIsOn("toggleCoordinates")) drawCoordinates();
-    }
-
-    if (customization === 1) {
-      const canvas = ensureEl("canvas");
-      if (canvas && canvas.style.opacity !== "0") {
-        const img = ensureEl("imageToConvert");
-        if (img) {
-          const ctx = canvas.getContext("2d");
-          ctx.clearRect(0, 0, canvas.width, canvas.height);
-          ctx.setTransform(scale, 0, 0, scale, viewX, viewY);
-          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-        }
-      }
-    }
-
-    if (didScaleChange) {
-      invokeActiveZooming();
-      drawScaleBar(scaleBar, scale);
-      fitScaleBar(scaleBar, svgWidth, svgHeight);
-    }
-
-    if (didPositionChange || didScaleChange) {
-      window.updateMinimap && updateMinimap();
-    }
-  });
+  navigationUpdates.update({scale: k, x, y, scaleChanged, positionChanged, exact: !d3.event.sourceEvent});
 }
 
-const zoom = d3.zoom().scaleExtent([1, 20]).on("zoom", zoomRaf);
+const zoom = d3.zoom().scaleExtent([1, 20]).on("zoom", zoomRaf).on("end", () => navigationUpdates.end());
+window.addEventListener("map:loaded", () => navigationUpdates.cancel());
 
 var mapCoordinates = {}; // map coordinates on globe
 let populationRate = +ensureEl("populationRateInput").value;
@@ -547,6 +538,18 @@ function resetZoom(d = 1000) {
 
 // active zooming feature
 function invokeActiveZooming() {
+  if (zoomWorld !== grid) navigationUpdates.cancel();
+  updateZoomStyling();
+  window.updateZoneHatching?.(scale);
+  window.cullMapLabels?.(scale, viewX, viewY, svgWidth, svgHeight);
+  window.refreshDenseZoom?.(scale, viewX, viewY, svgWidth, svgHeight);
+}
+
+function updateZoomStyling() {
+  // Read visibility together before label and marker mutations can dirty layout.
+  const labelsVisible = labels.style("display") !== "none";
+  const emblemsVisible = emblems.style("display") !== "none";
+  const rulersVisible = ruler.style("display") !== "none";
   const isOptimized = shapeRendering.value === "optimizeSpeed";
 
   if (coastline.select("#sea_island").size() && +coastline.select("#sea_island").attr("auto-filter")) {
@@ -556,12 +559,15 @@ function invokeActiveZooming() {
   }
 
   // rescale labels on zoom
-  if (labels.style("display") !== "none") {
+  if (labelsVisible) {
     labels.selectAll("g").each(function () {
       if (this.id === "burgLabels") return;
       const desired = +this.dataset.size;
       const relative = Math.max(rn((desired + desired / scale) / 2, 2), 1);
-      if (rescaleLabels.checked) this.setAttribute("font-size", relative);
+      if (rescaleLabels.checked) {
+        window.noteZoomLabelSize?.(this, relative);
+        this.setAttribute("font-size", relative);
+      }
 
       // tupaia-mcp: per-group override written by the MCP `display {labels}`: data-min-size replaces the
       // lower bound (6), data-max-size the upper (60), data-always-show skips both; without the
@@ -578,7 +584,7 @@ function invokeActiveZooming() {
   }
 
   // rescale emblems on zoom
-  if (emblems.style("display") !== "none") {
+  if (emblemsVisible) {
     emblems.selectAll("g").each(function () {
       const size = this.getAttribute("font-size") * scale;
       // tupaia-mcp: same per-group override as the labels above (data-min-size replaces 25, data-max-size 300)
@@ -617,7 +623,7 @@ function invokeActiveZooming() {
     });
 
   // rescale rulers to have always the same size
-  if (ruler.style("display") !== "none") {
+  if (rulersVisible) {
     const size = rn((10 / scale ** 0.3) * 2, 2);
     ruler.selectAll("text").attr("font-size", size);
   }
@@ -705,8 +711,8 @@ async function generate(options) {
     Features.markupPack();
     createDefaultRuler();
 
-    Rivers.generate();
-    Biomes.define();
+    await Rivers.generateAsync();
+    await Biomes.defineAsync();
     Features.defineGroups();
 
     Ice.generate();
@@ -715,10 +721,10 @@ async function generate(options) {
 
     rankCells();
     Cultures.generate();
-    Cultures.expand();
+    await Cultures.expandAsync();
 
     Burgs.generate();
-    States.generate();
+    await States.generateAsync();
     Routes.generate();
     Religions.generate();
 

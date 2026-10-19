@@ -1,16 +1,17 @@
-// Tupaia MCP bridge extension (track 'relief'): relief icon settings and regenerate-on-load.
+// Tupaia MCP bridge extension (track 'relief'): relief icon settings and deprecated legacy relief compatibility.
 //
 // The settings are attributes of #terrain (the app reads them on every relief draw, see
 // src/renderers/relief-settings.ts, which also exports the helpers this file uses as the page
 // global ReliefSettings), so every save carries them and every draw uses them: data-seed,
 // data-scale, data-biomes, data-min-height, data-exclude, data-near-burgs and data-regenerate
-// (saves drop the icons; a load draws them again). This file validates and writes them and
+// (deprecated compatibility for old files saved without icons; current saves preserve icons).
+// This file validates and writes them and
 // draws the icons:
 //   regenerate {parts:['relief'], relief:{...}}  (FNS.regenerate is wrapped; phased when relief-only)
 //   edit map {set:{reliefOnLoad:true|false}}     (FIELDS.map.reliefOnLoad)
 // On a reliefOnLoad map it also redraws the icons after any mutating call that changed what the
 // renderer reads since the last draw (T.call and the app's drawReliefIcons are wrapped), so the page
-// shows what a load will draw; and it adds a relief line to the map summary (map_info, load_map).
+// keeps its legacy automatic refresh behavior; it also adds relief to map_info and load_map.
 // Same rules as bridge-mutations.js: app globals by bare name at call time, no locals that
 // shadow app globals (terrain, seed, grid, pack, ...), one args object per FNS function.
 (root => {
@@ -63,6 +64,17 @@
     if (!el) fail("PAGE_ERROR", "the map has no #terrain group");
     return el;
   }
+
+  /** Logical glyph count stays stable when dense relief is stored as one raster image. */
+  function reliefCount(el = terrainEl()) {
+    const raster = el.querySelector(":scope > image[data-relief-count]");
+    if (raster) {
+      const count = Number(raster.getAttribute("data-relief-count"));
+      if (Number.isFinite(count) && count >= 0) return count;
+    }
+    return el.querySelectorAll(":scope > use").length;
+  }
+
 
   /** The app's relief helpers (src/renderers/relief-settings.ts). */
   function RS() {
@@ -316,7 +328,7 @@
     if (a.density !== undefined)
       lit.density = next.density = a.density === null ? 1 : num("relief.density", 0, 2)(a.density);
     if (a.matchIcons !== undefined) {
-      if (a.matchIcons === true) next.match = terrainEl().childElementCount;
+      if (a.matchIcons === true) next.match = reliefCount();
       else next.match = num("relief.matchIcons", 0, 1e7)(a.matchIcons);
       if (!Number.isInteger(next.match)) fail("BAD_ARGS", "relief.matchIcons is true or a whole number of icons");
       if (a.matchIcons === true && !reliefOn())
@@ -421,7 +433,7 @@
     const count = d => {
       write({ ...s, density: d });
       drawReliefIcons();
-      return terrainEl().childElementCount;
+      return reliefCount();
     };
     if (target === 0) return { density: 0, icons: count(0), tries: 1 };
     let d = s.density > 0 ? s.density : 1;
@@ -462,14 +474,14 @@
     }
     const t0 = performance.now();
     drawReliefIcons();
-    return { icons: terrainEl().childElementCount, ms: Math.round(performance.now() - t0) };
+    return { icons: reliefCount(), ms: Math.round(performance.now() - t0) };
   }
 
   const HIDDEN_NOTE =
     "the relief layer is off: no icons are drawn now (and none are saved); display {on:['relief']} draws them with these settings";
 
   const ON_LOAD_NOTE =
-    "saves now drop the relief icons and a load draws them again from the stored seed and settings; a build without this hook (e.g. an older deployed app) shows no relief until the Relief layer is toggled, so deploy before saving such a map to shared";
+    "onLoad is deprecated legacy compatibility for old maps saved with empty relief groups; current saves preserve drawn icons and load preserves them";
 
   /** Note when a redraw changed the icon count a lot (density 1 is the style default, not the old look). */
   function countNote(before, after, explicitDensity) {
@@ -490,7 +502,7 @@
       return { phase: "validate", before: view(cur), after: view(next), ...(errors.length ? { errors } : {}) };
     if (errors.length) fail(errors[0].code, errors[0].message);
     const base = baseOf(lit, cur);
-    const iconsBefore = terrainEl().childElementCount;
+    const iconsBefore = reliefCount();
     let drawn;
     let matched = null;
     if (next.match !== undefined) {
@@ -500,7 +512,7 @@
       if (!("density" in base)) base.density = cur.density;
       delete next.match;
       write(next);
-      drawn = reliefOn() ? { icons: terrainEl().childElementCount, ms: Math.round(performance.now() - t0) } : refresh();
+      drawn = reliefOn() ? { icons: reliefCount(), ms: Math.round(performance.now() - t0) } : refresh();
       notes.push(
         `matchIcons: density ${matched.density} draws ${matched.icons} icons (target ${a.relief.matchIcons === true ? `${iconsBefore}, the current count` : a.relief.matchIcons}; ${matched.tries} draws)`
       );
@@ -586,11 +598,11 @@
         c.notes.add(HIDDEN_NOTE);
         return;
       }
-      // what a reload will draw: seeded, so the page shows it now (manual relief edits are lost)
-      const before = el.childElementCount;
+      // Preserve the deprecated flag's seeded initial refresh (manual relief edits are replaced).
+      const before = reliefCount(el);
       const drawn = refresh();
       c.notes.add(
-        `relief icons redrawn from seed '${el.getAttribute(ATTR.seed)}' to match what a load draws: ${drawn.icons} icons (was ${before})`
+        `relief icons redrawn from seed '${el.getAttribute(ATTR.seed)}' for the deprecated reliefOnLoad flag: ${drawn.icons} icons (was ${before})`
       );
       const n = countNote(before, drawn.icons, false);
       if (n) c.notes.add(n);
@@ -603,7 +615,7 @@
     const el = document.getElementById("terrain");
     if (!el) return null;
     const s = stored();
-    const out = { icons: el.childElementCount };
+    const out = { icons: reliefCount(el) };
     if (s.onLoad) out.onLoad = true;
     if (s.seed !== null) out.seed = s.seed;
     if (s.density !== 1) out.density = s.density;
@@ -699,7 +711,7 @@
     try {
       if (!env?.ok || !watching() || reliefInputs() === lastDrawn) return env;
       drawReliefIcons();
-      const msg = `relief icons redrawn (${terrainEl().childElementCount}): this map draws them on load (reliefOnLoad), so the page now shows what a load will draw`;
+      const msg = `relief icons redrawn (${reliefCount()}): the deprecated reliefOnLoad compatibility flag keeps relief synchronized after edits`;
       const v = env.value;
       if (isObj(v)) {
         if (v.notes === undefined) v.notes = [msg];

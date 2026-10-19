@@ -246,9 +246,9 @@ declare global {
   // Provinces, Burgs, COA, COArenderer) are used directly instead.
   var drawCultures: () => void;
   var drawReligions: () => void;
-  var drawStates: () => void;
-  var drawBorders: () => void;
-  var drawProvinces: () => void;
+  var drawStates: (affectedStates?: number[]) => void;
+  var drawBorders: (affectedStates?: number[]) => void;
+  var drawProvinces: (affectedProvinces?: number[]) => void;
   var drawStateLabels: (ids?: number[]) => void;
   var drawPopulation: () => void;
 

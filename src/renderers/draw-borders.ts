@@ -1,13 +1,21 @@
 declare global {
-  var drawBorders: () => void;
+  var drawBorders: (affectedStates?: number[]) => void;
 }
 
-const bordersRenderer = () => {
+const bordersRenderer = (affectedStates?: number[]) => {
   TIME && console.time("drawBorders");
   const { cells, vertices } = pack;
 
-  const statePath: string[] = [];
-  const provincePath: string[] = [];
+  let dirty = affectedStates ? new Set(affectedStates) : null;
+  // Older saved maps contain one aggregate path. Bootstrap keyed paths once before patching.
+  if (dirty && document.querySelector("#borders path:not([data-border-key])")) dirty = null;
+  const statePath = new Map<string, { paths: string[]; owners: number[] }>();
+  const provincePath = new Map<string, { paths: string[]; owners: number[] }>();
+  const addPath = (paths: typeof statePath, key: string, border: string, owners: number[]) => {
+    const entry = paths.get(key) || { paths: [], owners };
+    entry.paths.push(border);
+    paths.set(key, entry);
+  };
   const checked: { [key: string]: boolean } = {};
 
   const isLand = (cellId: number) => cells.h[cellId] >= 20;
@@ -18,7 +26,7 @@ const bordersRenderer = () => {
     const stateId = cells.state[cellId];
 
     // bordering cell of another province
-    if (provinceId) {
+    if (provinceId && (!dirty || dirty.has(stateId))) {
       const provToCell = cells.c[cellId].find(neibId => {
         const neibProvinceId = cells.province[neibId];
         return (
@@ -41,7 +49,7 @@ const bordersRenderer = () => {
         });
 
         if (border) {
-          provincePath.push(border);
+          addPath(provincePath, `${provinceId}-${cells.province[provToCell]}`, border, [stateId]);
           cellId--; // check the same cell again
           continue;
         }
@@ -51,7 +59,12 @@ const bordersRenderer = () => {
     // if cell is on state border
     const stateToCell = cells.c[cellId].find(neibId => {
       const neibStateId = cells.state[neibId];
-      return isLand(neibId) && stateId > neibStateId && !checked[`state-${stateId}-${neibStateId}-${cellId}`];
+      return (
+        (!dirty || dirty.has(stateId) || dirty.has(neibStateId)) &&
+        isLand(neibId) &&
+        stateId > neibStateId &&
+        !checked[`state-${stateId}-${neibStateId}-${cellId}`]
+      );
     });
 
     if (stateToCell !== undefined) {
@@ -66,15 +79,30 @@ const bordersRenderer = () => {
       });
 
       if (border) {
-        statePath.push(border);
+        addPath(statePath, `${stateId}-${cells.state[stateToCell]}`, border, [stateId, cells.state[stateToCell]]);
         cellId--; // check the same cell again
       }
     }
   }
 
-  svg.select("#borders").attr("fill", "none").selectAll("path").remove();
-  svg.select("#stateBorders").append("path").attr("d", statePath.join(" "));
-  svg.select("#provinceBorders").append("path").attr("d", provincePath.join(" "));
+  svg.select("#borders").attr("fill", "none");
+  for (const [group, paths] of [
+    ["stateBorders", statePath],
+    ["provinceBorders", provincePath]
+  ] as const) {
+    const parent = document.getElementById(group)!;
+    for (const path of parent.querySelectorAll("path")) {
+      const owners = (path.getAttribute("data-owners") || "").split(",").map(Number);
+      if (!dirty || owners.some(id => dirty!.has(id))) path.remove();
+    }
+    for (const [key, entry] of paths) {
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("data-border-key", key);
+      path.setAttribute("data-owners", entry.owners.join(","));
+      path.setAttribute("d", entry.paths.join(" "));
+      parent.appendChild(path);
+    }
+  }
 
   function getBorder({
     type,

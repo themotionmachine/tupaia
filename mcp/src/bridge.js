@@ -1897,7 +1897,8 @@
         } finally {
           for (const s of unlocked) s.lock = true;
         }
-      } else fn();
+      } else if (step.ids && ["states", "provinces", "borders"].includes(step.layer)) fn(step.ids);
+      else fn();
       redrawn.push(step.ids ? { layer: step.layer, ids: step.ids } : step.layer);
     }
     if (typeof invokeActiveZooming === "function") invokeActiveZooming();
@@ -1951,11 +1952,22 @@
     await sleep(0);
     const fonts = typeof document !== "undefined" ? document.fonts : null;
     const end = Date.now() + 3000;
+    const bounded = async promise => {
+      let timer;
+      try {
+        await Promise.race([
+          promise,
+          new Promise(resolve => {timer = setTimeout(resolve, Math.max(0, end - Date.now()));})
+        ]);
+      } finally {clearTimeout(timer);}
+    };
     for (let i = 0; i < 4; i++) {
-      if (fonts) await Promise.race([fonts.ready, sleep(Math.max(0, end - Date.now()))]);
+      if (fonts) await bounded(fonts.ready);
       await raf2();
       if (!fonts || fonts.status !== "loading" || Date.now() >= end) break;
     }
+    await bounded(Promise.all([root.reliefRenderReady, root.burgRenderReady]));
+    await raf2();
   }
 
   /**

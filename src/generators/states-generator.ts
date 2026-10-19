@@ -1,3 +1,5 @@
+import { expandStates } from "./expansion-kernel";
+import { captureExpansionInput, expandInWorker } from "./expansion-worker";
 import { mean, median, sum } from "d3";
 import {
   each,
@@ -7,7 +9,6 @@ import {
   getMixedColor,
   getPolesOfInaccessibility,
   getRandomColor,
-  minmax,
   P,
   ra,
   rand,
@@ -106,38 +107,6 @@ class StatesModule {
     return states;
   }
 
-  private getBiomeCost(b: number, biome: number, type: string) {
-    if (b === biome) return 10; // tiny penalty for native biome
-    if (type === "Hunting") return biomesData.cost[biome] * 2; // non-native biome penalty for hunters
-    if (type === "Nomadic" && biome > 4 && biome < 10) return biomesData.cost[biome] * 3; // forest biome penalty for nomads
-    return biomesData.cost[biome]; // general non-native biome penalty
-  }
-
-  private getHeightCost(f: any, h: number, type: string) {
-    if (type === "Lake" && f.type === "lake") return 10; // low lake crossing penalty for Lake cultures
-    if (type === "Naval" && h < 20) return 300; // low sea crossing penalty for Navals
-    if (type === "Nomadic" && h < 20) return 10000; // giant sea crossing penalty for Nomads
-    if (h < 20) return 1000; // general sea crossing penalty
-    if (type === "Highland" && h < 62) return 1100; // penalty for highlanders on lowlands
-    if (type === "Highland") return 0; // no penalty for highlanders on highlands
-    if (h >= 67) return 2200; // general mountains crossing penalty
-    if (h >= 44) return 300; // general hills crossing penalty
-    return 0;
-  }
-
-  private getRiverCost(r: any, i: number, type: string) {
-    if (type === "River") return r ? 0 : 100; // penalty for river cultures
-    if (!r) return 0; // no penalty for others if there is no river
-    return minmax(pack.cells.fl[i] / 10, 20, 100); // river penalty from 20 to 100 based on flux
-  }
-
-  private getTypeCost(t: number, type: string) {
-    if (t === 1) return type === "Naval" || type === "Lake" ? 0 : type === "Nomadic" ? 60 : 20; // penalty for coastline
-    if (t === 2) return type === "Naval" || type === "Nomadic" ? 30 : 0; // low penalty for land level 2 for Navals and nomads
-    if (t !== -1) return type === "Naval" || type === "Lake" ? 100 : 0; // penalty for mainland for navals
-    return 0;
-  }
-
   generate() {
     TIME && console.time("generateStates");
     pack.states = this.createStates();
@@ -152,74 +121,37 @@ class StatesModule {
     TIME && console.timeEnd("generateStates");
   }
 
+  async generateAsync() {
+    TIME && console.time("generateStates");
+    pack.states = this.createStates();
+    await this.expandStatesAsync();
+    this.normalize();
+    this.getPoles();
+    this.findNeighbors();
+    this.assignColors();
+    this.generateCampaigns();
+    this.generateDiplomacy();
+
+    TIME && console.timeEnd("generateStates");
+  }
+
+  private expansionRevision = 0;
+
   expandStates() {
-    TIME && console.time("expandStates");
-    const { cells, states, cultures, burgs } = pack;
+    this.expansionRevision++;
+    this.applyExpansion(expandStates(captureExpansionInput()));
+  }
 
-    cells.state = cells.state || new Uint16Array(cells.i.length);
+  async expandStatesAsync() {
+    const revision = ++this.expansionRevision;
+    const cells = pack.cells;
+    const result = await expandInWorker("expandStates", captureExpansionInput());
+    if (revision === this.expansionRevision && cells === pack.cells) this.applyExpansion(result);
+  }
 
-    const queue = new FlatQueue();
-    const cost: number[] = [];
-
-    const globalGrowthRate = (document.getElementById("growthRate") as HTMLInputElement | null)?.valueAsNumber || 1;
-    const statesGrowthRate =
-      (document.getElementById("statesGrowthRate") as HTMLInputElement | null)?.valueAsNumber || 1;
-    const growthRate = (cells.i.length / 2) * globalGrowthRate * statesGrowthRate; // limit cost for state growth
-
-    // remove state from all cells except of locked
-    for (const cellId of cells.i) {
-      const state = states[cells.state[cellId]];
-      if (state.lock) continue;
-      cells.state[cellId] = 0;
-    }
-
-    for (const state of states) {
-      if (!state.i || state.removed) continue;
-
-      const capitalCell = burgs[state.capital].cell;
-      cells.state[capitalCell] = state.i;
-      const cultureCenter = cultures[state.culture].center!;
-      const b = cells.biome[cultureCenter]; // state native biome
-      queue.push({ e: state.center, p: 0, s: state.i, b }, 0);
-      cost[state.center] = 1;
-    }
-
-    while (queue.length) {
-      const next = queue.pop();
-
-      const { e, p, s, b } = next;
-      const { type, culture } = states[s];
-
-      cells.c[e].forEach(e => {
-        const state = states[cells.state[e]];
-        if (state.lock) return; // do not overwrite cell of locked states
-        if (cells.state[e] && e === state.center) return; // do not overwrite capital cells
-
-        const cultureCost = culture === cells.culture[e] ? -9 : 100;
-        const populationCost = cells.h[e] < 20 ? 0 : cells.s[e] ? Math.max(20 - cells.s[e], 0) : 5000;
-        const biomeCost = this.getBiomeCost(b, cells.biome[e], type);
-        const heightCost = this.getHeightCost(pack.features[cells.f[e]], cells.h[e], type);
-        const riverCost = this.getRiverCost(cells.r[e], e, type);
-        const typeCost = this.getTypeCost(cells.t[e], type);
-        const cellCost = Math.max(cultureCost + populationCost + biomeCost + heightCost + riverCost + typeCost, 0);
-        const totalCost = p + 10 + cellCost / states[s].expansionism;
-
-        if (totalCost > growthRate) return;
-
-        if (!cost[e] || totalCost < cost[e]) {
-          if (cells.h[e] >= 20) cells.state[e] = s; // assign state to cell
-          cost[e] = totalCost;
-          queue.push({ e, p: totalCost, s, b }, totalCost);
-        }
-      });
-    }
-
-    burgs
-      .filter(b => b.i && !b.removed)
-      .forEach(b => {
-        b.state = cells.state[b.cell]; // assign state to burgs
-      });
-    TIME && console.timeEnd("expandStates");
+  private applyExpansion(result: Uint16Array) {
+    pack.cells.state = result;
+    for (const burg of pack.burgs) if (burg.i && !burg.removed) burg.state = result[burg.cell];
   }
 
   normalize() {

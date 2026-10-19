@@ -15,22 +15,18 @@ browser ─ https://map.activationlayer.org ─▶ fmg-map Worker
    ├─ GET  /api/map/:id/versions       retained snapshots (≤20)
    ├─ POST /api/map/:id/restore?v=n    roll back to a version
    ├─ POST /api/map/:id/{claim,release} soft advisory edit lock
-   ├─ GET  /api/map/:id/ops            a sketch's ops.json  (R2)          [not deployed yet]
-   ├─ PUT  /api/map/:id/ops            replace ops.json (sketch-*, ≤ 2 MB) [not deployed yet]
-   └─ DELETE /api/map/:id              remove a sketch (403 otherwise)   [not deployed yet]
+   ├─ GET  /api/map/:id/ops            a sketch's ops.json  (R2)          [deployed 2026-10-11]
+   ├─ PUT  /api/map/:id/ops            replace ops.json (sketch-*, ≤ 2 MB) [deployed 2026-10-11]
+   └─ DELETE /api/map/:id              remove a sketch (403 otherwise)   [deployed 2026-10-11]
 ```
 
 Storage: blobs in **R2** (`maps/<id>.map`, `maps/<id>/v<n>.map`, and for sketches
 `maps/<id>/ops.json`); one metadata row per map in **D1**. The blob is opaque — the Worker
 never parses it.
 
-### Sketch routes (added for the MCP server's sketches; NOT deployed)
+### Sketch routes (deployed 2026-10-11)
 
-The MCP server (`mcp/`) stores a provisional sketch of the shared map as its own map id,
-`sketch-<slug>`, plus an operation log beside it. Two routes were added for that; **they are
-in `worker/src/index.ts` but are not deployed. Deploying them is Ryan's call** (`./cloudflare/deploy.sh`
-after review). The live site answers them with its generic 404 until then, and the MCP server
-refuses to save a sketch against such a Worker.
+The MCP server (`mcp/`) stores provisional maps under `sketch-<slug>` with operation logs. These routes are deployed in Worker version `692b44b5-9740-4f91-9f7a-5d0cdb9fbb10`, together with the performance update. Deployment checks and rollback identity are recorded in [`docs/performance/deployment.md`](../docs/performance/deployment.md).
 
 - `GET /api/map/:id/ops`: the JSON at `maps/<id>/ops.json`. 404 `{error:'not_found', id}` when
   the map or its ops.json does not exist.
@@ -101,34 +97,9 @@ is not hidden (every map a current client saved), so each save switched Trade on
 off and `src/io/load.ts` leaves the button off for it (files without the attribute, and older
 clients, behave as before). Re-check all of these after an upstream rebase.
 
-Relief icons (MCP `regenerate {parts:['relief']}` and `edit map {set:{reliefOnLoad}}`) add one
-new file and five marked hooks. `src/renderers/relief-settings.ts` reads map-level settings from
-attributes of `#terrain` (`data-seed`, `data-scale`, `data-biomes`, `data-min-height`,
-`data-exclude`, `data-near-burgs`, `data-regenerate`) and exposes its helpers as the page global
-`ReliefSettings` (the MCP bridge uses them; its reader clamps each value to a sane range: scale and
-per-biome multipliers 0 to 2, min height 0 to 100, near-burg distance 0 to 10000, so a crafted file
-cannot make a draw hang); `src/renderers/draw-relief-icons.ts` applies them
-(with none set it draws as upstream; a seeded draw swaps `Math.random` per cell and
-`drawReliefIcons` puts it back; below a multiplier of 1 a cell keeps its icons with odds that keep
-the count going with the square of the multiplier, instead of always keeping one). With
-`data-regenerate` set, `prepareMapData` (`src/io/save.ts`) empties `#terrain` in the saved SVG, so
-every save path (File > Save, browser storage, autosave, the shared map, MCP saves and snapshots)
-drops the icons, and `src/io/load.ts` calls `restoreReliefOnLoad()` after a load to draw the same
-icons again and turn the Relief button on. `generate()` in `public/main.js` clears the settings,
-so a new map starts as upstream. `public/modules/ui/relief-editor.js` warns that manual relief
-edits are not saved on such a map. In the app the switch is a Style > Relief checkbox, "Redraw
-relief icons on load (smaller file)" (one row in `src/index.html`, its handler in
-`public/modules/ui/style.js`, calling `ReliefSettings.setOnLoad`). Old files load unchanged. A client without these hooks (an
-older deploy) loading such a file shows no relief and the Relief button off; turning Relief on
-draws unseeded icons at the style density, and its next save stores them again. So MCP
-`shared_save` and `sketch_promote` refuse (BUILD) a `data-regenerate` map unless the deployed
-build is the local one or its entry chunk contains the hook. Deploy the app before saving such a
-map to `shared` by hand. In-app edits that change what relief is drawn from redraw the icons on a
-`data-regenerate` map, so the page shows what its next load draws: `ReliefSettings.sync()` is
-called after the biomes editor's Apply and Restore defaults (`public/modules/ui/biomes-editor.js`)
-and after the heightmap editor's finalize (`public/modules/ui/heightmap-editor.js`); Tools >
-Regenerate > Relief and the Style relief controls already redraw with the stored settings. On
-other maps `sync()` does nothing. MCP calls redraw through the bridge. Re-check after an upstream rebase (upstream has a `relief-webgl-renderer` branch).
+Relief settings remain map-level attributes on `#terrain`, read by the typed `ReliefSettings` adapter. Dense relief renders as a canvas raster carrying editable placement metadata. Saves serialize canonical glyphs without duplicate raster data and preserve manual edits. The old save-drop workaround and Style checkbox were removed. Old empty `data-regenerate` maps still regenerate on load; the deprecated MCP setter and empty-map build guard remain for compatibility. The current client is deployed.
+
+Native binary is the default for downloads, browser storage and Dropbox; the shared HTTP map protocol remains text. See [`docs/performance/implementation-status.md`](../docs/performance/implementation-status.md) for rendering, worker, serialization and compatibility evidence.
 
 Resampling (for the MCP `regrid` tool and the app's Transform tool): `src/generators/resample.ts`
 `process()` takes a `keepId` option; with it (scale 1) it keeps the map id and fires `map:resampled` instead of

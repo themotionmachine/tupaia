@@ -39,7 +39,8 @@ interface Daemon {
 }
 
 async function spawnDaemon(extra: Record<string, string> = {}, args: string[] = []): Promise<Daemon> {
-  const env = safeEnv(extra);
+  // Daemon lifecycle assertions below require direct ownership of descendant Chromium PIDs.
+  const env = safeEnv({ TUPAIA_BROWSER_POOL: "0", ...extra });
   const child = spawn(process.execPath, [SERVER, "--http", ...args], {
     env,
     cwd: MCP_ROOT,

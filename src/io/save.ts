@@ -1,6 +1,12 @@
 // Save the whole .map project to storage, machine or cloud
 import { lazy } from "@/lazy-loaders";
+import { restoreBurgVectorsIn } from "@/renderers/burg-canvas";
+import { restoreZoneHatching } from "@/renderers/zone-hatching";
+import { clearDenseZoom } from "@/renderers/dense-zoom";
+import { restorePathVectorsIn } from "@/renderers/path-layer-canvas";
+import { materializeRelief, prepareReliefSerialization } from "@/renderers/relief-canvas";
 import { ensureEl, link, parseError, rn } from "@/utils";
+import { type BinaryMapSection, encodeBinaryMap, encodeBinarySections } from "./binary-map";
 import { serializeBiomeExtras } from "./biome-extras"; // tupaia-mcp: biome icon density/icons/cost
 
 type SaveMethod = "storage" | "machine" | "dropbox";
@@ -10,7 +16,7 @@ export async function saveMap(method: SaveMethod): Promise<void> {
   closeDialogs("#alert");
 
   try {
-    const mapData = prepareMapData();
+    const mapData = await prepareMapFile();
     const filename = `${getFileName()}.map`;
 
     if (method === "storage") await saveToStorage(mapData, true);
@@ -41,7 +47,16 @@ export async function saveMap(method: SaveMethod): Promise<void> {
   }
 }
 
+/** The native downloadable project, without storage or network I/O. */
+export async function prepareMapFile(): Promise<Uint8Array<ArrayBuffer>> {
+  return encodeBinarySections(prepareMapSections());
+}
+
 export function prepareMapData(): string {
+  return prepareMapSections().join("\r\n");
+}
+
+function prepareMapSections(): BinaryMapSection[] {
   const date = new Date();
   const dateString = `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`;
   const license = "File can be loaded in azgaar.github.io/Fantasy-Map-Generator";
@@ -86,6 +101,15 @@ export function prepareMapData(): string {
 
   // save svg
   const cloneEl = ensureEl("map").cloneNode(true) as SVGSVGElement;
+  restoreBurgVectorsIn(cloneEl);
+  clearDenseZoom(cloneEl);
+  restoreZoneHatching(cloneEl);
+  restorePathVectorsIn(cloneEl);
+  const reliefSerialization = prepareReliefSerialization(cloneEl);
+  materializeRelief(cloneEl); // Only custom raster fallbacks need their embedded snapshot.
+  cloneEl.querySelectorAll(".viewport-culled").forEach(element => {
+    element.classList.remove("viewport-culled");
+  });
 
   // reset transform values to default
   cloneEl.setAttribute("width", String(graphWidth));
@@ -101,10 +125,10 @@ export function prepareMapData(): string {
     if (layerIsOn("toggleTrade")) cloneTradeAnimation.removeAttribute("data-layer-off");
     else cloneTradeAnimation.setAttribute("data-layer-off", "1");
   }
-  const cloneTerrain = cloneEl.querySelector("#terrain");
-  if (cloneTerrain?.hasAttribute("data-regenerate")) cloneTerrain.innerHTML = ""; // tupaia-mcp: redrawn on load (relief-settings.ts)
+  // Keep rendered relief, including legacy data-regenerate maps; empty old files still regenerate on load.
 
-  const serializedSVG = new XMLSerializer().serializeToString(cloneEl);
+  let serializedSVG = new XMLSerializer().serializeToString(cloneEl);
+  for (const { marker, markup } of reliefSerialization) serializedSVG = serializedSVG.replace(marker, () => markup);
 
   const { spacing, cellsX, cellsY, boundary, points, features, cellsDesired } = grid;
   const gridGeneral = JSON.stringify({ spacing, cellsX, cellsY, boundary, points, features, cellsDesired });
@@ -191,20 +215,21 @@ export function prepareMapData(): string {
     deals,
     pack.cells.market,
     customGoodIcons
-  ].join("\r\n");
+  ];
   return mapData;
 }
 
 // save map file to indexedDB
-export async function saveToStorage(mapData: string, showTip = false): Promise<void> {
-  const blob = new Blob([mapData], { type: "text/plain" });
+export async function saveToStorage(mapData: string | Uint8Array<ArrayBuffer>, showTip = false): Promise<void> {
+  const contents = typeof mapData === "string" ? await encodeBinaryMap(mapData) : mapData;
+  const blob = new Blob([contents], { type: "application/octet-stream" });
   await ldb.set("lastMap", blob);
   showTip && tip("Map is saved to the browser storage", false, "success");
 }
 
 // download map file
-function saveToMachine(mapData: string, filename: string): void {
-  const blob = new Blob([mapData], { type: "text/plain" });
+function saveToMachine(mapData: string | Uint8Array<ArrayBuffer>, filename: string): void {
+  const blob = new Blob([mapData], { type: typeof mapData === "string" ? "text/plain" : "application/octet-stream" });
   const URL = window.URL.createObjectURL(blob);
 
   const link = document.createElement("a");
@@ -216,7 +241,7 @@ function saveToMachine(mapData: string, filename: string): void {
   setTimeout(() => window.URL.revokeObjectURL(URL), 5000);
 }
 
-async function saveToDropbox(mapData: string, filename: string): Promise<void> {
+async function saveToDropbox(mapData: Uint8Array<ArrayBuffer>, filename: string): Promise<void> {
   const { Cloud } = await lazy.cloud();
   await Cloud.providers.dropbox.save(filename, mapData);
   tip("Map is saved to your Dropbox", true, "success", 8000);

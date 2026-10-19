@@ -21,8 +21,11 @@ It is a separate Node package. Nothing here is imported by the app or shipped in
   JSON-RPC and logs go to stderr. `--http` serves the same tools from a local daemon instead
   (below).
 - Startup registers 28 tools and 3 resources and opens no browser and no network. The first
-  tool call starts a loopback static server over `<repo>/dist`, launches Chromium
-  (Playwright 1.60.0) and opens one page at `/?local`.
+  tool call starts a loopback static server over `<repo>/dist`, connects to shared Chromium
+  (Playwright 1.60.0) and opens an isolated context/page at `/?local`. A private loopback browser
+  owner is reused across processes in the same checkout and launch mode; it retires after 60 s
+  without clients. Closing a session closes its context only. `TUPAIA_BROWSER_POOL=0` selects
+  dedicated process ownership for lifecycle diagnostics.
 - Page side: `src/bridge.js` and `src/bridge-mutations.js` define `globalThis.__tupaia`; every
   `src/bridge-ext/*.js` is injected after them in name order (apply, biomes, clear, compact,
   labels, lint, regen-replay, regen, regrid, relief, rivers, routes, settings, terrain, tokens).
@@ -103,10 +106,10 @@ What the newer tools and fields replaced (all one undo entry each, all dryRun-ab
 - `regenerate {parts:['provinces','emblems'], provinces:{states, centres|count}, emblems:{...}}`
   for named states only (hand-made states too).
 - `regenerate {parts:['relief'], relief:{density|matchIcons, perBiome, exclude, nearBurgs,
-  seed}}` and `edit map {set:{reliefOnLoad:true}}` (saves drop the icons, loads redraw them;
-  terraform-v3.map 4.75 -> 2.33 MB). App hooks: `src/renderers/relief-settings.ts` and friends;
-  the app has the same switch (Style > Relief, "Redraw relief icons on load") and its biomes and
-  heightmap editors redraw such a map's icons.
+  seed}}` stores relief settings and draws icons deterministically. Saves preserve the drawn icons.
+  `relief.onLoad` and `edit map {set:{reliefOnLoad:true}}` are deprecated compatibility options
+  for older maps whose relief group was saved empty; the Style checkbox has been removed.
+  App hooks: `src/renderers/relief-settings.ts` and friends.
 - `display {labels:{<group>:{minSize, maxSize, alwaysShow}}}` and `screenshot {labels:'all'}`.
   App hook: `invokeActiveZooming` in `public/main.js` reads `data-min-size`, `data-max-size`,
   `data-always-show`.
@@ -459,9 +462,14 @@ them first and refuses before writing anything.
 cd mcp
 npm run typecheck
 npm run lint            # root biome over src/ and test/
-node --test --test-concurrency=3 "test/**/*.test.ts"
+npm test                # serial files; shared Chromium, isolated daemon contexts
+npm run test:bridge     # pure bridge tests and a reused demo page with snapshot resets
 ```
 
+- `test/browser-pool.test.ts`: cross-process Chromium reuse, cookie and route isolation, and
+  disconnect ownership. `test/bridge-fixture.test.ts` uses `sharedDemoFixture()` from the helpers
+  to restore map, storage, cookies and viewport between cases without relaunching its page.
+  Protocol and lifecycle suites keep separate Node-side undo/sketch stores.
 - `test/bridge.test.ts`, `test/ops.test.ts`, `test/paths.test.ts`: pure unit tests;
   `test/docs.test.ts` keeps the cheatsheet, this README, the skill and the server instructions in
   step with the registered tools; `test/integrate2.test.ts` checks small message fixes.

@@ -548,7 +548,7 @@
   }
 
   /** Mulberry32 seeded from the map seed: the coastal rainfall term and the river and lake names use Math.random. */
-  function seededRandom(label, fn) {
+  async function seededRandom(label, fn) {
     let h = 1779033703;
     for (const ch of `${seed}|${label}`) {
       h = Math.imul(h ^ ch.charCodeAt(0), 3432918353);
@@ -564,7 +564,7 @@
       return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
     };
     try {
-      return fn();
+      return await fn();
     } finally {
       Math.random = saved;
     }
@@ -591,7 +591,7 @@
   }
 
   /** What a recalculation of `mode` would replace and keep (dry run and validate). */
-  function replacesReport(mode) {
+  async function replacesReport(mode) {
     const stages = STAGES[mode];
     const replaces = {};
     const keeps = {};
@@ -606,7 +606,7 @@
       const saved = C.biome;
       let derived;
       try {
-        Biomes.define();
+        await Biomes.defineAsync();
         derived = C.biome;
       } finally {
         C.biome = saved;
@@ -642,7 +642,7 @@
     const biomeBefore = has("biomes") ? pack.cells.biome : null;
     let biomeCellsChanged = 0;
     // one seeded stream for the whole recalculation: same map, same result (so a replay matches)
-    seededRandom("recalc", () => {
+    await seededRandom("recalc", async () => {
       calculateMapCoordinates();
       if (has("climate")) {
         calculateTemperatures();
@@ -651,7 +651,7 @@
         done.push("precipitation");
       }
       if (has("rivers")) {
-        Rivers.generate(false); // erosion off: heights stay as they are (updateWorld restores them)
+        await Rivers.generateAsync(false); // erosion off: heights stay as they are (updateWorld restores them)
         Rivers.specify();
         Features.defineGroups();
         for (const f of pack.features || [])
@@ -663,7 +663,7 @@
         if (lakeNames.size) kept.lakeNames = lakeNames.size;
       }
       if (has("biomes")) {
-        Biomes.define();
+        await Biomes.defineAsync();
         const C = pack.cells;
         for (let k = 0; k < custom.length; k += 2) C.biome[custom[k]] = custom[k + 1];
         for (let i = 0; i < C.biome.length; i++) if (C.biome[i] !== biomeBefore[i]) biomeCellsChanged++;
@@ -825,7 +825,7 @@
       if (stale) out.stale = stale;
       if (mode !== "none") out.recalculate = mode;
       if (touchesDerived) {
-        const { replaces, keeps } = replacesReport(mode);
+        const { replaces, keeps } = await replacesReport(mode);
         out.replaces = replaces;
         if (Object.keys(keeps).length) out.keeps = keeps;
         out.derived = derived; // replay compares it with the page it replays onto

@@ -1,0 +1,173 @@
+{
+  "schema": 1,
+  "layers": [
+    "default",
+    "heightmap",
+    "relief"
+  ],
+  "samples": 3,
+  "platform": "darwin",
+  "arch": "arm64",
+  "cpu": "Apple M1 Max",
+  "chromium": "148.0.7778.96",
+  "viewport": [
+    1280,
+    720
+  ],
+  "seed": "7319",
+  "measurements": [
+    {
+      "cells": 10000,
+      "operation": "generate",
+      "samplesMs": [
+        1093.7999999523163,
+        1070.699999988079,
+        999
+      ],
+      "medianMs": 1070.699999988079
+    },
+    {
+      "cells": 10000,
+      "operation": "save",
+      "samplesMs": [
+        46.10000002384186,
+        44,
+        39.40000003576279
+      ],
+      "medianMs": 44
+    },
+    {
+      "cells": 10000,
+      "operation": "load",
+      "samplesMs": [
+        390.69999998807907,
+        402.4000000357628,
+        403.0999999642372
+      ],
+      "medianMs": 402.4000000357628
+    },
+    {
+      "cells": 10000,
+      "operation": "redraw",
+      "samplesMs": [
+        283.9000000357628,
+        282.39999997615814,
+        274.5
+      ],
+      "medianMs": 282.39999997615814
+    },
+    {
+      "cells": 10000,
+      "operation": "regrid",
+      "samplesMs": [
+        958.5999999642372,
+        920.1999999880791,
+        873.4000000357628
+      ],
+      "medianMs": 920.1999999880791
+    },
+    {
+      "cells": 50000,
+      "operation": "generate",
+      "samplesMs": [
+        3477.699999988079,
+        3676.300000011921,
+        3587.199999988079
+      ],
+      "medianMs": 3587.199999988079
+    },
+    {
+      "cells": 50000,
+      "operation": "save",
+      "samplesMs": [
+        95.5,
+        80.10000002384186,
+        93.80000001192093
+      ],
+      "medianMs": 93.80000001192093
+    },
+    {
+      "cells": 50000,
+      "operation": "load",
+      "samplesMs": [
+        1090.800000011921,
+        1002.0999999642372,
+        998.3999999761581
+      ],
+      "medianMs": 1002.0999999642372
+    },
+    {
+      "cells": 50000,
+      "operation": "redraw",
+      "samplesMs": [
+        611,
+        592.6999999880791,
+        628.8000000119209
+      ],
+      "medianMs": 611
+    },
+    {
+      "cells": 50000,
+      "operation": "regrid",
+      "samplesMs": [
+        2443.100000023842,
+        2244.7000000476837,
+        2356.199999988079
+      ],
+      "medianMs": 2356.199999988079
+    },
+    {
+      "cells": 100000,
+      "operation": "generate",
+      "samplesMs": [
+        6690.5,
+        7967.100000023842,
+        7160.800000011921
+      ],
+      "medianMs": 7160.800000011921
+    },
+    {
+      "cells": 100000,
+      "operation": "save",
+      "samplesMs": [
+        219.5,
+        187.39999997615814,
+        184.5
+      ],
+      "medianMs": 187.39999997615814
+    },
+    {
+      "cells": 100000,
+      "operation": "load",
+      "samplesMs": [
+        2527.300000011921,
+        2229.5,
+        2349.199999988079
+      ],
+      "medianMs": 2349.199999988079
+    },
+    {
+      "cells": 100000,
+      "operation": "redraw",
+      "samplesMs": [
+        1116.800000011921,
+        1151.5,
+        1077.300000011921
+      ],
+      "medianMs": 1116.800000011921
+    },
+    {
+      "cells": 100000,
+      "operation": "regrid",
+      "samplesMs": [
+        4418.399999976158,
+        4326,
+        4667.199999988079
+      ],
+      "medianMs": 4418.399999976158
+    }
+  ],
+  "sourceRevision": "e73840e0df7460a790479819aa6b4a2df525bcdc",
+  "note": "Git HEAD, default layers plus heightmap and relief",
+  "node": "v25.6.1"
+}

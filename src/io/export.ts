@@ -1,5 +1,10 @@
+import { normalizeZoneHatching } from "@/renderers/zone-hatching";
+import { clearDenseZoom } from "@/renderers/dense-zoom";
 import type { Selection } from "d3";
 import { select } from "d3";
+import { restoreBurgVectorsIn } from "@/renderers/burg-canvas";
+import { restorePathVectorsIn } from "@/renderers/path-layer-canvas";
+import { materializeRelief } from "@/renderers/relief-canvas";
 import { connectVertices, ensureEl, getBase64, getCoordinates, getGridPolygon, rn, unique } from "@/utils";
 
 type MapSelection = Selection<SVGSVGElement, unknown, null, undefined>;
@@ -237,8 +242,16 @@ export async function getMapURL(type: string, options: GetMapURLOptions = {}): P
     fullMap = false
   } = options;
 
+  await Promise.all([window.reliefRenderReady, window.burgRenderReady]);
   const cloneEl = (document.getElementById("map") as unknown as SVGSVGElement).cloneNode(true) as SVGSVGElement; // clone svg
   cloneEl.id = "fantasyMap";
+  materializeRelief(cloneEl);
+  restoreBurgVectorsIn(cloneEl);
+  clearDenseZoom(cloneEl);
+  restorePathVectorsIn(cloneEl);
+  cloneEl.querySelectorAll(".viewport-culled").forEach(element => {
+    element.classList.remove("viewport-culled");
+  });
   document.body.appendChild(cloneEl);
   const clone: MapSelection = select(cloneEl);
   if (!debug) clone.select("#debug").remove();
@@ -271,6 +284,7 @@ export async function getMapURL(type: string, options: GetMapURLOptions = {}): P
   }
   if (noScaleBar) clone.select("#scaleBar").remove();
 
+  normalizeZoneHatching(clone.node()!, fullMap);
   if (type === "svg") removeUnusedElements(clone);
   if (customization && type === "mesh") updateMeshCells(clone);
   inlineStyle(clone);
@@ -355,7 +369,7 @@ export async function getMapURL(type: string, options: GetMapURLOptions = {}): P
 
     const defsRelief = svgDefs.getElementById("defs-relief");
     for (const terrain of [...uniqueElements]) {
-      if (!terrain) continue;
+      if (!terrain?.startsWith("#")) continue;
       const element = defsRelief?.querySelector(terrain);
       if (element) cloneDefs.appendChild(element.cloneNode(true));
     }

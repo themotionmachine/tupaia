@@ -6,6 +6,7 @@ function editBurg(id) {
   if (!layerIsOn("toggleLabels")) toggleLabels();
 
   const burg = id || d3.event.target.dataset.id;
+  window.prepareBurgIcons?.();
   elSelected = burgLabels.select("[data-id='" + burg + "']");
   if (!elSelected.size()) elSelected = burgIcons.select("[data-id='" + burg + "']");
 
@@ -467,6 +468,7 @@ function editBurg(id) {
     ensureEl("burgRelocate").classList.remove("pressed");
     burgLabels.selectAll("text").call(d3.drag().on("drag", null)).classed("draggable", false);
     unselect();
+    window.finishBurgIcons?.();
   }
 }
 

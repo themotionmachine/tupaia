@@ -1,19 +1,11 @@
 "use strict";
-function editReliefIcon() {
+function editReliefIcon(target) {
   if (customization) return;
   closeDialogs(".stable");
   if (!layerIsOn("toggleRelief")) toggleRelief();
-  // tupaia-mcp: saves drop the icons of a #terrain[data-regenerate] map (src/renderers/relief-settings.ts)
-  if (terrain.attr("data-regenerate"))
-    tip(
-      "This map draws its relief icons again on every load: changes made here are not saved. To keep them, uncheck 'Redraw relief icons on load' in Style > Relief",
-      true,
-      "warn",
-      8000
-    );
 
   terrain.selectAll("use").call(d3.drag().on("drag", dragReliefIcon)).classed("draggable", true);
-  elSelected = d3.select(d3.event.target);
+  elSelected = d3.select(target || d3.event.target);
 
   restoreEditMode();
   updateReliefIconSelected();
@@ -65,7 +57,7 @@ function editReliefIcon() {
   }
 
   function updateReliefIconSelected() {
-    const type = elSelected.attr("href") || elSelected.attr("data-type");
+    const type = elSelected.attr("href") || elSelected.attr("xlink:href") || elSelected.attr("data-type");
     const button = reliefIconsDiv.querySelector("svg[data-type='" + type + "']");
 
     reliefIconsDiv.querySelectorAll("svg.pressed").forEach(b => b.classList.remove("pressed"));
@@ -292,5 +284,6 @@ function editReliefIcon() {
     removeCircle();
     unselect();
     clearMainTip();
+    window.compactRelief?.();
   }
 }

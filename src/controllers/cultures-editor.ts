@@ -713,9 +713,9 @@ async function showHierarchy(): Promise<void> {
   });
 }
 
-function recalculateCultures(force?: boolean): void {
+async function recalculateCultures(force?: boolean): Promise<void> {
   if (force || ensureEl<HTMLInputElement>("culturesAutoChange").checked) {
-    Cultures.expand();
+    await Cultures.expandAsync();
     drawCultures();
     pack.burgs.forEach(b => {
       b.culture = pack.cells.culture[b.cell];

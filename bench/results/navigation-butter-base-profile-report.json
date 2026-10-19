@@ -1,0 +1,359 @@
+{
+  "note": "Exploratory one-sample preserved-build profile; synthetic input/frame timings do not represent physical display FPS. GPU metadata will accompany full baseline.",
+  "runs": [
+    {
+      "world": "shared-v8",
+      "gesture": "pan-near",
+      "frame": {
+        "count": 119,
+        "p50": 33.399999999999636,
+        "p95": 41.70000000000073,
+        "max": 41.80000000000109,
+        "total": 4083.300000000001
+      },
+      "idleFrame": {
+        "count": 119,
+        "p50": 8.300000000001091,
+        "p95": 8.5,
+        "max": 16.5,
+        "total": 999.8999999999996
+      },
+      "inputDispatch": {
+        "count": 122,
+        "p50": 0.30000001192092896,
+        "p95": 0.40000003576278687,
+        "max": 1,
+        "total": 35.10000002384186
+      },
+      "callback": {
+        "count": 119,
+        "p50": 0,
+        "p95": 0.10000002384185791,
+        "max": 0.30000001192092896,
+        "total": 5.899999737739563
+      },
+      "frameBudgets": {
+        "16.7": {
+          "budgetMs": 16.7,
+          "framesOverBudget": 115,
+          "missedBudgets": 48
+        },
+        "8.3": {
+          "budgetMs": 8.3,
+          "framesOverBudget": 118,
+          "missedBudgets": 364
+        }
+      },
+      "idleFrameBudgets": {
+        "16.7": {
+          "budgetMs": 16.7,
+          "framesOverBudget": 0,
+          "missedBudgets": 0
+        },
+        "8.3": {
+          "budgetMs": 8.3,
+          "framesOverBudget": 77,
+          "missedBudgets": 0
+        }
+      },
+      "tracePath": "/tmp/tupaia-butter-traces/navigation-butter-base-profile/shared-v8-pan-near.json",
+      "traceAttribution": {
+        "gestureDurationMs": 4445.998,
+        "input": {
+          "count": 1,
+          "totalMs": 0.467,
+          "maxMs": 0.467
+        },
+        "javascriptByEvent": {
+          "EventDispatch": {
+            "count": 1,
+            "totalMs": 0.467,
+            "maxMs": 0.467
+          },
+          "FunctionCall": {
+            "count": 669,
+            "totalMs": 63.33599999999993,
+            "maxMs": 0.963
+          },
+          "FireAnimationFrame": {
+            "count": 387,
+            "totalMs": 66.937,
+            "maxMs": 0.967
+          },
+          "TimerFire": {
+            "count": 6,
+            "totalMs": 2.7169999999999996,
+            "maxMs": 2.562
+          }
+        },
+        "layout": {
+          "count": 149,
+          "totalMs": 23.338999999999984,
+          "maxMs": 0.553
+        },
+        "layoutInsideInput": {
+          "count": 1,
+          "totalMs": 0.212,
+          "maxMs": 0.212
+        },
+        "layoutInsideJavascript": {
+          "count": 121,
+          "totalMs": 17.888999999999992,
+          "maxMs": 0.503
+        },
+        "style": {
+          "count": 149,
+          "totalMs": 14.798999999999996,
+          "maxMs": 0.257
+        },
+        "paint": {
+          "count": 596,
+          "totalMs": 239.54100000000025,
+          "maxMs": 1.869
+        },
+        "raster": {
+          "count": 2290,
+          "totalMs": 13628.949999999988,
+          "maxMs": 11.616
+        },
+        "notes": "Event duration totals may overlap and must not be summed. Layout nested in an input/JS event is forced-layout evidence; raster totals span worker threads, not main-thread wall time."
+      }
+    },
+    {
+      "world": "shared-v8",
+      "gesture": "pan-wide",
+      "frame": {
+        "count": 119,
+        "p50": 33.39999999999782,
+        "p95": 41.70000000000073,
+        "max": 41.80000000000291,
+        "total": 4075.5
+      },
+      "idleFrame": {
+        "count": 119,
+        "p50": 8.299999999999272,
+        "p95": 9.400000000001455,
+        "max": 10.30000000000291,
+        "total": 991.5
+      },
+      "inputDispatch": {
+        "count": 122,
+        "p50": 0.30000001192092896,
+        "p95": 1,
+        "max": 1.5,
+        "total": 44.799999475479126
+      },
+      "callback": {
+        "count": 119,
+        "p50": 0.09999996423721313,
+        "p95": 0.800000011920929,
+        "max": 1,
+        "total": 16.399999856948853
+      },
+      "frameBudgets": {
+        "16.7": {
+          "budgetMs": 16.7,
+          "framesOverBudget": 115,
+          "missedBudgets": 58
+        },
+        "8.3": {
+          "budgetMs": 8.3,
+          "framesOverBudget": 117,
+          "missedBudgets": 369
+        }
+      },
+      "idleFrameBudgets": {
+        "16.7": {
+          "budgetMs": 16.7,
+          "framesOverBudget": 0,
+          "missedBudgets": 0
+        },
+        "8.3": {
+          "budgetMs": 8.3,
+          "framesOverBudget": 44,
+          "missedBudgets": 0
+        }
+      },
+      "tracePath": "/tmp/tupaia-butter-traces/navigation-butter-base-profile/shared-v8-pan-wide.json",
+      "traceAttribution": {
+        "gestureDurationMs": 4437.732,
+        "input": {
+          "count": 1,
+          "totalMs": 0.358,
+          "maxMs": 0.358
+        },
+        "javascriptByEvent": {
+          "EventDispatch": {
+            "count": 1,
+            "totalMs": 0.358,
+            "maxMs": 0.358
+          },
+          "FunctionCall": {
+            "count": 702,
+            "totalMs": 87.97100000000002,
+            "maxMs": 3.333
+          },
+          "FireAnimationFrame": {
+            "count": 389,
+            "totalMs": 88.37699999999994,
+            "maxMs": 1.51
+          },
+          "TimerFire": {
+            "count": 6,
+            "totalMs": 6.471,
+            "maxMs": 3.345
+          }
+        },
+        "layout": {
+          "count": 151,
+          "totalMs": 26.264999999999997,
+          "maxMs": 0.495
+        },
+        "layoutInsideInput": {
+          "count": 1,
+          "totalMs": 0.159,
+          "maxMs": 0.159
+        },
+        "layoutInsideJavascript": {
+          "count": 121,
+          "totalMs": 20.328999999999997,
+          "maxMs": 0.389
+        },
+        "style": {
+          "count": 151,
+          "totalMs": 23.024,
+          "maxMs": 1.065
+        },
+        "paint": {
+          "count": 604,
+          "totalMs": 254.83100000000016,
+          "maxMs": 2.216
+        },
+        "raster": {
+          "count": 2292,
+          "totalMs": 13523.06900000003,
+          "maxMs": 12.745
+        },
+        "notes": "Event duration totals may overlap and must not be summed. Layout nested in an input/JS event is forced-layout evidence; raster totals span worker threads, not main-thread wall time."
+      }
+    },
+    {
+      "world": "shared-v8",
+      "gesture": "wheel-zoom",
+      "frame": {
+        "count": 119,
+        "p50": 33.30000000000291,
+        "p95": 41.700000000004366,
+        "max": 43.80000000000291,
+        "total": 4108
+      },
+      "idleFrame": {
+        "count": 119,
+        "p50": 8.30000000000291,
+        "p95": 8.900000000001455,
+        "max": 9.69999999999709,
+        "total": 990.4000000000015
+      },
+      "inputDispatch": {
+        "count": 120,
+        "p50": 3.399999976158142,
+        "p95": 7.100000023841858,
+        "max": 12.099999964237213,
+        "total": 411.8000001311302
+      },
+      "callback": {
+        "count": 123,
+        "p50": 0.30000001192092896,
+        "p95": 7.5,
+        "max": 15.899999976158142,
+        "total": 286.89999973773956
+      },
+      "frameBudgets": {
+        "16.7": {
+          "budgetMs": 16.7,
+          "framesOverBudget": 118,
+          "missedBudgets": 57
+        },
+        "8.3": {
+          "budgetMs": 8.3,
+          "framesOverBudget": 118,
+          "missedBudgets": 364
+        }
+      },
+      "idleFrameBudgets": {
+        "16.7": {
+          "budgetMs": 16.7,
+          "framesOverBudget": 0,
+          "missedBudgets": 0
+        },
+        "8.3": {
+          "budgetMs": 8.3,
+          "framesOverBudget": 73,
+          "missedBudgets": 0
+        }
+      },
+      "tracePath": "/tmp/tupaia-butter-traces/navigation-butter-base-profile/shared-v8-wheel-zoom.json",
+      "traceAttribution": {
+        "gestureDurationMs": 4479.139,
+        "input": {
+          "count": 120,
+          "totalMs": 411.76099999999985,
+          "maxMs": 12.018
+        },
+        "javascriptByEvent": {
+          "EventDispatch": {
+            "count": 120,
+            "totalMs": 411.76099999999985,
+            "maxMs": 12.018
+          },
+          "FunctionCall": {
+            "count": 782,
+            "totalMs": 731.4519999999995,
+            "maxMs": 15.949
+          },
+          "FireAnimationFrame": {
+            "count": 392,
+            "totalMs": 737.2579999999996,
+            "maxMs": 16.137
+          },
+          "TimerFire": {
+            "count": 6,
+            "totalMs": 3.308,
+            "maxMs": 3.157
+          }
+        },
+        "layout": {
+          "count": 240,
+          "totalMs": 615.3880000000006,
+          "maxMs": 14.08
+        },
+        "layoutInsideInput": {
+          "count": 120,
+          "totalMs": 376.6080000000001,
+          "maxMs": 8.559
+        },
+        "layoutInsideJavascript": {
+          "count": 210,
+          "totalMs": 606.9370000000006,
+          "maxMs": 14.08
+        },
+        "style": {
+          "count": 436,
+          "totalMs": 51.50700000000001,
+          "maxMs": 3.646
+        },
+        "paint": {
+          "count": 600,
+          "totalMs": 377.4290000000003,
+          "maxMs": 2.829
+        },
+        "raster": {
+          "count": 2311,
+          "totalMs": 14130.949999999993,
+          "maxMs": 12.821
+        },
+        "notes": "Event duration totals may overlap and must not be summed. Layout nested in an input/JS event is forced-layout evidence; raster totals span worker threads, not main-thread wall time."
+      }
+    }
+  ]
+}

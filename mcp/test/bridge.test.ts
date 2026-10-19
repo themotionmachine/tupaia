@@ -361,3 +361,35 @@ describe("envelope and safeJson", () => {
     assert.deepEqual(plain(near.value.rows.map((r: any) => r.i)), [3]);
   });
 });
+
+describe("generator bridge orchestration (pure)", () => {
+  const mutations = fs.readFileSync(path.join(MCP_ROOT, "src", "bridge-mutations.js"), "utf8");
+  test("regeneration uses dependency order and refreshes population statistics", async () => {
+    const calls: string[] = [];
+    const { T, ctx } = load({
+      recalculatePopulation: () => calls.push("population"),
+      States: { collectStatistics: () => calls.push("statistics") },
+      regenerateCultures: () => calls.push("cultures"),
+      regenerateStates: () => calls.push("states"),
+      regenerateRoutes: () => calls.push("routes")
+    });
+    vm.runInContext(mutations, ctx);
+    T.fns.layersOn = () => [];
+    ctx.__tupaia.settle = async () => {};
+    await T.fns.regenerate({ parts: ["routes", "states", "population", "cultures"] });
+    assert.deepEqual(calls, ["population", "statistics", "cultures", "states", "routes"]);
+  });
+  test("river regeneration restores the saved heights instead of accumulating erosion", async () => {
+    const { T, ctx, world } = load();
+    const heights = world.pack.cells.h;
+    ctx.regenerateRivers = () => {
+      world.pack.cells.h = new Uint8Array(heights.length).fill(20);
+    };
+    vm.runInContext(mutations, ctx);
+    T.fns.layersOn = () => [];
+    ctx.__tupaia.settle = async () => {};
+    await T.fns.regenerate({ parts: ["rivers"] });
+    assert.equal(world.pack.cells.h, heights);
+    assert.equal(heights[0], 30);
+  });
+});

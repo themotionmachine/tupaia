@@ -1,9 +1,11 @@
 // In-memory map history kept in Node (it survives page relaunches):
-// - a named ring of whole-map snapshots (.map text from prepareMapData),
+// - a named ring of block-delta snapshots (exact .map text reconstructed on demand),
 // - an auto-undo stack: every mutating tool pushes the state from BEFORE it ran,
 // - a redo stack filled by undo,
 // - the provenance of the map currently in the page.
 // Each snapshot/undo entry owns a digest baseline key in the page (for map_info diffs).
+
+import { HistoryTextStore } from "./history-text.ts";
 
 export type ProvenanceKind = "boot" | "generated" | "file" | "shared" | "sketch" | "snapshot" | "unknown";
 
@@ -109,6 +111,7 @@ export function summarizeArgs(args: unknown, max = 120): string {
 export class SnapshotStore {
   readonly max: number;
   readonly undoDepth: number;
+  #texts = new HistoryTextStore();
   #ring: Snapshot[] = [];
   #undo: HistoryEntry[] = [];
   #redo: HistoryEntry[] = [];
@@ -150,6 +153,7 @@ export class SnapshotStore {
       baselineKey: `snap:${id}`,
       tick: ++this.#tick
     };
+    this.#texts.attach(snap, text);
     this.#ring.push(snap);
     const evicted: string[] = [];
     while (this.#ring.length > this.max) {
@@ -229,6 +233,7 @@ export class SnapshotStore {
       tick: ++this.#tick,
       ...marks
     };
+    this.#texts.attach(this.restorePoint, text);
     return this.restorePoint;
   }
 
@@ -288,6 +293,7 @@ export class SnapshotStore {
       baselineKey: `undo:${id}`,
       tick: ++this.#tick
     };
+    this.#texts.attach(entry, text);
     this.#undo.push(entry);
     const evicted: string[] = [];
     while (this.#undo.length > this.undoDepth) {
@@ -309,7 +315,7 @@ export class SnapshotStore {
     const redo: HistoryEntry[] = undone.map((e, k) => {
       const afterText = k === 0 ? currentText : undone[k - 1].text;
       const afterProv = k === 0 ? cloneProv(this.provenance) : cloneProv(undone[k - 1].provenance);
-      return {
+      const entry: HistoryEntry = {
         id: e.id,
         op: e.op,
         argsSummary: e.argsSummary,
@@ -319,6 +325,7 @@ export class SnapshotStore {
         provenance: afterProv,
         baselineKey: `redo:${e.id}`
       };
+      return this.#texts.attach(entry, afterText);
     });
     return { n, load: undone[undone.length - 1], undone, redo };
   }
@@ -370,6 +377,7 @@ export class SnapshotStore {
         baselineKey: `undo:${id}`,
         tick: ++this.#tick
       };
+      this.#texts.attach(entry, before);
       this.#undo.push(entry);
       added.push(entry.baselineKey);
       pairs.push({ from: e.id, to: id });
@@ -426,8 +434,18 @@ export class SnapshotStore {
     return { key: u.baselineKey, describe: `before '${u.op}' at ${u.at}` };
   }
 
+  get storage() {
+    return this.#texts.stats([
+      ...this.#ring,
+      ...this.#undo,
+      ...this.#redo,
+      ...(this.restorePoint ? [this.restorePoint] : [])
+    ]);
+  }
+
   listing() {
     return {
+      storage: this.storage,
       snapshots: this.#ring.map(s => ({
         index: s.id,
         label: s.label,

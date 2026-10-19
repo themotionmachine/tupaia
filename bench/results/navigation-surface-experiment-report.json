@@ -1,0 +1,136 @@
+{
+  "world": "shared-v8",
+  "center": {
+    "x": 1000,
+    "y": 1060,
+    "cells": 47885
+  },
+  "viewport": {
+    "width": 1280,
+    "height": 720,
+    "k": 8
+  },
+  "rows": [
+    {
+      "mode": "normal",
+      "median": 125,
+      "p95": 141.6999999999989,
+      "over16_7": 60,
+      "over25": 60,
+      "callbackP95": 0.6000000014901161
+    },
+    {
+      "mode": "tight-filter-regions",
+      "median": 125,
+      "p95": 188.90000000000146,
+      "over16_7": 60,
+      "over25": 59,
+      "callbackP95": 0.5
+    },
+    {
+      "mode": "no-filters",
+      "median": 131.1999999999971,
+      "p95": 291.70000000000437,
+      "over16_7": 60,
+      "over25": 58,
+      "callbackP95": 0.5
+    },
+    {
+      "mode": "no-dense",
+      "median": 146.8000000000029,
+      "p95": 242.5,
+      "over16_7": 60,
+      "over25": 60,
+      "callbackP95": 2.699999999254942
+    },
+    {
+      "mode": "no-labels",
+      "median": 133.8000000000029,
+      "p95": 223.90000000000146,
+      "over16_7": 60,
+      "over25": 60,
+      "callbackP95": 0.5
+    },
+    {
+      "mode": "canvas",
+      "median": 8.30000000000291,
+      "p95": 8.5,
+      "over16_7": 0,
+      "over25": 0,
+      "callbackP95": 0.10000000149011612
+    },
+    {
+      "mode": "idle",
+      "median": 8.30000000000291,
+      "p95": 16.80000000000291,
+      "over16_7": 3,
+      "over25": 1,
+      "callbackP95": 0.30000000074505806
+    }
+  ],
+  "filters": [
+    {
+      "id": "blurFilter",
+      "attrs": {
+        "x": "-1",
+        "y": "-1",
+        "width": "100",
+        "height": "100"
+      },
+      "deviation": "0.2"
+    },
+    {
+      "id": "blur1",
+      "attrs": {
+        "x": "-1",
+        "y": "-1",
+        "width": "100",
+        "height": "100"
+      },
+      "deviation": "1"
+    },
+    {
+      "id": "blur3",
+      "attrs": {
+        "x": "-1",
+        "y": "-1",
+        "width": "100",
+        "height": "100"
+      },
+      "deviation": "3"
+    },
+    {
+      "id": "blur5",
+      "attrs": {
+        "x": "-1",
+        "y": "-1",
+        "width": "100",
+        "height": "100"
+      },
+      "deviation": "5"
+    },
+    {
+      "id": "blur7",
+      "attrs": {
+        "x": "-1",
+        "y": "-1",
+        "width": "100",
+        "height": "100"
+      },
+      "deviation": "7"
+    },
+    {
+      "id": "blur10",
+      "attrs": {
+        "x": "-1",
+        "y": "-1",
+        "width": "100",
+        "height": "100"
+      },
+      "deviation": "10"
+    }
+  ],
+  "glyphs": 207,
+  "labels": 83,
+  "paddedPixels": 1536000
+}

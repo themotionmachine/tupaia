@@ -1,13 +1,12 @@
-import { mean, range } from "d3";
-import { rn } from "../utils";
+import { range } from "d3";
+import { type BiomeInput, biomeId, defineBiomes } from "./biome-kernel";
+import { defineBiomesInWorker } from "./biome-worker";
 
 declare global {
   var Biomes: BiomesModule;
 }
 
 class BiomesModule {
-  private MIN_LAND_HEIGHT = 20;
-
   getDefault() {
     const name: string[] = [
       "Marine",
@@ -91,51 +90,36 @@ class BiomesModule {
     };
   }
 
-  define() {
-    TIME && console.time("defineBiomes");
-
-    const { fl: flux, r: riverIds, h: heights, c: neighbors, g: gridReference } = pack.cells;
-    const { temp, prec } = grid.cells;
-    pack.cells.biome = new Uint8Array(pack.cells.i.length); // biomes array
-
-    const calculateMoisture = (cellId: number) => {
-      let moisture = prec[gridReference[cellId]];
-      if (riverIds[cellId]) moisture += Math.max(flux[cellId] / 10, 2);
-
-      const moistAround = neighbors[cellId]
-        .filter((neibCellId: number) => heights[neibCellId] >= this.MIN_LAND_HEIGHT)
-        .map((c: number) => prec[gridReference[c]])
-        .concat([moisture]);
-      return rn(4 + (mean(moistAround) as number));
+  private input(): BiomeInput {
+    const cells = pack.cells;
+    return {
+      heights: cells.h,
+      flux: cells.fl,
+      rivers: cells.r,
+      neighbors: cells.c,
+      reference: cells.g,
+      temperature: grid.cells.temp,
+      precipitation: grid.cells.prec,
+      matrix: biomesData.biomesMatrix
     };
+  }
 
-    for (let cellId = 0; cellId < heights.length; cellId++) {
-      const height = heights[cellId];
-      const moisture = height < this.MIN_LAND_HEIGHT ? 0 : calculateMoisture(cellId);
-      const temperature = temp[gridReference[cellId]];
-      pack.cells.biome[cellId] = this.getId(moisture, temperature, height, Boolean(riverIds[cellId]));
-    }
+  define() {
+    pack.cells.biome = defineBiomes(this.input());
+  }
 
-    TIME && console.timeEnd("defineBiomes");
+  async defineAsync(): Promise<void> {
+    const cells = pack.cells;
+    const worldSeed = seed;
+    const heights = cells.h;
+    const result = await defineBiomesInWorker(this.input());
+    if (pack.cells !== cells || cells.h !== heights || seed !== worldSeed)
+      throw new DOMException("Biome generation world changed", "AbortError");
+    cells.biome = result;
   }
 
   getId(moisture: number, temperature: number, height: number, hasRiver: boolean) {
-    if (height < 20) return 0; // all water cells: marine biome
-    if (temperature < -5) return 11; // too cold: permafrost biome
-    if (temperature >= 25 && !hasRiver && moisture < 8) return 1; // too hot and dry: hot desert biome
-    if (this.isWetland(moisture, temperature, height)) return 12; // too wet: wetland biome
-
-    // in other cases use biome matrix
-    const moistureBand = Math.min((moisture / 5) | 0, 4); // [0-4]
-    const temperatureBand = Math.min(Math.max(20 - temperature, 0), 25); // [0-25]
-    return biomesData.biomesMatrix[moistureBand][temperatureBand];
-  }
-
-  private isWetland(moisture: number, temperature: number, height: number) {
-    if (temperature <= -2) return false; // too cold
-    if (moisture > 40 && height < 25) return true; // near coast
-    if (moisture > 24 && height > 24 && height < 60) return true; // off coast
-    return false;
+    return biomeId(moisture, temperature, height, hasRiver, biomesData.biomesMatrix);
   }
 }
 
