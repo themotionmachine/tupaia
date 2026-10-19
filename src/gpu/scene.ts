@@ -3,6 +3,7 @@
 import type { ReliefSprite } from "../renderers/relief-canvas";
 import { withCanonicalEmblemPaint } from "./emblem-paint";
 import { TRADE_LAYER } from "./markers";
+import { SceneCensus } from "./scene-census";
 import { flattenPath, type Subpath } from "./svg-path";
 
 export type Rgba = [number, number, number, number];
@@ -235,6 +236,8 @@ export function buildScene(viewbox: Element, curveTolerance = 0.2): Scene {
 
 function canonicalBuildScene(viewbox: Element, curveTolerance: number): Scene {
   const layers: Record<string, LayerReport> = {};
+  // null unless a bench page installed globalThis.__gpuSceneCensus (scene-census.ts); read-only either way
+  const census = SceneCensus.open();
   const report = (layer: string, native: boolean, reason = "") => {
     layers[layer] ??= { native: 0, compat: 0, reasons: [] };
     const entry = layers[layer];
@@ -261,7 +264,7 @@ function canonicalBuildScene(viewbox: Element, curveTolerance: number): Scene {
     const style = shapeStyle(cs);
     if (d === null) return compat(element, layer, `<${source.tagName}>`, out);
     if (typeof style === "string") return compat(element, layer, style, out);
-    if (!style.fill && !style.pattern && !style.stroke) return;
+    if (!style.fill && !style.pattern && !style.stroke) return census?.skip(layer, element, "no paint");
     report(layer, true);
     out.push({ kind: "shape", element, layer, subpaths: flattenPath(d, curveTolerance), style, d });
   };
@@ -285,12 +288,14 @@ function canonicalBuildScene(viewbox: Element, curveTolerance: number): Scene {
 
   const walk = (element: Element, layer: string, out: Draw[], depth: number, inGroup: boolean) => {
     const tag = element.tagName;
-    if (skipped.has(tag) || element.hasAttribute("data-dense-zoom")) return;
+    if (skipped.has(tag) || element.hasAttribute("data-dense-zoom"))
+      return census?.skip(layer, element, skipped.has(tag) ? "tag" : "dense-zoom");
     const cs = computed(element);
     const culled = element.classList.contains("viewport-culled");
-    if (cs.display === "none" && !culled) return;
+    if (cs.display === "none" && !culled) return census?.skip(layer, element, "display:none");
     const zoomHidden = element.hasAttribute("data-zoom-hidden");
-    if ((cs.visibility === "hidden" || cs.visibility === "collapse") && !zoomHidden) return;
+    if ((cs.visibility === "hidden" || cs.visibility === "collapse") && !zoomHidden)
+      return census?.skip(layer, element, "hidden");
     const transform = element.getAttribute("transform");
     const effects =
       (cs.filter && cs.filter !== "none" && "filter") ||
@@ -401,5 +406,6 @@ function canonicalBuildScene(viewbox: Element, curveTolerance: number): Scene {
 
   const draws: Draw[] = [];
   for (const child of viewbox.children) walk(child, child.id || child.tagName, draws, 0, false);
+  census?.finish(draws);
   return { draws, layers };
 }
