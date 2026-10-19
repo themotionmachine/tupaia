@@ -18,6 +18,11 @@ import {
   compatClone,
   compatResolution,
   cropRaster,
+  LADDER_HEADROOM,
+  LADDER_STEPS,
+  ladderFit,
+  ladderScale,
+  ladderStart,
   type Region,
   rasterizeRun,
   resolveInClone,
@@ -46,7 +51,7 @@ import {
   type StyleState,
   sharedReleaser
 } from "./compat-reuse";
-import type { GpuDevice, TrackedBuffer, TrackedTexture } from "./device";
+import type { GpuDevice, TextureSource, TrackedBuffer, TrackedTexture } from "./device";
 import type { Batch, FillBatch, Frame, ImageBatch, StrokeBatch } from "./framegraph";
 import { appendSegments, appendStrokeCaps, capCode, F32, normalizeDashes, pathBounds } from "./geometry";
 import { appendStencilMeshes, type MeshStats, newMeshStats } from "./mesh";
@@ -56,8 +61,8 @@ import { buildReliefAtlas, cachedReliefImage, meetImageRect, rasterizePattern } 
 import { type GlyphHits, glyphCovers, readGlyphReport } from "./relief-pick";
 import type { PrepareStep } from "./restore-phases";
 import { buildScene, type Draw, type LayerReport, type Scene, type ShapeStyle } from "./scene";
-import type { SceneCache, SceneKey } from "./scene-cache";
-import { createSlicer } from "./slice";
+import { cloneLayers, type SceneCache, type SceneKey } from "./scene-cache";
+import { createSlicer, slicePolicy } from "./slice";
 import { flattenPath, type Subpath } from "./svg-path";
 import { GLYPH_FLOATS, type GlyphAtlas, layoutLabels } from "./text";
 
@@ -77,6 +82,9 @@ export interface PrepareContext {
   picking?: boolean; // false: presentation only; canonical SVG remains responsible for editor targets
   // the frame on screen: clean compat runs reuse its rasters and settle details (compat-reuse.ts); absent: none
   previous?: Prepared | null;
+  // the CPU payload of the frame a context loss destroyed (retainFrame): a restore at the same key re-uploads it
+  // instead of walking and converting the scene again; absent or stale: a full prepare
+  retained?: RetainedFrame | null;
 }
 
 // The scene curve tolerance; buildScene's own default, passed explicitly so the cache key cannot drift from it.
@@ -110,13 +118,12 @@ interface CompatRun {
   sharp: boolean; // holds text, marker <svg> or burg icon vectors: refined before smooth fills (refineOrder)
   hits?: HitShape[]; // screen overlay above #viewbox: its hit area in SVG-local CSS px, as of its current raster
   stamp: number; // reuse-tracker epoch of the DOM state its raster was cut from (compat-reuse.ts)
-  key: string; // what else its raster depends on: world region, resolution and bucket, or viewport size and DPR
+  key: string; // what else its raster depends on: world region, base resolution and bucket, or viewport size and DPR
   // its detail: the settle request it answers, the alpha-cropped size it was cut at (null: fully transparent) and the
   // downscale factor applied to fit the budget (1: none); replayed by refineCompat to keep it
   detailMeta?: { request: string; size: [number, number] | null; fit: number };
-  // world run: the resolution at its turn in the world loop, its alpha-cropped size then (null: fully transparent)
-  // and every shrink factor applied after it; replayed to prove a reused raster equals a fresh one
-  history?: { turn: number; size: [number, number] | null; scales: number[] };
+  // world run: the ladder level its raster is at (compat.ts ladderScale); a reused raster must be at the frame's level
+  level?: number;
 }
 
 // Per-prepare compat reuse (telemetry). `reasons` counts dirty runs by why they were dirty (at most 8 distinct).
@@ -125,14 +132,16 @@ export interface CompatReuse {
   enabled: boolean;
   world: number;
   worldClean: number;
+  worldKept: number; // clean world runs whose raster the frame kept (a step down the ladder re-cuts them)
   screen: number;
   screenClean: number;
   details: number; // settle details carried over from the previous frame
   cloned: boolean; // false: every run reused its raster and no export clone was cut
-  aborted: string; // reuse abandoned mid-prepare (world rasters had to shrink), "" otherwise
+  aborted: string; // why clean world runs were re-cut (world rasters stepped down the ladder), "" otherwise
   structural: string; // the sibling-dependent stylesheet selector that widened invalidation, "" when none
   reasons: Record<string, number>;
   ms: number; // evaluation cost (style state, tracker, references)
+  retained: boolean; // restored from a frame's retained CPU payload (retainFrame): no scene walk or conversion
 }
 
 // Hit shapes of a root overlay in the root <svg>'s user space (SVG-local CSS px: #map has no viewBox).
@@ -154,6 +163,7 @@ export interface Prepared {
     elements: number;
     reasons: string[];
     resolution: number;
+    level: number; // world raster ladder level (resolution = base · ladderScale(level))
     // last settle refinement, in refine order: source id and drawn px per world unit (base resolution when kept)
     detail?: { id: string; density: number }[];
     reuse?: CompatReuse;
@@ -177,7 +187,199 @@ export interface Prepared {
   windows: BitmapWindows | null;
   cpuBytes: number;
   tessellation: MeshStats;
+  // what retainFrame keeps across a context loss (B1 step 1): references only, the vertex arrays included. Kept even
+  // with ?gpu-restore-retain=0 (read when a restore prepares): the restore bench switches arms in the page
+  // (history.replaceState) without a new prepare, so a frame committed under the opt-out arm must still be retainable.
+  payload: Payload;
   release(): void;
+}
+
+// ---- retention across context loss (research B1 step 1) -------------------------------------------------------
+// A frame's CPU side survives a WebGL context loss; only its GPU objects die. A restore at the same revision, world,
+// raster bucket, viewport and picking mode would rebuild an identical scene, conversion and pick index, so the payload
+// keeps them (the batch tree, the vertex and glyph instance arrays, the sources of every texture the conversion made,
+// the bitmap-window sources and the compat runs) and the restore only re-uploads them. Compat rasters are still cut
+// again (from the export clone, cached per revision): their pixels are not retained (step 2).
+
+interface PayloadKey {
+  revision: number;
+  worldEpoch: number | undefined;
+  bucket: number;
+  picking: boolean;
+  world: string;
+  screen: string;
+  scale: number; // camera scale when picking: dashed-stroke hit rings follow it (dash-measure.ts)
+  maxTexture: number; // relief atlas and canonical relief images are sized to the device limit (an adapter switch)
+}
+
+interface Recipe {
+  label: string;
+  source: TextureSource;
+  options: { repeat?: boolean; mipmap?: boolean };
+}
+
+interface WindowSource {
+  slot: ImageBatch;
+  image: HTMLImageElement;
+  rect: [number, number, number, number];
+  opacity?: number;
+  detail: ImageBatch["detail"]; // the relief viewport's sharper canonical image (a recipe texture), at commit
+}
+
+interface Payload {
+  key: PayloadKey;
+  layers: Record<string, LayerReport>;
+  reasons: string[];
+  pick: PickIndex;
+  relief: Prepared["relief"];
+  tessellation: MeshStats;
+  batches: Batch[]; // the committed batch tree: its textures are matched to recipes, window slots and compat runs
+  vertices: { fans: Float32Array; segments: Float32Array; caps: Float32Array; sprites: Float32Array };
+  glyphs: Float32Array;
+  glyphCount: number;
+  // the glyph atlas canvas the instances index: the renderer's live atlas (the next prepare clears it), or the copy a
+  // retained restore uploaded (owned by this payload)
+  atlasCanvas: HTMLCanvasElement | null;
+  atlasCopy: boolean;
+  // the live atlas's generation (GlyphAtlas.clear bumps it) when this frame's glyphs were laid out in it
+  atlasGeneration: number;
+  recipes: Map<TrackedTexture, Recipe>;
+  windows: WindowSource[];
+}
+
+export interface RetainedFrame extends Payload {
+  runs: { slot: ImageBatch; elements: Element[]; screen: boolean; sharp: boolean; hits?: HitShape[] }[];
+  atlas: HTMLCanvasElement | null; // a copy of the glyph atlas the frame's instances index
+}
+
+const payloadKey = (ctx: PrepareContext, picking: boolean): PayloadKey => ({
+  revision: ctx.revision,
+  worldEpoch: ctx.worldEpoch,
+  bucket: ctx.bucket,
+  picking,
+  world: `${ctx.world.x},${ctx.world.y},${ctx.world.width},${ctx.world.height}`,
+  screen: `${ctx.screen.width}x${ctx.screen.height}@${ctx.screen.dpr}`,
+  scale: picking ? ctx.camera.k : 0,
+  maxTexture: ctx.device.maxTextureSize
+});
+
+const sameKey = (a: PayloadKey, b: PayloadKey) =>
+  (Object.keys(a) as (keyof PayloadKey)[]).every(key => a[key] === b[key]);
+
+// Opt-out for the A/B (bench/host/restore-timing.ts): ?gpu-restore-retain=0 makes every restore a full prepare.
+export function retainEnabled(): boolean {
+  try {
+    return new URLSearchParams(globalThis.location?.search ?? "").get("gpu-restore-retain") !== "0";
+  } catch {
+    return true;
+  }
+}
+
+const walk = (batches: Batch[], visit: (batch: Batch) => void) => {
+  for (const batch of batches) {
+    visit(batch);
+    if (batch.kind === "group") {
+      for (const item of batch.mask ?? []) visit(item.fill);
+      walk(batch.children, visit);
+    }
+  }
+};
+
+// Every texture of the tree has a source and every image slot is a window or a compat run: rehydrate can rebuild it.
+export function complete(retained: RetainedFrame): boolean {
+  const slots = new Set<ImageBatch>([
+    ...retained.windows.map(item => item.slot),
+    ...retained.runs.map(run => run.slot)
+  ]);
+  let ok = true;
+  walk(retained.batches, batch => {
+    if (batch.kind === "fill" && batch.tile) ok &&= retained.recipes.has(batch.tile.texture);
+    else if (batch.kind === "sprites") ok &&= retained.recipes.has(batch.texture);
+    else if (batch.kind === "image") ok &&= slots.has(batch);
+  });
+  for (const item of retained.windows) if (item.detail?.texture) ok &&= retained.recipes.has(item.detail.texture);
+  return ok;
+}
+
+// Re-uploads a retained frame's texture sources, re-adds its bitmap windows and gives its compat runs empty slots (the
+// world loop cuts their rasters as usual); returns the runs and a copy of the batch tree that points at all of them.
+export function rehydrate(
+  retained: RetainedFrame,
+  make: (label: string, source: TextureSource, options?: Recipe["options"]) => TrackedTexture,
+  addWindow: (image: HTMLImageElement, rect: [number, number, number, number], opacity?: number) => ImageBatch
+): { runs: CompatRun[]; batches: Batch[] } {
+  const textures = new Map<TrackedTexture, TrackedTexture>();
+  for (const [old, recipe] of retained.recipes) textures.set(old, make(recipe.label, recipe.source, recipe.options));
+  const slots = new Map<ImageBatch, ImageBatch>();
+  for (const item of retained.windows) {
+    const slot = addWindow(item.image, item.rect, item.opacity);
+    const detail = item.detail;
+    if (detail?.texture)
+      slot.detail = { texture: textures.get(detail.texture)!, rect: [...detail.rect], covers: [...detail.covers] };
+    slots.set(item.slot, slot);
+  }
+  const runs = retained.runs.map(run => {
+    const slot: ImageBatch = { kind: "image", texture: null, rect: [0, 0, 0, 0], screen: run.screen, detail: null };
+    slots.set(run.slot, slot);
+    return {
+      slot,
+      elements: [...run.elements],
+      screen: run.screen,
+      sharp: run.sharp,
+      hits: run.hits,
+      stamp: 0,
+      key: ""
+    };
+  });
+  const copy = (batch: Batch): Batch => {
+    switch (batch.kind) {
+      case "fill":
+        return batch.tile
+          ? { ...batch, tile: { ...batch.tile, texture: textures.get(batch.tile.texture)! } }
+          : { ...batch };
+      case "sprites":
+        return { ...batch, texture: textures.get(batch.texture)! };
+      case "image":
+        return slots.get(batch)!;
+      case "group":
+        return {
+          ...batch,
+          mask: batch.mask?.map(item => ({ fill: copy(item.fill) as FillBatch, white: item.white })) ?? null,
+          children: batch.children.map(copy)
+        };
+      default:
+        return { ...batch };
+    }
+  };
+  return { runs, batches: retained.batches.map(copy) };
+}
+
+// Called on context loss, before the frame is dropped, with the renderer's live glyph atlas. Its glyphs are the frame's
+// only while no prepare has cleared it since the frame laid its labels out: every prepare clears it first, including
+// one that is still in flight, was aborted (motion, suspend) or whose result was released, while the frame stays.
+// A frame that was itself restored from a payload indexes that payload's own copy instead.
+export function retainFrame(
+  prepared: Prepared | null,
+  live: Pick<GlyphAtlas, "canvas" | "generation">
+): RetainedFrame | null {
+  if (!prepared) return null;
+  const { glyphCount, atlasCanvas, atlasCopy, atlasGeneration } = prepared.payload;
+  let copy: HTMLCanvasElement | null = null;
+  if (glyphCount && atlasCopy) copy = atlasCanvas;
+  else if (glyphCount) {
+    if (!atlasCanvas || atlasCanvas !== live.canvas || live.generation !== atlasGeneration) return null;
+    copy = document.createElement("canvas");
+    copy.width = atlasCanvas.width;
+    copy.height = atlasCanvas.height;
+    const context = copy.getContext("2d");
+    if (!context) return null;
+    context.drawImage(atlasCanvas, 0, 0);
+  }
+  return {
+    ...prepared.payload,
+    runs: prepared.runs.map(({ slot, elements, screen, sharp, hits }) => ({ slot, elements, screen, sharp, hits })),
+    atlas: copy
+  };
 }
 
 interface Graph {
@@ -215,7 +417,15 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
   const picking = ctx.picking !== false;
   const viewbox = svg.querySelector("#viewbox");
   if (!viewbox) throw new Error("missing #viewbox");
-  const scene = sceneFor(viewbox, ctx);
+  const payloadAt = payloadKey(ctx, picking);
+  // the generation this prepare lays labels out at; a clear while it runs makes the frame's atlas unretainable
+  const atlasGeneration = ctx.atlas.generation;
+  const retained =
+    ctx.retained && retainEnabled() && sameKey(ctx.retained.key, payloadAt) && complete(ctx.retained)
+      ? ctx.retained
+      : null;
+  // a retained restore converts nothing: its scene is the payload's layer reports
+  const scene: Scene = retained ? { draws: [], layers: cloneLayers(retained.layers) } : sceneFor(viewbox, ctx);
   const textures: TrackedTexture[] = [];
   const buffers: TrackedBuffer[] = [];
   const windows = new BitmapWindows(device, 640, WINDOW_BUDGET);
@@ -238,13 +448,28 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
   const sprites = new F32(1 << 10);
   const glyphs: Float32Array[] = [];
   let glyphCount = 0;
-  const pick = new PickIndex(ctx.world.width, ctx.world.height);
-  let relief: Prepared["relief"] = null;
+  const pick = retained?.pick ?? new PickIndex(ctx.world.width, ctx.world.height);
+  let relief: Prepared["relief"] = retained?.relief ?? null;
+  // texture sources and bitmap-window sources the conversion used, for retainFrame
+  const recipes = new Map<TrackedTexture, Recipe>();
+  const windowSources: WindowSource[] = [];
+  const make = (label: string, source: TextureSource, options: Recipe["options"] = {}) => {
+    const texture = device.texture(label, source, options);
+    recipes.set(texture, { label, source, options });
+    textures.push(texture);
+    return texture;
+  };
+  const addWindow = (image: HTMLImageElement, rect: [number, number, number, number], opacity?: number) => {
+    const slot = windows.add(image, rect, opacity);
+    windowSources.push({ slot, image, rect: [...rect], opacity, detail: null });
+    return slot;
+  };
   const runs: CompatRun[] = [];
   const reasons: string[] = [];
   const tiles = new Map<string, FillBatch["tile"] | string>();
   // the synchronous draw conversion yields every SLICE_MS so a 100k-element world does not block input for seconds
-  const slice = createSlicer();
+  const policy = slicePolicy();
+  const slice = createSlicer(policy.budget, undefined, undefined, policy.inputPending, policy.floor);
 
   // `layer` is null for screen overlays: they sit outside the world and are not pickable
   const compat = (
@@ -328,8 +553,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
       const result = pattern ? await rasterizePattern(pattern, ctx.bucket) : `missing pattern #${id}`;
       if (typeof result === "string") tiles.set(key, result);
       else {
-        const texture = device.texture(`pattern ${id}`, result.canvas, { repeat: true });
-        textures.push(texture);
+        const texture = make(`pattern ${id}`, result.canvas, { repeat: true });
         tiles.set(key, { texture, worldToUv: mat3(result.worldToUv), referenceZoom: result.referenceZoom });
       }
     }
@@ -428,7 +652,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
         // displays the canonical PNG (viewport crops). SVG hit testing sees that <image>, not its retained vectors
         // (they are an attribute, not DOM): pointer-events="none" (path-layer-canvas) makes the layer click-through,
         // otherwise the image rect is the hit area. The vectors are not hit regions in either case.
-        out.push(windows.add(image, meetImageRect(rect, image.naturalWidth, image.naturalHeight), draw.opacity));
+        out.push(addWindow(image, meetImageRect(rect, image.naturalWidth, image.naturalHeight), draw.opacity));
         if (picking && rasterHits(draw.element)) {
           const [x, y, w, h] = rect;
           pick.setDepth(pick.addBox(draw.layer, id, [x, y, x + w, y, x + w, y + h, x, y + h]), depth, path);
@@ -470,7 +694,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
         const width = Number(draw.element.getAttribute("width"));
         const height = Number(draw.element.getAttribute("height"));
         if (cached && width > 0 && height > 0) {
-          const slot = windows.add(
+          const slot = addWindow(
             cached,
             meetImageRect(
               [Number(draw.element.getAttribute("x") || 0), Number(draw.element.getAttribute("y") || 0), width, height],
@@ -489,8 +713,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
               Number(viewport.getAttribute("height"))
             ];
             if (detail && rect.every(Number.isFinite) && rect[2] > 0 && rect[3] > 0) {
-              const sharper = device.texture("canonical relief viewport", detail);
-              textures.push(sharper);
+              const sharper = make("canonical relief viewport", detail);
               slot.detail = {
                 texture: sharper,
                 rect: meetImageRect(rect, detail.naturalWidth, detail.naturalHeight),
@@ -513,10 +736,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
           continue;
         }
         // cells are 1-2× the on-screen icon size at this bucket: plain linear sampling, no trilinear mip blur
-        const texture = device.texture("relief atlas", atlas.canvas, { mipmap: true });
-        device.gl.bindTexture(device.gl.TEXTURE_2D, texture.handle);
-        device.gl.texParameteri(device.gl.TEXTURE_2D, device.gl.TEXTURE_MIN_FILTER, device.gl.LINEAR_MIPMAP_LINEAR);
-        textures.push(texture);
+        const texture = make("relief atlas", atlas.canvas, { mipmap: true }); // device: LINEAR_MIPMAP_LINEAR
         const first = sprites.length / 7;
         draw.icons.forEach((icon, k) => {
           const [u0, v0, u1, v1] = atlas.uv.get(icon.i)!;
@@ -574,35 +794,56 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
   try {
     const before: Batch[] = [];
     const after: Batch[] = [];
-    let seen = false;
-    for (const child of svg.children) {
-      if (child === viewbox) seen = true;
-      else if (!ignoredRoot.has(child.tagName) && getComputedStyle(child).display !== "none") {
-        compat(child, "screen overlay", seen ? after : before, null, true);
-        if (picking && seen) runs[runs.length - 1].hits = overlayShapes(child, svg);
+    const batches: Batch[] = [];
+    if (retained) {
+      const restored = rehydrate(retained, make, addWindow);
+      runs.push(...restored.runs);
+      batches.push(...restored.batches);
+      reasons.push(...retained.reasons);
+    } else {
+      let seen = false;
+      for (const child of svg.children) {
+        if (child === viewbox) seen = true;
+        else if (!ignoredRoot.has(child.tagName) && getComputedStyle(child).display !== "none") {
+          compat(child, "screen overlay", seen ? after : before, null, true);
+          if (picking && seen) runs[runs.length - 1].hits = overlayShapes(child, svg);
+        }
+      }
+      if (!(await convert(scene.draws, batches))) {
+        release();
+        return null;
       }
     }
-    const batches: Batch[] = [];
-    if (!(await convert(scene.draws, batches))) {
-      release();
-      return null;
-    }
     ctx.mark?.("scene");
+    const vertices = retained?.vertices ?? {
+      fans: fans.view(),
+      segments: segments.view(),
+      caps: caps.view(),
+      sprites: sprites.view()
+    };
+    let glyphData = retained?.glyphs ?? null;
+    if (retained) glyphCount = retained.glyphCount;
+    const atlasCanvas = retained ? retained.atlas : ctx.atlas.canvas;
 
     // Still to upload after the compat rasters: glyph atlas and vertex data (≈ CPU arrays).
-    const glyphBytes = glyphCount ? ctx.atlas.canvas.width * ctx.atlas.canvas.height * 4 : 0;
-    const vertexBytes = (fans.length + segments.length + caps.length + sprites.length + glyphCount * GLYPH_FLOATS) * 4;
+    const glyphBytes = glyphCount && atlasCanvas ? atlasCanvas.width * atlasCanvas.height * 4 : 0;
+    const vertexBytes =
+      (vertices.fans.length +
+        vertices.segments.length +
+        vertices.caps.length +
+        vertices.sprites.length +
+        glyphCount * GLYPH_FLOATS) *
+      4;
     const pending = glyphBytes + vertexBytes;
     const owned = () => textures.reduce((sum, texture) => sum + texture.bytes, 0) + windows.bytes;
 
     const worldRuns = runs.filter(run => !run.screen);
-    let resolution = compatResolution(worldRuns.length, ctx.world, 2, device.maxTextureSize);
+    const base = compatResolution(worldRuns.length, ctx.world, 2, device.maxTextureSize);
     const { world: region } = ctx;
-    const worldKey = (ratio: number) =>
-      `${region.x},${region.y},${region.width},${region.height}@${ratio}/${ctx.bucket}`;
+    const worldKey = `${region.x},${region.y},${region.width},${region.height}@${base}/${ctx.bucket}`;
     const screenKey = `${ctx.screen.width}x${ctx.screen.height}@${ctx.screen.dpr}`;
-    // world rasters depend on the base resolution; the shrink steps under budget pressure are replayed (below)
-    for (const run of runs) run.key = run.screen ? screenKey : worldKey(resolution);
+    // world rasters depend on the base resolution; the ladder level they shrank to is checked in the world loop
+    for (const run of runs) run.key = run.screen ? screenKey : worldKey;
     const mib = (bytes: number) => `${(bytes / 2 ** 20).toFixed(1)} MiB`;
     const rgba = (texture: TrackedTexture | null | undefined) => (texture ? texture.width * texture.height * 4 : 0);
 
@@ -610,18 +851,24 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
     // reachable changed since that raster was cut, takes its texture (and its settle detail) instead of a new raster.
     const reuse = adoptRuns(device, svg, runs, ctx.previous ?? null);
     const { adopted, report } = reuse;
+    report.retained = !!retained;
     for (const [run] of adopted) if (!run.screen && run.slot.texture) reused.push(run.slot.texture);
     const reusedScreen = [...adopted.keys()].reduce((n, run) => (run.screen ? n + rgba(run.slot.texture) : n), 0);
     // Tracked bytes as a full re-prepare sees them: it releases every previous detail at its start. A carried detail
     // stays allocated instead, but its bytes never exceed the reused rasters a full re-prepare would allocate again.
     const tracked = () => device.memory().total - reuse.detailBytes;
 
+    // World raster level (resolution = base · ladderScale(level)), chosen with the budget below; 0 is the base.
+    let level = 0;
+    let resolution = base;
+    // world runs rasterized this prepare, transparent ones included: each records the level its raster is at
+    const cut: CompatRun[] = [];
     const held: { run: CompatRun; canvas: HTMLCanvasElement; rect: Region }[] = [];
-    // reused world rasters the world loop has passed, at the size their replayed history gives them so far
-    let replayedBytes = () => 0;
+    // clean world runs counted at the current level with their reused texture
+    const kept = new Set<CompatRun>();
     const sum = (screen: boolean) =>
       held.reduce((n, item) => (item.run.screen === screen ? n + item.canvas.width * item.canvas.height * 4 : n), 0) +
-      (screen ? reusedScreen : replayedBytes());
+      (screen ? reusedScreen : [...kept].reduce((n, run) => n + rgba(run.slot.texture), 0));
     // Built only when some run needs a raster: a prepare that reuses every run cuts no export clone.
     let clone: SVGSVGElement | null = null;
     let cloneStamp = 0;
@@ -652,10 +899,12 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
       const canvas = await rasterizeRun(source, resolved as Element[], region, w, h, run.screen);
       if (ctx.stale()) return false;
       run.stamp = cloneStamp;
+      if (!run.screen) {
+        run.level = level;
+        cut.push(run);
+      }
       const cropped = cropRaster(canvas, region);
       if (cropped) held.push({ run, ...cropped }); // fully transparent: slot keeps texture null and draws nothing
-      if (!run.screen)
-        run.history = { turn: ratio, size: cropped && [cropped.canvas.width, cropped.canvas.height], scales: [] };
       return true;
     };
     // Screen overlays first (fixed size at the screen DPR): their bytes are known before the window crops take room.
@@ -685,118 +934,131 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
 
     // This frame's compat share: the steady budget minus the group target reserve, what it already uploaded (bitmap
     // window crops included) and what is still pending, and never past the peak beside the previous frame. Over it,
-    // world rasters shrink; a share too small for useful world rasters (or for the screen overlays) fails the
-    // prepare, and the renderer shows the SVG. Reused rasters count where a full re-prepare would allocate them, so
-    // every scaling decision is the one it would make; one that must shrink rasters abandons world reuse instead.
+    // world rasters step down the ladder; a share too small for useful world rasters (or for the screen overlays)
+    // fails the prepare, and the renderer shows the SVG. Reused rasters count where a full re-prepare would allocate
+    // them.
     const budget = compatAllowance(tracked(), owned(), pending);
     if (budget < sum(true))
       throw new BudgetError(`compat: screen overlays need ${mib(sum(true))}, ${mib(budget)} fits`);
-    // World rasters in run order; whenever the held bytes exceed the room, every held world raster shrinks by the
-    // same factor (scaleRaster) and later runs rasterize at the lower resolution. A reused raster is exactly the one a
-    // full re-prepare would cut only if it would arrive at the same turn resolution and then see the same shrink
-    // steps: its recorded history is replayed (its pixel size simulated), and any divergence rasterizes every world
-    // run afresh, so the frame always equals a full re-prepare's.
-    if (runs.length) {
-      const base = resolution;
-      let again = true;
-      while (again) {
-        again = false;
-        resolution = base;
-        const replayed: { run: CompatRun; width: number; height: number; expected: number[] }[] = [];
-        const diverged = () => {
-          reuse.dropWorld(reused);
-          for (let i = held.length - 1; i >= 0; i--) if (!held[i].run.screen) held.splice(i, 1)[0].canvas.width = 0;
-          again = true;
-        };
-        replayedBytes = () => replayed.reduce((n, item) => n + item.width * item.height * 4, 0);
-        for (const run of runs) {
-          if (run.screen) continue;
-          const history = adopted.get(run)?.history;
-          if (adopted.has(run)) {
-            if (!history || history.turn !== resolution) {
-              diverged();
-              break;
-            }
-            run.history = { turn: resolution, size: history.size, scales: [] };
-            if (history.size)
-              replayed.push({ run, width: history.size[0], height: history.size[1], expected: history.scales });
-          } else if (ctx.stale() || !(await rasterize(run))) {
-            release();
-            return null;
-          }
-          const worldRoom = budget - sum(true);
-          const scale = fitScale(sum(false), worldRoom);
-          if (scale < 1 && worldRoom < MIN_COMPAT_BUDGET)
-            throw new BudgetError(
-              `compat: world rasters need ${mib(sum(false))}, ${mib(worldRoom)} fits the GPU budget`
-            );
-          if (scale < 1) {
-            if (replayed.some(item => item.expected[item.run.history!.scales.length] !== scale)) {
-              diverged();
-              break;
-            }
-            for (const item of held)
-              if (!item.run.screen) {
-                item.canvas = scaleRaster(item.canvas, scale);
-                item.run.history!.scales.push(scale);
-              }
-            for (const item of replayed) {
-              item.width = Math.max(1, Math.floor(item.width * scale)); // scaleRaster's own rounding
-              item.height = Math.max(1, Math.floor(item.height * scale));
-              item.run.history!.scales.push(scale);
-            }
-            resolution *= scale;
-          }
-        }
-        if (
-          !again &&
-          replayed.some(
-            item =>
-              item.run.history!.scales.length !== item.expected.length ||
-              item.width !== item.run.slot.texture?.width ||
-              item.height !== item.run.slot.texture?.height
-          )
-        )
-          diverged();
-      }
-      replayedBytes = () => 0;
-      for (const { run, canvas, rect } of held) {
-        run.slot.texture = device.texture(run.screen ? "compat screen" : "compat world", canvas);
-        if (!run.screen) textures.push(run.slot.texture);
-        run.slot.rect = [rect.x, rect.y, rect.width, rect.height];
-        canvas.width = canvas.height = 0;
-      }
+    // With reuse on, world rasters shrink along the fixed ladder (compat.ts): a frame that keeps world rasters starts
+    // at the previous frame's level, or higher (sharper) when the previous frame's world bytes would fit the room there,
+    // so a reused frame steps back up as a full re-prepare would (an estimate: the dirty runs may change size). With
+    // reuse off (the default), they shrink to an exact fit (fitScale) as before the ladder, level reporting the
+    // equivalent fractional step.
+    const ladder = report.enabled;
+    const previous = ctx.previous;
+    if (ladder && previous && [...adopted.keys()].some(run => !run.screen)) {
+      const bytes = previous.runs.reduce((n, run) => (run.screen ? n : n + rgba(run.slot.texture)), 0);
+      level = ladderStart(previous.compat.level, bytes, budget - sum(true));
+      resolution = base * ladderScale(level);
     }
+    // World rasters in run order at the current level. Whenever their bytes exceed the room, the level steps down to
+    // one that fits under LADDER_HEADROOM of it: every held fresh raster is resampled to it (scaleRaster), later runs
+    // are cut at it, and a kept raster (a GPU texture, which cannot shrink) is cut again at it after the queue.
+    const queue = [...worldRuns];
+    for (let i = 0; i < queue.length; i++) {
+      const run = queue[i];
+      if (adopted.has(run) && adopted.get(run)!.level === level) {
+        run.level = level;
+        kept.add(run);
+      } else {
+        if (adopted.has(run)) reuse.drop(run, reused, "world level changed");
+        if (ctx.stale() || !(await rasterize(run))) {
+          release();
+          return null;
+        }
+      }
+      const worldRoom = budget - sum(true);
+      const bytes = sum(false);
+      if (bytes <= worldRoom) continue;
+      if (worldRoom < MIN_COMPAT_BUDGET)
+        throw new BudgetError(`compat: world rasters need ${mib(bytes)}, ${mib(worldRoom)} fits the GPU budget`);
+      let next: number;
+      let scale: number;
+      if (ladder) {
+        next = ladderFit(bytes, worldRoom * LADDER_HEADROOM, level);
+        scale = ladderScale(next) / ladderScale(level);
+      } else {
+        scale = fitScale(bytes, worldRoom);
+        next = level - LADDER_STEPS * Math.log2(scale);
+      }
+      for (const item of held) if (!item.run.screen) item.canvas = scaleRaster(item.canvas, scale);
+      for (const run of cut) run.level = next;
+      for (const run of kept) {
+        reuse.drop(run, reused, "world rasters stepped down the ladder");
+        queue.push(run);
+      }
+      kept.clear();
+      level = next;
+      resolution = ladder ? base * ladderScale(level) : resolution * scale;
+    }
+    for (const { run, canvas, rect } of held) {
+      run.slot.texture = device.texture(run.screen ? "compat screen" : "compat world", canvas);
+      if (!run.screen) textures.push(run.slot.texture);
+      run.slot.rect = [rect.x, rect.y, rect.width, rect.height];
+      canvas.width = canvas.height = 0;
+    }
+    report.worldKept = kept.size;
     ctx.mark?.("world");
 
-    const upload = (label: string, data: F32 | Float32Array, length: number) => {
-      if (!length) return null;
-      const buffer = device.buffer(label, data instanceof F32 ? data.view() : data);
+    const upload = (label: string, data: Float32Array) => {
+      if (!data.length) return null;
+      const buffer = device.buffer(label, data);
       buffers.push(buffer);
       return buffer;
     };
-    const glyphData = new Float32Array(glyphCount * GLYPH_FLOATS);
-    let offset = 0;
-    for (const chunk of glyphs) {
-      glyphData.set(chunk, offset);
-      offset += chunk.length;
+    if (!glyphData) {
+      glyphData = new Float32Array(glyphCount * GLYPH_FLOATS);
+      let offset = 0;
+      for (const chunk of glyphs) {
+        glyphData.set(chunk, offset);
+        offset += chunk.length;
+      }
     }
     let atlas: TrackedTexture | null = null;
-    if (glyphCount) {
-      atlas = device.texture("glyph atlas", ctx.atlas.canvas);
+    if (glyphCount && atlasCanvas) {
+      atlas = device.texture("glyph atlas", atlasCanvas);
       textures.push(atlas);
     }
+    const tree = [...before, ...batches, ...after];
     const frame: Frame = {
-      batches: [...before, ...batches, ...after],
-      fans: upload("fans", fans, fans.length),
-      segments: upload("segments", segments, segments.length),
-      caps: upload("stroke caps", caps, caps.length),
-      sprites: upload("sprites", sprites, sprites.length),
-      glyphs: upload("glyphs", glyphData, glyphData.length),
+      batches: tree,
+      fans: upload("fans", vertices.fans),
+      segments: upload("segments", vertices.segments),
+      caps: upload("stroke caps", vertices.caps),
+      sprites: upload("sprites", vertices.sprites),
+      glyphs: upload("glyphs", glyphData),
       atlas
     };
     ctx.mark?.("buffers");
-    const atlasBytes = ctx.atlas.canvas.width * ctx.atlas.canvas.height * 4; // CPU glyph canvas, counted once here
+    // CPU glyph canvas, counted once here (the renderer's atlas, or the retained copy it was restored from)
+    const atlasBytes = atlasCanvas ? atlasCanvas.width * atlasCanvas.height * 4 : 0;
+    // Kept for retainFrame: views of the conversion's arrays (their capacity, up to twice the used length), the glyph
+    // instances and every texture source (an upper bound: some, such as the cached relief images, are held by their
+    // caches anyway).
+    const vertexHeld = Object.values(vertices).reduce((n, array) => n + array.buffer.byteLength, 0);
+    const recipeHeld = [...recipes.values()].reduce(
+      (n, { source }) => n + ("width" in source && "height" in source ? source.width * source.height * 4 : 0),
+      0
+    );
+    const payloadHeld = vertexHeld + glyphData.byteLength + recipeHeld;
+    const payload: Payload = {
+      key: payloadAt,
+      layers: retained?.layers ?? cloneLayers(scene.layers),
+      reasons: [...reasons],
+      pick,
+      relief,
+      tessellation: retained?.tessellation ?? tessellation,
+      batches: tree,
+      vertices,
+      glyphs: glyphData,
+      glyphCount,
+      atlasCanvas: glyphCount ? atlasCanvas : null,
+      atlasCopy: !!retained,
+      atlasGeneration: ctx.atlas.generation === atlasGeneration ? atlasGeneration : -1,
+      recipes,
+      windows: windowSources.map(item => ({ ...item, detail: item.slot.detail && { ...item.slot.detail } }))
+    };
     const overlays = indexOverlays(runs, ctx.screen);
     // tracker entries older than every raster this frame or the previous one still draws can no longer matter
     compatDirt.prune(
@@ -814,6 +1076,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
         elements: runs.reduce((n, run) => n + run.elements.length, 0),
         reasons,
         resolution,
+        level,
         reuse: report
       },
       styleKey: reuse.style?.key,
@@ -821,9 +1084,10 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
       overlays,
       relief,
       windows: windows.size ? windows : null,
-      // retained CPU memory: pick index and glyph atlas canvas (vertex arrays are dropped after upload)
-      cpuBytes: pick.bytes() + overlays.bytes() + atlasBytes,
-      tessellation,
+      // retained CPU memory: pick index, glyph atlas canvas and the payload kept for a context restore
+      cpuBytes: pick.bytes() + overlays.bytes() + atlasBytes + payloadHeld,
+      tessellation: payload.tessellation,
+      payload,
       release
     };
   } catch (error) {
@@ -836,9 +1100,11 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
 // stylesheet state, and clean in the reuse tracker (compat-reuse.ts) with no reference to a non-definition element.
 // A clean run takes the previous texture (shared) and, while their bytes stay within the reused rasters, its settle
 // detail; every other previous detail is released now, as a full re-prepare does at its start.
-// Off by default: on the route-focus run (Metal, DPR 2, k=8/16) a route close dirties every run under the fail-closed
-// ancestor rule, and with a subtree-only rule the budget-scaled world rasters still diverge from their history, so
-// reuse saved nothing there (PERF-A stop-loss). Opt in with ?gpu-compat-reuse=1 or a build with
+// Off by default, pending a decision: with the subtree rule and the world raster ladder (PERF W1), a route close on the
+// route-focus run (Metal, DPR 2, three route closes, single runs) keeps 4/6 world and 2/3 screen runs and the prepare
+// goes 2.9/5.4/5.8 -> 2.2/3.1/2.8 s (integration-20261019T210149-621Z -> 211754-900Z), and canonical passes with it
+// on, but no check yet compares a reused raster against SVG after an edit, and resume stays 5.5-8.1 s. The ladder is
+// part of reuse: off, world rasters fit the budget exactly, as before W1. Opt in with ?gpu-compat-reuse=1 or a build with
 // VITE_GPU_COMPAT_REUSE=1. The dirty-run telemetry (lastPrepare.reuse reasons) needs the flag too: off, the renderer
 // installs no tracker feed or outside-input watcher, and the default path matches the pre-reuse renderer.
 export function compatReuseEnabled(): boolean {
@@ -857,6 +1123,7 @@ function adoptRuns(device: GpuDevice, svg: SVGSVGElement, runs: CompatRun[], pre
     enabled: compatReuseEnabled(),
     world: runs.filter(run => !run.screen).length,
     worldClean: 0,
+    worldKept: 0,
     screen: runs.filter(run => run.screen).length,
     screenClean: 0,
     details: 0,
@@ -864,7 +1131,8 @@ function adoptRuns(device: GpuDevice, svg: SVGSVGElement, runs: CompatRun[], pre
     aborted: "",
     structural: "",
     reasons: {},
-    ms: 0
+    ms: 0,
+    retained: false
   };
   const count = (reason: string) => {
     const keys = Object.keys(report.reasons);
@@ -947,34 +1215,33 @@ function adoptRuns(device: GpuDevice, svg: SVGSVGElement, runs: CompatRun[], pre
     report,
     style,
     detailBytes,
-    // Abandons world reuse (reused textures cannot shrink): drops the shared textures and carried details from this
-    // frame, and the carried details from the previous one too, so both look as a full re-prepare leaves them.
-    dropWorld(reused: TrackedTexture[]) {
-      for (const [run, old] of adopted) {
-        if (run.screen) continue;
-        const texture = run.slot.texture;
-        const at = texture ? reused.indexOf(texture) : -1;
-        if (at >= 0) reused.splice(at, 1);
-        releaseShared(device, texture);
-        run.slot.texture = null;
-        run.slot.rect = [0, 0, 0, 0];
-        const detail = run.slot.detail;
-        if (detail) {
-          result.detailBytes -= detail.texture ? detail.texture.width * detail.texture.height * 4 : 0;
+    // Re-cuts a clean world run after all (its raster is at another ladder level than the frame): drops its shared
+    // texture and carried detail from this frame, and the carried detail from the previous one too, so both look as a
+    // full re-prepare leaves them.
+    drop(run: CompatRun, reused: TrackedTexture[], why: string) {
+      const old = adopted.get(run);
+      if (!old || run.screen) return;
+      const texture = run.slot.texture;
+      const at = texture ? reused.indexOf(texture) : -1;
+      if (at >= 0) reused.splice(at, 1);
+      releaseShared(device, texture);
+      run.slot.texture = null;
+      run.slot.rect = [0, 0, 0, 0];
+      const detail = run.slot.detail;
+      if (detail) {
+        result.detailBytes -= detail.texture ? detail.texture.width * detail.texture.height * 4 : 0;
+        releaseShared(device, detail.texture);
+        if (old.slot.detail?.texture === detail.texture) {
           releaseShared(device, detail.texture);
-          if (old.slot.detail?.texture === detail.texture) {
-            releaseShared(device, detail.texture);
-            old.slot.detail = null;
-            old.detailMeta = undefined;
-          }
-          run.slot.detail = null;
-          run.detailMeta = undefined;
-          report.details--;
+          old.slot.detail = null;
+          old.detailMeta = undefined;
         }
-        adopted.delete(run);
-        report.worldClean--;
+        run.slot.detail = null;
+        run.detailMeta = undefined;
+        report.details--;
       }
-      report.aborted = "world rasters had to shrink";
+      adopted.delete(run);
+      report.aborted ||= why;
     }
   };
   return result;

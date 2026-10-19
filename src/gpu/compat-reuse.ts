@@ -9,9 +9,10 @@
 // The tracker records every pixel-relevant change with an epoch. A raster is stamped with the epoch of the DOM state
 // it was cut from. A run is clean when nothing that can reach its pixels changed after its stamp.
 //
-// It fails closed. A change to a definition, a stylesheet, a font, an ancestor attribute or a source outside #map
-// that the clone reads dirties every run. When a stylesheet rule can make a map element depend on its siblings
-// (structural pseudo-classes, sibling combinators, :has), so does any change outside the runs.
+// It fails closed. A change to a definition, a stylesheet, a font or a source outside #map that the clone reads dirties
+// every run; an ancestor attribute dirties the runs under that ancestor. When a stylesheet rule can make a map element
+// depend on its siblings (structural pseudo-classes, sibling combinators, :has), any change outside the runs, ancestor
+// attributes included, dirties every run.
 
 export interface ReuseNode {
   tagName?: string;
@@ -191,12 +192,16 @@ export class CompatDirt {
       }
       if (kinds & ADDED) added.set(node, at);
       if (above.has(node)) {
-        // Fail closed: every run goes dirty. The reason says whether the run sits under the node, so telemetry shows
-        // what a subtree-only rule would keep.
-        if (kinds & ATTR)
-          for (const i of live)
-            dirty(i, at, `ancestor ${describeNode(node)}${under(runs[i], node) ? "" : " (outside)"}`);
-        else if (structural && kinds & (CHILDREN | TEXT))
+        // Subtree rule: an attribute reaches the pixels of its own subtree only (inheritance, transforms, effects and
+        // descendant selectors all flow downwards). The ways it can reach further are each closed elsewhere: sibling
+        // combinators and :has() make the stylesheet `structural` (every run dirty, below), and a run that paints
+        // through an id outside the definitions is never reused (externalReference). The zoom-end label font-size
+        // write on #labels > g#states therefore dirties the label runs under it, not every run (PERF-A stop-loss).
+        // Known gap: an ancestor id change that makes a url(#id) or href elsewhere resolve to another element.
+        if (kinds & ATTR) {
+          if (structural) every(at, `ancestor ${describeNode(node)} (structural CSS)`);
+          else for (const i of live) if (under(runs[i], node)) dirty(i, at, `ancestor ${describeNode(node)}`);
+        } else if (structural && kinds & (CHILDREN | TEXT))
           every(at, `children of ${describeNode(node)} (structural CSS)`);
       } else if (structural && kinds & (ATTR | CHILDREN | TEXT)) every(at, `${describeNode(node)} (structural CSS)`);
     }

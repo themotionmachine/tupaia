@@ -816,6 +816,35 @@ const DEFS: Record<string, CheckDef> = {
       }));
     }
   },
+  // Context-loss restore timing (PERF: research B0/B1/B2): loss at rest on a settled camera, per-arm restore clock and
+  // hover event-to-rAF during the restore, arms interleaved ABBA. Descriptive: fails only on errors or a missed restore.
+  restore: {
+    lock: "exclusive",
+    keys: ["dpr", "world", "arms", "reps", "cold", "input", "rzoom"],
+    spec: {
+      arms: { type: "string", default: "base" },
+      reps: { type: "int", default: 3 },
+      cold: { type: "bool", default: false },
+      input: { type: "bool", default: true },
+      rzoom: { type: "string", default: "3.5" }
+    },
+    timeout: 1800,
+    run: ctx => {
+      const env = {
+        RESTORE_DPR: String(ctx.args.dpr),
+        RESTORE_WORLD: String(ctx.args.world),
+        RESTORE_ARMS: String(ctx.args.arms),
+        RESTORE_REPS: String(ctx.args.reps),
+        RESTORE_COLD: ctx.args.cold ? "1" : "0",
+        RESTORE_INPUT: ctx.args.input ? "1" : "0",
+        RESTORE_ZOOM: String(ctx.args.rzoom)
+      };
+      return runScript(ctx, nodeScript("bench/host/restore-timing.ts"), env, join(ctx.dir, "restore-timing.json"), 1800, data => ({
+        failure: reportFailure(data) ?? (data?.errors?.length ? `${data.errors.length} page error(s)` : null),
+        metrics: data && { adapter: data.contextProperties?.adapter, world: data.world, cold: data.cold, summary: data.summary }
+      }));
+    }
+  },
   palette: {
     lock: "shared",
     keys: [],

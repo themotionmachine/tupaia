@@ -155,11 +155,23 @@ describe("compat reuse tracker: what a change dirties", () => {
     expect(second.dirt.evaluate(second.runs, true).every(Boolean)).toBe(true);
   });
 
-  it("dirties every run on an ancestor attribute change, even runs outside that ancestor", () => {
+  it("dirties the runs under an ancestor whose attribute changed, not the runs outside it (zoom-end font-size)", () => {
     const { dirt, w, runs } = setup();
     dirt.note([attr(w.labels, "font-size")]);
-    const why = dirt.evaluate(runs, false);
-    expect(why).toEqual(["ancestor <g#labels>", "ancestor <g#labels> (outside)"]);
+    expect(dirt.evaluate(runs, false)).toEqual(["ancestor <g#labels>", ""]);
+    // an ancestor of both runs dirties both
+    const second = setup();
+    second.dirt.note([attr(second.w.viewbox, "filter")]);
+    expect(second.dirt.evaluate(second.runs, false)).toEqual(["ancestor <g#viewbox>", "ancestor <g#viewbox>"]);
+  });
+
+  it("with sibling-dependent stylesheet rules, an ancestor attribute dirties every run", () => {
+    const { dirt, w, runs } = setup();
+    dirt.note([attr(w.labels, "class")]);
+    expect(dirt.evaluate(runs, true)).toEqual([
+      "ancestor <g#labels> (structural CSS)",
+      "ancestor <g#labels> (structural CSS)"
+    ]);
   });
 
   it("ignores attribute writes that cannot reach a raster", () => {
