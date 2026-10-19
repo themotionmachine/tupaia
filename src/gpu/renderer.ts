@@ -21,6 +21,14 @@ import {
 import { HiddenEmblemCulling } from "./emblem-culling";
 import { FrameGraph } from "./framegraph";
 import { GpuFrameTimer, type TimingTelemetry, timingRequested } from "./gpu-timer";
+import {
+  customizationMode,
+  editorState,
+  type FilterSource,
+  hiddenReason,
+  IDLE_WATCH_MS,
+  rootFilter
+} from "./lifecycle";
 import { classify, pixelRecords, TRADE_LAYER, TradeMarkers } from "./markers";
 import { describeMutation, MOTION_IDLE, prepareStale, prepareStart, settleAction } from "./motion";
 import { type PickHit, resolveLeaf } from "./pick";
@@ -102,6 +110,10 @@ export interface GpuTelemetry {
   // state "active" means a frame is prepared and drawable; canvasVisible is whether the GPU canvas is on screen now
   canvasVisible: boolean;
   sourceCurrent: boolean;
+  // why the canvas is hidden now ("" = it may show; lifecycle.ts hiddenReason), from the cached editor state
+  hiddenReason: string;
+  // the root #map filter forwarded as the canvas CSS filter ("" none), or why the GPU frame refuses it
+  rootFilter: { css: string; refused: string };
   drawBatches: { submitted: number; culled: number };
   stateCalls: { issued: number; skipped: number }; // last frame's cached GL state setters (gl-state.ts)
   // last frame's full-viewport composites / stencil clears / group mask fills drawn and culled off-view
@@ -240,8 +252,10 @@ export class GpuRenderer {
   // or draw follows it): re-check on the next frame. draw() hides again (a no-op) if the editor is still open.
   // Likewise an opening dialog: nothing else may follow it, and without a draw the last GPU frame would stay on screen
   // over the SVG the editor changes (editor replay, bench/host/editor-replay.ts).
+  // A replaced #map (a load in progress, or one that failed before map:loaded) hides the previous world at once.
   private dialogs = new MutationObserver(records => {
     this.dialogsDirty = true;
+    if (!this.sourceCurrent()) return void this.active();
     this.resume();
     if (this.suspendedReason || records.some(touchesDialog)) this.requestDraw();
   });
@@ -254,6 +268,40 @@ export class GpuRenderer {
   private markers: TradeMarkers;
   private resizes: ResizeObserver;
   private onWindowResize = () => this.resize();
+  // --- LIFE: lifecycle hooks (lifecycle.ts decides; these feed it) ---
+  private printing = false; // beforeprint..afterprint: the canonical SVG is printed, the canvas stays hidden
+  private rootFilterState = { css: "", refused: "" };
+  private customizationSeen: unknown = undefined;
+  private idleWatch = 0;
+  // Customization modes set a bare global no event announces: poll it so entering one hides the canvas (and leaving it
+  // resumes) without waiting for the next camera, mutation or draw.
+  private watchIdle = () => {
+    const mode = customizationMode();
+    if (mode === this.customizationSeen) return;
+    this.customizationSeen = mode;
+    this.active();
+    this.requestDraw();
+  };
+  // A face that a committed or in-flight layout measured without (fontReady reason: slow, failed, unavailable) has
+  // arrived: those labels took the compat lane, so re-prepare. Loads the layout itself awaited never re-prepare.
+  private onFontsLoaded = () => {
+    if (!this.atlas.fontsArrived()) return;
+    compatDirt.all("font loaded");
+    this.invalidations.last = "font loaded";
+    this.traceJob("revision", "font loaded")();
+    this.invalidate(false);
+  };
+  // Print renders the canonical SVG (index.css hides canvases): it must hold the GPU camera and every emblem.
+  private onBeforePrint = () => {
+    this.printing = true;
+    this.syncSvgCamera();
+    this.hide();
+  };
+  private onAfterPrint = () => {
+    this.printing = false;
+    this.requestDraw();
+  };
+  // --- end LIFE ---
 
   constructor(
     private svg: SVGSVGElement,
@@ -313,6 +361,12 @@ export class GpuRenderer {
     this.resizes = new ResizeObserver(() => this.resize());
     this.resizes.observe(svg);
     window.addEventListener("resize", this.onWindowResize);
+    window.addEventListener("beforeprint", this.onBeforePrint);
+    window.addEventListener("afterprint", this.onAfterPrint);
+    document.fonts?.addEventListener("loadingdone", this.onFontsLoaded);
+    this.customizationSeen = customizationMode();
+    this.idleWatch = window.setInterval(this.watchIdle, IDLE_WATCH_MS);
+    this.applyRootFilter();
     this.resize();
     this.schedulePrepare(0, "initial");
   }
@@ -455,6 +509,7 @@ export class GpuRenderer {
     // the replaced #map is canonical: adopt its camera so hiding cannot write the previous world's transform over it
     const transform = this.svg.querySelector("#viewbox")?.getAttribute("transform");
     if (transform != null) this.view = parseViewboxTransform(transform);
+    this.applyRootFilter();
     this.moving = this.prepareWanted = this.suspendWanted = false;
     clearTimeout(this.motionTimer);
     this.motionTimer = 0;
@@ -515,7 +570,9 @@ export class GpuRenderer {
       dialogScans: this.dialogScans,
       pickProfile: { ...this.pickProfile },
       canvasVisible: this.canvas.style.display !== "none",
-      sourceCurrent: this.svg === document.querySelector<SVGSVGElement>("#map"),
+      sourceCurrent: this.sourceCurrent(),
+      hiddenReason: this.hiddenReason(this.suspendedReason),
+      rootFilter: { ...this.rootFilterState },
       drawBatches: { ...this.graph.drawBatches },
       stateCalls: { ...this.graph.state.counts },
       passes: { ...this.graph.passes },
@@ -579,6 +636,10 @@ export class GpuRenderer {
     this.longTaskObserver?.disconnect();
     this.resizes.disconnect();
     window.removeEventListener("resize", this.onWindowResize);
+    window.removeEventListener("beforeprint", this.onBeforePrint);
+    window.removeEventListener("afterprint", this.onAfterPrint);
+    document.fonts?.removeEventListener("loadingdone", this.onFontsLoaded);
+    clearInterval(this.idleWatch);
     this.syncSvgCamera();
     this.drop();
     this.markers.release();
@@ -589,13 +650,46 @@ export class GpuRenderer {
     forgetCompatClone();
   }
 
-  // The canvas is shown by draw() right after a successful render, and hidden here whenever it cannot be correct.
+  // The canvas is shown by draw() right after a successful render, and hidden here whenever it cannot be correct
+  // (lifecycle.ts hiddenReason). A replaced #map also drops the frame: a load that fails before map:loaded must never
+  // leave the previous world drawn over its partial replacement; the next worldReplaced prepares the new one.
   private active(): boolean {
     this.suspendedReason = this.editorReason();
     if (!this.suspendedReason) this.resume();
-    const visible = !!this.prepared && !this.device.lost && !this.suspendedReason && !this.markers.pending;
-    if (!visible) this.hide();
-    return visible;
+    const reason = this.hiddenReason(this.suspendedReason);
+    if (reason === "source replaced" && this.prepared) this.drop();
+    if (reason) this.hide();
+    return !reason;
+  }
+
+  private hiddenReason(editor: string): string {
+    return hiddenReason({
+      prepared: !!this.prepared,
+      lost: this.device.lost,
+      sourceCurrent: this.sourceCurrent(),
+      printing: this.printing,
+      editor,
+      root: this.rootFilterState.refused,
+      markersPending: this.markers.pending
+    });
+  }
+
+  private sourceCurrent(): boolean {
+    return this.svg === document.querySelector<SVGSVGElement>("#map");
+  }
+
+  // Forwards the root #map filter to the canvas, or refuses the frame when the canvas cannot reproduce it.
+  private applyRootFilter(): void {
+    const computed = getComputedStyle(this.svg).filter;
+    const next = rootFilter(
+      computed || this.svg.getAttribute("filter"),
+      id => document.getElementById(id) as unknown as FilterSource | null
+    );
+    if (this.canvas.style.filter !== next.css) this.canvas.style.filter = next.css;
+    if (next.refused === this.rootFilterState.refused && next.css === this.rootFilterState.css) return;
+    if (next.refused) console.info(`GPU frame hidden: ${next.refused}`);
+    this.rootFilterState = next;
+    this.requestDraw();
   }
 
   // The prepared bitmap crops cover the current view. Otherwise the canvas hides (SVG shown, never a frame missing
@@ -743,14 +837,15 @@ export class GpuRenderer {
   // removed node, a style/class/hidden change anywhere): queued records are drained first, so an open() or close() in
   // the same task is seen before the next query. CSSOM rule edits are not observed (no editor uses them).
   private editorReason(): string {
-    if (typeof customization === "number" && customization) return `editor customization ${customization}`;
+    const mode = customizationMode();
+    if (typeof mode === "number" && mode) return editorState(mode, false);
     if (this.dialogs.takeRecords().length) this.dialogsDirty = true;
     if (this.dialogsDirty) {
       this.dialogsDirty = false;
       this.dialogShown = [...document.querySelectorAll<HTMLElement>(".ui-dialog")].some(isShown);
       this.dialogScans++;
     }
-    return this.dialogShown ? "editor dialog open" : "";
+    return editorState(mode, this.dialogShown);
   }
 
   // The SVG under a hidden canvas must show the GPU camera; transform-only writes are ignored by the observer.
@@ -762,6 +857,7 @@ export class GpuRenderer {
   }
 
   private mutated(records: MutationRecord[]): void {
+    if (records.some(record => record.target === this.svg && record.type === "attributes")) this.applyRootFilter();
     const roots: Element[] = [];
     const change = classify(
       records,
@@ -848,7 +944,8 @@ export class GpuRenderer {
   }
 
   private async prepare(): Promise<void> {
-    if (!this.svg.querySelector("#viewbox")) return;
+    // a replaced #map waits for worldReplaced (map:loaded); a load that failed half way never re-prepares the old world
+    if (!this.sourceCurrent() || !this.svg.querySelector("#viewbox")) return;
     // Keep navigation on the drawable frame: hover/style/resize work waits for the next settle (motion.ts). A replaced
     // world has no prepared frame and still prepares immediately. An open editor hides the canvas, so a prepare that
     // would only replace a frame waits for its close (resume()).
@@ -906,7 +1003,7 @@ export class GpuRenderer {
         this.suspendWanted = true;
         this.suspendDeferrals++;
       }
-      return reason !== "";
+      return reason !== "" || !this.sourceCurrent();
     };
     try {
       this.atlas.clear();
@@ -955,6 +1052,7 @@ export class GpuRenderer {
       if (!this.moving)
         this.view = parseViewboxTransform(this.svg.querySelector("#viewbox")!.getAttribute("transform"));
       this.clear = clearColor(this.svg);
+      this.applyRootFilter();
       this.requestDraw();
       // crisp initial idle frame: refine compat runs for the current view without waiting for a camera gesture
       if (!this.moving) this.scheduleSettle();
