@@ -17,7 +17,7 @@
 //   RESTORE_ZOOM   camera zoom (default 3.5, native-recovery's wheel camera); RESTORE_DPR (default 2)
 //   RESTORE_INPUT  "0" disables the hover input
 // Each sample also screenshots the settled frame before the loss and after the restore and counts the pixels that
-// differ by more than 16 (trade caravans move between the two shots, so a small count is expected): a restore that
+// differ by more than 16, page chrome masked (trade caravans move between the two shots, so a small count is expected): a restore that
 // rebuilds a different frame (a retained payload gone wrong) shows up there.
 import { createServer } from "node:http";
 import { readFileSync, readdirSync, writeFileSync } from "node:fs";
@@ -64,7 +64,10 @@ const diff = (a: Buffer, b: Buffer) => {
   if (p.width !== q.width || p.height !== q.height) return { pixels: p.width * p.height, over16: -1, max: -1 };
   let over16 = 0;
   let max = 0;
+  // page chrome over the map is masked: the status tip along the bottom (it fades) and the top-left menu button
+  const chrome = (x: number, y: number) => y >= p.height - 48 * DPR || (x < 48 * DPR && y < 48 * DPR);
   for (let i = 0; i < p.data.length; i += 4) {
+    if (chrome((i / 4) % p.width, Math.floor(i / 4 / p.width))) continue;
     let d = 0;
     for (let j = 0; j < 3; j++) d = Math.max(d, Math.abs(p.data[i + j] - q.data[i + j]));
     if (d > 16) over16++;
@@ -250,8 +253,16 @@ try {
         longTasks: { ...summarize(after.tasks), totalMs: Math.round(after.tasks.reduce((n: number, t: number) => n + t, 0)) },
         settleAfterDrawMs: Math.round(after.settledMs),
         pixelsVsBeforeLoss: diff(shotBefore, shotAfter),
+        shots: null as null | string[],
         memory: drawn.memory
       };
+      if (sample.pixelsVsBeforeLoss.over16 > 1000) {
+        // kept for diagnosis: the frame the restore drew differs from the one before the loss
+        const base = resolve(process.env.GATE_OUT_DIR || process.cwd(), `restore-r${rep}-${arm.replace(/[^\w.-]+/g, "_")}`);
+        writeFileSync(`${base}-before.png`, shotBefore);
+        writeFileSync(`${base}-after.png`, shotAfter);
+        sample.shots = [`${base}-before.png`, `${base}-after.png`];
+      }
       report.samples.push(sample);
       console.log(JSON.stringify({ rep, arm, outcome: sample.outcome, lossToDrawMs: sample.lossToDrawMs, restoredToDrawMs: sample.restoredToDrawMs, prepareMs: sample.prepareMs, steps: sample.steps, eventToRafP95: sample.eventToRaf.p95, n: sample.eventToRaf.n }));
       if (sample.outcome !== "drawn") throw Error(`restore ${sample.outcome} on arm ${arm}`);
