@@ -21,7 +21,8 @@ import {
   type Region,
   rasterizeRun,
   resolveInClone,
-  scaleRaster
+  scaleRaster,
+  stampedClone
 } from "./compat";
 import {
   type CompatRoot,
@@ -36,6 +37,15 @@ import {
   strokeHitRings,
   resScale as viewScaleOf
 } from "./compat-pick";
+import {
+  compatDirt,
+  documentStyle,
+  externalReference,
+  releaseShared,
+  retain,
+  type StyleState,
+  sharedReleaser
+} from "./compat-reuse";
 import type { GpuDevice, TrackedBuffer, TrackedTexture } from "./device";
 import type { Batch, FillBatch, Frame, ImageBatch, StrokeBatch } from "./framegraph";
 import { appendSegments, appendStrokeCaps, capCode, F32, normalizeDashes, pathBounds } from "./geometry";
@@ -65,6 +75,8 @@ export interface PrepareContext {
   scenes?: SceneCache;
   worldEpoch?: number;
   picking?: boolean; // false: presentation only; canonical SVG remains responsible for editor targets
+  // the frame on screen: clean compat runs reuse its rasters and settle details (compat-reuse.ts); absent: none
+  previous?: Prepared | null;
 }
 
 // The scene curve tolerance; buildScene's own default, passed explicitly so the cache key cannot drift from it.
@@ -97,6 +109,30 @@ interface CompatRun {
   screen: boolean;
   sharp: boolean; // holds text, marker <svg> or burg icon vectors: refined before smooth fills (refineOrder)
   hits?: HitShape[]; // screen overlay above #viewbox: its hit area in SVG-local CSS px, as of its current raster
+  stamp: number; // reuse-tracker epoch of the DOM state its raster was cut from (compat-reuse.ts)
+  key: string; // what else its raster depends on: world region, resolution and bucket, or viewport size and DPR
+  // its detail: the settle request it answers, the alpha-cropped size it was cut at (null: fully transparent) and the
+  // downscale factor applied to fit the budget (1: none); replayed by refineCompat to keep it
+  detailMeta?: { request: string; size: [number, number] | null; fit: number };
+  // world run: the resolution at its turn in the world loop, its alpha-cropped size then (null: fully transparent)
+  // and every shrink factor applied after it; replayed to prove a reused raster equals a fresh one
+  history?: { turn: number; size: [number, number] | null; scales: number[] };
+}
+
+// Per-prepare compat reuse (telemetry). `reasons` counts dirty runs by why they were dirty (at most 8 distinct).
+// worldClean/screenClean count runs the tracker found clean; they reused their raster only when `enabled`.
+export interface CompatReuse {
+  enabled: boolean;
+  world: number;
+  worldClean: number;
+  screen: number;
+  screenClean: number;
+  details: number; // settle details carried over from the previous frame
+  cloned: boolean; // false: every run reused its raster and no export clone was cut
+  aborted: string; // reuse abandoned mid-prepare (world rasters had to shrink), "" otherwise
+  structural: string; // the sibling-dependent stylesheet selector that widened invalidation, "" when none
+  reasons: Record<string, number>;
+  ms: number; // evaluation cost (style state, tracker, references)
 }
 
 // Hit shapes of a root overlay in the root <svg>'s user space (SVG-local CSS px: #map has no viewBox).
@@ -120,7 +156,11 @@ export interface Prepared {
     resolution: number;
     // last settle refinement, in refine order: source id and drawn px per world unit (base resolution when kept)
     detail?: { id: string; density: number }[];
+    reuse?: CompatReuse;
+    // last settle refinement: details kept from an identical earlier request, details cut, export clone cut
+    refine?: { kept: number; rasterized: number; cloned: boolean };
   };
+  styleKey?: string; // stylesheet state its rasters were cut under (compat-reuse.ts styleState)
   runs: CompatRun[];
   // root overlays above the world (indexOverlays); rebuilt with the rasters by refreshOverlays, so a pick always
   // answers for the overlay pixels currently drawn
@@ -179,11 +219,16 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
   const textures: TrackedTexture[] = [];
   const buffers: TrackedBuffer[] = [];
   const windows = new BitmapWindows(device, 640, WINDOW_BUDGET);
+  // world rasters reused from ctx.previous (one shared reference each, compat-reuse.ts retain)
+  const reused: TrackedTexture[] = [];
+  const releaser = sharedReleaser(device);
   // Screen overlay textures are owned by their slot (refreshOverlays swaps them in place), everything else by `textures`.
+  // Compat textures can be shared with the previous or next frame, so every release goes through the shared count.
   const release = () => {
-    for (const resource of [...textures, ...buffers]) device.release(resource);
-    releaseRuns(runs, device);
-    textures.length = buffers.length = 0;
+    for (const resource of [...textures, ...reused]) releaseShared(device, resource);
+    for (const resource of buffers) device.release(resource);
+    releaseRuns(runs, releaser);
+    textures.length = buffers.length = reused.length = 0;
     windows.dispose();
   };
   const fans = new F32(1 << 16);
@@ -223,7 +268,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
       return void last.elements.push(element);
     }
     const slot: ImageBatch = { kind: "image", texture: null, rect: [0, 0, 0, 0], screen, detail: null };
-    runs.push({ slot, elements: [element], screen, sharp });
+    runs.push({ slot, elements: [element], screen, sharp, stamp: 0, key: "" });
     out.push(slot);
   };
 
@@ -552,34 +597,70 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
 
     const worldRuns = runs.filter(run => !run.screen);
     let resolution = compatResolution(worldRuns.length, ctx.world, 2, device.maxTextureSize);
+    const { world: region } = ctx;
+    const worldKey = (ratio: number) =>
+      `${region.x},${region.y},${region.width},${region.height}@${ratio}/${ctx.bucket}`;
+    const screenKey = `${ctx.screen.width}x${ctx.screen.height}@${ctx.screen.dpr}`;
+    // world rasters depend on the base resolution; the shrink steps under budget pressure are replayed (below)
+    for (const run of runs) run.key = run.screen ? screenKey : worldKey(resolution);
     const mib = (bytes: number) => `${(bytes / 2 ** 20).toFixed(1)} MiB`;
+    const rgba = (texture: TrackedTexture | null | undefined) => (texture ? texture.width * texture.height * 4 : 0);
+
+    // Reuse: a run whose elements, raster key and stylesheets match a run of the previous frame, and that nothing
+    // reachable changed since that raster was cut, takes its texture (and its settle detail) instead of a new raster.
+    const reuse = adoptRuns(device, svg, runs, ctx.previous ?? null);
+    const { adopted, report } = reuse;
+    for (const [run] of adopted) if (!run.screen && run.slot.texture) reused.push(run.slot.texture);
+    const reusedScreen = [...adopted.keys()].reduce((n, run) => (run.screen ? n + rgba(run.slot.texture) : n), 0);
+    // Tracked bytes as a full re-prepare sees them: it releases every previous detail at its start. A carried detail
+    // stays allocated instead, but its bytes never exceed the reused rasters a full re-prepare would allocate again.
+    const tracked = () => device.memory().total - reuse.detailBytes;
+
     const held: { run: CompatRun; canvas: HTMLCanvasElement; rect: Region }[] = [];
+    // reused world rasters the world loop has passed, at the size their replayed history gives them so far
+    let replayedBytes = () => 0;
     const sum = (screen: boolean) =>
-      held.reduce((n, item) => (item.run.screen === screen ? n + item.canvas.width * item.canvas.height * 4 : n), 0);
-    const clone = runs.length ? await compatClone(ctx.revision) : null;
+      held.reduce((n, item) => (item.run.screen === screen ? n + item.canvas.width * item.canvas.height * 4 : n), 0) +
+      (screen ? reusedScreen : replayedBytes());
+    // Built only when some run needs a raster: a prepare that reuses every run cuts no export clone.
+    let clone: SVGSVGElement | null = null;
+    let cloneStamp = 0;
+    const cloneNow = async () => {
+      if (!clone) {
+        ({ clone, stamp: cloneStamp } = await stampedClone(ctx.revision));
+        report.cloned = true;
+      }
+      return clone;
+    };
+    if (runs.some(run => !adopted.has(run))) await cloneNow();
     ctx.mark?.("clone");
     const rasterize = async (run: CompatRun): Promise<boolean> => {
-      const resolved = resolveManyInClone(run.elements, clone!);
+      const source = await cloneNow();
+      if (ctx.stale()) return false;
+      const resolved = resolveManyInClone(run.elements, source);
       const missing = resolved.find(item => typeof item === "string");
       if (missing) {
         const i = resolved.indexOf(missing);
         const e = run.elements[i];
         throw new Error(
-          `compat: ${missing} for <${e.tagName}> #${e.id} parent #${e.parentElement?.id} attrs ${e.getAttributeNames().join(",")} source siblings ${[...(e.parentElement?.children || [])].map(c => c.tagName).join(",")} clone siblings ${[...(clone!.querySelector(`#${CSS.escape(e.parentElement?.id || "")}`)?.children || [])].map(c => c.tagName).join(",")}`
+          `compat: ${missing} for <${e.tagName}> #${e.id} parent #${e.parentElement?.id} attrs ${e.getAttributeNames().join(",")} source siblings ${[...(e.parentElement?.children || [])].map(c => c.tagName).join(",")} clone siblings ${[...(source.querySelector(`#${CSS.escape(e.parentElement?.id || "")}`)?.children || [])].map(c => c.tagName).join(",")}`
         );
       }
       const region = run.screen ? { x: 0, y: 0, ...ctx.screen } : ctx.world;
       const ratio = run.screen ? ctx.screen.dpr : resolution;
       const [w, h] = [Math.max(1, Math.round(region.width * ratio)), Math.max(1, Math.round(region.height * ratio))];
-      const canvas = await rasterizeRun(clone!, resolved as Element[], region, w, h, run.screen);
+      const canvas = await rasterizeRun(source, resolved as Element[], region, w, h, run.screen);
       if (ctx.stale()) return false;
+      run.stamp = cloneStamp;
       const cropped = cropRaster(canvas, region);
       if (cropped) held.push({ run, ...cropped }); // fully transparent: slot keeps texture null and draws nothing
+      if (!run.screen)
+        run.history = { turn: ratio, size: cropped && [cropped.canvas.width, cropped.canvas.height], scales: [] };
       return true;
     };
     // Screen overlays first (fixed size at the screen DPR): their bytes are known before the window crops take room.
     for (const run of runs) {
-      if (!run.screen) continue;
+      if (!run.screen || adopted.has(run)) continue;
       if (ctx.stale() || !(await rasterize(run))) {
         release();
         return null;
@@ -593,7 +674,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
     // uncovered and the renderer shows the SVG for that view instead of a frame missing its canonical bitmaps.
     if (windows.size) {
       const reserve = sum(true) + (worldRuns.length ? MIN_COMPAT_BUDGET : 0);
-      const limit = compatAllowance(device.memory().total, owned(), pending + reserve);
+      const limit = compatAllowance(tracked(), owned(), pending + reserve);
       const committed = await windows.refresh(ctx.camera, ctx.screen, ctx.stale, limit);
       if (!committed && ctx.stale()) {
         release();
@@ -605,26 +686,80 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
     // This frame's compat share: the steady budget minus the group target reserve, what it already uploaded (bitmap
     // window crops included) and what is still pending, and never past the peak beside the previous frame. Over it,
     // world rasters shrink; a share too small for useful world rasters (or for the screen overlays) fails the
-    // prepare, and the renderer shows the SVG.
-    const budget = compatAllowance(device.memory().total, owned(), pending);
+    // prepare, and the renderer shows the SVG. Reused rasters count where a full re-prepare would allocate them, so
+    // every scaling decision is the one it would make; one that must shrink rasters abandons world reuse instead.
+    const budget = compatAllowance(tracked(), owned(), pending);
     if (budget < sum(true))
       throw new BudgetError(`compat: screen overlays need ${mib(sum(true))}, ${mib(budget)} fits`);
+    // World rasters in run order; whenever the held bytes exceed the room, every held world raster shrinks by the
+    // same factor (scaleRaster) and later runs rasterize at the lower resolution. A reused raster is exactly the one a
+    // full re-prepare would cut only if it would arrive at the same turn resolution and then see the same shrink
+    // steps: its recorded history is replayed (its pixel size simulated), and any divergence rasterizes every world
+    // run afresh, so the frame always equals a full re-prepare's.
     if (runs.length) {
-      for (const run of runs) {
-        if (run.screen) continue;
-        if (ctx.stale() || !(await rasterize(run))) {
-          release();
-          return null;
+      const base = resolution;
+      let again = true;
+      while (again) {
+        again = false;
+        resolution = base;
+        const replayed: { run: CompatRun; width: number; height: number; expected: number[] }[] = [];
+        const diverged = () => {
+          reuse.dropWorld(reused);
+          for (let i = held.length - 1; i >= 0; i--) if (!held[i].run.screen) held.splice(i, 1)[0].canvas.width = 0;
+          again = true;
+        };
+        replayedBytes = () => replayed.reduce((n, item) => n + item.width * item.height * 4, 0);
+        for (const run of runs) {
+          if (run.screen) continue;
+          const history = adopted.get(run)?.history;
+          if (adopted.has(run)) {
+            if (!history || history.turn !== resolution) {
+              diverged();
+              break;
+            }
+            run.history = { turn: resolution, size: history.size, scales: [] };
+            if (history.size)
+              replayed.push({ run, width: history.size[0], height: history.size[1], expected: history.scales });
+          } else if (ctx.stale() || !(await rasterize(run))) {
+            release();
+            return null;
+          }
+          const worldRoom = budget - sum(true);
+          const scale = fitScale(sum(false), worldRoom);
+          if (scale < 1 && worldRoom < MIN_COMPAT_BUDGET)
+            throw new BudgetError(
+              `compat: world rasters need ${mib(sum(false))}, ${mib(worldRoom)} fits the GPU budget`
+            );
+          if (scale < 1) {
+            if (replayed.some(item => item.expected[item.run.history!.scales.length] !== scale)) {
+              diverged();
+              break;
+            }
+            for (const item of held)
+              if (!item.run.screen) {
+                item.canvas = scaleRaster(item.canvas, scale);
+                item.run.history!.scales.push(scale);
+              }
+            for (const item of replayed) {
+              item.width = Math.max(1, Math.floor(item.width * scale)); // scaleRaster's own rounding
+              item.height = Math.max(1, Math.floor(item.height * scale));
+              item.run.history!.scales.push(scale);
+            }
+            resolution *= scale;
+          }
         }
-        const worldRoom = budget - sum(true);
-        const scale = fitScale(sum(false), worldRoom);
-        if (scale < 1 && worldRoom < MIN_COMPAT_BUDGET)
-          throw new BudgetError(`compat: world rasters need ${mib(sum(false))}, ${mib(worldRoom)} fits the GPU budget`);
-        if (scale < 1) {
-          for (const item of held) if (!item.run.screen) item.canvas = scaleRaster(item.canvas, scale);
-          resolution *= scale;
-        }
+        if (
+          !again &&
+          replayed.some(
+            item =>
+              item.run.history!.scales.length !== item.expected.length ||
+              item.width !== item.run.slot.texture?.width ||
+              item.height !== item.run.slot.texture?.height
+          )
+        )
+          diverged();
       }
+      replayedBytes = () => 0;
       for (const { run, canvas, rect } of held) {
         run.slot.texture = device.texture(run.screen ? "compat screen" : "compat world", canvas);
         if (!run.screen) textures.push(run.slot.texture);
@@ -663,6 +798,10 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
     ctx.mark?.("buffers");
     const atlasBytes = ctx.atlas.canvas.width * ctx.atlas.canvas.height * 4; // CPU glyph canvas, counted once here
     const overlays = indexOverlays(runs, ctx.screen);
+    // tracker entries older than every raster this frame or the previous one still draws can no longer matter
+    compatDirt.prune(
+      [...runs, ...(ctx.previous?.runs ?? [])].reduce((min, run) => Math.min(min, run.stamp), compatDirt.now())
+    );
     return {
       frame,
       picking,
@@ -670,7 +809,14 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
       bucket: ctx.bucket,
       revision: ctx.revision,
       layers: scene.layers,
-      compat: { runs: runs.length, elements: runs.reduce((n, run) => n + run.elements.length, 0), reasons, resolution },
+      compat: {
+        runs: runs.length,
+        elements: runs.reduce((n, run) => n + run.elements.length, 0),
+        reasons,
+        resolution,
+        reuse: report
+      },
+      styleKey: reuse.style?.key,
       runs,
       overlays,
       relief,
@@ -686,9 +832,160 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
   }
 }
 
+// Pairs this prepare's compat runs with the previous frame's: same elements in the same order, same raster key, same
+// stylesheet state, and clean in the reuse tracker (compat-reuse.ts) with no reference to a non-definition element.
+// A clean run takes the previous texture (shared) and, while their bytes stay within the reused rasters, its settle
+// detail; every other previous detail is released now, as a full re-prepare does at its start.
+// Off by default: on the route-focus run (Metal, DPR 2, k=8/16) a route close dirties every run under the fail-closed
+// ancestor rule, and with a subtree-only rule the budget-scaled world rasters still diverge from their history, so
+// reuse saved nothing there (PERF-A stop-loss). Opt in with ?gpu-compat-reuse=1 or a build with
+// VITE_GPU_COMPAT_REUSE=1. The dirty-run telemetry (lastPrepare.reuse reasons) needs the flag too: off, the renderer
+// installs no tracker feed or outside-input watcher, and the default path matches the pre-reuse renderer.
+export function compatReuseEnabled(): boolean {
+  if (import.meta.env?.VITE_GPU_COMPAT_REUSE === "1") return true;
+  try {
+    return new URLSearchParams(globalThis.location?.search ?? "").get("gpu-compat-reuse") === "1";
+  } catch {
+    return false;
+  }
+}
+
+function adoptRuns(device: GpuDevice, svg: SVGSVGElement, runs: CompatRun[], previous: Prepared | null) {
+  const started = performance.now();
+  const adopted = new Map<CompatRun, CompatRun>();
+  const report: CompatReuse = {
+    enabled: compatReuseEnabled(),
+    world: runs.filter(run => !run.screen).length,
+    worldClean: 0,
+    screen: runs.filter(run => run.screen).length,
+    screenClean: 0,
+    details: 0,
+    cloned: false,
+    aborted: "",
+    structural: "",
+    reasons: {},
+    ms: 0
+  };
+  const count = (reason: string) => {
+    const keys = Object.keys(report.reasons);
+    const key = report.reasons[reason] !== undefined || keys.length < 8 ? reason : "other";
+    report.reasons[key] = (report.reasons[key] ?? 0) + 1;
+  };
+  // Off: the renderer feeds the tracker and watches outside inputs only when reuse is on (input-path cost), so its
+  // verdicts would be meaningless; skip the evaluation too. The renderer released the previous details at prepare start.
+  const style: StyleState | null = runs.length && report.enabled ? documentStyle(svg) : null;
+  if (!report.enabled && runs.length) report.reasons["reuse off"] = runs.length;
+  report.structural = style?.structural ?? "";
+  const now = compatDirt.now();
+  let detailBytes = 0;
+  const carried = new Set<ImageBatch["detail"]>();
+  if (style && previous?.runs.length) {
+    const before = new Map<Element, CompatRun>();
+    for (const run of previous.runs) before.set(run.elements[0], run);
+    const pairs: { run: CompatRun; old: CompatRun }[] = [];
+    for (const run of runs) {
+      const old = before.get(run.elements[0]);
+      if (
+        !old ||
+        old.screen !== run.screen ||
+        old.elements.length !== run.elements.length ||
+        old.elements.some((element, i) => element !== run.elements[i])
+      )
+        count("new run");
+      else if (old.key !== run.key) count("raster key");
+      else if (previous.styleKey !== style.key) count("stylesheets");
+      else pairs.push({ run, old });
+    }
+    const verdicts = compatDirt.evaluate(
+      pairs.map(pair => pair.old),
+      !!style.structural
+    );
+    const document = svg.ownerDocument;
+    pairs.forEach(({ run, old }, i) => {
+      const external =
+        verdicts[i] ||
+        externalReference(run.elements as unknown as Parameters<typeof externalReference>[0], id =>
+          document.getElementById(id)
+        );
+      if (external) count(verdicts[i] || `reference ${external}`);
+      else {
+        if (run.screen) report.screenClean++;
+        else report.worldClean++;
+        if (report.enabled) adopted.set(run, old);
+      }
+    });
+    let reusedBytes = 0;
+    for (const [run, old] of adopted) {
+      const texture = old.slot.texture;
+      run.slot.texture = texture && retain(texture);
+      run.slot.rect = [...old.slot.rect];
+      run.stamp = now; // verified clean up to now
+      reusedBytes += texture ? texture.width * texture.height * 4 : 0;
+    }
+    for (const [run, old] of adopted) {
+      const detail = old.slot.detail;
+      if (run.screen || !detail || !old.detailMeta) continue;
+      const bytes = detail.texture ? detail.texture.width * detail.texture.height * 4 : 0;
+      if (detailBytes + bytes > reusedBytes) continue;
+      detailBytes += bytes;
+      run.slot.detail = { ...detail, texture: detail.texture && retain(detail.texture) };
+      run.detailMeta = old.detailMeta;
+      carried.add(detail);
+      report.details++;
+    }
+  } else if (report.enabled) for (let i = 0; i < runs.length; i++) count(previous ? "new run" : "no previous frame");
+  if (previous)
+    for (const run of previous.runs)
+      if (run.slot.detail && !carried.has(run.slot.detail)) {
+        releaseShared(device, run.slot.detail.texture);
+        run.slot.detail = null;
+        run.detailMeta = undefined;
+      }
+  report.ms = Math.round((performance.now() - started) * 10) / 10;
+  const result = {
+    adopted,
+    report,
+    style,
+    detailBytes,
+    // Abandons world reuse (reused textures cannot shrink): drops the shared textures and carried details from this
+    // frame, and the carried details from the previous one too, so both look as a full re-prepare leaves them.
+    dropWorld(reused: TrackedTexture[]) {
+      for (const [run, old] of adopted) {
+        if (run.screen) continue;
+        const texture = run.slot.texture;
+        const at = texture ? reused.indexOf(texture) : -1;
+        if (at >= 0) reused.splice(at, 1);
+        releaseShared(device, texture);
+        run.slot.texture = null;
+        run.slot.rect = [0, 0, 0, 0];
+        const detail = run.slot.detail;
+        if (detail) {
+          result.detailBytes -= detail.texture ? detail.texture.width * detail.texture.height * 4 : 0;
+          releaseShared(device, detail.texture);
+          if (old.slot.detail?.texture === detail.texture) {
+            releaseShared(device, detail.texture);
+            old.slot.detail = null;
+            old.detailMeta = undefined;
+          }
+          run.slot.detail = null;
+          run.detailMeta = undefined;
+          report.details--;
+        }
+        adopted.delete(run);
+        report.worldClean--;
+      }
+      report.aborted = "world rasters had to shrink";
+    }
+  };
+  return result;
+}
+
 // Settle-time sharper raster of world compat runs for the visible region at backing resolution, alpha-cropped and kept
 // within GPU_BUDGET (tracked total, so the base frame and target count). Returns false when stale, over budget or
 // nothing to refine. Each slot draws its detail only while the view stays inside `covers`, else its base texture.
+// A detail already cut for this exact request at full density, from content unchanged since (this frame's, or one
+// prepareFrame carried over from a clean run), is kept where a full re-refine would allocate the same bytes; the
+// export clone is cut only when some detail must be rasterized.
 export async function refineCompat(
   prepared: Prepared,
   ctx: PrepareContext,
@@ -698,23 +995,49 @@ export async function refineCompat(
 ): Promise<boolean> {
   const world = prepared.runs.filter(run => !run.screen && run.slot.texture);
   if (!world.length) return false;
-  // Sharp runs, then smallest visible footprint first (see refineOrder); every previous detail is released before any
-  // room is measured, so a stale detail of a later run never counts against an earlier one.
+  const { device } = ctx;
+  // Sharp runs, then smallest visible footprint first (see refineOrder); every previous detail that is not kept is
+  // released before any room is measured, so a stale detail of a later run never counts against an earlier one.
   const order = refineOrder(
     world.map(run => run.slot.rect),
     visible,
     world.map(run => run.sharp)
   );
   const runs = order.map(index => world[index]);
-  for (const run of runs) {
-    ctx.device.release(run.slot.detail?.texture);
+  const request = `${visible.x},${visible.y},${visible.width},${visible.height}@${pixels.width}x${pixels.height}`;
+  const bytesOf = (run: CompatRun) => {
+    const texture = run.slot.detail?.texture;
+    return texture ? texture.width * texture.height * 4 : 0;
+  };
+  const drop = (run: CompatRun) => {
+    releaseShared(device, run.slot.detail?.texture);
     run.slot.detail = null;
+    run.detailMeta = undefined;
+  };
+  const kept = new Set<CompatRun>();
+  for (const run of runs) {
+    if (run.slot.detail && run.detailMeta?.request === request) kept.add(run);
+    else drop(run);
   }
+  // kept details of runs this pass has not reached yet: a full re-refine has not allocated them at that point
+  let keptAfter = runs.reduce((n, run) => (kept.has(run) ? n + bytesOf(run) : n), 0);
   const covers: [number, number, number, number] = [visible.x, visible.y, visible.width, visible.height];
-  const clone = await compatClone(ctx.revision);
+  const stats = { kept: 0, rasterized: 0, cloned: false };
+  let clone: SVGSVGElement | null = null;
   const density = pixels.width / visible.width;
+  // The detail a raster alpha-cropped to `size` (null: fully transparent) becomes with `room` left: full (fit 1),
+  // downscaled into the room while that still beats the base raster's density, or none (null: the base stays).
+  const decide = (size: [number, number] | null, room: number): number | null => {
+    if (!size) return 1;
+    const bytes = size[0] * size[1] * 4;
+    if (bytes <= room) return 1;
+    const fit = Math.sqrt(Math.max(0, room) / bytes);
+    if (!(density * fit > prepared.compat.resolution)) return null;
+    return Math.floor(size[0] * fit) >= 1 && Math.floor(size[1] * fit) >= 1 ? fit : null;
+  };
   const report: { id: string; density: number }[] = [];
   prepared.compat.detail = report;
+  prepared.compat.refine = stats;
   let refined = false;
   for (const run of runs) {
     const element = run.elements[0];
@@ -724,6 +1047,27 @@ export async function refineCompat(
     };
     report.push(entry);
     if (ctx.stale()) return false;
+    const meta = run.detailMeta;
+    if (kept.has(run) && meta) {
+      const bytes = bytesOf(run);
+      keptAfter -= bytes;
+      kept.delete(run);
+      // what a full re-refine cuts here, beside only the details before this run: the same detail is kept
+      const fit = decide(meta.size, budget - (device.memory().total - keptAfter - bytes));
+      if (fit === meta.fit) {
+        entry.density = density * fit;
+        stats.kept++;
+        refined = true;
+        continue;
+      }
+      drop(run);
+      if (fit === null) continue; // it would keep the base: nothing to cut
+    }
+    if (!clone) {
+      clone = await compatClone(ctx.revision);
+      stats.cloned = true;
+      if (ctx.stale()) return false;
+    }
     const resolved = resolveManyInClone(run.elements, clone);
     if (resolved.some(item => typeof item === "string")) return false;
     const canvas = await rasterizeRun(clone, resolved as Element[], visible, pixels.width, pixels.height, false);
@@ -732,22 +1076,30 @@ export async function refineCompat(
     // Check the alpha-cropped allocation, not a hypothetical full viewport. Sparse labels and markers can fit
     // even when an uncropped viewport would exceed the budget. A run that cannot fit is downscaled into the remaining
     // headroom while that still beats the base raster's density, else it keeps the base.
-    const bytes = cropped ? cropped.canvas.width * cropped.canvas.height * 4 : 0;
-    const room = budget - ctx.device.memory().total;
-    if (cropped && bytes > room) {
-      const fit = Math.sqrt(Math.max(0, room) / bytes);
-      const sharper = density * fit > prepared.compat.resolution;
-      const scaled = sharper ? scaleCanvas(cropped.canvas, fit) : null;
+    const size: [number, number] | null = cropped && [cropped.canvas.width, cropped.canvas.height];
+    let room = budget - device.memory().total;
+    if (size && size[0] * size[1] * 4 > room && keptAfter) {
+      // a full re-refine would see the room without the later kept details: free them, they are cut again in turn
+      for (const later of kept) drop(later);
+      kept.clear();
+      keptAfter = 0;
+      room = budget - device.memory().total;
+    }
+    const fit = decide(size, room);
+    if (cropped && fit !== 1) {
+      const scaled = fit === null ? null : scaleCanvas(cropped.canvas, fit);
       cropped.canvas.width = cropped.canvas.height = 0;
       if (!scaled) continue;
       cropped = { canvas: scaled, rect: cropped.rect };
-      entry.density = density * fit;
-    } else entry.density = density;
+    }
+    entry.density = density * (fit ?? 1);
     refined = true;
+    stats.rasterized++;
+    run.detailMeta = { request, size, fit: fit ?? 1 };
     if (!cropped) run.slot.detail = { texture: null, rect: covers, covers };
     else {
       const { x, y, width, height } = cropped.rect;
-      const texture = ctx.device.texture("compat detail", cropped.canvas);
+      const texture = device.texture("compat detail", cropped.canvas);
       run.slot.detail = { texture, rect: [x, y, width, height], covers };
       cropped.canvas.width = cropped.canvas.height = 0;
     }
@@ -833,7 +1185,9 @@ export async function refreshOverlays(
     runs.push(run);
   }
   if (!runs.length) return "committed";
-  const clone = await compatClone(ctx.revision);
+  // The copies come from the live roots, but their defs, embedded fonts, root attributes and the styles computed under
+  // them are the cached clone's: the refreshed raster is only as current as the clone (fail closed for reuse).
+  const { clone, stamp } = await stampedClone(ctx.revision);
   if (ctx.stale()) return "stale";
   // every copy is resolved before any is swapped in, so a "full" exit leaves the clone as it was
   const swaps: [Element, Element][] = [];
@@ -868,6 +1222,7 @@ export async function refreshOverlays(
       if (ctx.stale()) return "stale";
     }
     const { device } = ctx;
+    const releaser = sharedReleaser(device);
     const old = runs.reduce((n, run) => n + (run.slot.texture?.bytes ?? 0), 0);
     const bytes = held.reduce(
       (n, { cropped }) => n + (cropped ? cropped.canvas.width * cropped.canvas.height * 4 : 0),
@@ -877,7 +1232,7 @@ export async function refreshOverlays(
     const textures = uploadAll(
       held,
       ({ cropped }) => cropped && device.texture("compat screen", cropped.canvas),
-      device
+      releaser
     );
     swapOverlays(
       held.map(({ run, cropped }, i) => ({
@@ -886,10 +1241,11 @@ export async function refreshOverlays(
         rect:
           cropped && ([cropped.rect.x, cropped.rect.y, cropped.rect.width, cropped.rect.height] as ImageBatch["rect"])
       })),
-      device
+      releaser
     );
     runs.forEach((run, i) => {
       run.hits = hits[i];
+      run.stamp = stamp;
     });
     prepared.overlays = indexOverlays(prepared.runs, ctx.screen);
   } finally {
@@ -904,7 +1260,8 @@ export const hasDetail = (prepared: Prepared) => prepared.runs.some(run => run.s
 export function releaseDetail(prepared: Prepared, device: GpuDevice): void {
   for (const run of prepared.runs)
     if (run.slot.detail) {
-      device.release(run.slot.detail.texture);
+      releaseShared(device, run.slot.detail.texture);
       run.slot.detail = null;
+      run.detailMeta = undefined;
     }
 }
