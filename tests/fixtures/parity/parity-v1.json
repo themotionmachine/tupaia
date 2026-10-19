@@ -74,26 +74,26 @@
   },
   "build": {
     "builtWith": "bench/host/fixtures/build-parity-fixture.ts",
-    "seconds": 16.3,
+    "seconds": 17.4,
     "steps": [
-      "generate ok 425ms",
-      "canonicalise ok 265ms",
-      "settings ok 4ms",
-      "layers ok 2816ms",
-      "relief ok 967ms",
-      "lakes ok 129ms",
-      "regiments ok 126ms",
-      "markers ok 124ms",
-      "zones ok 126ms",
+      "generate ok 462ms",
+      "canonicalise ok 283ms",
+      "settings ok 18ms",
+      "layers ok 2852ms",
+      "relief ok 1001ms",
+      "lakes ok 133ms",
+      "regiments ok 132ms",
+      "markers ok 132ms",
+      "zones ok 128ms",
       "ice ok 120ms",
-      "grid ok 142ms",
-      "measurers ok 144ms",
-      "legend ok 145ms",
-      "labels ok 141ms",
-      "fog ok 144ms",
-      "zoom-styling ok 141ms",
-      "save ok 515ms",
-      "reload ok 1597ms"
+      "grid ok 143ms",
+      "measurers ok 152ms",
+      "legend ok 154ms",
+      "labels ok 142ms",
+      "fog ok 151ms",
+      "zoom-styling ok 151ms",
+      "save ok 541ms",
+      "reload ok 1718ms"
     ],
     "pageErrors": []
   },
@@ -2866,8 +2866,7 @@
         "coastline-filter",
         "grid-dashed",
         "coordinates",
-        "halo",
-        "emblems"
+        "halo"
       ]
     },
     {
@@ -2879,6 +2878,39 @@
       "y": 0,
       "covers": [
         "ice"
+      ]
+    },
+    {
+      "id": "k2-lake",
+      "k": 2,
+      "cx": 776.4,
+      "cy": 435.1,
+      "x": -912.8,
+      "y": -510.2,
+      "covers": [
+        "lakes"
+      ]
+    },
+    {
+      "id": "k2-compass",
+      "k": 2,
+      "cx": 320,
+      "cy": 180,
+      "x": 0,
+      "y": 0,
+      "covers": [
+        "compass"
+      ]
+    },
+    {
+      "id": "k2-emblem",
+      "k": 2,
+      "cx": 553,
+      "cy": 388,
+      "x": -466,
+      "y": -416,
+      "covers": [
+        "emblems"
       ]
     },
     {
@@ -2918,19 +2950,51 @@
         "coastline-filter",
         "grid-dashed",
         "coordinates",
-        "halo",
-        "emblems"
+        "halo"
       ]
     },
     {
       "id": "k4-ice",
+      "k": 4,
+      "cx": 193,
+      "cy": 90,
+      "x": -132,
+      "y": 0,
+      "covers": [
+        "ice"
+      ]
+    },
+    {
+      "id": "k4-lake",
+      "k": 4,
+      "cx": 776.4,
+      "cy": 435.1,
+      "x": -2465.6,
+      "y": -1380.4,
+      "covers": [
+        "lakes"
+      ]
+    },
+    {
+      "id": "k4-compass",
       "k": 4,
       "cx": 160,
       "cy": 90,
       "x": 0,
       "y": 0,
       "covers": [
-        "ice"
+        "compass"
+      ]
+    },
+    {
+      "id": "k4-emblem",
+      "k": 4,
+      "cx": 553,
+      "cy": 388,
+      "x": -1572,
+      "y": -1192,
+      "covers": [
+        "emblems"
       ]
     },
     {
@@ -2981,19 +3045,51 @@
         "coastline-filter",
         "grid-dashed",
         "coordinates",
-        "halo",
-        "emblems"
+        "halo"
       ]
     },
     {
       "id": "k8-ice",
+      "k": 8,
+      "cx": 193,
+      "cy": 59.8,
+      "x": -904,
+      "y": -118.4,
+      "covers": [
+        "ice"
+      ]
+    },
+    {
+      "id": "k8-lake",
+      "k": 8,
+      "cx": 776.4,
+      "cy": 435.1,
+      "x": -5571.2,
+      "y": -3120.8,
+      "covers": [
+        "lakes"
+      ]
+    },
+    {
+      "id": "k8-compass",
       "k": 8,
       "cx": 80,
       "cy": 45,
       "x": 0,
       "y": 0,
       "covers": [
-        "ice"
+        "compass"
+      ]
+    },
+    {
+      "id": "k8-emblem",
+      "k": 8,
+      "cx": 553,
+      "cy": 388,
+      "x": -3784,
+      "y": -2744,
+      "covers": [
+        "emblems"
       ]
     },
     {
