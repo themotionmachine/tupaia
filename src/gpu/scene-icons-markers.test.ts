@@ -86,9 +86,19 @@ describe("row 18 military regiments", () => {
     expect(scene.layers.armies).toMatchObject({ native: 4, compat: 6 });
   });
 
-  it("[PRIM] an <image href=''> inside a regiment is compat 'image' rather than skipped", () => {
+  it("[PRIM] an <image href=''> inside a regiment paints nothing and is skipped", () => {
     env.fill("armies", '<g id="army1"><image x="0" y="0" width="2" height="2" href=""/></g>');
-    expect(layerRouting(buildStyled(env), "armies")).toEqual(["compat(image)"]);
+    expect(layerRouting(buildStyled(env), "armies")).toEqual([]);
+  });
+
+  it("[PRIM] a regiment drawn with rotate(0) (drawRegiment) keeps its rects native", () => {
+    env.fill(
+      "armies",
+      '<g id="army1" fill="#ff0000"><g id="regiment1-0" transform="rotate(0)" transform-origin="3px 1px"><rect x="0" y="0" width="6" height="3"/><image x="0" y="0" width="2" height="2" href=""/></g></g>'
+    );
+    expect(layerRouting(buildStyled(env), "armies")).toEqual(["shape"]);
+    env.layer("regiment1-0").setAttribute("transform", "rotate(30)");
+    expect(layerRouting(env.build(), "armies")).toEqual(["compat(group transform)"]);
   });
 });
 

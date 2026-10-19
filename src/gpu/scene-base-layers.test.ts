@@ -166,19 +166,24 @@ describe("row 23 texture and debug overlays", () => {
     expect(layerRouting(env.build(), "texture")).toEqual(["compat(image)"]);
   });
 
-  it("[PRIM] an <image href=''> (cleared texture) is still compat 'image', not skipped", () => {
+  it("[PRIM] an <image href=''> (cleared texture) paints nothing and is skipped, not a compat run", () => {
     env.fill("texture", '<image href="" x="0" y="0" width="10" height="10"/>');
     applyStylePreset(env);
     env.layer("texture").removeAttribute("mask");
-    expect(layerRouting(env.build(), "texture")).toEqual(["compat(image)"]);
+    const scene = env.build();
+    expect(layerRouting(scene, "texture")).toEqual([]);
+    expect(scene.layers.texture).toBeUndefined();
+    env.fill("texture", '<image x="0" y="0" width="10" height="10"/>');
+    expect(layerRouting(env.build(), "texture")).toEqual([]);
   });
 
-  it("[PRIM] #debug circles and lines are compat; debug paths are native", () => {
+  it("[PRIM] #debug circles and lines are compat by default and native opt-in; debug paths are native", () => {
     env.fill(
       "debug",
       '<circle cx="1" cy="1" r="2" fill="#ff0000"/><line x1="0" y1="0" x2="5" y2="5" stroke="#000000"/>'
     );
     expect(layerRouting(build(), "debug")).toEqual(["compat(<circle>; <line>)"]);
+    expect(layerRouting(env.build({ nativeShapes: true }), "debug")).toEqual(["shape", "shape"]);
     env.fill("debug", '<path d="M0,0L5,5" fill="none" stroke="#000000"/>');
     expect(layerRouting(env.build(), "debug")).toEqual(["shape"]);
   });

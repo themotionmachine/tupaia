@@ -9,7 +9,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { vi } from "vitest";
-import { buildScene, type Draw, type Scene } from "../scene";
+import { buildScene, type Draw, type Scene, type SceneOptions } from "../scene";
 
 export const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -198,7 +198,7 @@ export interface MapEnv {
   set(id: string, attributes: Record<string, string>): Element;
   /** Add stylesheet stub rules at runtime. */
   rule(selector: string, declarations: Record<string, string>): void;
-  build(): Scene;
+  build(options?: SceneOptions): Scene;
   dispose(): void;
 }
 
@@ -263,7 +263,7 @@ export function createMapEnv(options: MapEnvOptions = {}): MapEnv {
     rule(selector, declarations) {
       rules.push({ selector, declarations });
     },
-    build: () => buildScene(viewbox),
+    build: options => buildScene(viewbox, undefined, options),
     dispose: () => {
       vi.unstubAllGlobals();
       vi.restoreAllMocks();
