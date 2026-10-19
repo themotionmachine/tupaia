@@ -60,6 +60,7 @@ function frame() {
     glyphCount: 0,
     atlasCanvas: null,
     atlasCopy: false,
+    atlasGeneration: 0,
     recipes: new Map([
       [pattern, { label: "pattern hatch", source: { width: 4, height: 4 } as never, options: { repeat: true } }],
       [reliefAtlas, { label: "relief atlas", source: { width: 4, height: 4 } as never, options: { mipmap: true } }],
@@ -187,19 +188,50 @@ describe("retained frame (context-loss restore without a scene walk)", () => {
   it("retains on loss only while the glyph atlas still holds the frame's glyphs", () => {
     const { retained } = frame();
     const { runs, atlas: _atlas, ...payload } = retained;
-    const prepared = (glyphCount: number, atlasCopy: boolean) =>
+    const live = { canvas: { width: 8, height: 8 } as HTMLCanvasElement, generation: 3 };
+    const copies: { drawn: unknown[] }[] = [];
+    vi.stubGlobal("document", {
+      createElement: () => {
+        const copy = { width: 0, height: 0, drawn: [] as unknown[] };
+        copies.push(copy);
+        return { ...copy, getContext: () => ({ drawImage: (source: unknown) => copy.drawn.push(source) }) };
+      }
+    });
+    // a frame laid out in the live atlas at `generation`, or restored from a payload that owns its copy
+    const prepared = (glyphCount: number, atlasCopy: boolean, atlasGeneration = live.generation) =>
       ({
-        payload: { ...payload, glyphCount, atlasCanvas: glyphCount ? ({} as HTMLCanvasElement) : null, atlasCopy },
+        payload: {
+          ...payload,
+          glyphCount,
+          atlasCanvas: glyphCount ? (atlasCopy ? ({} as HTMLCanvasElement) : live.canvas) : null,
+          atlasCopy,
+          atlasGeneration
+        },
         runs
       }) as unknown as Prepared;
-    expect(retainFrame(null, true)).toBeNull();
-    // no glyphs: nothing to copy, retained even while a prepare is in flight
-    expect(retainFrame(prepared(0, false), false)?.atlas).toBeNull();
-    // glyphs in the renderer's live atlas, which an in-flight prepare has cleared
-    expect(retainFrame(prepared(5, false), false)).toBeNull();
-    // a frame restored from a payload indexes that payload's own copy: kept as is, in flight or not
-    const owned = prepared(5, true);
-    expect(retainFrame(owned, false)?.atlas).toBe(owned.payload.atlasCanvas);
-    expect(retainFrame(owned, true)?.runs.map(run => run.slot)).toEqual(runs.map(run => run.slot));
+    try {
+      expect(retainFrame(null, live)).toBeNull();
+      // ?gpu-restore-retain=0: the frame kept no payload
+      expect(retainFrame({ payload: null, runs } as unknown as Prepared, live)).toBeNull();
+      // no glyphs: nothing to copy, retained whatever the atlas holds
+      expect(retainFrame(prepared(0, false, 1), live)?.atlas).toBeNull();
+      // the live atlas still holds the frame's glyphs: copied
+      const kept = retainFrame(prepared(5, false), live);
+      expect(kept?.atlas).not.toBeNull();
+      expect(copies.at(-1)?.drawn).toEqual([live.canvas]);
+      // a prepare cleared the atlas since the frame, in flight or aborted on motion (its result never committed):
+      // the frame stays, the atlas holds another job's glyphs, so nothing is retained
+      expect(retainFrame(prepared(5, false, live.generation - 1), live)).toBeNull();
+      // a clear during the frame's own prepare (recorded as -1) never matches
+      expect(retainFrame(prepared(5, false, -1), live)).toBeNull();
+      // another atlas canvas than the renderer's
+      expect(retainFrame(prepared(5, false), { ...live, canvas: {} as HTMLCanvasElement })).toBeNull();
+      // a frame restored from a payload indexes that payload's own copy: kept as is, whatever the live atlas holds
+      const owned = prepared(5, true, 0);
+      expect(retainFrame(owned, live)?.atlas).toBe(owned.payload!.atlasCanvas);
+      expect(retainFrame(owned, live)?.runs.map(run => run.slot)).toEqual(runs.map(run => run.slot));
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

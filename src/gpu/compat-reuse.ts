@@ -197,6 +197,7 @@ export class CompatDirt {
         // combinators and :has() make the stylesheet `structural` (every run dirty, below), and a run that paints
         // through an id outside the definitions is never reused (externalReference). The zoom-end label font-size
         // write on #labels > g#states therefore dirties the label runs under it, not every run (PERF-A stop-loss).
+        // Known gap: an ancestor id change that makes a url(#id) or href elsewhere resolve to another element.
         if (kinds & ATTR) {
           if (structural) every(at, `ancestor ${describeNode(node)} (structural CSS)`);
           else for (const i of live) if (under(runs[i], node)) dirty(i, at, `ancestor ${describeNode(node)}`);

@@ -1141,8 +1141,9 @@ export class GpuRenderer {
     this.recovery.lost();
     this.generation++;
     this.prepareWanted = this.suspendWanted = false; // restored() prepares unconditionally
-    // PERF B1: keep the frame's CPU payload for a same-revision restore; an in-flight prepare has cleared the glyph atlas
-    this.retained = retainFrame(this.prepared, !this.preparing) ?? this.retained;
+    // PERF B1: keep the frame's CPU payload for a same-revision restore. Any prepare since the frame (in flight, aborted
+    // or released) has cleared the glyph atlas: retainFrame checks the atlas generation the frame recorded.
+    this.retained = retainFrame(this.prepared, this.atlas) ?? this.retained;
     this.drop();
     this.markers.forget();
     this.timer?.lose();

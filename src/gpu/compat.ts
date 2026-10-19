@@ -133,7 +133,8 @@ export async function rasterizeRun(
 
 // Decode resolution for world runs: the desired density capped by MAX_TEXTURE_SIZE and by a per-run decode pixel cap
 // (the transient CPU canvas; 4096² also fits Safari's canvas area limit). GPU memory is bounded after alpha cropping
-// (see fitScale in prepare), so huge worlds get a lower density instead of a forced floor over the budget.
+// (fitScale, or the ladder below with compat reuse on, in prepare), so huge worlds get a lower density instead of a
+// forced floor over the budget.
 export function compatResolution(
   runs: number,
   world: Region,
@@ -147,7 +148,8 @@ export function compatResolution(
   return Math.min(desired, bySize, byPixels);
 }
 
-// World rasters shrink under budget pressure along a fixed ladder, base·2^(-level/LADDER_STEPS), never to an exact fit.
+// With compat reuse on (prepare.ts compatReuseEnabled), world rasters shrink under budget pressure along a fixed ladder,
+// base·2^(-level/LADDER_STEPS), never to an exact fit (off, they fit exactly, fitScale).
 // A frame's world rasters all sit at one level, so two prepares whose budgets differ a little (a cells mesh, a route
 // edit, the previous frame's size) land on the same level and a clean run's raster stays reusable (compat-reuse.ts).
 export const LADDER_STEPS = 4;
@@ -162,6 +164,14 @@ export function ladderFit(bytes: number, room: number, from: number): number {
   let level = from;
   while (level < from + 64 && bytes * (ladderScale(level) / ladderScale(from)) ** 2 > room) level++;
   return level;
+}
+
+// Where a prepare that keeps world rasters starts: the previous frame's level `from`, or the level a full re-prepare
+// would reach with the previous frame's world bytes (measured at `from`) when that is higher (sharper): level 0 when
+// they fit the room there, else the ladder fit under LADDER_HEADROOM. Without it a reused frame never steps back up.
+export function ladderStart(from: number, bytes: number, room: number): number {
+  const atBase = bytes / ladderScale(from) ** 2;
+  return Math.min(from, atBase <= room ? 0 : ladderFit(atBase, room * LADDER_HEADROOM, 0));
 }
 
 // Crops a decoded raster to its non-transparent pixels plus 1 px transparent padding and returns the world rect of the

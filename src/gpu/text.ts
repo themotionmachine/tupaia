@@ -27,6 +27,8 @@ export class GlyphAtlas {
   private y = 0;
   private row = 0;
   dirty = true;
+  // bumped by every clear(): a frame records the generation its glyph instances index (prepare.ts retainFrame)
+  generation = 0;
 
   constructor() {
     this.canvas = document.createElement("canvas");
@@ -90,6 +92,7 @@ export class GlyphAtlas {
     this.glyphs.clear();
     this.x = this.y = this.row = 0;
     this.dirty = true;
+    this.generation++;
   }
 }
 

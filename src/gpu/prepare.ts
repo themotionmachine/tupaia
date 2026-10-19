@@ -3,7 +3,15 @@
 // await: a superseded job releases what it allocated and returns null.
 import type { ReliefSprite } from "../renderers/relief-canvas";
 import { BitmapWindows } from "./bitmap-window";
-import { compatAllowance, GPU_BUDGET, MIN_COMPAT_BUDGET, refineOrder, reliefCell, windowAllowance } from "./budget";
+import {
+  compatAllowance,
+  fitScale,
+  GPU_BUDGET,
+  MIN_COMPAT_BUDGET,
+  refineOrder,
+  reliefCell,
+  windowAllowance
+} from "./budget";
 import type { Camera } from "./camera";
 import { resolveManyInClone } from "./clone-map";
 import {
@@ -11,8 +19,10 @@ import {
   compatResolution,
   cropRaster,
   LADDER_HEADROOM,
+  LADDER_STEPS,
   ladderFit,
   ladderScale,
+  ladderStart,
   type Region,
   rasterizeRun,
   resolveInClone,
@@ -177,8 +187,9 @@ export interface Prepared {
   windows: BitmapWindows | null;
   cpuBytes: number;
   tessellation: MeshStats;
-  // what retainFrame keeps across a context loss (B1 step 1): references only, the vertex arrays included
-  payload: Payload;
+  // what retainFrame keeps across a context loss (B1 step 1): references only, the vertex arrays included; null with
+  // ?gpu-restore-retain=0, so the opt-out arm holds no extra CPU memory
+  payload: Payload | null;
   release(): void;
 }
 
@@ -197,6 +208,7 @@ interface PayloadKey {
   world: string;
   screen: string;
   scale: number; // camera scale when picking: dashed-stroke hit rings follow it (dash-measure.ts)
+  maxTexture: number; // relief atlas and canonical relief images are sized to the device limit (an adapter switch)
 }
 
 interface Recipe {
@@ -228,6 +240,8 @@ interface Payload {
   // retained restore uploaded (owned by this payload)
   atlasCanvas: HTMLCanvasElement | null;
   atlasCopy: boolean;
+  // the live atlas's generation (GlyphAtlas.clear bumps it) when this frame's glyphs were laid out in it
+  atlasGeneration: number;
   recipes: Map<TrackedTexture, Recipe>;
   windows: WindowSource[];
 }
@@ -244,7 +258,8 @@ const payloadKey = (ctx: PrepareContext, picking: boolean): PayloadKey => ({
   picking,
   world: `${ctx.world.x},${ctx.world.y},${ctx.world.width},${ctx.world.height}`,
   screen: `${ctx.screen.width}x${ctx.screen.height}@${ctx.screen.dpr}`,
-  scale: picking ? ctx.camera.k : 0
+  scale: picking ? ctx.camera.k : 0,
+  maxTexture: ctx.device.maxTextureSize
 });
 
 const sameKey = (a: PayloadKey, b: PayloadKey) =>
@@ -338,16 +353,20 @@ export function rehydrate(
   return { runs, batches: retained.batches.map(copy) };
 }
 
-// Called on context loss, before the frame is dropped. `liveAtlas`: the renderer's glyph atlas still holds the glyphs
-// this frame indexes (false while a prepare is in flight: it cleared the atlas). A frame that was itself restored from a
-// payload indexes that payload's own copy instead.
-export function retainFrame(prepared: Prepared | null, liveAtlas: boolean): RetainedFrame | null {
-  if (!prepared) return null;
-  const { glyphCount, atlasCanvas, atlasCopy } = prepared.payload;
+// Called on context loss, before the frame is dropped, with the renderer's live glyph atlas. Its glyphs are the frame's
+// only while no prepare has cleared it since the frame laid its labels out: every prepare clears it first, including
+// one that is still in flight, was aborted (motion, suspend) or whose result was released, while the frame stays.
+// A frame that was itself restored from a payload indexes that payload's own copy instead.
+export function retainFrame(
+  prepared: Prepared | null,
+  live: Pick<GlyphAtlas, "canvas" | "generation">
+): RetainedFrame | null {
+  if (!prepared?.payload) return null;
+  const { glyphCount, atlasCanvas, atlasCopy, atlasGeneration } = prepared.payload;
   let copy: HTMLCanvasElement | null = null;
   if (glyphCount && atlasCopy) copy = atlasCanvas;
   else if (glyphCount) {
-    if (!liveAtlas || !atlasCanvas) return null;
+    if (!atlasCanvas || atlasCanvas !== live.canvas || live.generation !== atlasGeneration) return null;
     copy = document.createElement("canvas");
     copy.width = atlasCanvas.width;
     copy.height = atlasCanvas.height;
@@ -398,6 +417,8 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
   const viewbox = svg.querySelector("#viewbox");
   if (!viewbox) throw new Error("missing #viewbox");
   const payloadAt = payloadKey(ctx, picking);
+  // the generation this prepare lays labels out at; a clear while it runs makes the frame's atlas unretainable
+  const atlasGeneration = ctx.atlas.generation;
   const retained =
     ctx.retained && retainEnabled() && sameKey(ctx.retained.key, payloadAt) && complete(ctx.retained)
       ? ctx.retained
@@ -836,11 +857,11 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
     // stays allocated instead, but its bytes never exceed the reused rasters a full re-prepare would allocate again.
     const tracked = () => device.memory().total - reuse.detailBytes;
 
-    // World ladder level: a frame that reuses world rasters starts where the previous frame ended (they are at that
-    // level); any other starts at the base resolution. The level only steps down within a prepare.
+    // World raster level (resolution = base · ladderScale(level)), chosen with the budget below; 0 is the base.
     let level = 0;
-    for (const [run, old] of adopted) if (!run.screen) level = old.level ?? 0;
-    let resolution = base * ladderScale(level);
+    let resolution = base;
+    // world runs rasterized this prepare, transparent ones included: each records the level its raster is at
+    const cut: CompatRun[] = [];
     const held: { run: CompatRun; canvas: HTMLCanvasElement; rect: Region }[] = [];
     // clean world runs counted at the current level with their reused texture
     const kept = new Set<CompatRun>();
@@ -877,7 +898,10 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
       const canvas = await rasterizeRun(source, resolved as Element[], region, w, h, run.screen);
       if (ctx.stale()) return false;
       run.stamp = cloneStamp;
-      if (!run.screen) run.level = level;
+      if (!run.screen) {
+        run.level = level;
+        cut.push(run);
+      }
       const cropped = cropRaster(canvas, region);
       if (cropped) held.push({ run, ...cropped }); // fully transparent: slot keeps texture null and draws nothing
       return true;
@@ -915,6 +939,18 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
     const budget = compatAllowance(tracked(), owned(), pending);
     if (budget < sum(true))
       throw new BudgetError(`compat: screen overlays need ${mib(sum(true))}, ${mib(budget)} fits`);
+    // With reuse on, world rasters shrink along the fixed ladder (compat.ts): a frame that keeps world rasters starts
+    // at the previous frame's level, or higher (sharper) when the previous frame's world bytes would fit the room there,
+    // so a reused frame steps back up as a full re-prepare would (an estimate: the dirty runs may change size). With
+    // reuse off (the default), they shrink to an exact fit (fitScale) as before the ladder, level reporting the
+    // equivalent fractional step.
+    const ladder = report.enabled;
+    const previous = ctx.previous;
+    if (ladder && previous && [...adopted.keys()].some(run => !run.screen)) {
+      const bytes = previous.runs.reduce((n, run) => (run.screen ? n : n + rgba(run.slot.texture)), 0);
+      level = ladderStart(previous.compat.level, bytes, budget - sum(true));
+      resolution = base * ladderScale(level);
+    }
     // World rasters in run order at the current level. Whenever their bytes exceed the room, the level steps down to
     // one that fits under LADDER_HEADROOM of it: every held fresh raster is resampled to it (scaleRaster), later runs
     // are cut at it, and a kept raster (a GPU texture, which cannot shrink) is cut again at it after the queue.
@@ -936,20 +972,24 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
       if (bytes <= worldRoom) continue;
       if (worldRoom < MIN_COMPAT_BUDGET)
         throw new BudgetError(`compat: world rasters need ${mib(bytes)}, ${mib(worldRoom)} fits the GPU budget`);
-      const next = ladderFit(bytes, worldRoom * LADDER_HEADROOM, level);
-      const scale = ladderScale(next) / ladderScale(level);
-      for (const item of held)
-        if (!item.run.screen) {
-          item.canvas = scaleRaster(item.canvas, scale);
-          item.run.level = next;
-        }
+      let next: number;
+      let scale: number;
+      if (ladder) {
+        next = ladderFit(bytes, worldRoom * LADDER_HEADROOM, level);
+        scale = ladderScale(next) / ladderScale(level);
+      } else {
+        scale = fitScale(bytes, worldRoom);
+        next = level - LADDER_STEPS * Math.log2(scale);
+      }
+      for (const item of held) if (!item.run.screen) item.canvas = scaleRaster(item.canvas, scale);
+      for (const run of cut) run.level = next;
       for (const run of kept) {
         reuse.drop(run, reused, "world rasters stepped down the ladder");
         queue.push(run);
       }
       kept.clear();
       level = next;
-      resolution = base * ladderScale(level);
+      resolution = ladder ? base * ladderScale(level) : resolution * scale;
     }
     for (const { run, canvas, rect } of held) {
       run.slot.texture = device.texture(run.screen ? "compat screen" : "compat world", canvas);
@@ -992,8 +1032,16 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
     ctx.mark?.("buffers");
     // CPU glyph canvas, counted once here (the renderer's atlas, or the retained copy it was restored from)
     const atlasBytes = atlasCanvas ? atlasCanvas.width * atlasCanvas.height * 4 : 0;
-    // kept for retainFrame: views of the conversion's arrays (their capacity, up to twice the used length)
+    // Kept for retainFrame (none with ?gpu-restore-retain=0): views of the conversion's arrays (their capacity, up to
+    // twice the used length), the glyph instances and every texture source (an upper bound: some, such as the cached
+    // relief images, are held by their caches anyway).
+    const keep = retainEnabled();
     const vertexHeld = Object.values(vertices).reduce((n, array) => n + array.buffer.byteLength, 0);
+    const recipeHeld = [...recipes.values()].reduce(
+      (n, { source }) => n + ("width" in source && "height" in source ? source.width * source.height * 4 : 0),
+      0
+    );
+    const payloadHeld = keep ? vertexHeld + glyphData.byteLength + recipeHeld : 0;
     const payload: Payload = {
       key: payloadAt,
       layers: retained?.layers ?? cloneLayers(scene.layers),
@@ -1007,6 +1055,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
       glyphCount,
       atlasCanvas: glyphCount ? atlasCanvas : null,
       atlasCopy: !!retained,
+      atlasGeneration: ctx.atlas.generation === atlasGeneration ? atlasGeneration : -1,
       recipes,
       windows: windowSources.map(item => ({ ...item, detail: item.slot.detail && { ...item.slot.detail } }))
     };
@@ -1035,10 +1084,10 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
       overlays,
       relief,
       windows: windows.size ? windows : null,
-      // retained CPU memory: pick index, glyph atlas canvas and the vertex arrays kept for a context restore
-      cpuBytes: pick.bytes() + overlays.bytes() + atlasBytes + vertexHeld + glyphData.byteLength,
+      // retained CPU memory: pick index, glyph atlas canvas and the payload kept for a context restore
+      cpuBytes: pick.bytes() + overlays.bytes() + atlasBytes + payloadHeld,
       tessellation: payload.tessellation,
-      payload,
+      payload: keep ? payload : null,
       release
     };
   } catch (error) {
@@ -1054,7 +1103,8 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
 // Off by default, pending a decision: with the subtree rule and the world raster ladder (PERF W1), a route close on the
 // route-focus run (Metal, DPR 2, three route closes, single runs) keeps 4/6 world and 2/3 screen runs and the prepare
 // goes 2.9/5.4/5.8 -> 2.2/3.1/2.8 s (integration-20261019T210149-621Z -> 211754-900Z), and canonical passes with it
-// on, but no check yet compares a reused raster against SVG after an edit, and resume stays 5.5-8.1 s. Opt in with ?gpu-compat-reuse=1 or a build with
+// on, but no check yet compares a reused raster against SVG after an edit, and resume stays 5.5-8.1 s. The ladder is
+// part of reuse: off, world rasters fit the budget exactly, as before W1. Opt in with ?gpu-compat-reuse=1 or a build with
 // VITE_GPU_COMPAT_REUSE=1. The dirty-run telemetry (lastPrepare.reuse reasons) needs the flag too: off, the renderer
 // installs no tracker feed or outside-input watcher, and the default path matches the pre-reuse renderer.
 export function compatReuseEnabled(): boolean {

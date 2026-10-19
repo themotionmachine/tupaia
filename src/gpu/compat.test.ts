@@ -5,7 +5,15 @@ const { prepareMapClone } = vi.hoisted(() => ({
 }));
 vi.mock("../io/export", () => ({ prepareMapClone }));
 
-import { compatClone, forgetCompatClone, LADDER_HEADROOM, LADDER_STEPS, ladderFit, ladderScale } from "./compat";
+import {
+  compatClone,
+  forgetCompatClone,
+  LADDER_HEADROOM,
+  LADDER_STEPS,
+  ladderFit,
+  ladderScale,
+  ladderStart
+} from "./compat";
 
 describe("compat clone", () => {
   // the scene walks the live #viewbox including #debug (editor overlays such as the route editor's #controlPoints);
@@ -58,5 +66,24 @@ describe("world raster ladder", () => {
 
   it("gives up after 64 levels (the budget check fails the prepare first)", () => {
     expect(ladderFit(1, 0, 0)).toBe(64);
+  });
+
+  // A frame that keeps world rasters starts at the previous level unless the room now fits a sharper one, as a full
+  // re-prepare (which starts at the base) would find: a tight frame (an open editor) does not pin later frames low.
+  it("starts a reusing prepare at the previous level, or higher when the room fits it", () => {
+    const bytes = 60 << 20; // previous world rasters, measured at level 4 (half density): 240 MiB at the base
+    // the same room that put it there: stays at 4 (no re-cut of the clean runs)
+    expect(ladderStart(4, bytes, (64 << 20) / LADDER_HEADROOM)).toBe(4);
+    // a room that shrank: the world loop steps down from 4 as before
+    expect(ladderStart(4, bytes, 50 << 20)).toBe(4);
+    // the editor closed and the room grew back: the base fits, start there
+    expect(ladderStart(4, bytes, 240 << 20)).toBe(0);
+    // more room but not the base: the ladder fit a full re-prepare would land on
+    const room = 150 << 20;
+    expect(ladderStart(4, bytes, room)).toBe(ladderFit(240 << 20, room * LADDER_HEADROOM, 0));
+    expect(ladderStart(4, bytes, room)).toBeLessThan(4);
+    // never below 0, and level 0 stays at 0
+    expect(ladderStart(0, bytes, 1 << 30)).toBe(0);
+    expect(ladderStart(0, bytes, 1 << 20)).toBe(0);
   });
 });
