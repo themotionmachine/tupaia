@@ -5,6 +5,7 @@ import { withCanonicalEmblemPaint } from "./emblem-paint";
 import { TRADE_LAYER } from "./markers";
 import { SceneCensus } from "./scene-census";
 import { flattenPath, type Subpath } from "./svg-path";
+import { basicShapePath, isIdentityTransform, nearestViewport, type Viewport } from "./svg-shapes";
 
 export type Rgba = [number, number, number, number];
 export interface ShapeStyle {
@@ -149,11 +150,12 @@ function attributeStyles(element: Element, parent: Styles): Styles {
   };
 }
 
-function shapeStyle(cs: Styles): ShapeStyle | string {
+// `unfilled`: the shape has no interior (<line>), so its fill paint is never used and never refuses it.
+function shapeStyle(cs: Styles, unfilled = false): ShapeStyle | string {
   const opacity = number(cs.opacity, 1);
-  const pattern = urlId(cs.fill);
-  const fill = pattern ? null : parseColor(cs.fill, number(cs.fillOpacity, 1) * opacity);
-  if (!pattern && !fill && cs.fill && cs.fill !== "none") return `fill ${cs.fill}`;
+  const pattern = unfilled ? null : urlId(cs.fill);
+  const fill = pattern || unfilled ? null : parseColor(cs.fill, number(cs.fillOpacity, 1) * opacity);
+  if (!unfilled && !pattern && !fill && cs.fill && cs.fill !== "none") return `fill ${cs.fill}`;
   const width = cs.strokeWidth.endsWith("%") ? Number.NaN : number(cs.strokeWidth, 1);
   let stroke = parseColor(cs.stroke, number(cs.strokeOpacity, 1) * opacity);
   if (urlId(cs.stroke) || (!stroke && cs.stroke && cs.stroke !== "none")) return `stroke ${cs.stroke}`;
@@ -178,18 +180,27 @@ function shapeStyle(cs: Styles): ShapeStyle | string {
   };
 }
 
-function geometry(element: Element): string | null {
+// Path data for a drawable element; null keeps it compat. `viewport` resolves percentage lengths (mask content only).
+function geometry(element: Element, viewport: Viewport | null = null): string | null {
   const tag = element.tagName;
   if (tag === "path") return element.getAttribute("d") || "";
   if (tag === "polygon" || tag === "polyline")
     return pointsToPath(element.getAttribute("points") || "") + (tag === "polygon" ? "Z" : "");
-  if (tag === "rect" && !element.getAttribute("rx") && !element.getAttribute("ry")) {
-    const values = ["x", "y", "width", "height"].map(name => element.getAttribute(name) || "0");
-    if (values.some(v => v.endsWith("%"))) return null;
-    const [x, y, w, h] = values.map(Number);
-    return [x, y, w, h].every(Number.isFinite) ? `M${x},${y}h${w}v${h}h${-w}Z` : null;
+  return basicShapePath(element, viewport);
+}
+
+// Mask content geometry (viewport-% rects as in #fog and #water, rect x/y as geometry rather than an offset) is native
+// unless the page opts out with ?gpu-mask-rects=0, which restores the previous rule that sent those masks to compat.
+function maskRectsDefault(): boolean {
+  try {
+    return new URLSearchParams(globalThis.location?.search ?? "").get("gpu-mask-rects") !== "0";
+  } catch {
+    return true;
   }
-  return null;
+}
+
+export interface SceneOptions {
+  maskRects?: boolean;
 }
 
 function reliefIcons(value: string | null): ReliefSprite[] | null {
@@ -230,11 +241,12 @@ export function materializedIcons(group: Element): ReliefSprite[] | null {
   return icons.length ? icons : null;
 }
 
-export function buildScene(viewbox: Element, curveTolerance = 0.2): Scene {
-  return withCanonicalEmblemPaint(() => canonicalBuildScene(viewbox, curveTolerance));
+export function buildScene(viewbox: Element, curveTolerance = 0.2, options: SceneOptions = {}): Scene {
+  const maskRects = options.maskRects ?? maskRectsDefault();
+  return withCanonicalEmblemPaint(() => canonicalBuildScene(viewbox, curveTolerance, maskRects));
 }
 
-function canonicalBuildScene(viewbox: Element, curveTolerance: number): Scene {
+function canonicalBuildScene(viewbox: Element, curveTolerance: number, maskRects: boolean): Scene {
   const layers: Record<string, LayerReport> = {};
   // null unless a bench page installed globalThis.__gpuSceneCensus (scene-census.ts); read-only either way
   const census = SceneCensus.open();
@@ -259,9 +271,16 @@ function canonicalBuildScene(viewbox: Element, curveTolerance: number): Scene {
     } else out.push({ kind: "compat", element, elements: [element], layer, reason });
   };
 
-  const shape = (element: Element, source: Element, cs: Styles, layer: string, out: Draw[]) => {
-    const d = geometry(source);
-    const style = shapeStyle(cs);
+  const shape = (
+    element: Element,
+    source: Element,
+    cs: Styles,
+    layer: string,
+    out: Draw[],
+    viewport: Viewport | null = null
+  ) => {
+    const d = geometry(source, viewport);
+    const style = shapeStyle(cs, source.tagName === "line");
     if (d === null) return compat(element, layer, `<${source.tagName}>`, out);
     if (typeof style === "string") return compat(element, layer, style, out);
     if (!style.fill && !style.pattern && !style.stroke) return census?.skip(layer, element, "no paint");
@@ -274,10 +293,16 @@ function canonicalBuildScene(viewbox: Element, curveTolerance: number): Scene {
     const mask = doc.getElementById(id);
     if (!mask || mask.hasAttribute("maskUnits") || mask.hasAttribute("maskContentUnits")) return null;
     const out: Draw[] = [];
+    const viewport = maskRects ? nearestViewport(mask) : null;
     for (const child of mask.children) {
-      const source = child.tagName === "use" ? doc.getElementById(child.getAttribute("href")?.slice(1) || "") : child;
-      if (!source || child.getAttribute("x") || child.getAttribute("y")) return null;
-      shape(child, source, computed(child), layer, out);
+      const use = child.tagName === "use";
+      const source = use ? doc.getElementById(child.getAttribute("href")?.slice(1) || "") : child;
+      if (!source) return null;
+      // a <use> x/y is an offset this stencil cannot apply; on a basic shape it is the shape's own geometry
+      const x = child.getAttribute("x");
+      const y = child.getAttribute("y");
+      if (!maskRects ? x || y : use && (number(x, 0) || number(y, 0))) return null;
+      shape(child, source, computed(child), layer, out, viewport);
       const last = out[out.length - 1];
       if (last?.kind !== "shape" || last.style.stroke || !last.style.fill) return null;
       const [r, g, b, a] = last.style.fill;
@@ -300,7 +325,7 @@ function canonicalBuildScene(viewbox: Element, curveTolerance: number): Scene {
     const effects =
       (cs.filter && cs.filter !== "none" && "filter") ||
       (cs.clipPath && cs.clipPath !== "none" && "clip-path") ||
-      (transform && !/^\s*(translate\(\s*0[\s,]+0\s*\))?\s*$/.test(transform) && "transform") ||
+      (!isIdentityTransform(transform) && "transform") ||
       "";
     // Live trade markers are mirrored per frame (markers.ts); only their static siblings (highlight) are prepared here.
     if (depth === 0 && element.id === TRADE_LAYER) {
@@ -384,6 +409,9 @@ function canonicalBuildScene(viewbox: Element, curveTolerance: number): Scene {
         out.push({ kind: "cachedPaths", element, layer, paths: parsed, opacity: number(cs.opacity, 1) });
         return;
       }
+      // An image with no href paints nothing (cleared texture, regiment without an image icon)
+      const href = element.getAttribute("href") ?? element.getAttribute("xlink:href") ?? "";
+      if (!href.trim()) return census?.skip(layer, element, "empty image");
       return compat(element, layer, "image", out);
     }
     if (tag === "use") {

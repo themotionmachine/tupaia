@@ -109,14 +109,14 @@ describe("row 19 ice", () => {
     expect(layerRouting(scene, "ice")).toEqual(["group{mask:none,op:0.9}[compat(transform),shape]"]);
   });
 
-  it("[PRIM] identity translate(0,0) is normalized to native but rotate(0) is not", () => {
+  it("[PRIM] identity translate(0,0), translate(0 0) and rotate(0) are all normalized to native", () => {
     env.fill(
       "ice",
       '<polygon id="a" points="0,0 5,0 5,5" transform="translate(0,0)"/><polygon id="b" points="0,0 5,0 5,5" transform="rotate(0)"/><polygon id="c" points="0,0 5,0 5,5" transform="translate(0 0)"/>'
     );
     applyStylePreset(env);
     env.layer("ice").removeAttribute("filter");
-    expect(layerRouting(env.build(), "ice")).toEqual(["group{mask:none,op:0.9}[shape,compat(transform),shape]"]);
+    expect(layerRouting(env.build(), "ice")).toEqual(["group{mask:none,op:0.9}[shape,shape,shape]"]);
   });
 
   it("polygon points become a closed native path", () => {
