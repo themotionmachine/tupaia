@@ -5,6 +5,13 @@ import { resolve, extname, dirname, basename } from "node:path";
 import { createHash } from "node:crypto";
 import { frameBudgets, budgetToleranceFraction } from "./frame-budget.ts";
 import { attributeTrace } from "./trace.ts";
+import {
+  fileFixtureIdentity,
+  type FixtureIdentity,
+  generatedFixtureIdentity,
+  parseRendererEnv,
+  rendererQuery
+} from "./renderer-ab.ts";
 import { platform, arch, cpus, loadavg } from "node:os";
 
 const dist = resolve(process.env.BENCH_DIST || "dist");
@@ -33,6 +40,9 @@ if (angle && !["metal", "swiftshader"].includes(angle)) throw new Error("Invalid
 if (process.env.BENCH_GPU && !["0", "1"].includes(process.env.BENCH_GPU)) throw new Error("Invalid BENCH_GPU");
 const enableGpu = process.env.BENCH_GPU === "1";
 const launchConfig = { headless, channel, angle, enableGpu };
+// Unset keeps the URL and output identical to earlier runs; P0 records a gpu request that falls back to svg.
+const renderer = parseRendererEnv(process.env.BENCH_RENDERER);
+const inputMethod = "synthetic-dom";
 const launchArgs = [
   ...(angle ? ["--use-angle=" + angle] : []),
   ...(enableGpu ? ["--enable-gpu"] : []),
@@ -105,12 +115,14 @@ try {
   page.on("pageerror", error => errors.push(error.message));
   page.on("dialog", dialog => dialog.dismiss());
   const workerQuery = process.env.BENCH_RELIEF_WORKER === "1" ? "&reliefWorker=1" : "";
-  await page.goto(origin + "/?local&seed=7319&width=1280&height=720" + workerQuery);
+  await page.goto(origin + "/?local&seed=7319&width=1280&height=720" + workerQuery + rendererQuery(renderer));
   await page.evaluate(async () => {
     const runtime = (globalThis as any).__tupaia;
     const result = await runtime.call("ready", { timeoutMs: 120000 });
     if (!result.ok) throw new Error(JSON.stringify(result));
   });
+  const readRendererStatus = () => page.evaluate(() => (globalThis as any).rendererStatus?.() ?? null);
+  const rendererStatusStart = await readRendererStatus();
   const sharedText = process.env.BENCH_MAP ? readFileSync(process.env.BENCH_MAP, "utf8") : undefined;
   const fixtureHash = sharedText ? createHash("sha256").update(sharedText).digest("hex") : undefined;
   const sharedWorld = process.env.BENCH_MAP_LABEL || "shared";
@@ -132,6 +144,15 @@ try {
     (worlds.includes(sharedWorld) && !sharedText)
   )
     throw new Error("Invalid BENCH_WORLDS or missing BENCH_MAP");
+  // "demo" always loads the demo fixture; previously it silently loaded BENCH_MAP whenever that was set.
+  const demoText = readFileSync("tests/fixtures/demo.map", "utf8");
+  const worldText = (world: string) => (world === sharedWorld ? sharedText : world === "demo" ? demoText : undefined);
+  const fixtures: Record<string, FixtureIdentity> = {};
+  for (const world of worlds)
+    fixtures[world] =
+      world === "100k"
+        ? generatedFixtureIdentity(world, { cells: 100000, seed: "7319", template: "continents", width: 1280, height: 720 })
+        : fileFixtureIdentity(world, worldText(world) || "");
   for (const world of worlds) {
     await page.evaluate(
       async ({ world, text }) => {
@@ -153,7 +174,7 @@ try {
         await Promise.all([(globalThis as any).reliefRenderReady, (globalThis as any).burgRenderReady]);
         await runtime.settle();
       },
-      { world, text: sharedText || readFileSync("tests/fixtures/demo.map", "utf8") }
+      { world, text: worldText(world) }
     );
     for (const gesture of ["pan-near", "pan-wide", "wheel-zoom"]) {
       for (let iteration = 0; iteration <= samples; iteration++) {
@@ -495,6 +516,7 @@ try {
       }
     }
   }
+  const rendererStatusEnd = await readRendererStatus();
   mkdirSync(dirname(output), { recursive: true });
   writeFileSync(
     output,
@@ -504,8 +526,12 @@ try {
         tracing,
         gpu,
         launchConfig,
+        renderer,
+        inputMethod,
+        rendererStatus: { start: rendererStatusStart, end: rendererStatusEnd },
         fixtureHash,
         fixtureMetadata,
+        fixtures,
         budgetToleranceFraction,
         loadAverageStart,
         loadAverageEnd: loadavg(),

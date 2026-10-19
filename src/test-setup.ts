@@ -5,11 +5,9 @@ if (typeof window === "undefined") {
 
 // Stub DOM Node so utils/index.ts can patch its prototype without crashing
 if (typeof Node === "undefined") {
-  (globalThis as Record<string, unknown>).Node = {
-    prototype: {
-      addEventListener: () => {},
-      removeEventListener: () => {}
-    }
+  (globalThis as Record<string, unknown>).Node = class {
+    addEventListener() {}
+    removeEventListener() {}
   };
 }
 

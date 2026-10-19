@@ -11,6 +11,8 @@ for (const field of [
   "tracing",
   "gpu",
   "launchConfig",
+  "renderer",
+  "inputMethod",
   "node",
   "platform",
   "arch",
@@ -25,6 +27,9 @@ for (const field of [
 ])
   if (JSON.stringify(base[field]) !== JSON.stringify(head[field]))
     throw new Error("Incompatible navigation runs: " + field);
+// Renderer A/B pairs are compared by bench/renderer-ab-run.ts; this comparator only pairs like with like.
+if (base.renderer && base.rendererStatus?.end?.active !== head.rendererStatus?.end?.active)
+  throw new Error("Incompatible navigation runs: active renderer");
 if (base.samples < 3) throw new Error("Use at least three gesture samples");
 const key = (run: any) => run.world + "/" + run.gesture + "/" + run.iteration;
 for (const data of [base, head]) {
