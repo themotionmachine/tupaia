@@ -288,6 +288,9 @@ const putBytes = (run: ArmRun, key: string, bytes: Buffer) => {
 
 // ------------------------------------------------------------------ one arm: the script both arms run
 
+// The Navigate/Edit indicator (gpu arm only) sits over the 3D canvas; element screenshots include overlapping UI.
+const HIDE_GPU_CHROME = "#renderModeIndicator { visibility: hidden !important; }";
+
 async function runArm(world: string, arm: Arm, label: string = arm): Promise<ArmRun> {
   const { context, page, run, downloads } = await openArm(world, arm, label);
   const evalp = <T>(fn: (...a: any[]) => T | Promise<T>, arg?: unknown) => page.evaluate(fn as any, arg) as Promise<T>;
@@ -459,7 +462,7 @@ async function runArm(world: string, arm: Arm, label: string = arm): Promise<Arm
       });
       await page.waitForSelector("#canvas3d", { state: "visible", timeout: 60000 });
       await page.waitForTimeout(4000);
-      putBytes(run, "view3d-mesh.png", await page.locator("#canvas3d").screenshot());
+      putBytes(run, "view3d-mesh.png", await page.locator("#canvas3d").screenshot({ style: HIDE_GPU_CHROME }));
       run.facts.view3d = await evalp(() => ({ status: (globalThis as any).__cons.status(), canvases: document.querySelectorAll("#canvas3d").length }));
       // satellite: a procedural texture that replaces the SVG render entirely ("satellite mode unchanged"). Its water
       // shimmer follows the rAF timestamp, so the timestamp is fixed for the capture.
@@ -468,9 +471,9 @@ async function runArm(world: string, arm: Arm, label: string = arm): Promise<Arm
         await (globalThis as any).ThreeD.toggleSatellite();
       });
       await page.waitForTimeout(5000);
-      putBytes(run, "view3d-satellite.png", await page.locator("#canvas3d").screenshot());
+      putBytes(run, "view3d-satellite.png", await page.locator("#canvas3d").screenshot({ style: HIDE_GPU_CHROME }));
       await page.waitForTimeout(500);
-      putBytes(run, "view3d-satellite-again.png", await page.locator("#canvas3d").screenshot());
+      putBytes(run, "view3d-satellite-again.png", await page.locator("#canvas3d").screenshot({ style: HIDE_GPU_CHROME }));
       await evalp(async () => {
         (globalThis as any).__cons.freezeRafTime(false);
         await (globalThis as any).ThreeD.toggleSatellite();
