@@ -16,6 +16,9 @@ import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { FAMILIES, FAMILY_NAMES, parsePresets, parseZooms, STYLE_PRESETS, selectFamilies } from "../host/golden-families.ts";
 import { HostLock, type LockMode, slotCount } from "./host-lock.ts";
+import { nonPassing } from "../integration-fixture.ts";
+import { parseArms } from "../host/editor-replay-core.ts";
+import { LAUNCHERS } from "../host/launcher.ts";
 
 const REPO = resolve(import.meta.dirname, "../..");
 const NODE = process.execPath;
@@ -91,6 +94,20 @@ const ARG_SPEC: Record<string, Spec> = {
   preamble: { type: "enum", values: ["none", "editors", "roundtrip", "fixture"], default: "none" },
   cohort: { type: "enum", values: ["short", "full"], default: "short" },
   focus: { type: "enum", values: ["all", "route"], default: "all" },
+  // integration/replay browser: metal (host GPU, default) or swiftshader (CPU WebGL; reproduces the pre-W1 gate runs)
+  launcher: { type: "enum", values: [...LAUNCHERS], default: "metal" },
+  // replay (bench/host/editor-replay.ts): editor scripts under bench/host/editor-scripts/, and the arms that replay them
+  editors: {
+    type: "string",
+    default: "all",
+    check: text => {
+      if (text === "all") return;
+      const known = readdirSync(join(REPO, "bench/host/editor-scripts")).filter(f => f.endsWith(".ts") && f !== "common.ts").map(f => f.slice(0, -3));
+      const bad = text.split(",").filter(name => !known.includes(name.trim()));
+      if (bad.length) throw new UsageError(`editors: unknown ${bad.join(", ")} (have ${known.join(", ")})`);
+    }
+  },
+  arms: { type: "string", default: "svg,gpu,gpu-select", check: listOf(parseArms) },
   denseLabels: { type: "bool", default: false },
   reliefMode: { type: "enum", values: ["compact", "materialized"], default: "compact" },
   phase: { type: "enum", values: ["settled", "motion"], default: "settled" },
@@ -350,6 +367,30 @@ async function runScript(
 }
 
 const reportFailure = (data: Json) => (data?.failure ? String(data.failure).slice(0, 2000) : null);
+// Integration-family verdict tables: anything but PASS fails the check, whatever the script itself concluded
+// (UNTESTED and UNDERCOVERED cohorts once let `integration` pass; 2026-10-19, gpu-main integration-20261019T202113).
+const verdictFailure = (data: Json) => {
+  if (!data) return null;
+  if (!data.verdicts || typeof data.verdicts !== "object") return "report has no verdicts";
+  const bad = nonPassing(data.verdicts);
+  return bad.length ? `verdicts not PASS: ${bad.join(", ")}` : null;
+};
+
+function replayCheck(ctx: Ctx, fixed: Record<string, string>): Promise<Partial<Result>> {
+  const report = join(ctx.dir, "replay.json");
+  const env = {
+    REPLAY_MAP: ctx.map(),
+    REPLAY_EDITORS: String(ctx.args.editors ?? "all"),
+    REPLAY_ARMS: String(ctx.args.arms ?? "svg,gpu,gpu-select"),
+    REPLAY_DPR: String(ctx.args.dpr ?? 2),
+    REPLAY_LAUNCHER: String(ctx.args.launcher),
+    ...fixed
+  };
+  return runScript(ctx, nodeScript("bench/host/editor-replay.ts"), env, report, DEFS[ctx.check].timeout, data => ({
+    failure: reportFailure(data) ?? verdictFailure(data),
+    metrics: data && { summary: data.summary, selftest: data.selftest, adapters: data.adapters, failures: data.failures?.slice(0, 12) }
+  }));
+}
 
 function vitestMetrics(text: string): Json {
   const files = /Test Files\s+(.+)/.exec(text)?.[1]?.trim();
@@ -415,7 +456,11 @@ function integrationMetrics(data: Json): Json {
     pageErrors: data.pageErrors?.length ?? null,
     blockedRequests: data.blockedRequests?.length ?? null,
     failures: data.failures?.length ?? null,
-    resyncCohort: data.resyncCohort ? Object.fromEntries(Object.entries(data.resyncCohort).map(([k, v]: [string, Json]) => [k, pick(v, ["eligible", "resynced", "dropped"])])) : undefined
+    resyncCohort: data.resyncCohort ? Object.fromEntries(Object.entries(data.resyncCohort).map(([k, v]: [string, Json]) => [k, pick(v, ["eligible", "resynced", "dropped"])])) : undefined,
+    adapter: data.adapter?.renderer ?? undefined,
+    staleWindow: Object.fromEntries(
+      (["routeCohort", "markerCohort"] as const).filter(k => data[k]).map(k => [k, { eligible: data[k].eligible, ineligible: data[k].ineligible, wheelToClickMs: data[k].wheelToClickMs }])
+    )
   };
 }
 
@@ -813,7 +858,7 @@ const DEFS: Record<string, CheckDef> = {
         INTEGRATION_MAP: ctx.map()
       };
       return runScript(ctx, nodeScript("bench/direct-integration-metal-local-init.ts"), env, report, 300, data => ({
-        failure: reportFailure(data),
+        failure: reportFailure(data) ?? verdictFailure(data),
         metrics: { ...integrationMetrics(data), canonicalFallback: data?.canonicalFallback && pick(data.canonicalFallback, ["active", "hookCleared", "rendererCleared", "canvases"]) }
       }));
     }
@@ -865,7 +910,7 @@ const DEFS: Record<string, CheckDef> = {
   },
   integration: {
     lock: "shared",
-    keys: [...CAMERA, "cohort", "focus", "preamble"],
+    keys: [...CAMERA, "cohort", "focus", "preamble", "launcher"],
     timeout: 1800,
     run: ctx => {
       const report = join(ctx.dir, "report.json");
@@ -877,13 +922,41 @@ const DEFS: Record<string, CheckDef> = {
         INTEGRATION_MAP: ctx.map(),
         INTEGRATION_COHORT: String(ctx.args.cohort),
         INTEGRATION_FOCUS: String(ctx.args.focus),
-        INTEGRATION_PREAMBLE: String(ctx.args.preamble)
+        INTEGRATION_PREAMBLE: String(ctx.args.preamble),
+        INTEGRATION_LAUNCHER: String(ctx.args.launcher)
       };
       return runScript(ctx, nodeScript("bench/renderer-integration.ts"), env, report, 1800, data => ({
-        failure: reportFailure(data),
+        failure: reportFailure(data) ?? verdictFailure(data),
         metrics: { ...integrationMetrics(data), summary: data?.summary }
       }));
     }
+  },
+  // Editor replay (W1 REPLAY): record each editor script on the SVG arm, replay it under gpu and gpu-select, diff
+  // pack/grid hashes, the model DOM and its attribute deltas, dispatch counts and the camera; GPU arms must suspend
+  // (canvas hidden) while the editor is open and resume after the close. Correctness only: resume latency here comes
+  // from arms running side by side, so read it from `replay-resume`.
+  replay: {
+    lock: "shared",
+    keys: ["editors", "arms", "dpr", "launcher", "fixture"],
+    spec: { fixture: { type: "string", default: "parity" } },
+    timeout: 900,
+    run: ctx => replayCheck(ctx, {})
+  },
+  // The same replay, arms one after another under the exclusive lock: resume latency (current and refined frame) for PERF.
+  "replay-resume": {
+    lock: "exclusive",
+    keys: ["editors", "launcher", "fixture"],
+    spec: { fixture: { type: "string", default: "parity" } },
+    timeout: 1200,
+    run: ctx => replayCheck(ctx, { REPLAY_ARMS: "svg,gpu,gpu-select", REPLAY_PARALLEL: "0" })
+  },
+  // The replay must still fail: corrupt pack, the model DOM and the dispatch count on the replay arm; each must be caught.
+  "replay-selftest": {
+    lock: "shared",
+    keys: ["launcher", "fixture"],
+    spec: { fixture: { type: "string", default: "parity" } },
+    timeout: 600,
+    run: ctx => replayCheck(ctx, { REPLAY_EDITORS: "label", REPLAY_ARMS: "svg,gpu", REPLAY_BREAK: "model,dom,dispatch" })
   },
   timing: { lock: "exclusive", keys: ["arm", "headless", "trace"], timeout: 900, run: ctx => timing(ctx, "bench/navigation.ts") },
   profile: { lock: "exclusive", keys: ["arm", "headless", "trace"], timeout: 900, run: ctx => timing(ctx, "bench/profile-navigation.ts") },

@@ -82,3 +82,11 @@ export function cohortVerdict(input: { eligible: number; required: number; failu
   if (input.eligible < input.required) return "UNDERCOVERED";
   return "PASS";
 }
+
+// The gate's reading of a verdict table: every entry that is not PASS. UNTESTED and UNDERCOVERED are as bad as FAIL
+// here, in short and full mode alike: a cohort that measured nothing must not let the check pass.
+export function nonPassing(verdicts: Record<string, string>): string[] {
+  return Object.entries(verdicts)
+    .filter(([, verdict]) => verdict !== "PASS")
+    .map(([name, verdict]) => name + ": " + verdict);
+}
