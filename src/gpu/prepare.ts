@@ -187,9 +187,10 @@ export interface Prepared {
   windows: BitmapWindows | null;
   cpuBytes: number;
   tessellation: MeshStats;
-  // what retainFrame keeps across a context loss (B1 step 1): references only, the vertex arrays included; null with
-  // ?gpu-restore-retain=0, so the opt-out arm holds no extra CPU memory
-  payload: Payload | null;
+  // what retainFrame keeps across a context loss (B1 step 1): references only, the vertex arrays included. Kept even
+  // with ?gpu-restore-retain=0 (read when a restore prepares): the restore bench switches arms in the page
+  // (history.replaceState) without a new prepare, so a frame committed under the opt-out arm must still be retainable.
+  payload: Payload;
   release(): void;
 }
 
@@ -361,7 +362,7 @@ export function retainFrame(
   prepared: Prepared | null,
   live: Pick<GlyphAtlas, "canvas" | "generation">
 ): RetainedFrame | null {
-  if (!prepared?.payload) return null;
+  if (!prepared) return null;
   const { glyphCount, atlasCanvas, atlasCopy, atlasGeneration } = prepared.payload;
   let copy: HTMLCanvasElement | null = null;
   if (glyphCount && atlasCopy) copy = atlasCanvas;
@@ -1032,16 +1033,15 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
     ctx.mark?.("buffers");
     // CPU glyph canvas, counted once here (the renderer's atlas, or the retained copy it was restored from)
     const atlasBytes = atlasCanvas ? atlasCanvas.width * atlasCanvas.height * 4 : 0;
-    // Kept for retainFrame (none with ?gpu-restore-retain=0): views of the conversion's arrays (their capacity, up to
-    // twice the used length), the glyph instances and every texture source (an upper bound: some, such as the cached
-    // relief images, are held by their caches anyway).
-    const keep = retainEnabled();
+    // Kept for retainFrame: views of the conversion's arrays (their capacity, up to twice the used length), the glyph
+    // instances and every texture source (an upper bound: some, such as the cached relief images, are held by their
+    // caches anyway).
     const vertexHeld = Object.values(vertices).reduce((n, array) => n + array.buffer.byteLength, 0);
     const recipeHeld = [...recipes.values()].reduce(
       (n, { source }) => n + ("width" in source && "height" in source ? source.width * source.height * 4 : 0),
       0
     );
-    const payloadHeld = keep ? vertexHeld + glyphData.byteLength + recipeHeld : 0;
+    const payloadHeld = vertexHeld + glyphData.byteLength + recipeHeld;
     const payload: Payload = {
       key: payloadAt,
       layers: retained?.layers ?? cloneLayers(scene.layers),
@@ -1087,7 +1087,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
       // retained CPU memory: pick index, glyph atlas canvas and the payload kept for a context restore
       cpuBytes: pick.bytes() + overlays.bytes() + atlasBytes + payloadHeld,
       tessellation: payload.tessellation,
-      payload: keep ? payload : null,
+      payload,
       release
     };
   } catch (error) {

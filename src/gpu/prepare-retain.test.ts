@@ -211,8 +211,6 @@ describe("retained frame (context-loss restore without a scene walk)", () => {
       }) as unknown as Prepared;
     try {
       expect(retainFrame(null, live)).toBeNull();
-      // ?gpu-restore-retain=0: the frame kept no payload
-      expect(retainFrame({ payload: null, runs } as unknown as Prepared, live)).toBeNull();
       // no glyphs: nothing to copy, retained whatever the atlas holds
       expect(retainFrame(prepared(0, false, 1), live)?.atlas).toBeNull();
       // the live atlas still holds the frame's glyphs: copied
@@ -228,7 +226,7 @@ describe("retained frame (context-loss restore without a scene walk)", () => {
       expect(retainFrame(prepared(5, false), { ...live, canvas: {} as HTMLCanvasElement })).toBeNull();
       // a frame restored from a payload indexes that payload's own copy: kept as is, whatever the live atlas holds
       const owned = prepared(5, true, 0);
-      expect(retainFrame(owned, live)?.atlas).toBe(owned.payload!.atlasCanvas);
+      expect(retainFrame(owned, live)?.atlas).toBe(owned.payload.atlasCanvas);
       expect(retainFrame(owned, live)?.runs.map(run => run.slot)).toEqual(runs.map(run => run.slot));
     } finally {
       vi.unstubAllGlobals();
