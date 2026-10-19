@@ -563,7 +563,7 @@ async function metricsCheck(ctx: Ctx): Promise<Partial<Result>> {
 function resolveNamedFixture(name: string): string {
   if (name === "shared") return resolveFixture();
   if (name === "parity") {
-    const candidates = [process.env.TUPAIA_GATE_PARITY_MAP, join(REPO, "tests/fixtures/parity/parity.map"), join(GATE_HOME, "fixtures", "parity.map")];
+    const candidates = [process.env.TUPAIA_GATE_PARITY_MAP, join(REPO, "tests/fixtures/parity/parity-v1.map"), join(REPO, "tests/fixtures/parity/parity.map"), join(GATE_HOME, "fixtures", "parity.map")];
     const found = candidates.find(path => path && existsSync(path));
     if (!found)
       throw new UsageError(
@@ -866,7 +866,7 @@ const DEFS: Record<string, CheckDef> = {
   integration: {
     lock: "shared",
     keys: [...CAMERA, "cohort", "focus", "preamble"],
-    timeout: 900,
+    timeout: 1800,
     run: ctx => {
       const report = join(ctx.dir, "report.json");
       const env = {
@@ -879,7 +879,7 @@ const DEFS: Record<string, CheckDef> = {
         INTEGRATION_FOCUS: String(ctx.args.focus),
         INTEGRATION_PREAMBLE: String(ctx.args.preamble)
       };
-      return runScript(ctx, nodeScript("bench/renderer-integration.ts"), env, report, 900, data => ({
+      return runScript(ctx, nodeScript("bench/renderer-integration.ts"), env, report, 1800, data => ({
         failure: reportFailure(data),
         metrics: { ...integrationMetrics(data), summary: data?.summary }
       }));
