@@ -211,11 +211,43 @@ function prepareReliefIcons(): void {
   indexedRaster = null;
   document.getElementById("terrain")!.innerHTML = vectors(data);
 }
-function pickRelief(x: number, y: number): SVGUseElement | null {
+// A relief selection before any editor commit: the compact raster's data, no <use> exists yet. `key` matches the
+// href@x,y of the <use> commitRelief would materialize at `index`.
+export interface ReliefPeek {
+  index: number;
+  icon: ReliefSprite;
+  key: string;
+  raster: Element;
+  generation: number;
+}
+export function reliefKey(icon: ReliefSprite): string {
+  return `|${icon.i}@${icon.x},${icon.y}`;
+}
+let indexedRevision = -1;
+let indexedData: string | null = null;
+// bumped on every (re)index or drop; a peek is committable only under the generation it was taken in
+let generation = 0;
+function invalidateReliefIndex(): void {
+  indexedRaster = null;
+  indexedRevision = -1;
+  indexedData = null;
+  icons = [];
+  tree = quadtree<ReliefSprite>();
+  maxSize = 0;
+  generation++;
+}
+// The index for the live raster, rebuilt when the element, render revision or data-relief content changed. Content is
+// compared with ===: exact for same-length edits, and O(1) on the normal path because the browser hands back the same
+// cached string for an unchanged attribute (a changed one differs in length or early, or is a real reindex).
+function reliefIndex(): Element | null {
   const raster = document.querySelector("#terrain > image[data-relief]");
-  if (!raster || !layerIsOn("toggleRelief")) return null;
-  if (indexedRaster !== raster) {
-    icons = JSON.parse(raster.getAttribute("data-relief")!) as ReliefSprite[];
+  if (!raster) {
+    if (indexedRaster) invalidateReliefIndex();
+    return null;
+  }
+  const data = raster.getAttribute("data-relief")!;
+  if (indexedRaster !== raster || indexedRevision !== revision || indexedData !== data) {
+    icons = JSON.parse(data) as ReliefSprite[];
     tree = quadtree(
       icons,
       d => d.x + d.s / 2,
@@ -223,7 +255,17 @@ function pickRelief(x: number, y: number): SVGUseElement | null {
     );
     maxSize = icons.reduce((size, icon) => Math.max(size, icon.s), 0);
     indexedRaster = raster;
+    indexedRevision = revision;
+    indexedData = data;
+    generation++;
   }
+  return raster;
+}
+// Read-only: no prepareReliefIcons(), no DOM writes. A re-rendered raster, replaced world or edited data reindexes;
+// a raster that is gone drops the index.
+export function peekRelief(x: number, y: number): ReliefPeek | null {
+  const raster = reliefIndex();
+  if (!raster || !layerIsOn("toggleRelief")) return null;
   let selected: ReliefSprite | undefined;
   tree.visit((node, x0, y0, x1, y1) => {
     if (x0 > x + maxSize || y0 > y + maxSize || x1 < x - maxSize || y1 < y - maxSize) return true;
@@ -245,9 +287,21 @@ function pickRelief(x: number, y: number): SVGUseElement | null {
     return false;
   });
   if (!selected) return null;
-  const index = icons.indexOf(selected);
+  return { index: icons.indexOf(selected), icon: selected, key: reliefKey(selected), raster, generation };
+}
+// Editor commit: materializes the glyphs and returns the peeked <use>. Null, without materializing, when the layer is
+// off or the raster, revision or data changed since the peek; the materialized <use> must carry the peeked key.
+export function commitRelief(peek: ReliefPeek): SVGUseElement | null {
+  if (!layerIsOn("toggleRelief") || reliefIndex() !== peek.raster || generation !== peek.generation) return null;
+  if (!icons[peek.index] || reliefKey(icons[peek.index]) !== peek.key) return null;
   prepareReliefIcons();
-  return document.querySelectorAll<SVGUseElement>("#terrain > use")[index] || null;
+  const use = document.querySelectorAll<SVGUseElement>("#terrain > use")[peek.index];
+  const href = use?.getAttribute("href") || use?.getAttribute("xlink:href");
+  return use && `|${href}@${use.getAttribute("x")},${use.getAttribute("y")}` === peek.key ? use : null;
+}
+function pickRelief(x: number, y: number): SVGUseElement | null {
+  const peek = peekRelief(x, y);
+  return peek && commitRelief(peek);
 }
 function compactRelief(): void {
   const group = document.getElementById("terrain");
@@ -288,12 +342,17 @@ declare global {
   interface Window {
     reliefRenderReady?: Promise<void>;
     pickRelief: typeof pickRelief;
+    peekRelief: typeof peekRelief;
     compactRelief: typeof compactRelief;
     getReliefIcons: typeof getReliefIcons;
     prepareReliefIcons: typeof prepareReliefIcons;
+    reliefRevision: () => number;
   }
 }
 window.pickRelief = pickRelief;
+window.peekRelief = peekRelief;
+// read-only: lets the picking oracle prove no render or materialization happened while it sampled
+window.reliefRevision = () => revision;
 window.compactRelief = compactRelief;
 
 window.getReliefIcons = getReliefIcons;

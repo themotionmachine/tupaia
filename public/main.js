@@ -186,7 +186,9 @@ let viewY = 0;
 let zoomWorld = null;
 const navigationUpdates = new window.ZoomUpdateScheduler({
   valid: () => zoomWorld === grid,
-  camera() {
+  camera(update) {
+    // ?renderer=gpu: in-motion frames move the GPU camera uniforms only; the exact settle frame still writes the SVG
+    if (window.gpuRenderer?.camera(update)) return;
     viewbox.attr("transform", `translate(${viewX} ${viewY}) scale(${scale})`);
     if (customization === 1) {
       const canvas = ensureEl("canvas");
@@ -199,13 +201,18 @@ const navigationUpdates = new window.ZoomUpdateScheduler({
       }
     }
   },
-  style() { updateZoomStyling(); },
-  visible() {
+  style(update) {
+    if (window.gpuRenderer?.defers(update)) return;
+    updateZoomStyling();
+  },
+  visible(update) {
+    if (window.gpuRenderer?.defers(update)) return;
     window.updateZoneHatching?.(scale);
     window.cullMapLabels?.(scale, viewX, viewY, svgWidth, svgHeight);
     window.refreshDenseZoom?.(scale, viewX, viewY, svgWidth, svgHeight);
   },
   details(update) {
+    if (window.gpuRenderer?.defers(update)) return;
     if (update.positionChanged && layerIsOn("toggleCoordinates")) drawCoordinates();
     if (update.scaleChanged || update.exact) {
       if (update.exact || !window.drawScaleBarFast) drawScaleBar(scaleBar, scale);
@@ -296,13 +303,16 @@ document.addEventListener("DOMContentLoaded", async () => {
 });
 
 function hideLoading() {
-  d3.select("#loading").transition().duration(3000).style("opacity", 0);
+  d3.select("#loading").interrupt().transition().duration(3000).style("opacity", 0).on("end", function () {
+    // The invisible compass animation otherwise keeps SVG layout/paint/compositing running after loading completes.
+    this.style.display = "none";
+  });
   d3.select("#optionsContainer").transition().duration(2000).style("opacity", 1);
   d3.select("#tooltip").transition().duration(3000).style("opacity", 1);
 }
 
 function showLoading() {
-  d3.select("#loading").transition().duration(200).style("opacity", 1);
+  d3.select("#loading").interrupt().style("display", null).transition().duration(200).style("opacity", 1);
   d3.select("#optionsContainer").transition().duration(100).style("opacity", 0);
   d3.select("#tooltip").transition().duration(200).style("opacity", 0);
 }

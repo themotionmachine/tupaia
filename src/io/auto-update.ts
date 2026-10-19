@@ -1152,7 +1152,9 @@ export function resolveVersionConflicts(mapVersion: string): void {
     goods.append("g").attr("id", "goodsIcons").attr("data-circle", "1");
     goods.append("g").attr("id", "goodsBurgs");
     markets = viewbox.insert("g", "#emblems").attr("id", "markets").attr("fill-opacity", "0").style("display", "none");
-    tradeAnimation = viewbox.insert("g", "#goods").attr("id", "tradeAnimation");
+    // reuse the container the app shell already has, a second one would hold caravans clear() never reaches
+    tradeAnimation = viewbox.select<SVGGElement>("#tradeAnimation");
+    if (tradeAnimation.empty()) tradeAnimation = viewbox.insert("g", "#goods").attr("id", "tradeAnimation");
 
     options.trade = { animation: TradeAnimation.getDefaultOptions() };
 

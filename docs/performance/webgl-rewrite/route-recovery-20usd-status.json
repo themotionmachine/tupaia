@@ -1,0 +1,85 @@
+{
+  "schema": 1,
+  "chunk": "route-recovery-20usd",
+  "date": "2026-10-17",
+  "report": "ROUTE-RECOVERY-20USD-2026-10-17.md",
+  "delegation": "route-recovery-delegation.md",
+  "deployed": false,
+  "defaultRenderer": "svg",
+  "production": "89902648-220c-40b8-8462-dce2bfed06d6 (unchanged)",
+  "verdict": "partial",
+  "rootCausesFixed": [
+    {
+      "cause": "prepares ran while an editor held the renderer suspended",
+      "fix": "defer prepare while suspended; record wanted revisions; prepare once on resume",
+      "files": ["src/gpu/motion.ts", "src/gpu/renderer.ts", "src/gpu/motion.test.ts"]
+    },
+    {
+      "cause": "compat clone built without #debug; editor overlays (#controlPoints) unresolvable -> SVG fallback",
+      "fix": "prepareMapClone('gpu', {debug: true})",
+      "files": ["src/gpu/compat.ts", "src/gpu/compat.test.ts"]
+    },
+    {
+      "cause": "legacy cell-mesh redraw: ~800k moveTo/lineTo context calls, path 10632 ms",
+      "fix": "exact-geometry raster cache + single Path2D string (path 37 ms); identical subpaths and single stroke",
+      "files": ["src/renderers/cell-mesh-canvas.ts", "src/renderers/cell-mesh-canvas.test.ts"]
+    }
+  ],
+  "routeFocus": {
+    "scope": "diagnostic only; never a full-suite pass",
+    "before": {
+      "artifact": "host-checks/integration-1792278899989224000.json",
+      "fallback": "GPU prepare failed: compat: missing #debug for <g> #controlPoints",
+      "totalMs": [15240, 15057]
+    },
+    "after": {
+      "artifact": "host-checks/integration-1792279586716482000.json",
+      "active": "gpu",
+      "fallback": null,
+      "resumeSettledMs": [2575, 2783, 2663],
+      "totalMs": [3971, 7557, 4022],
+      "firstCommittedFrameAfterCloseMs": [1592, 1599, 1604],
+      "telemetry": { "resynced": 3, "agree": 3 },
+      "cellsMeshMs": { "key": 14, "path": 37, "stroke": 1, "encode": 60 },
+      "controls": { "reprepareMs": 2739, "cellsOnMs": 7816, "cellsOffMs": 2779 }
+    },
+    "goal2s": { "firstFrame": true, "settled": false }
+  },
+  "fullSuite": {
+    "artifact": "host-checks/integration-1792279954598297000.json",
+    "verdicts": {
+      "routeCohort": "FAIL",
+      "markerCohort": "UNTESTED",
+      "resyncLabel": "UNDERCOVERED",
+      "undo": "UNTESTED",
+      "worldReplacement": "PASS",
+      "fixture": "PASS"
+    },
+    "routeCohortPrepareMs": 90504,
+    "phasesCumulativeMs": { "scene": 27564, "clone": 46943, "screen": 60999, "windows": 61001, "world": 90504, "buffers": 90505 },
+    "earlierRunsPrepareMs": { "1792203893051794000": 94722, "1792204791979432000": 94807, "1792206351287622000": 89462 },
+    "fixed": false,
+    "cause": "unidentified; uniform ~10x slowdown of every phase after the full-suite preamble (see report section 6)",
+    "hypothesesUnverified": ["carried-over page state (re-install, reload)", "main-thread contention from timers/animation", "revision churn + larger DOM per clone"]
+  },
+  "checks": {
+    "unit": { "pass": true, "files": 69, "tests": 755 },
+    "build": { "pass": true },
+    "bench": { "pass": true, "passed": 38, "total": 38, "artifact": "host-checks/p1-delegated-1792279710366005000.log" },
+    "context": { "pass": true, "lossToDrawMs": 571.9, "goalMs": 500, "goalMet": false, "steadyGpuMB": 159.37, "budgetMB": 167.77, "artifact": "host-checks/p1-delegated-1792279713363432000.json" },
+    "lifecycle": { "pass": true, "contextLosses": 0, "gpuMB": 159.38, "heapGrowthMB": 38.4, "artifact": "host-checks/p1-delegated-1792279725195346000.json" },
+    "smokeDpr1": { "over16": 0.0061686, "maxDelta": 111, "identicalToBaseline": "p1-delegated-1792207017851193000", "artifact": "host-checks/p1-delegated-1792279800005796000" },
+    "smokeDpr2": { "over16": 0.0081003, "identicalToBaseline": true, "artifact": "host-checks/p1-delegated-1792279808477718000" },
+    "picking": { "failure": null, "dense": false, "samples": 536, "wrong": 0, "extra": 0, "artifact": "host-checks/picking-1792279821460984000.json" },
+    "integrationFull": { "pass": false, "failure": "routeCohort", "artifact": "host-checks/integration-1792279954598297000.json" }
+  },
+  "notRun": ["picking denseLabels:true", "navigation paired blocks", "full-suite rerun (known failure, no new information)"],
+  "capabilities": {
+    "supported": ["route editor open via click with stale-camera resync", "edit + save/export round trip", "close and resume GPU without fallback"],
+    "legacyUnsupported": ["route undo/redo (#undo/#redo are heightmap-owned; not faked)"],
+    "notYetAcceptable": ["full-suite route cohort prepare (~90 s)", "settled resume < 2 s", "context restore < 500 ms", "cellsOn compat raster cost outside editors"]
+  },
+  "burgGpuEditorRouting": "not promoted (READY_KINDS = ['marker'])",
+  "team": { "lead": "Opus 5.5", "children": "native Haiku 5.5 only", "maxConcurrent": 6, "childrenRanChecks": false },
+  "budgetUsd": { "cliLimit": 15, "reserveNotSpent": 5, "usedAtReport": 6.7 }
+}

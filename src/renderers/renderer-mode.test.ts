@@ -4,6 +4,7 @@ import {
   parseRendererPreference,
   probeWebGL2,
   type RendererBackend,
+  type RendererHost,
   RendererRouter,
   rendererStatus
 } from "./renderer-mode";
@@ -106,9 +107,29 @@ describe("RendererRouter", () => {
     expect(router.start()).toMatchObject({ requested: "gpu", active: "svg", fallbackReason: "no gl" });
   });
 
-  it("keeps svg active in P0 even with WebGL2 because no GPU backend is registered", () => {
+  it("keeps svg active with WebGL2 when no GPU backend is registered", () => {
     const router = new RendererRouter({ search: "?renderer=gpu", probe: webgl2 });
     expect(router.start()).toMatchObject({ active: "svg", fallbackReason: GPU_UNAVAILABLE_REASON });
+  });
+
+  it("lets the active backend fall back asynchronously and ignores stale hosts", () => {
+    const log: string[] = [];
+    const hosts: RendererHost[] = [];
+    const router = new RendererRouter({
+      search: "?renderer=gpu",
+      probe: webgl2,
+      gpuBackend: host => {
+        hosts.push(host);
+        return { ...fakeBackend(log), telemetry: () => ({ state: "active" }) };
+      }
+    });
+    expect(router.start()).toMatchObject({ active: "gpu", gpu: { state: "active" } });
+    hosts[0].fallBack("GPU prepare failed: oom");
+    expect(router.snapshot()).toMatchObject({ active: "svg", fallbackReason: "GPU prepare failed: oom" });
+    expect(router.snapshot().gpu).toBeUndefined();
+    hosts[0].fallBack("GPU restore failed: late");
+    expect(router.snapshot().fallbackReason).toBe("GPU prepare failed: oom");
+    expect(log).toEqual(["dispose"]);
   });
 
   it("falls back to svg and disposes a backend whose init fails", () => {

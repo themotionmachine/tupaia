@@ -187,3 +187,23 @@ test("A/B analysis is invalid when the GPU arm fell back, fixtures drift or inpu
   assert.match(unlabeled.problems.join("\n"), /no supported input method/);
   assert.equal(analyzeAb([slot(0, "A", "svg", [16])], "frame", 1).comparable, false);
 });
+
+
+test("A/B GPU claims require presentation throughout each measured gesture", () => {
+  const svg = slot(0, "A", "svg", [16]);
+  const gpu = slot(1, "B", "gpu", [8]);
+  const presented = { ...gpu, runs: gpu.runs.map(run => ({ ...run, gpuPresentedFraction: 1 })) };
+  assert.equal(analyzeAb([svg, presented], "frame", 1).comparable, true);
+  assert.match(analyzeAb([svg, gpu], "frame", 1).problems.join("\n"), /did not present GPU/);
+  const partial = { ...gpu, runs: gpu.runs.map(run => ({ ...run, gpuPresentedFraction: 0.5 })) };
+  assert.equal(analyzeAb([svg, partial], "frame", 1).comparable, false);
+});
+
+
+test("A/B analysis rejects idle cadence confounds even when GPU is presented", () => {
+  const a = slot(0, "A", "svg", [16]);
+  const b = slot(1, "B", "gpu", [8]);
+  const withIdle = (s: typeof a, p95: number) => ({ ...s, runs: s.runs.map(r => ({ ...r, gpuPresentedFraction: 1, idleFrame: {p95} })) });
+  assert.equal(analyzeAb([withIdle(a,8.3),withIdle(b,8.4)],"frame",1).comparable,true);
+  assert.match(analyzeAb([withIdle(a,8.3),withIdle(b,33.3)],"frame",1).problems.join("\n"), /Idle cadence differs/);
+});

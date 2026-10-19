@@ -17,3 +17,6 @@
 .github/prompts/bmad-*
 # tupaia MCP server output (screenshots, exports)
 .tupaia-mcp-out/
+
+# GPU rewrite raw evidence (traces, diagnostics; ~2.6 GB), kept outside git
+docs/performance/webgl-rewrite/host-checks/

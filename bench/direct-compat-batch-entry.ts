@@ -1,0 +1,1 @@
+import {compatShapes,compatShapesBatch} from "../src/gpu/compat-pick";import {HiddenEmblemCulling} from "../src/gpu/emblem-culling";Object.assign(window,{__batchAPI:{compatShapes,compatShapesBatch,HiddenEmblemCulling}});

@@ -1,4 +1,5 @@
 import { lazy } from "@/lazy-loaders";
+import { keepSingleContainer as keepSingleTradeContainer } from "@/renderers/draw-trade-animation";
 import { restoreReliefOnLoad } from "@/renderers/relief-settings";
 import { calculateVoronoi, ensureEl, last, link, minmax, parseError, rn } from "@/utils";
 import { decodeBinaryMap, isBinaryMap, type MapCellArray } from "./binary-map";
@@ -403,6 +404,7 @@ async function parseLoadedData(data: string[], mapVersion: string | null): Promi
     anchors = icons.select<SVGGElement>("#anchors");
     armies = viewbox.select<SVGGElement>("#armies");
     markers = viewbox.select<SVGGElement>("#markers");
+    keepSingleTradeContainer(viewbox.node()!);
     tradeAnimation = viewbox.select<SVGGElement>("#tradeAnimation");
     ruler = viewbox.select<SVGGElement>("#ruler");
     fogging = viewbox.select<SVGGElement>("#fogging");

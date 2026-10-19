@@ -5,6 +5,7 @@ const base = JSON.parse(readFileSync(basePath, "utf8")),
   head = JSON.parse(readFileSync(headPath, "utf8"));
 for (const field of [
   "schema",
+  "assetPolicy",
   "fixtureHash",
   "fixtureMetadata",
   "budgetToleranceFraction",

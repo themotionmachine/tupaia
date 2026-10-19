@@ -12,6 +12,40 @@ const MARKER_SYMBOLS = {
 } as const;
 
 let symbolsReady: Promise<void> | null = null;
+// Every caravan group still in flight, wherever it was appended: a load replaces the container, so clear() cannot
+// reach groups drawn into the previous world through the current `tradeAnimation` selection
+const liveGroups = new Set<SVGGElement>();
+
+// Saves made before auto-update reused an existing container can carry two #tradeAnimation groups; keep the first
+export function keepSingleContainer(root: ParentNode): void {
+  const [, ...duplicates] = Array.from(root.querySelectorAll("#tradeAnimation"));
+  for (const duplicate of duplicates) duplicate.remove();
+}
+
+// Caravan groups are transient: a persistent copy of the map must not carry them
+export function stripTradeCaravans(root: ParentNode): void {
+  for (const group of Array.from(root.querySelectorAll("#tradeAnimation > g"))) group.remove();
+}
+
+// prepareMapClone policy: only the GPU compat clone (attached across frames) drops caravans; user svg/png/jpeg/mesh
+// exports keep the mid-flight snapshot they always had
+export function stripCloneCaravans(clone: ParentNode, type: string): void {
+  if (type === "gpu") stripTradeCaravans(clone);
+}
+
+// Every #tradeAnimation of the live map, the canonical (first) one leading; never other layers or export clones
+function liveContainers(): Element[] {
+  return Array.from(document.getElementById("map")?.querySelectorAll("#tradeAnimation") ?? []);
+}
+
+// Rebinds the global selection to the live map's single container when a world replacement left it detached or
+// pointing at a duplicate; idempotent, and a no-op when the selection is already canonical
+function bindCanonicalContainer(): void {
+  const [canonical] = liveContainers();
+  if (!canonical) return;
+  keepSingleContainer(document.getElementById("map")!);
+  if (tradeAnimation.node() !== canonical) tradeAnimation = viewbox.select<SVGGElement>(() => canonical as SVGGElement);
+}
 
 function ensureSymbols(): Promise<void> {
   if (symbolsReady) return symbolsReady;
@@ -56,7 +90,10 @@ export async function draw(
     const duration = options.trade.animation.duration;
     const segDuration = segment.type === "land" ? duration * options.trade.animation.landDurationModifier : duration;
 
+    bindCanonicalContainer();
     const group = tradeAnimation.append("g");
+    const node = group.node();
+    if (node) liveGroups.add(node);
     group
       .append("use")
       .attr("href", `#trade-marker-${segment.type}`)
@@ -122,6 +159,7 @@ export async function draw(
       })
       .on("end", () => {
         group.remove();
+        if (node) liveGroups.delete(node);
         setTimeout(() => animateSegment(idx + 1), options.trade.animation.segmentChangePause);
       });
   }
@@ -129,6 +167,16 @@ export async function draw(
 
 export function clear(): void {
   tradeAnimation.selectAll("g").interrupt().remove();
+  // groups in a duplicate or stale live container (only caravan groups are direct children; highlights stay)
+  const stray = liveContainers().flatMap(container => Array.from(container.children).filter(c => c.tagName === "g"));
+  const orphans = [...new Set([...liveGroups, ...stray])];
+  liveGroups.clear();
+  if (orphans.length) {
+    // the container's own (legacy d3) selection interrupts transitions it created, even on detached nodes
+    tradeAnimation.selectAll(() => orphans).interrupt();
+    for (const orphan of orphans) orphan.remove();
+  }
+  bindCanonicalContainer();
 }
 
 export function getPath(points: Point[]): string {

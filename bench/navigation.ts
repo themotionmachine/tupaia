@@ -15,6 +15,10 @@ import {
 import { platform, arch, cpus, loadavg } from "node:os";
 
 const dist = resolve(process.env.BENCH_DIST || "dist");
+const deviceScaleFactor = Number(process.env.BENCH_DPR || 1);
+if (![1, 2].includes(deviceScaleFactor)) throw new Error("BENCH_DPR must be 1 or 2");
+const fontCDN = process.env.BENCH_FONT_CDN === "1";
+const assetPolicy = fontCDN ? "local-and-font-cdn-get" : "local-only";
 const output = process.env.BENCH_OUTPUT || "bench/results/navigation-current.json";
 const samples = Number(process.env.BENCH_SAMPLES || 3);
 const tracing = process.env.BENCH_TRACE === "1";
@@ -89,7 +93,7 @@ try {
   console.log(JSON.stringify({ launchConfig, gpu, loadAverageStart }));
   const context = await browser.newContext({
     viewport: { width: 1280, height: 720 },
-    deviceScaleFactor: 1,
+    deviceScaleFactor,
     serviceWorkers: "block"
   });
   await context.addInitScript(() => {
@@ -107,7 +111,7 @@ try {
   ];
   await context.addInitScript(scripts.map(n => readFileSync("mcp/src/" + n, "utf8")).join("\n"));
   await context.route("**/*", route =>
-    new URL(route.request().url()).origin === origin ? route.continue() : route.abort()
+    new URL(route.request().url()).origin === origin || (fontCDN && route.request().method() === "GET" && new URL(route.request().url()).origin === "https://fonts.gstatic.com") ? route.continue() : route.abort()
   );
   const page = await context.newPage();
   page.setDefaultTimeout(300000);
@@ -186,7 +190,7 @@ try {
             transferMode: "ReturnAsStream"
           });
         const result = await page.evaluate(
-          async ({ gesture, frames, markInput }) => {
+          async ({ gesture, frames, markInput, requestedRenderer }) => {
             const w = globalThis as any;
             const raf = w.requestAnimationFrame.bind(w);
             const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -202,6 +206,17 @@ try {
                   .scale(initialScale)
               );
             await sleep(350);
+            const rendererReadyStart = performance.now();
+            if (requestedRenderer === "gpu") {
+              while (true) {
+                const status = w.rendererStatus?.();
+                if (status?.active !== "gpu") throw new Error("GPU benchmark fell back: " + status?.fallbackReason);
+                if (status.gpu?.canvasVisible && !status.gpu.pending && !status.gpu.refinementPending) break;
+                if (performance.now() - rendererReadyStart > 30000) throw new Error("GPU did not reach steady readiness");
+                await sleep(25);
+              }
+            }
+            const rendererReadyWaitMs = performance.now() - rendererReadyStart;
             function digest() {
               let hash = 2166136261;
               for (const field of ["h", "biome", "state", "culture", "burg", "r"])
@@ -249,6 +264,7 @@ try {
               intervals: number[] = [];
             const inputDispatchMs: number[] = [];
             const motionSurfaceActiveFrames: boolean[] = [];
+            let gpuPresentedFrames = 0;
             let denseSettleMs = 0;
             const densePendingAtStart = Boolean(w.denseZoomPending);
             const denseBackendAtStart = w.reliefWorkerStatus ? w.reliefWorkerStatus() : null;
@@ -355,6 +371,7 @@ try {
                     );
                   }
                   motionSurfaceActiveFrames.push(Boolean(w.MotionSurface?.active));
+                  if (w.gpuRenderer?.canvas?.style.display === "block") gpuPresentedFrames++;
                   densePendingFrames.push(Boolean(w.denseZoomPending));
                   frame++;
                   if (frame < frames) raf(tick);
@@ -403,6 +420,11 @@ try {
             await new Promise<void>(resolve => raf(() => raf(() => resolve())));
             const settledExact = settledBefore === settledStyles();
             if (!settledExact) throw new Error("Gesture did not settle to exact visual styles");
+            // The GPU arm moves uniforms during motion; the canonical SVG must still end on the exact final camera.
+            const finalCamera = `translate(${(0, eval)("viewX")} ${(0, eval)("viewY")}) scale(${(0, eval)("scale")})`;
+            // Recorded rather than thrown so existing svg baselines are not invalidated by this new check.
+            const finalCameraExact = document.getElementById("viewbox")?.getAttribute("transform") === finalCamera;
+            const gpuAfterSettle = w.rendererStatus?.().gpu ?? null;
             const motionSurfaceActiveAfterSettle = Boolean(w.MotionSurface?.active);
             if (motionSurfaceActiveAfterSettle)
               throw new Error("Transient motion surface remained active after settle");
@@ -421,6 +443,7 @@ try {
             };
             return {
               cells: w.pack.cells.i.length,
+              rendererReadyWaitMs,
               gesture,
               frames,
               intervalsMs: intervals,
@@ -435,6 +458,8 @@ try {
               motionSurfaceReadyAtStart,
               motionSurfaceActiveFrames,
               motionSurfaceActiveCount: motionSurfaceActiveFrames.filter(Boolean).length,
+              gpuPresentedFrames,
+              gpuPresentedFraction: gpuPresentedFrames / frames,
               motionSurfaceActiveAfterSettle,
               first10IntervalsMs: intervals.slice(0, 10),
               first10MaxMs: Math.max(0, ...intervals.slice(0, 10)),
@@ -455,10 +480,12 @@ try {
               glyphAdds,
               glyphRemoves,
               modelUnchanged: before === after,
-              settledExact
+              settledExact,
+              finalCameraExact,
+              gpuAfterSettle
             };
           },
-          { gesture, frames, markInput: Boolean(traceSession) }
+          { gesture, frames, markInput: Boolean(traceSession), requestedRenderer: renderer }
         );
         let traceAttribution: ReturnType<typeof attributeTrace> | undefined;
         let tracePath: string | undefined;
@@ -523,6 +550,7 @@ try {
     JSON.stringify(
       {
         schema: 2,
+        assetPolicy,
         tracing,
         gpu,
         launchConfig,
@@ -541,7 +569,7 @@ try {
         cpu: cpus()[0]?.model,
         chromium: browser.version(),
         viewport: [1280, 720],
-        deviceScaleFactor: 1,
+        deviceScaleFactor,
         samples,
         frames,
         seed: "7319",

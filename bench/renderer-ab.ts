@@ -162,7 +162,8 @@ export function compareRgba(a: RgbaImage, b: RgbaImage, channelTolerance = 0): F
   };
 }
 
-// Real GPU capture is a P1 adapter. Until one is registered, capture reports unsupported and never fabricates pixels.
+// Real capture comes from a registered adapter (bench/gpu-capture.ts, used by navigation-quality.ts). Without one,
+// capture reports unsupported and never fabricates pixels.
 export interface GpuCaptureRequest {
   renderer: RendererKind;
   world: string;
@@ -185,7 +186,7 @@ export interface GpuCaptureAdapter {
   capture(request: GpuCaptureRequest): Promise<GpuCaptureResult>;
 }
 
-export function unsupportedGpuCapture(reason = "No GPU capture adapter registered until P1"): GpuCaptureAdapter {
+export function unsupportedGpuCapture(reason = "No GPU capture adapter registered"): GpuCaptureAdapter {
   return { name: "unsupported", capture: async () => ({ supported: false, adapter: "unsupported", reason }) };
 }
 
@@ -210,6 +211,8 @@ export interface AbRun {
   iteration: number;
   modelUnchanged?: boolean;
   settledExact?: boolean;
+  finalCameraExact?: boolean;
+  gpuPresentedFraction?: number;
   frame?: { p95: number };
   callback?: { p95: number };
   inputDispatch?: { p95: number };
@@ -254,9 +257,12 @@ export function analyzeAb(slots: AbSlot[], metric: Metric, seed: number) {
       );
     if (!slot.inputMethod || !INPUT_METHODS[slot.inputMethod]?.supported)
       problems.push(`Slot ${slot.slot} has no supported input method label`);
-    for (const run of slot.runs)
-      if (run.modelUnchanged === false || run.settledExact === false)
+    for (const run of slot.runs) {
+      if (slot.requested === "gpu" && run.gpuPresentedFraction !== 1)
+        problems.push(`Slot ${slot.slot} ${run.world}/${run.gesture}/${run.iteration} did not present GPU for every measured frame`);
+      if (run.modelUnchanged === false || run.settledExact === false || run.finalCameraExact === false)
         problems.push(`Slot ${slot.slot} ${run.world}/${run.gesture}/${run.iteration} did not settle`);
+    }
   }
   const first = slots[0];
   for (const slot of slots.slice(1)) {
@@ -279,6 +285,10 @@ export function analyzeAb(slots: AbSlot[], metric: Metric, seed: number) {
       );
     const a = values("A"),
       b = values("B");
+    const idle = (arm: Arm) => arms[arm].flatMap(slot => slot.runs.filter(run => run.world === world && run.gesture === gesture).map(run => run.idleFrame?.p95).filter((v): v is number => Number.isFinite(v)));
+    const idleA = idle("A"), idleB = idle("B");
+    if (idleA.length && idleB.length && Math.abs(percentile(idleA, 0.5) - percentile(idleB, 0.5)) > 2)
+      problems.push(`Idle cadence differs by more than 2 ms for ${world}/${gesture}`);
     if (!a.length || !b.length) problems.push(`Missing ${metric} samples for ${world}/${gesture}`);
     cells.push({
       world,

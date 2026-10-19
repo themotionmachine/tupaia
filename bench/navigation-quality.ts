@@ -2,8 +2,14 @@ import { chromium } from "playwright";
 import { createServer } from "node:http";
 import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { resolve, extname } from "node:path";
+import { playwrightGpuCapture } from "./gpu-capture.ts";
+import { captureProblems, parseRendererEnv, rendererQuery } from "./renderer-ab.ts";
 
 const dist = resolve(process.env.BENCH_DIST || "dist");
+const deviceScaleFactor = Number(process.env.BENCH_DPR || 1);
+if (![1, 2].includes(deviceScaleFactor)) throw new Error("BENCH_DPR must be 1 or 2");
+const fontCDN = process.env.BENCH_FONT_CDN === "1";
+const assetPolicy = fontCDN ? "local-and-font-cdn-get" : "local-only";
 const text = readFileSync(process.env.BENCH_MAP || "/tmp/tupaia-navigation-shared-v8.map", "utf8");
 const mime: Record<string, string> = {
   ".html": "text/html",
@@ -38,7 +44,7 @@ const browser = await chromium.launch({
 });
 try {
   const disableWorker = process.env.BENCH_DISABLE_WORKER === "1";
-  const context = await browser.newContext({ viewport: { width: 1280, height: 720 }, serviceWorkers: "block" });
+  const context = await browser.newContext({ viewport: { width: 1280, height: 720 }, deviceScaleFactor, serviceWorkers: "block" });
   await context.addInitScript(() => {
     localStorage.setItem("autosaveInterval", "0");
     localStorage.setItem("azgaarAssistant", "hide");
@@ -58,7 +64,7 @@ try {
   ];
   await context.addInitScript(scripts.map(name => readFileSync("mcp/src/" + name, "utf8")).join("\n"));
   await context.route("**/*", route =>
-    new URL(route.request().url()).origin === origin ? route.continue() : route.abort()
+    new URL(route.request().url()).origin === origin || (fontCDN && route.request().method() === "GET" && new URL(route.request().url()).origin === "https://fonts.gstatic.com") ? route.continue() : route.abort()
   );
   const page = await context.newPage();
   page.setDefaultTimeout(120000);
@@ -66,7 +72,8 @@ try {
   page.on("pageerror", error => errors.push(error.message));
   page.on("dialog", dialog => dialog.dismiss());
   const workerQuery = process.env.BENCH_RELIEF_WORKER === "1" ? "&reliefWorker=1" : "";
-  await page.goto(origin + "/?local&seed=7319&width=1280&height=720" + workerQuery);
+  const renderer = parseRendererEnv(process.env.BENCH_RENDERER);
+  await page.goto(origin + "/?local&seed=7319&width=1280&height=720" + workerQuery + rendererQuery(renderer));
   await page.evaluate(async text => {
     const w = globalThis as any;
     const ready = await w.__tupaia.call("ready", { timeoutMs: 120000 });
@@ -379,11 +386,60 @@ try {
     const status = w.reliefWorkerStatus?.();
     if (!status) return { applicable: false };
     if (status.pending) throw new Error("Worker still pending after settled quality checks");
-    const expected = disabled || !new URLSearchParams(location.search).has("reliefWorker") ? "main" : "worker";
+    const expected = disabled || new URLSearchParams(location.search).get("reliefWorker") !== "1" ? "main" : "worker";
     if (status.backend !== expected) throw new Error("Unexpected relief backend: " + JSON.stringify(status));
     if (expected === "worker" && !status.completed) throw new Error("No relief worker jobs completed");
     return { applicable: true, expected, ...status };
   }, disableWorker);
+  // Renderer parity (BENCH_RENDERER=svg|gpu): final camera, hit testing and a provenance-checked capture. Run once per
+  // arm and compare the two captures with compareRgba; a gpu arm that is not presenting is reported, not relabeled.
+  const rendererCheck = renderer
+    ? await (async () => {
+        await page.waitForFunction(() => {
+          const status = (globalThis as any).rendererStatus?.();
+          return status?.active !== "gpu" || ["active", "suspended"].includes(status.gpu?.state);
+        });
+        const state = await page.evaluate(() => {
+          const w = globalThis as any;
+          const camera = w.__qualityCamera();
+          const svg = document.getElementById("map")!;
+          const rect = svg.getBoundingClientRect();
+          const hits = { samples: 0, compared: 0, agree: 0, mismatches: [] as unknown[] };
+          for (let y = 40; y < rect.height; y += 80)
+            for (let x = 40; x < rect.width; x += 80) {
+              hits.samples++;
+              const gpu = w.gpuPick?.(x, y, 0);
+              if (!gpu) continue;
+              const target = document.elementFromPoint(rect.left + x, rect.top + y)?.closest("[id]")?.id ?? null;
+              hits.compared++;
+              if (target === gpu.id) hits.agree++;
+              else if (hits.mismatches.length < 20) hits.mismatches.push({ x, y, gpu: gpu.id, svg: target });
+            }
+          return {
+            status: w.rendererStatus?.(),
+            camera,
+            viewboxTransform: document.getElementById("viewbox")?.getAttribute("transform") ?? null,
+            expectedTransform: `translate(${camera.x} ${camera.y}) scale(${camera.k})`,
+            hits
+          };
+        });
+        const request = { renderer, world: "seed-7319", viewport: [1280, 720] as [number, number], deviceScaleFactor };
+        const capture = await playwrightGpuCapture(page).capture(request);
+        let capturePath = null;
+        if (capture.supported) {
+          capturePath = output.replace(/\.json$/, "") + `-${renderer}.rgba`;
+          writeFileSync(capturePath, capture.image.data);
+        }
+        return {
+          ...state,
+          finalCameraExact: state.viewboxTransform === state.expectedTransform,
+          capture: capture.supported
+            ? { adapter: capture.adapter, gpu: capture.gpu, activeRenderer: capture.activeRenderer, path: capturePath }
+            : capture,
+          captureProblems: captureProblems(request, capture)
+        };
+      })()
+    : null;
   let pixelDiff = null;
   if (process.env.BENCH_BASE_IMAGE) {
     const baseline = readFileSync(process.env.BENCH_BASE_IMAGE).toString("base64");
@@ -442,9 +498,13 @@ try {
   if (errors.length) throw new Error(errors.join("\n"));
   const report = {
     ...result,
+    assetPolicy,
+    deviceScaleFactor,
     workerDisabled: disableWorker,
     workerOptIn: process.env.BENCH_RELIEF_WORKER === "1",
     workerCheck,
+    renderer: renderer ?? null,
+    rendererCheck,
     initialSpriteDelay,
     imagePath,
     pixelDiff,

@@ -1,0 +1,101 @@
+{
+  "phase": "first-hardening-pass-verified",
+  "authorization": "User: Let us work toward the reviewed opt-in daily-use build milestone, 2026-10-18. Direct primary work resumed; overnight deadline retained as historical only. No deployment/default flip/paid jobs/agents.",
+  "started_utc": "2026-10-18T16:59:59.767463+00:00",
+  "baseline_archive": "TUPAIA-DIRECT-CHECKPOINT-1008.zip",
+  "baseline_sha256": "f0c23ddceb4cd996eaf9035cb8cda7386679c75909eddb265fff26e7c4070a2d",
+  "heartbeat_active": false,
+  "svg_default": true,
+  "production_unchanged": true,
+  "paid_jobs_authorized": false,
+  "new_agents_authorized": false,
+  "owned_files": [
+    "bench/renderer-integration.ts",
+    "bench/direct-integration-metal-local-init.ts",
+    "src/gpu/editor-dispatch.ts",
+    "src/gpu/editor-dispatch.test.ts",
+    "src/gpu/renderer.ts",
+    "src/gpu/compat-pick.ts",
+    "src/gpu/emblem-culling.ts",
+    "src/io/save.ts",
+    "src/io/export.ts",
+    "src/renderers/emblems/transient-classes.ts",
+    "src/renderers/emblems/transient-classes.test.ts",
+    "bench/direct-emblem-culling-contract.ts"
+  ],
+  "changes": [
+    "Resync cohorts stop after required eligible clicks rather than raw click count; existing 2x attempt budget and all assertions unchanged.",
+    "Rendering-only GPU opt-in now synchronizes/re-hits canonical SVG on stale clicks; GPU index routing remains separately gated by gpu-select.",
+    "Shared canonical class snapshots extracted from GPU culling implementation so default SVG save/export no longer depends on GPU presentation code."
+  ],
+  "next_action": "Continue measured editor/large-world recovery optimization; then full integration/picking/visual-reference coverage and independent review before daily-use sign-off. No automatic deployment or paid/agent jobs.",
+  "gates": {
+    "integration_short": {
+      "status": "FINISHED",
+      "name": "opt-in-integration-short-1792342819283982000",
+      "timeout_seconds": 900,
+      "source": "bench/direct-integration-metal-local-init.ts",
+      "scope": "baseline product plus eligible count fix, before latest product changes",
+      "exit_code": 0,
+      "finished_utc": "2026-10-18T17:13:26.113052+00:00",
+      "report": "/Users/mgm1/Desktop/tupaia-webgl-rewrite-2026-10-13/implementation/docs/performance/webgl-rewrite/host-checks/opt-in-integration-short-1792342819283982000.json",
+      "route": 10,
+      "marker": 10,
+      "label": 10,
+      "page_errors": 0,
+      "undo": "UNTESTED"
+    },
+    "unit": {
+      "pass": true,
+      "tests": 770,
+      "files": 70,
+      "artifact": "opt-in-unit-1792343713326246000.log"
+    },
+    "build": {
+      "pass": true,
+      "artifact": "opt-in-build-1792343721769735000.log"
+    },
+    "paint": {
+      "pass": true,
+      "assertions": 47,
+      "artifact": "opt-in-paint-1792343735186492000.json"
+    },
+    "bundle_boundary": {
+      "pass": true,
+      "before_shared_bytes": 9945,
+      "after_shared_bytes": 594,
+      "artifact": "opt-in-boundary-after-1792343734059775000.json"
+    },
+    "rendering_only": {
+      "pass": true,
+      "editors": 5,
+      "eligible_labels": 10,
+      "gpu_queries_during_eligible_clicks": 0,
+      "exact_roundtrip": true,
+      "fallback_cleanup": true,
+      "artifact": "opt-in-canonical-1792343744563473000.json"
+    },
+    "packaged_build": {
+      "pass": true,
+      "artifact": "opt-in-package-default-smoke-1792344284160256000.json",
+      "assets": 660,
+      "default_no_flag_webgl_requests": 0,
+      "svg_lazy_save_export_webgl_requests": 0,
+      "gpu_opt_in_active": true,
+      "missing_assets": 0,
+      "page_errors": 0
+    }
+  },
+  "baseline_findings": {
+    "short_native": "opt-in-integration-short-1792342819283982000.json: route10 marker10 label10 PASS, world replacement/exact roundtrip PASS, undo UNTESTED, zero page errors",
+    "bundle": "opt-in-boundary-before-1792343657624219000.json: current save/export statically import 9945-byte GPU presentation chunk",
+    "rendering_only": "opt-in-canonical-1792343658495458000.json: expected baseline FAIL, missing click recovery hook without gpu-select"
+  },
+  "updated_utc": "2026-10-18T17:25:33.433840+00:00",
+  "daily_use_signed_off": false,
+  "reviewable_local_trial": true,
+  "additional_paid_jobs": 0,
+  "new_astra_uses": 0,
+  "source_report": "/Users/mgm1/Desktop/tupaia-webgl-rewrite-2026-10-13/implementation/docs/performance/webgl-rewrite/OPT-IN-MILESTONE-2026-10-18.md",
+  "review_package": "TUPAIA-OPT-IN-REVIEW-2026-10-18.zip"
+}

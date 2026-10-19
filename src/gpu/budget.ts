@@ -1,0 +1,141 @@
+// GPU memory policy. All figures are the device's tracked allocation estimate (bytes this renderer uploaded or
+// allocated, mipmaps and MSAA included), not measured process GPU usage.
+import type { Region } from "./compat";
+
+export const GPU_BUDGET = 160 << 20; // steady-state target for everything the renderer tracks
+export const TARGET_BUDGET = 80 << 20; // offscreen group target (MSAA colour + depth/stencil + resolve texture)
+export const MIN_COMPAT_BUDGET = 16 << 20; // least useful world compat share; below it the frame fails to SVG
+export const PEAK_LIMIT = 256 << 20; // transient ceiling while a replacement set coexists with the one it replaces
+export const DETAIL_RESERVE = 8 << 20; // steady headroom settle-time detail leaves for window refreshes
+
+// Bytes a bitmap window refresh may commit. The new set is allocated before the old one (`windowBytes`) is released,
+// so it must fit the peak room now and, once the old set is gone, the steady budget.
+export function windowAllowance(total: number, windowBytes: number, budget = GPU_BUDGET, peak = PEAK_LIMIT): number {
+  return Math.max(0, Math.min(peak - total, budget - (total - windowBytes)));
+}
+
+// Compat raster bytes a prepare may still allocate: its steady share (budget minus target reserve and what the new
+// frame already owns or will upload) and the peak room left beside the previous frame (`total` = tracked now).
+export function compatAllowance(
+  total: number,
+  own: number,
+  pending: number,
+  budget = GPU_BUDGET,
+  peak = PEAK_LIMIT
+): number {
+  return Math.max(0, Math.min(budget - TARGET_BUDGET - own - pending, peak - total - pending));
+}
+
+export interface PixelBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+// Tight bounds of pixels with non-zero alpha in RGBA data; null when the raster is fully transparent.
+export function alphaBounds(data: ArrayLike<number>, width: number, height: number): PixelBounds | null {
+  let [x0, y0, x1, y1] = [width, height, -1, -1];
+  for (let y = 0; y < height; y++) {
+    const row = y * width * 4;
+    let first = -1;
+    for (let x = 0; x < width; x++)
+      if (data[row + x * 4 + 3]) {
+        first = x;
+        break;
+      }
+    if (first < 0) continue;
+    let last = first;
+    for (let x = width - 1; x > first; x--)
+      if (data[row + x * 4 + 3]) {
+        last = x;
+        break;
+      }
+    if (y0 > y) y0 = y;
+    y1 = y;
+    if (x0 > first) x0 = first;
+    if (x1 < last) x1 = last;
+  }
+  return y1 < 0 ? null : { x: x0, y: y0, width: x1 - x0 + 1, height: y1 - y0 + 1 };
+}
+
+// Grows bounds by `pad` transparent pixels (so linear filtering fades to zero at the edge), clamped to the raster.
+export function padBounds(bounds: PixelBounds, pad: number, width: number, height: number): PixelBounds {
+  const x = Math.max(0, bounds.x - pad);
+  const y = Math.max(0, bounds.y - pad);
+  return {
+    x,
+    y,
+    width: Math.min(width, bounds.x + bounds.width + pad) - x,
+    height: Math.min(height, bounds.y + bounds.height + pad) - y
+  };
+}
+
+// World rect covered by a pixel sub-rectangle of a raster of `region` — same pixel density, no resampling.
+export function cropRegion(region: Region, pixelWidth: number, pixelHeight: number, bounds: PixelBounds): Region {
+  const [sx, sy] = [region.width / pixelWidth, region.height / pixelHeight];
+  return {
+    x: region.x + bounds.x * sx,
+    y: region.y + bounds.y * sy,
+    width: bounds.width * sx,
+    height: bounds.height * sy
+  };
+}
+
+// Indices of world `rects` ordered by their area inside `visible` (smallest first, stable on ties). Settle refinement
+// is a greedy fill of the remaining budget, so refining in painter order lets large smooth fills starve sparse
+// high-frequency runs (labels, icons) that lose most from the blurry base. Draw order is unaffected. Area alone misses
+// sparse text/marker runs scattered across the view (their alpha bounds span it like an ocean pattern), so runs
+// flagged `sharp` come first, each group smallest first.
+export function refineOrder(
+  rects: readonly (readonly [number, number, number, number])[],
+  visible: Region,
+  sharp: readonly boolean[] = []
+): number[] {
+  const area = rects.map(([x, y, width, height]) => {
+    const w = Math.min(x + width, visible.x + visible.width) - Math.max(x, visible.x);
+    const h = Math.min(y + height, visible.y + visible.height) - Math.max(y, visible.y);
+    return Math.max(0, w) * Math.max(0, h);
+  });
+  const rank = (index: number) => (sharp[index] ? 0 : 1);
+  return rects.map((_, index) => index).sort((a, b) => rank(a) - rank(b) || area[a] - area[b] || a - b);
+}
+
+// Linear downscale that brings `bytes` within `budget` (1 when it already fits).
+export function fitScale(bytes: number, budget: number): number {
+  return bytes <= budget ? 1 : Math.sqrt(Math.max(0, budget) / bytes);
+}
+
+export function targetBytes(width: number, height: number, samples: number): number {
+  return samples ? width * height * 4 * samples * 2 + width * height * 4 : width * height * 8;
+}
+
+// Most MSAA samples (4, 2, else none) whose target fits the budget: 1080p DPR1 keeps 4×, 1440p 2×, DPR2 laptop
+// backing stores (2880×1800) none — their pixel density stands in for MSAA instead of a 100+ MiB multisampled target.
+export function targetSamples(
+  width: number,
+  height: number,
+  maxSamples: number,
+  budget = TARGET_BUDGET,
+  dpr = 1
+): number {
+  // At Retina density spend the allocation on crisp labels/markers rather than duplicate MSAA samples.
+  if (dpr >= 2) return 0;
+  for (const samples of [4, 2])
+    if (samples <= maxSamples && targetBytes(width, height, samples) <= budget) return samples;
+  return 0;
+}
+
+// The canvas's own (default) framebuffer follows the same rule. A 4× multisampled 2560×1440 drawing buffer is ~118 MB
+// outside the tracked budget, and its per-frame GPU cost delayed compositor-frame acks to ~13 ms on M1 Max/Metal,
+// halving navigation cadence to 60 Hz (P2-TIMING-DIAGNOSIS.md). Fixed at context creation.
+export function canvasAntialias(dpr = 1): boolean {
+  return dpr < 2;
+}
+
+// Relief atlas cell edge: the largest icon's on-screen size at this raster bucket (power of two, 16..256), so sprites
+// are sampled near 1:1 instead of minified from 256 px through blurry mip levels.
+export function reliefCell(maxIconSize: number, bucket: number, max = 256): number {
+  const pixels = Math.max(1, maxIconSize * bucket) + 2;
+  return Math.min(max, Math.max(16, 2 ** Math.ceil(Math.log2(pixels))));
+}

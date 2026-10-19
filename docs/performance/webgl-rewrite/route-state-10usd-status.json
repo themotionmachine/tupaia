@@ -1,0 +1,60 @@
+{
+  "tranche": "route-state-10usd",
+  "date": "2026-10-17",
+  "verdict": "partial",
+  "deployed": false,
+  "productionCandidate": "89902648-220c-40b8-8462-dce2bfed06d6",
+  "productionCandidateChanged": false,
+  "defaultRenderer": "svg",
+  "workingTreeShipped": false,
+  "minimalPrefix": "preamble 'fixture': roundtrip load turns toggleEmblems on -> survives 100k world replacement -> route zoom k=8 renders 403 COA <svg> (5068 KB, 407 document <style>s) into #coas; prepareMapClone copies them into every per-revision clone",
+  "cause": {
+    "identified": "emblem COA state left on by the preamble",
+    "fixedPart": "compat runs serialized/decoded all 403 COA defs on every run (src/gpu/compat.ts isolate kept all defs)",
+    "unresolvedPart": "~10 s native (program) CPU per prepare; suspects: 403 global COA <style> sheets, per-use COA deep copies in prepareMapClone"
+  },
+  "fix": {
+    "files": ["src/gpu/compat.ts", "src/gpu/compat.test.ts"],
+    "codePaths": ["src/gpu/compat.ts isolate() defs-document pruning (undone before yield)", "src/gpu/compat.ts unreachable()"],
+    "regressionTest": "src/gpu/compat.test.ts 'compat run defs pruning'"
+  },
+  "beforeAfter": {
+    "reprepareResumeMs": { "control": 2600, "before": 15701, "after": 13673 },
+    "prepareTotalMs": { "control": 1200, "before": 9816, "after": 8436 },
+    "refineMs": { "before": 4162, "after": 3494 },
+    "reprepareSettleMs": { "after": 14152 },
+    "clickResumeMs": { "before": 16191, "after": 13400 },
+    "cellsOnResumeMs": { "before": 21375, "after": 15958 },
+    "cellsOffResumeMs": { "before": 15662, "after": 13060 },
+    "cpuVsWaitReprepare": {
+      "before": { "taskMs": 16159, "waitMs": 5, "programMs": 11843 },
+      "after": { "taskMs": 14153, "waitMs": 3, "programMs": 10010, "styleMs": 942, "scriptMs": 347, "layoutMs": 121 }
+    },
+    "cdpNodesRouteCamera": { "before": 1953792, "after": 1180563 }
+  },
+  "checks": {
+    "unit": { "pass": true, "files": 69, "tests": 756, "artifact": "host-checks/p1-delegated-1792293245491216000.log" },
+    "build": { "pass": true, "artifact": "host-checks/p1-delegated-1792292661183726000" },
+    "bench": { "pass": true, "tests": 38, "artifact": "host-checks/p1-delegated-1792293167113264000.log" },
+    "smokeDpr1": { "pass": true, "over16": 0.0061686, "preFixOver16": 0.0061686, "artifact": "host-checks/p1-delegated-1792293251426382000.json" },
+    "focusedBefore": "host-checks/integration-1792291937687067000",
+    "focusedAfter": "host-checks/integration-1792292667542867000",
+    "control": "host-checks/integration-1792279586716482000",
+    "skipped": {
+      "shortFullIntegration": "prefix still slow",
+      "contextLifecycle": "no ref/scheduling change",
+      "picking": "hit geometry unchanged"
+    }
+  },
+  "rejected": [
+    "background-loop contention (one timeout/s idle; no rAF/interval/MessageChannel loop)",
+    "renderer recreation (id 1, seq 1 throughout)",
+    "defs pruning as the dominant cause (only ~14% of prepare)"
+  ],
+  "remaining": [
+    "dedupe/scope the per-COA global <style> (next discriminating experiment)",
+    "copy each COA once per distinct href in prepareMapClone",
+    "harness: second key camera() settle 30 s timeout at bench/renderer-integration.ts:1103"
+  ],
+  "stopReason": "budget: ~$4.7 of $7 used; remainder held as verification/report reserve"
+}

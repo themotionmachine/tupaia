@@ -1,5 +1,5 @@
 // Interleaved renderer A/B: runs bench/navigation.ts once per ABBA slot with BENCH_RENDERER set, then pools results.
-// Host-run only. In P0 the gpu arm falls back to svg, so the report is marked not comparable rather than faked.
+// Host-run only. A gpu arm that fell back to svg marks the report not comparable rather than faked.
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -45,7 +45,7 @@ const report = {
   schedule,
   analyses: metrics.map(metric => analyzeAb(slots, metric, seed)),
   limitations:
-    "Each slot is a fresh browser process running bench/navigation.ts with synthetic DOM input. Pooled values are per-iteration p95s; CIs are percentile bootstraps of the median difference (B - A). A gpu arm that ran svg is reported, never relabeled. Pixel fidelity requires a registered GpuCaptureAdapter (none in P0)."
+    "Each slot is a fresh browser process running bench/navigation.ts with synthetic DOM input. Pooled values are per-iteration p95s; CIs are percentile bootstraps of the median difference (B - A). A gpu arm that ran svg is reported, never relabeled. Timing only: pixel fidelity, hit testing and final camera come from bench/navigation-quality.ts with BENCH_RENDERER (CDP input, bench/gpu-capture.ts adapter)."
 };
 writeFileSync(resolve(directory, "report.json"), JSON.stringify(report, null, 2) + "\n");
 for (const analysis of report.analyses)

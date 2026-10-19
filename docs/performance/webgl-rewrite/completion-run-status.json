@@ -1,0 +1,110 @@
+{
+  "run": "completion-run-2026-10-16",
+  "status": "reviewable-experimental-candidate",
+  "fullReplacement": false,
+  "deployed": false,
+  "defaultFlipped": false,
+  "defaultRenderer": "svg",
+  "architecture": "hybrid: WebGL2 canvas over the canonical SVG (SVG remains source of truth for editing, save, export)",
+  "flags": { "gpuRender": "?renderer=gpu", "gpuSelect": "&gpu-select", "readyKinds": ["marker"] },
+  "untouched": ["/Users/mgm1/Desktop/code/vespucci", "production P2 71dd4740-4b1b-4652-932c-d2855ce07fe8"],
+  "noChanges": ["backend", "shareAPI", "save format", "production dependencies"],
+  "e2eRun": false,
+  "children": { "A-dash-measure": "integrated", "B-explore": "read-only, no code", "C-marker-pick-rows": "integrated" },
+  "checks": {
+    "unit": { "artifact": "host-checks/p1-delegated-1792188952464726000.log", "exit": 0, "files": 65, "tests": 697 },
+    "bench": { "artifact": "host-checks/p1-delegated-1792188957854588000.log", "exit": 0, "passed": 38, "total": 38 },
+    "build": { "ok": true },
+    "lifecycle": {
+      "artifact": "host-checks/p1-delegated-1792188960969978000.json",
+      "failure": null,
+      "regenerations": 20,
+      "heapMB": [85.6, 124.0],
+      "heapGrowthBytes": 38417616,
+      "plateauFromCycle": 5,
+      "contextLossToDrawMs": 608.2
+    },
+    "context": {
+      "artifact": "host-checks/p1-delegated-1792189044890056000.json",
+      "failure": null,
+      "lossToDrawMs": 615.7,
+      "goalMs": 500,
+      "pass": false,
+      "restoredTrackedMB": 113.7,
+      "budgetMB": 167.8
+    },
+    "timing": { "ran": true, "artifactLocated": false, "exit": "unknown" },
+    "navigation": {
+      "artifact": "host-checks/p1-delegated-1792189141227808000.json",
+      "failure": null,
+      "kind": "single-arm pilot, injected CDP input",
+      "frameP95Ms": { "shared": [8.5, 8.6], "100k": [8.4, 8.4] },
+      "wheelZoomEventToNextRafP95Ms": { "shared": 23.7, "100k": 24.2 },
+      "longTasksDuringMotion": 0,
+      "gpuPresentedFraction": 1,
+      "gpuMemoryPeakBytes": 204850141,
+      "gpuMemoryBudgetBytes": 167772160,
+      "settlePrepare100kMs": 2000,
+      "offMotionLongTaskMaxMs": 484
+    },
+    "integration": {
+      "artifact": "host-checks/integration-1792188131997300000",
+      "failure": null,
+      "editors": { "burg": 0, "label": 0, "route": 0, "marker": 0, "relief": 0 },
+      "roundtrip": {
+        "editsPersisted": 5,
+        "maskedSaveEqual": true,
+        "maskedField": "header savedAt",
+        "exportIdentical": true,
+        "canvasInExport": false
+      },
+      "labelResync": { "clicks": 10, "staleEligible": 8, "resyncedCorrect": 8, "intercepted": 1, "notInView": 1 },
+      "routeResyncClicks": 0,
+      "markerCohort": { "clicks": 50, "routedCorrect": 44, "recoveredCorrect": 6, "unrecovered": 0, "latencyMaxMs": 30.8 },
+      "telemetry": { "routed": 44, "resynced": 9, "legacy": 11, "agree": 20, "disagree": 0, "recovered": 6 }
+    },
+    "picking": {
+      "gate": "burg/label/marker >=50 samples and >=99.5% (agree/(expected+extra+wrongInto)); cells exact",
+      "world100k": [
+        { "cell": "dpr2-z2-compact", "artifact": "host-checks/picking-1792189196480911000.json", "burgRaw": 0.863, "burgSemantic": 0.9868, "label": "46/46 insufficient", "marker": "430/430 pass", "cells": "pass" },
+        { "cell": "dpr2-z2-materialized", "artifact": "host-checks/picking-1792189265076766000.json", "burgRaw": 0.920, "burgSemantic": 0.9937, "label": "46/46 insufficient", "marker": "430/430 pass", "cells": "pass" },
+        { "cell": "dpr1-z2-compact", "artifact": "host-checks/picking-1792189357148983000.json", "burgRaw": 0.8714, "burgSemantic": 0.9857, "label": "57/57 pass", "marker": "418/418 pass", "cells": "pass" },
+        { "cell": "dpr2-z4-compact", "artifact": "host-checks/picking-1792189459003388000.json", "burgRaw": 0.8209, "burgSemantic": 0.9882, "label": "37/37 insufficient", "marker": "95/95 pass", "cells": "pass" },
+        { "cell": "dpr1-z4-compact", "artifact": "host-checks/picking-1792189612983075000.json", "burgRaw": 0.8432, "burgSemantic": 0.9828, "label": "41/41 insufficient", "marker": "99/99 pass", "cells": "pass" },
+        { "cell": "dpr1-z2-materialized", "artifact": "host-checks/picking-1792189648032474000.json", "burgRaw": 0.9215, "burgSemantic": 0.9909, "label": "57/57 pass", "marker": "418/418 pass", "cells": "pass" },
+        { "cell": "dpr1-z4-materialized", "artifact": "host-checks/picking-1792189768995491000.json", "burgRaw": 0.9188, "burgSemantic": 0.9979, "burgSemanticPass": true, "label": "41/41 insufficient", "marker": "99/99 pass", "cells": "pass" },
+        { "cell": "dpr2-z4-materialized", "artifact": "host-checks/picking-1792189869363643000.json", "burgRaw": 0.8968, "burgSemantic": 1.0, "burgSemanticPass": true, "label": "37/37 insufficient", "marker": "95/95 pass", "cells": "pass" }
+      ],
+      "summary100k": { "markerPass": "8/8", "burgSemanticPass": "2/8", "burgRawPass": "0/8", "labelPass": "2/8 (6 insufficient)", "cellsPass": "8/8" },
+      "sharedWorld": "every kind <50 samples in every cell (insufficient); cells pass",
+      "cellsMeasured": 8,
+      "cellsPlanned": 8,
+      "labeledFixture": false
+    }
+  },
+  "performance": {
+    "pickIndexMsPerQuery": { "before": 1.91, "after": [0.61, 0.66] },
+    "gpuSelectP95Ms": { "before": 3, "afterCompact": [1.4, 2.1], "afterMaterialized": [2.4, 4.4] },
+    "queryGuardMs": 0.001
+  },
+  "unfinished": [
+    "burg fails picking gate in 6 of 8 cells (semantic 98.28-100%, passes only z4 materialized; raw 82-92%, 0/8)",
+    "label under 50 samples in 6 of 8 cells",
+    "routes ungated; route resync cohort 0 clicks",
+    "shared world under 50 samples per kind",
+    "no labeled deterministic >=50-per-kind fixture",
+    "relief fallback agreement not measured separately",
+    "undo/redo through routed clicks not exercised",
+    "HTML overlays (notes box) intercept stale-view clicks",
+    "real-world stale-click rate unknown",
+    "30.8 ms routing latency outlier",
+    "context restore 608-616 ms vs 500 ms goal",
+    "GPU memory peak 204.9 MB over 167.8 MB budget during settle prepare",
+    "100k settle prepare ~2 s, off-motion long tasks up to 484 ms",
+    "heap +38 MB over 20 regenerations (plateaus)",
+    "strict visual fidelity 0/8",
+    "Windows/iGPU untested",
+    "final timing-check artifact not located",
+    "navigation is a pilot, not 10 interleaved pairs"
+  ]
+}

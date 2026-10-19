@@ -245,7 +245,17 @@ describe("trigger", () => {
     globalThis.pack = makePack({ 0: { 1: 0 }, 1: { 0: 0 } }, [{ i: 0, group: "roads" }]) as any;
     const batch = { id: "1-2", deals: [], startBurgId: 1, endBurgId: 2, type: "local" as const };
     ta.trigger([batch]);
-    expect(drawTrade.draw).toHaveBeenCalledWith(batch, expect.any(Array));
+    expect(drawTrade.draw).toHaveBeenCalledWith(batch, expect.any(Array), undefined, expect.any(Function));
+  });
+
+  it("stop() cancels the follow-up segments of triggered batches", () => {
+    globalThis.pack = makePack({ 0: { 1: 0 }, 1: { 0: 0 } }, [{ i: 0, group: "roads" }]) as any;
+    ta.trigger([{ id: "1-2", deals: [], startBurgId: 1, endBurgId: 2, type: "local" }]);
+    const isCancelled = vi.mocked(drawTrade.draw).mock.calls[0][3]!;
+    expect(isCancelled()).toBe(false);
+    ta.stop();
+    expect(isCancelled()).toBe(true);
+    expect(drawTrade.clear).toHaveBeenCalled();
   });
 
   it("does not draw when no route path can be found", () => {

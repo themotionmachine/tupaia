@@ -1,0 +1,33 @@
+import { chromium } from "playwright";
+import { writeFileSync } from "node:fs";
+const browser = await chromium.launch({headless:true});
+const context = await browser.newContext({serviceWorkers:"block"});
+await context.route("**/*", r => r.abort());
+const page = await context.newPage();
+const result = await page.evaluate(async () => {
+ const ns="http://www.w3.org/2000/svg";
+ const rules="\n      g.secondary,path.secondary {fill: var(--secondary);}\n      g.tertiary,path.tertiary {fill: var(--tertiary);}\n    ";
+ const root=document.createElementNS(ns,"svg");root.id="coas";document.body.append(root);
+ const coa=document.createElementNS(ns,"svg");coa.id="coa";coa.setAttribute("viewBox","0 0 40 20");
+ coa.innerHTML='<defs><style>'+rules+'</style></defs><g style="--secondary:rgb(255,0,0);--tertiary:rgb(0,0,255)"><path class="secondary" d="M0 0H20V20H0Z"/><path class="tertiary" d="M20 0H40V20H20Z"/></g>';
+ root.append(coa);
+ const original=coa.querySelector("style")!;
+ const before=getComputedStyle(coa.querySelector("path")!).fill;
+ const shared=document.createElementNS(ns,"style");shared.textContent=rules;root.append(shared);
+ original.sheet!.disabled=true;
+ const clone=coa.cloneNode(true) as SVGSVGElement; clone.id="clone";root.append(clone);
+ const cloneEnabled=clone.querySelector("style")!.sheet?.disabled;
+ const after=getComputedStyle(coa.querySelector("path")!).fill;
+ const disabled=original.sheet!.disabled;
+ const pixels=async (node:Element) => {
+  const markup=new XMLSerializer().serializeToString(node);
+  const url=URL.createObjectURL(new Blob([markup],{type:"image/svg+xml"}));
+  const image=new Image();await new Promise((yes,no)=>{image.onload=yes;image.onerror=no;image.src=url;});
+  const c=document.createElement("canvas");c.width=40;c.height=20;const ctx=c.getContext("2d")!;ctx.drawImage(image,0,0,40,20);URL.revokeObjectURL(url);
+  return {a:[...ctx.getImageData(10,10,1,1).data],b:[...ctx.getImageData(30,10,1,1).data]};
+ };
+ const standalone=await pixels(coa);
+ return {before,after,disabled,cloneEnabled,standalone,markupHasDisabled:coa.outerHTML.includes("disabled")};
+});
+console.log(JSON.stringify(result));
+await browser.close();

@@ -1,6 +1,7 @@
-// P0 renderer routing behind ?renderer=svg|gpu. SVG is the default and the only active renderer until P1:
-// a gpu request is parsed, probed and recorded, then falls back to SVG. No canvas is attached, the camera,
-// zoom handlers and save/export paths are not touched.
+// Renderer routing behind ?renderer=svg|gpu. SVG is the default: it never probes WebGL, loads GPU code or allocates
+// GPU resources. A gpu request is probed, then the P1 backend module is loaded lazily; any init, load, prepare or
+// restore failure falls back to the canonical SVG, which save/export always use.
+import type { GpuRenderer } from "../gpu/renderer";
 
 export type RendererKind = "svg" | "gpu";
 
@@ -20,9 +21,15 @@ export interface RendererBackend {
   readonly kind: RendererKind;
   worldReplaced(world: number): void;
   dispose(): void;
+  telemetry?(): unknown;
 }
 
-export type RendererBackendFactory = () => RendererBackend;
+export interface RendererHost {
+  // asynchronous backend failures (lazy load, prepare, context restore)
+  fallBack(reason: string): void;
+}
+
+export type RendererBackendFactory = (host: RendererHost) => RendererBackend;
 
 export interface RendererStatus {
   requested: RendererKind;
@@ -33,9 +40,10 @@ export interface RendererStatus {
   world: number;
   started: boolean;
   disposed: boolean;
+  gpu?: unknown; // backend telemetry: state, memory, pending work, compat report
 }
 
-export const GPU_UNAVAILABLE_REASON = "GPU renderer unavailable until P1";
+export const GPU_UNAVAILABLE_REASON = "No GPU backend registered";
 
 export function parseRendererPreference(search: string): RendererPreference {
   const values = new URLSearchParams(search).getAll("renderer");
@@ -69,7 +77,7 @@ export function probeWebGL2(createCanvas?: () => HTMLCanvasElement | OffscreenCa
   }
 }
 
-const svgBackend: RendererBackendFactory = () => ({
+const svgBackend = (): RendererBackend => ({
   kind: "svg",
   worldReplaced: () => undefined,
   dispose: () => undefined
@@ -89,7 +97,6 @@ function disposeQuietly(backend: RendererBackend | null): string {
 export interface RendererRouterOptions {
   search: string;
   probe?: () => RendererCapabilities;
-  // Must stay undefined in P0. P1 registers the GPU backend here behind its own gate.
   gpuBackend?: RendererBackendFactory;
 }
 
@@ -142,7 +149,9 @@ export class RendererRouter {
   }
 
   snapshot(): RendererStatus {
-    return { ...this.status, warnings: [...this.status.warnings] };
+    const snapshot: RendererStatus = { ...this.status, warnings: [...this.status.warnings] };
+    if (this.backend?.telemetry) snapshot.gpu = this.backend.telemetry();
+    return snapshot;
   }
 
   private tryGpu(): RendererBackend | null {
@@ -157,8 +166,13 @@ export class RendererRouter {
       return null;
     }
     let backend: RendererBackend | null = null;
+    const host: RendererHost = {
+      fallBack: reason => {
+        if (backend && this.backend === backend && !this.status.disposed) this.fallBack(reason);
+      }
+    };
     try {
-      backend = this.options.gpuBackend();
+      backend = this.options.gpuBackend(host);
       if (backend.kind !== "gpu") throw new Error(`Backend reported ${backend.kind}`);
       return backend;
     } catch (error) {
@@ -174,12 +188,53 @@ export class RendererRouter {
     this.backend = svgBackend();
     this.status.active = "svg";
     this.status.fallbackReason = reason;
+    console.warn(`Renderer fallback: ${reason}`);
     const warning = disposeQuietly(failed);
     if (warning) this.status.warnings.push(warning);
   }
 }
 
-const router = new RendererRouter({ search: typeof location === "undefined" ? "" : location.search });
+// The GPU module is imported only here, on demand; type-only imports keep it out of the default bundle path.
+export const lazyGpuBackend: RendererBackendFactory = host => {
+  let renderer: GpuRenderer | null = null;
+  let release: (renderer: GpuRenderer) => void = () => undefined;
+  let disposed = false;
+  let world = 0;
+  const destroy = () => {
+    const current = renderer;
+    renderer = null;
+    if (!current) return;
+    release(current);
+    current.dispose();
+  };
+  import("../gpu/renderer")
+    .then(module => {
+      if (disposed) return;
+      release = module.detachGpuGlobals;
+      renderer = module.createGpuRenderer(host.fallBack);
+      // a fallback raised during construction disposed this shell before the renderer was assigned
+      if (disposed) return destroy();
+      if (world) renderer.worldReplaced(world);
+    })
+    .catch(error => host.fallBack(`GPU load failed: ${errorText(error)}`));
+  return {
+    kind: "gpu",
+    worldReplaced(next) {
+      world = next;
+      renderer?.worldReplaced(next);
+    },
+    telemetry: () => renderer?.telemetry() ?? { state: disposed ? "disposed" : "loading" },
+    dispose() {
+      disposed = true;
+      destroy();
+    }
+  };
+};
+
+const router = new RendererRouter({
+  search: typeof location === "undefined" ? "" : location.search,
+  gpuBackend: lazyGpuBackend
+});
 const status = router.start();
 if (status.requested !== "svg" || status.warnings.length)
   console.warn("Renderer:", status.active, status.fallbackReason, ...status.warnings);

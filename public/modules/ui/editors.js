@@ -11,8 +11,16 @@ function restoreDefaultEvents() {
   svg.call(zoom);
 }
 
-// handle viewbox click
+// handle viewbox click. EXPERIMENTAL ?renderer=gpu&gpu-select (src/gpu/editor-dispatch.ts): while the GPU camera runs
+// ahead of the SVG, the click is re-targeted once (false: swallowed); otherwise the native event is used unchanged
 function clicked() {
+  const route = window.gpuClickRoute?.(d3.event);
+  if (route === false) return;
+  if (route) return d3.customEvent(route, dispatchClick);
+  dispatchClick();
+}
+
+function dispatchClick() {
   const el = d3.event.target;
   const parent = el?.parentElement;
   const grand = parent?.parentElement;

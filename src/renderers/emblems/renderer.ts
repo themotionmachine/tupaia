@@ -1,3 +1,4 @@
+import { EMBLEM_RULES, maintainEmblemStyles } from "./styles";
 import { shieldBox } from "./box";
 import { colors } from "./colors";
 import { lines } from "./lines";
@@ -172,10 +173,7 @@ class EmblemRenderModule {
     const loadedPatterns = this.getPatterns(coa, id);
     const blacklight = `<radialGradient id="backlight_${id}" cx="100%" cy="100%" r="150%"><stop stop-color="#fff" stop-opacity=".3" offset="0"/><stop stop-color="#fff" stop-opacity=".15" offset=".25"/><stop stop-color="#000" stop-opacity="0" offset="1"/></radialGradient>`;
     const field = `<rect x="0" y="0" width="200" height="200" fill="${this.clr(coa.t1)}"/>`;
-    const style = `<style>
-      g.secondary,path.secondary {fill: var(--secondary);}
-      g.tertiary,path.tertiary {fill: var(--tertiary);}
-    </style>`;
+    const style = `<style>${EMBLEM_RULES}</style>`;
 
     const templateCharge = (
       charge: Charge,
@@ -298,7 +296,9 @@ class EmblemRenderModule {
         ${overlay}</svg>`;
 
     // insert coa svg to defs
-    document.getElementById("coas")!.insertAdjacentHTML("beforeend", svg);
+    const root = document.getElementById("coas")!;
+    root.insertAdjacentHTML("beforeend", svg);
+    maintainEmblemStyles(root, root.lastElementChild!);
     return true;
   }
 
@@ -307,6 +307,8 @@ class EmblemRenderModule {
     if (!coa) return console.warn(`Emblem ${id} is undefined`);
     if (coa.custom) return console.warn("Cannot render custom emblem", coa);
     if (!document.getElementById(id)) return this.draw(id, coa);
+    const root = document.getElementById("coas");
+    if (root) maintainEmblemStyles(root);
   }
 
   async add(type: string, i: number, coa: Emblem, x: number, y: number) {

@@ -1,3 +1,4 @@
+import { restoreHiddenEmblemClasses } from "@/renderers/emblems/transient-classes";
 // Save the whole .map project to storage, machine or cloud
 import { lazy } from "@/lazy-loaders";
 import { restoreBurgVectorsIn } from "@/renderers/burg-canvas";
@@ -101,6 +102,7 @@ function prepareMapSections(): BinaryMapSection[] {
 
   // save svg
   const cloneEl = ensureEl("map").cloneNode(true) as SVGSVGElement;
+  restoreHiddenEmblemClasses(ensureEl("map"), cloneEl);
   restoreBurgVectorsIn(cloneEl);
   clearDenseZoom(cloneEl);
   restoreZoneHatching(cloneEl);

@@ -104,10 +104,12 @@ export class TradeAnimationModule {
       return;
     }
 
+    // stop() ends these too, otherwise their next segment would reappear after the clear
+    const gen = this.generation;
     for (const batch of batches) {
       const path = this.getPath(batch);
       if (!path) continue;
-      draw(batch, path.segments);
+      draw(batch, path.segments, undefined, () => gen !== this.generation);
     }
   }
 
