@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+// node --test (like the other bench tests; `gate bench` runs them). It used to import vitest, which never picked it up
+// (vitest's root is src/), so it ran nowhere.
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
 import {
   attemptBudget,
   cohortMode,
@@ -7,8 +10,17 @@ import {
   compareIds,
   coverage,
   distinctCount,
+  nonPassing,
   strideSample
 } from "./integration-fixture.ts";
+
+const expect = (value: any) => ({
+  toBe: (expected: unknown) => assert.equal(value, expected),
+  toEqual: (expected: unknown) => assert.deepEqual(value, expected),
+  toThrow: (pattern: RegExp) => assert.throws(value, pattern),
+  toBeLessThan: (n: number) => assert.ok(value < n, `${value} < ${n}`),
+  toHaveLength: (n: number) => assert.equal(value.length, n)
+});
 
 describe("cohortMode / cohortSize", () => {
   it("defaults to short and sizes the cohorts", () => {
@@ -68,5 +80,16 @@ describe("coverage and verdicts", () => {
     expect(cohortVerdict({ eligible: 10, required: 10, failures: 0 })).toBe("PASS");
     expect(cohortVerdict({ eligible: 10, required: 10, failures: 1 })).toBe("FAIL");
     expect(cohortVerdict({ eligible: 0, required: 10, failures: 2 })).toBe("FAIL");
+  });
+});
+
+describe("nonPassing (the gate's verdict reading)", () => {
+  it("fails every verdict that is not PASS, in any cohort mode", () => {
+    expect(nonPassing({ a: "PASS", b: "PASS" })).toEqual([]);
+    expect(nonPassing({ routeCohort: "UNTESTED", markerCohort: "PASS", resyncLabel: "UNDERCOVERED", x: "FAIL" })).toEqual([
+      "routeCohort: UNTESTED",
+      "resyncLabel: UNDERCOVERED",
+      "x: FAIL"
+    ]);
   });
 });

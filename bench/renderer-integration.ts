@@ -22,7 +22,15 @@
 // agree/disagree deltas are reported; recovered/unrecovered move at most once per click; unavailable is only read
 // while a dialog is open (suspended pick). Verdicts per cohort: PASS, FAIL, UNTESTED (no eligible sample), UNDERCOVERED.
 // Cohort size: INTEGRATION_COHORT=short (default, 10 eligible per cohort) or full (50; the final run).
+// Every verdict must be PASS in both modes: UNTESTED and UNDERCOVERED fail the run (a cohort that measured nothing is not
+// evidence). The route-rename undo probe is retired: the stock app has no undo for route, label, burg or marker edits,
+// so it could only ever report UNTESTED. Undo systems are replayed by bench/host/editor-replay.ts scripts instead.
+// Browser: INTEGRATION_LAUNCHER=metal (default; new-headless Chromium, ANGLE on Metal, the host GPU) or swiftshader
+// (Playwright's default headless shell; CPU WebGL). See bench/host/launcher.ts: under SwiftShader the stale clicks
+// land after d3 zoom's "end" (150 ms after the wheel) and the route/marker cohorts go UNTESTED, and the run takes about
+// twice as long. The report records the WebGL adapter, and a metal run on a non-Metal adapter fails.
 import { chromium, type CDPSession, type Page } from "playwright";
+import { adapterMatches, launcherFrom, launchOptions, probeAdapter } from "./host/launcher.ts";
 import { cpuVsWait, diffMetrics, pickMetrics, summarizeCpuProfile } from "./route-state-probe.ts";
 import {
   FIXTURE_KINDS,
@@ -33,6 +41,7 @@ import {
   cohortVerdict,
   compareIds,
   coverage,
+  nonPassing,
   strideSample,
   type CohortVerdict
 } from "./integration-fixture.ts";
@@ -53,6 +62,9 @@ const diagnosticsPath = output.replace(/\.json$/, "") + ".diagnostics.json";
 if (existsSync(diagnosticsPath)) throw new Error("diagnostics exist; results are immutable: " + diagnosticsPath);
 
 const VIEW = { width: 1280, height: 720 };
+const launcher = launcherFrom(process.env.INTEGRATION_LAUNCHER);
+// d3-zoom's wheel gesture ends this long after the last wheel event; a click after it sees a synced canonical camera
+const WHEEL_END_MS = 150;
 const cohort = cohortMode(process.env.INTEGRATION_COHORT);
 const COHORT = cohortSize(cohort);
 const MARKER_ELIGIBLE = COHORT;
@@ -61,7 +73,8 @@ const MARKER_MINUTES = cohort === "full" ? 11 : 4;
 const RESYNC_PER_KIND = COHORT;
 const ROUTE_ATTEMPTS = attemptBudget(COHORT);
 // route cohort camera zooms, tried in order until a route has a ±2 px robust click point (max zoom 20 leaves room for
-// the +100 wheel step)
+// the +100 wheel step). Zooms below 8 are not tried: route strokes are ~0.5-1.6 CSS px wide at k 2 and no route ever
+// had a robust point there (0 of 25 in the 2026-10-18 and 2026-10-19 runs), so it only cost a camera move per route.
 const ROUTE_ZOOMS = [8, 16];
 // focus "route": the 100k route-click flow alone with phase telemetry (a diagnostic, never a full-suite pass)
 const nativeProbe = process.env.INTEGRATION_NATIVE_PROBE === "1";
@@ -134,6 +147,7 @@ const report: any = {
     markerCohort: { eligible: MARKER_ELIGIBLE, attempts: MARKER_ATTEMPTS, minutes: MARKER_MINUTES },
     resyncPerKind: RESYNC_PER_KIND,
     cohort: { mode: cohort, size: COHORT, attemptBudget: MARKER_ATTEMPTS, fixtureMinimum: FIXTURE_MIN },
+    launcher,
     nativeProbe, forceEmblems,
     focus,
     preamble,
@@ -288,8 +302,11 @@ function installHelpers() {
       if (!w.__ixClicks) {
         w.__ixClicks = true;
         window.addEventListener("click", event => {
-          w.__ix.clicks.push({ trusted: event.isTrusted, target: event.target, stale: w.gpuRenderer?.canonicalCameraStale() });
+          w.__ix.clicks.push({ trusted: event.isTrusted, target: event.target, stale: w.gpuRenderer?.canonicalCameraStale(), at: event.timeStamp });
         }, true);
+        // wheel input and d3-zoom gesture ends, on the event clock: whether a click came before the camera settled
+        window.addEventListener("wheel", event => (w.__ixWheelAt = event.timeStamp), true);
+        (0, eval)("zoom").on("end.ix", () => (w.__ixZoomEndAt = performance.now()));
       }
       for (const editor of EDITORS) {
         const fn = w[editor];
@@ -529,13 +546,6 @@ function installLocate() {
     const r = hit.el.getBoundingClientRect();
     return r.width > 0 && r.height > 0 ? ix.toWorld(r.left + r.width / 2, r.top + r.height / 2) : null;
   };
-  // the document-level undo/redo controls: #undo and #redo belong to the heightmap editor (index.html), not to the map
-  ix.undoState = () => {
-    const undo = document.getElementById("undo") as HTMLButtonElement | null;
-    const redo = document.getElementById("redo") as HTMLButtonElement | null;
-    return { undo: !!undo, undoDisabled: !!undo?.disabled, redo: !!redo, redoDisabled: !!redo?.disabled };
-  };
-  ix.routeName = (id: number) => (globalThis as any).pack.routes.find((r: any) => r.i === id)?.name ?? null;
   ix.locateRelief = () => {
     const raster = document.querySelector("#terrain > image[data-relief]");
     if (!raster) return null;
@@ -722,8 +732,14 @@ function installStaleChecks() {
     const routedWrong = outcome[0] === "routed" && ix.subject(target) !== ix.subject(rec?.oracle ?? null);
     expect(!routedWrong, "ROUTED WRONG TARGET " + ix.describe(target) + " oracle " + ix.describe(rec?.oracle));
     const expected = ix.current?.element ?? null;
+    // the stale window: wheel input -> click, and whether d3-zoom's gesture end (camera sync) came before the click
+    const wheelAt = w.__ixWheelAt ?? null;
+    const clickAt = first?.at ?? null;
+    const zoomEndAt = w.__ixZoomEndAt ?? null;
     return {
       problems,
+      wheelToClickMs: wheelAt != null && clickAt != null ? Math.round(clickAt - wheelAt) : null,
+      zoomEndedBeforeClick: zoomEndAt != null && wheelAt != null && clickAt != null ? zoomEndAt > wheelAt && zoomEndAt < clickAt : null,
       stale: recovered || (rec?.stale ?? null),
       recovered,
       intercepted,
@@ -992,6 +1008,21 @@ const stageSnapshot = async (page: Page, name: string, operations: string[]) => 
     listeners: row.metrics.JSEventListeners, heapMB: row.heapMB });
 };
 const list = (key: string) => ((diagnostics[key] ??= []) as any[]);
+const routeZoomList = () => [...new Set(zoom >= ROUTE_ZOOMS[0] ? [zoom, ...ROUTE_ZOOMS.filter(k => k > zoom)] : ROUTE_ZOOMS)];
+// why a clicked row did not count: the stale window closed (zoom ended before the click) is the launcher symptom
+const ineligibleReasons = (rows: any[]) => {
+  const reasons: Record<string, number> = {};
+  for (const r of rows.filter(r => !r.skip && !r.eligible)) {
+    const reason = !r.inView ? "left view" : r.intercepted ? "html overlay took the click"
+      : !r.stale ? (r.zoomEndedBeforeClick ? "not stale: zoom ended before the click" : "not stale") : "oracle subject differs";
+    reasons[reason] = (reasons[reason] ?? 0) + 1;
+  }
+  return reasons;
+};
+const wheelToClick = (rows: any[]) => {
+  const ms = rows.map(r => r.wheelToClickMs).filter((v: unknown): v is number => typeof v === "number").sort((a, b) => a - b);
+  return ms.length ? { n: ms.length, p50: ms[Math.floor(ms.length / 2)], max: ms[ms.length - 1], overWheelEnd: ms.filter(v => v > WHEEL_END_MS).length } : null;
+};
 
 // CPU profile + CDP task metrics around one measured window: busy (script/GC/native) vs idle wait, top callsites. The
 // raw profile is written next to the report (immutable, wx).
@@ -1151,7 +1182,7 @@ async function routeFocus(page: Page, loadWorld: (world: "100k") => Promise<void
   await centerCamera(page, zoom);
   const census = await page.evaluate(() => (globalThis as any).__ix.census("route"));
   const keys: string[] = strideSample([...census.keys].sort(compareIds), FIXTURE_MIN);
-  const routeZooms = [...new Set([zoom, ...ROUTE_ZOOMS.filter(k => k > zoom)])];
+  const routeZooms = routeZoomList();
   const controls: any = {};
   const rows: any[] = [];
   // a harness error (e.g. a fallback inside staleClick's settle) still reports the rows measured so far
@@ -1358,14 +1389,17 @@ async function routeFocus(page: Page, loadWorld: (world: "100k") => Promise<void
   }
 }
 
-const browser = await chromium.launch({ headless: true });
+const browser = await chromium.launch(launchOptions(launcher));
 try {
   const context = await browser.newContext({ viewport: VIEW, deviceScaleFactor: dpr, serviceWorkers: "block", acceptDownloads: false });
-  await context.addInitScript(() => {
+  // only on the app's origin: new-headless Chromium also runs init scripts in opaque-origin frames, where reading
+  // localStorage throws a page error ("Access is denied for this document")
+  await context.addInitScript((localOrigin: string) => {
+    if (location.origin !== localOrigin) return;
     localStorage.setItem("autosaveInterval", "0");
     localStorage.setItem("azgaarAssistant", "hide");
     (globalThis as any).__name ??= (fn: unknown) => fn; // tsx keepNames helper inside serialized page functions
-  });
+  }, origin);
   const scripts = [
     "bridge.js",
     "bridge-mutations.js",
@@ -1395,6 +1429,9 @@ try {
     const result = await (globalThis as any).__tupaia.call("ready", { timeoutMs: 120000 });
     if (!result.ok) throw new Error(JSON.stringify(result));
   });
+  report.adapter = { launcher, ...(await page.evaluate(probeAdapter)) };
+  if (!check(adapterMatches(launcher, report.adapter.renderer), "launcher " + launcher + " got WebGL adapter " + report.adapter.renderer))
+    throw new Error("wrong WebGL adapter for launcher " + launcher + ": " + report.adapter.renderer);
   const loadWorld = (world: "shared" | "100k" | "text", text = "") =>
     page.evaluate(
       async ({ world, text }) => {
@@ -1523,44 +1560,13 @@ try {
     check(downloads.length === 0, "roundtrip: downloads " + downloads.join(","));
   }
 
-  // undo/redo after a routed edit: the stock app has no document-level undo for route, label, burg or marker edits
-  // (docs/performance/webgl-rewrite/p0-audits/io-format-undo.md:118), so Ctrl+Z / Ctrl+Y (hotkeys.js, heightmap only)
-  // are pressed after the route rename and the route name is read back. Undo is PASS only if both directions revert;
-  // otherwise the probe is UNTESTED with the evidence, never PASS.
-  if (stage("roundtrip")) {
-    // the edits made before the roundtrip (the reload re-creates the page helpers, so they are read from the report)
-    const edits: any = report.roundtrip?.edits ?? {};
-    const routeId: number = edits.route?.id ?? -1;
-    const state = await page.evaluate(() => (globalThis as any).__ix.undoState());
-    const read = () => page.evaluate(id => (globalThis as any).__ix.routeName(id), routeId);
-    const before = await read();
-    await page.keyboard.press("Control+z");
-    await page.waitForTimeout(200);
-    const afterUndo = await read();
-    await page.keyboard.press("Control+y");
-    await page.waitForTimeout(200);
-    const afterRedo = await read();
-    const reverted = !!edits.route && afterUndo !== before;
-    const restored = !!edits.route && afterRedo === before;
-    const verdict: CohortVerdict = reverted && restored ? "PASS" : "UNTESTED";
-    report.undoCohort = {
-      verdict,
-      reason: edits.route
-        ? reverted
-          ? restored ? "undo and redo reverted the routed edit" : "undo reverted, redo did not restore"
-          : "no document-level undo for route edits; #undo/#redo are heightmap-owned"
-        : "no route edit was applied",
-      state,
-      routeEdit: edits.route ?? null,
-      names: { before, afterUndo, afterRedo }
-    };
-  }
-
-  // resynced cohort on the reloaded world: label and route are unready, so stale clicks sync and take the legacy path
+  // resynced cohort on the reloaded world: label is unready, so stale clicks sync and take the legacy path. Route is
+  // not sampled here: at k 2 its strokes never have a robust point (0 clicks in every run, 20 wasted camera moves);
+  // the 100k route cohort below covers route resync at k 8/16.
   if (stage("roundtrip")) {
     await centerCamera(page, zoom);
-    const cohort: any = { label: [], route: [] };
-    for (const kind of ["label", "route"]) {
+    const cohort: any = { label: [] };
+    for (const kind of ["label"]) {
       for (let attempt = 0; cohort[kind].filter(row => row.eligible).length < RESYNC_PER_KIND && attempt < RESYNC_PER_KIND * 2; attempt++) {
         const aim = await page.evaluate(({ kind, attempt }) => (globalThis as any).__ix.aim(kind, attempt % 5), { kind, attempt });
         if (aim) await camera(page, zoom, aim[0], aim[1]);
@@ -1589,12 +1595,14 @@ try {
       legacy: rows.filter(r => r.outcome === "legacy").length,
       recovered: rows.filter(r => r.recovered).length,
       intercepted: rows.filter(r => r.intercepted).length,
-      notInView: rows.filter(r => !r.inView).length
+      notInView: rows.filter(r => !r.inView).length,
+      ineligible: ineligibleReasons(rows),
+      wheelToClickMs: wheelToClick(rows)
     });
-    report.resyncCohort = { label: summary(cohort.label), route: summary(cohort.route) };
+    report.resyncCohort = { label: summary(cohort.label) };
     diagnostics.resyncCohort = cohort;
   }
-  if (stage("roundtrip")) await stageSnapshot(page, "roundtrip", ["save/export", "load text", "install", "undo probe (Ctrl+Z/Y)", "resync cohort label+route"]);
+  if (stage("roundtrip")) await stageSnapshot(page, "roundtrip", ["save/export", "load text", "install", "resync cohort label"]);
 
   // World B: generated 100k world, routed marker cohort (marker is the one ready kind)
   const fixtureKeys: Record<string, string[]> = {};
@@ -1706,7 +1714,7 @@ try {
       const mark = failures.length;
       const rows: any[] = [];
       let eligible = 0;
-      const routeZooms = [...new Set([zoom, ...ROUTE_ZOOMS.filter(k => k > zoom)])];
+      const routeZooms = routeZoomList();
       for (let i = 0; i < fixtureKeys.route.length && eligible < COHORT && rows.length < ROUTE_ATTEMPTS; i++) {
         const key = fixtureKeys.route[i];
         let target: any = null;
@@ -1767,6 +1775,8 @@ try {
         dropped: clicked.filter(r => r.outcome === "dropped").length,
         recovered: clicked.filter(r => r.recovered).length,
         intercepted: clicked.filter(r => r.intercepted).length,
+        ineligible: ineligibleReasons(clicked),
+        wheelToClickMs: wheelToClick(clicked),
         verdict: cohortVerdict({ eligible, required: COHORT, failures: failures.length - mark })
       };
       diagnostics.routeCohort = rows;
@@ -1830,11 +1840,7 @@ try {
       rows.push(row);
     }
     const clicked = rows.filter(r => !r.skip);
-    const reasons: Record<string, number> = {};
-    for (const r of clicked.filter(r => !r.eligible)) {
-      const reason = !r.inView ? "left view" : r.intercepted ? "html overlay took the click" : !r.stale ? "not stale" : "oracle subject differs";
-      reasons[reason] = (reasons[reason] ?? 0) + 1;
-    }
+    const reasons = ineligibleReasons(clicked);
     report.markerCohort = {
       markers: ids.length,
       attempts: rows.length,
@@ -1850,6 +1856,7 @@ try {
       // clicks with a static revision during the wheel step (pick index necessarily stale at click; diagnosis only)
       revisionDuringWheel: clicked.filter(r => r.point && r.point.revisions !== r.point.revisionsBefore).length,
       ineligible: reasons,
+      wheelToClickMs: wheelToClick(clicked),
       underCoverage: eligible < MARKER_ELIGIBLE,
       verdict: cohortVerdict({ eligible, required: COHORT, failures: failures.filter(f => f.startsWith("marker ")).length }),
       latencyMs: clicked.map(r => r.ms).filter((v: unknown) => typeof v === "number"),
@@ -1873,17 +1880,14 @@ const verdicts: Record<string, CohortVerdict | string> = focus === "route" ? { r
   resyncLabel: report.resyncCohort
     ? cohortVerdict({ eligible: report.resyncCohort.label.eligible, required: COHORT, failures: failures.filter(f => f.startsWith("resync label")).length })
     : "UNTESTED",
-  undo: report.undoCohort?.verdict ?? "UNTESTED",
   worldReplacement: report.worldReplacement?.verdict ?? "UNTESTED",
   fixture: report.fixture
     ? Object.values(report.fixture.kinds as Record<string, { meets: boolean }>).every(c => c.meets) ? "PASS" : "UNDERCOVERED"
     : "UNTESTED"
 };
 report.verdicts = verdicts;
-for (const [name, verdict] of Object.entries(verdicts)) {
-  const strictBad = cohort === "full" && (verdict === "UNTESTED" || verdict === "UNDERCOVERED");
-  if (verdict === "FAIL" || strictBad) fail("verdict " + name + ": " + verdict);
-}
+// every verdict must be PASS, short and full mode alike (UNTESTED / UNDERCOVERED measured nothing, or too little)
+for (const bad of nonPassing(verdicts)) fail("verdict " + bad);
 report.failure = failures.length ? failures.join("; ") : null;
 writeFileSync(output, JSON.stringify(report, null, 2), { flag: "wx" });
 writeFileSync(diagnosticsPath, JSON.stringify(diagnostics, null, 2), { flag: "wx" });
@@ -1901,7 +1905,7 @@ console.log(
       ...report.routeFocus,
       controls: Object.fromEntries(Object.entries(report.routeFocus.controls).map(([k, v]: [string, any]) => [k, v?.resumeMs ?? v]))
     },
-    undo: report.undoCohort,
+    adapter: report.adapter,
     worldReplacement: report.worldReplacement,
     fixture: report.fixture,
     verdicts,

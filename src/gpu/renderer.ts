@@ -238,10 +238,12 @@ export class GpuRenderer {
   // editor dialog visibility (editorReason): dirty on any document mutation that could change it
   // While suspended, a closing dialog is the only change that can resume an otherwise idle renderer (no camera, prepare
   // or draw follows it): re-check on the next frame. draw() hides again (a no-op) if the editor is still open.
-  private dialogs = new MutationObserver(() => {
+  // Likewise an opening dialog: nothing else may follow it, and without a draw the last GPU frame would stay on screen
+  // over the SVG the editor changes (editor replay, bench/host/editor-replay.ts).
+  private dialogs = new MutationObserver(records => {
     this.dialogsDirty = true;
     this.resume();
-    if (this.suspendedReason) this.requestDraw();
+    if (this.suspendedReason || records.some(touchesDialog)) this.requestDraw();
   });
   private dialogsDirty = true;
   private dialogShown = false;
@@ -1153,6 +1155,14 @@ export class GpuRenderer {
       this.fallBack(`GPU restore failed: ${errorText(error)}`);
     }
   }
+}
+
+// A mutation that can open a jQuery UI dialog: its wrapper added, or the wrapper's own style/class changed.
+function touchesDialog(record: MutationRecord): boolean {
+  if (record.target instanceof Element && record.target.classList.contains("ui-dialog")) return true;
+  for (const node of record.addedNodes)
+    if (node instanceof Element && node.classList.contains("ui-dialog")) return true;
+  return false;
 }
 
 // Computed visibility: jQuery UI dialogs that were closed (or never opened) stay in the DOM hidden by CSS.
