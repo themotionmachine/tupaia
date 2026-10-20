@@ -148,6 +148,40 @@ export class GlyphAtlas {
   }
 }
 
+// The atlas cuts a text-shadow alone by drawing the text far off the canvas and offsetting only its shadow back in
+// (GlyphAtlas.shadow). Chromium paints that shadow; a browser that culled the off-canvas draw before its shadow would
+// leave the cell empty and the text shadowless. One probe per process: when it finds no ink, shadowed text stays on
+// the compat lane under a named reason instead.
+let offCanvasShadow: boolean | undefined;
+export function offCanvasShadowPaints(context?: CanvasRenderingContext2D | null): boolean {
+  offCanvasShadow ??= probeOffCanvasShadow(context === undefined ? probeContext() : context);
+  return offCanvasShadow;
+}
+
+function probeOffCanvasShadow(c: CanvasRenderingContext2D | null): boolean {
+  if (!c) return false;
+  try {
+    const away = 4 * ATLAS;
+    c.font = "24px sans-serif";
+    c.fillStyle = "#fff";
+    c.shadowColor = "#fff";
+    c.shadowBlur = 2;
+    c.shadowOffsetX = away;
+    c.fillText("H", 4 - away, 26);
+    const { data } = c.getImageData(0, 0, 32, 32);
+    for (let i = 3; i < data.length; i += 4) if (data[i] > 0) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function probeContext(): CanvasRenderingContext2D | null {
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = 32;
+  return canvas.getContext("2d", { willReadFrequently: true });
+}
+
 // A label waits at most this long for its web font; a slower face is measured on a later prepare ('loadingdone').
 export const FONT_LOAD_TIMEOUT = 3000;
 // fonts whose load outlived FONT_LOAD_TIMEOUT and is still pending: later labels do not wait for them again
@@ -668,6 +702,7 @@ async function layoutStraight(
       ...color
     );
   const dpr = devicePixelRatio();
+  if (plan.shadows.length && !offCanvasShadowPaints()) return "text-shadow (canvas culls off-canvas shadow)";
   // CSS paints the first shadow on top: the last one goes down first
   for (const shadow of [...plan.shadows].reverse()) {
     const sigma = (shadow.blur * dpr) / 2; // device px

@@ -1406,7 +1406,7 @@ function overlayCopy(live: Element, clone: SVGSVGElement): Element | null {
     const empty = host.appendChild(document.createElementNS("http://www.w3.org/2000/svg", "g"));
     const defaults = getComputedStyle(empty);
     for (const element of [copy, ...copy.querySelectorAll("*")]) {
-      if (!element.matches("g, #ruler *, #scaleBar > text")) continue;
+      if (!element.matches("g, #ruler *, #scaleBar > text, #prec text")) continue;
       const computed = getComputedStyle(element);
       let style = "";
       const add = (key: string) => {

@@ -113,7 +113,9 @@ describe("non-label text is native glyphs", () => {
     expect(layerRouting(styled(), "ruler")).toEqual(["shape", "label", "label"]);
   });
 
-  it("province labels stay inside the #provs opacity group as glyphs", () => {
+  // Synthetic: on the parity fixture the whole #provs layer is one compat run (nested opacity), so its 37 labels are
+  // not routed here; this pins only that a plain text inside a simple opacity group becomes a glyph draw.
+  it("a straight text inside a plain opacity group (#provs) is a glyph draw inside that group", () => {
     env.fill("provs", '<g id="provinceLabels"><text x="1" y="1" font-size="10px">Wal</text></g>');
     applyStylePreset(env);
     expect(layerRouting(env.build(), "provs")).toEqual(["group{mask:none,op:0.7}[label]"]);
