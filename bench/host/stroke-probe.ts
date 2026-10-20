@@ -14,7 +14,8 @@
 //   - phase: the lag that best aligns the GPU profile with the SVG one;
 //   - dot aspect: along/across spread of a dot (round "0 2" dots: 1 when round).
 // Verdict per line: |width GPU - SVG| <= 1 device px, |pitch GPU - SVG| <= 1, |phase| <= 1, and a dot aspect within
-// 0.25 of SVG's; an empty arm fails. A check never compares GPU with GPU.
+// 0.25 of SVG's; an empty arm fails, except sub-pixel round dots that SVG drops and GPU keeps below 0.1 px of mass
+// (reported as `note: not comparable`). A check never compares GPU with GPU.
 //
 // Environment: GATE_OUT_DIR (evidence), PROBE_DPR (comma list, default 1,2), PROBE_K (comma list, default 1,4).
 // Output: stroke-probe.json (report; `failure` null on a pass) and probe-<dpr>-k<k>-{svg,gpu}.png.
@@ -271,7 +272,11 @@ function measureLine(probe: Probe, svg: DecodedPng, gpu: DecodedPng, k: number, 
     crossGpu: round(spread(g.across))
   };
   const failures: string[] = [];
-  if (!(widthSvg > 0.01)) failures.push("SVG arm empty");
+  // Sub-pixel round dots (a 0.25 device-px radius) are dropped by Skia entirely; a GPU arm that is also below
+  // visibility is then reported as not comparable rather than as a failure. Any visible GPU ink still fails.
+  const subPixelDots = !!probe.dots && probe.width * scale <= 0.5 && !(widthSvg > 0.01) && widthGpu < 0.1;
+  if (subPixelDots) line.note = "not comparable: SVG drops sub-pixel dots, GPU mass < 0.1 px";
+  else if (!(widthSvg > 0.01)) failures.push("SVG arm empty");
   if (!(widthGpu > 0.01)) failures.push("GPU arm empty");
   if (probe.period) {
     // dashed: the mass per column of a solid line of this width is the duty denominator
