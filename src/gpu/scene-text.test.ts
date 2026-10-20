@@ -4,9 +4,9 @@
 // transformed groups and structures the glyph path does not model stay compat with a named reason; #labels keeps its
 // own routing. The stylesheet stubs mirror public/index.css (the rules a computed style sees in the app).
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { applyStylePreset, createMapEnv, layerRouting, type MapEnv } from "./test/dom-env";
+import { applyStylePreset, createMapEnv, layerRouting, type MapEnv, type StyleRule } from "./test/dom-env";
 
-const appRules = [
+const appRules: StyleRule[] = [
   {
     selector: "#prec text",
     declarations: { "font-size": "32px", stroke: "none", "text-shadow": "1px 1px 1px #9daac9" }

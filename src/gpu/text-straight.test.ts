@@ -1,6 +1,6 @@
 // Straight <text> (outside #labels) helpers: what goes native as glyphs, and what stays on the compat lane and why.
 import { describe, expect, it } from "vitest";
-import { emojiContent, kerningFor, parseTextShadows, planStraightText, straightTextReason } from "./text";
+import { emojiContent, parseTextShadows, planStraightText, straightTextReason } from "./text";
 
 // A minimal element: attributes and text/element children, as planStraightText reads them.
 function text(attrs: Record<string, string>, content: string | null, children: "element"[] = []) {
@@ -68,14 +68,6 @@ describe("emojiContent", () => {
   it("wind arrows, degree units and plain text are text glyphs", () => {
     for (const s of ["⇉", "⇇", "⇊", "⇈", "72°F", "40K mi²", "2748 mi", "75°W"]) expect(emojiContent(s), s).toBe(false);
   });
-});
-
-it("kerningFor: Chromium computes text-rendering in lower case; optimizeSpeed turns kerning off", () => {
-  expect(kerningFor("optimizespeed")).toBe("none");
-  expect(kerningFor("optimizeSpeed")).toBe("none");
-  expect(kerningFor("auto")).toBe("auto");
-  expect(kerningFor("geometricprecision")).toBe("auto");
-  expect(kerningFor(undefined)).toBe("auto");
 });
 
 describe("planStraightText", () => {

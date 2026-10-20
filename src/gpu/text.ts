@@ -442,7 +442,7 @@ async function layoutLabel(
     }
     const rasterFont = cssFont(style, px * scale);
     measure.font = rasterFont;
-    measure.fontKerning = kerningFor(style.textRendering);
+    measure.fontKerning = style.textRendering === "optimizeSpeed" ? "none" : "auto";
     const baselineShift = centralBaselineShift(style.dominantBaseline, measure.measureText(content), scale);
     if (baselineShift === null) return "central baseline metrics";
     const advances = spacedAdvances(
@@ -482,11 +482,6 @@ async function layoutLabel(
 // ---------------------------------------------------------------- straight text (outside #labels)
 // A plain <text x y [dx dy]>content</text>: one horizontal line from (x+dx, y+dy), anchored as text-anchor says. The
 // overlay layers draw their small text this way (temperature, regiment numbers, coordinates, wind arrows, rulers).
-
-// Chromium returns computed text-rendering in lower case; optimizeSpeed turns kerning off (Blink FontDescription).
-export function kerningFor(textRendering: string | undefined): CanvasFontKerning {
-  return (textRendering || "").toLowerCase() === "optimizespeed" ? "none" : "auto";
-}
 
 // Color glyphs: the atlas stores coverage only, so an emoji would come out as a tinted silhouette. Conservative:
 // some symbols (©, ™, ↔) that usually render as text are kept on the compat lane too.
@@ -643,7 +638,9 @@ async function layoutStraight(
     atlas.fontIssues.set(font, content);
     return fontIssue;
   }
-  const kerning = kerningFor(style.textRendering);
+  // SVG text stays kerned under text-rendering: optimizeSpeed (Chromium getComputedTextLength is the same for auto,
+  // optimizeSpeed and geometricPrecision), so the layout always measures with kerning
+  const kerning: CanvasFontKerning = "auto";
   const rasterFont = cssFont(style, px * scale);
   measure!.font = rasterFont;
   measure!.fontKerning = kerning;
