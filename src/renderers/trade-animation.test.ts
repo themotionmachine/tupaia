@@ -264,3 +264,34 @@ describe("trigger", () => {
     expect(drawTrade.draw).not.toHaveBeenCalled();
   });
 });
+
+// ─── rebuilt world ───────────────────────────────────────────────────────────
+
+describe("rebuilt world", () => {
+  it("a caravan that finishes after generate/load replaced the cells stops the animation instead of spawning", () => {
+    const world = () => ({
+      ...makePack({ 0: { 1: 0 }, 1: { 0: 0 } }, [{ i: 0, group: "roads" }]),
+      deals: [{ seller: 2, sellerType: "burg", buyer: 1, buyerType: "market" }]
+    });
+    globalThis.pack = world() as any;
+    (globalThis as any).options = { trade: { animation: { concurrent: 2, displayType: "both" } } };
+    ta.start();
+    const draws = vi.mocked(drawTrade.draw).mock.calls;
+    expect(draws).toHaveLength(2);
+    draws[0][2]!(); // same world: a finished caravan is replaced
+    expect(draws).toHaveLength(3);
+
+    globalThis.pack = world() as any; // generate()/load replace pack.cells before the app restarts the animation
+    vi.mocked(drawTrade.clear).mockClear();
+    const random = vi.spyOn(Math, "random");
+    draws[1][2]!();
+    expect(draws).toHaveLength(3); // no caravan on the half-built world, no random draw in its seeded generation
+    expect(random).not.toHaveBeenCalled();
+    expect(drawTrade.clear).toHaveBeenCalled();
+    expect(draws[2][3]!()).toBe(true); // the remaining caravans are cancelled
+    random.mockRestore();
+
+    ta.start(); // the app's restart for the new world
+    expect(draws).toHaveLength(5);
+  });
+});

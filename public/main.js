@@ -1368,6 +1368,8 @@ const regenerateMap = debounce(async function (options) {
 
 // clear the map
 function undraw() {
+  // the rebuilt map must not keep animating (and spawning caravans on) the one being removed
+  TradeAnimation.stop();
   viewbox
     .selectAll("path, circle, polygon, line, text, use, #texture > image, #zones > g, #armies > g, #ruler > g")
     .remove();

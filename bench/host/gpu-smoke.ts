@@ -43,12 +43,13 @@ try {
  report.status=await page.evaluate(()=>({...(globalThis as any).rendererStatus?.(),temporaryExportClones:document.querySelectorAll("#fantasyMap").length}));
  if((report.status as any)?.active!=="gpu")report.failure="GPU fallback: "+(report.status as any)?.fallbackReason;
  if((report.status as any)?.gpu?.canvasVisible){
-  // Live trade markers are D3 groups in the hidden SVG; the GPU mirrors them per frame. Sample poses, GPU frame counter and both
+  // Live trade markers are D3 groups in the hidden SVG; the GPU mirrors them per frame. Poses are read through TradeAnimation:
+  // while the canvas covers the SVG they are not written to it (renderers/caravan-poses.ts). Sample poses, GPU frame counter and both
   // marker counts (DOM <use> in visible groups vs rendererStatus().gpu.markers) around a wait, then assert (TRADE packet).
   const sample=()=>page.evaluate(()=>new Promise<any>(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>{
     const groups=[...document.querySelectorAll("#tradeAnimation > g")] as Element[];
     const shown=groups.filter(g=>g.getAttribute("display")!=="none");
-    resolve({poses:groups.map(e=>e.getAttribute("transform")),domMarkers:shown.reduce((n,g)=>n+g.querySelectorAll(":scope > use").length,0),frames:(globalThis as any).rendererStatus?.().gpu?.frames||0,gpuMarkers:(globalThis as any).rendererStatus?.().gpu?.markers??null,tradeOn:!!(globalThis as any).layerIsOn?.("toggleTrade")});
+    resolve({poses:groups.map(e=>(globalThis as any).TradeAnimation?.transformOf?.(e)??e.getAttribute("transform")),domMarkers:shown.reduce((n,g)=>n+g.querySelectorAll(":scope > use").length,0),frames:(globalThis as any).rendererStatus?.().gpu?.frames||0,gpuMarkers:(globalThis as any).rendererStatus?.().gpu?.markers??null,tradeOn:!!(globalThis as any).layerIsOn?.("toggleTrade")});
   }))));
   const before=await sample();
   await page.waitForTimeout(150);

@@ -4,7 +4,16 @@
 // the frame is re-prepared from it. Whenever the GPU cannot show a correct frame the canvas is hidden, never blank.
 // Between inexact and exact updates, hover still sees the previous SVG transform. Clicks synchronize and re-hit-test
 // the canonical SVG before editor dispatch. GPU selection remains separately opt-in via ?gpu-select. An open editor
-// suspends the GPU, and hide() writes the GPU camera before revealing the canonical SVG.
+// suspends the GPU, and hide() writes the GPU camera before revealing the canonical SVG. Trade caravan poses are kept
+// out of the SVG while the canvas covers it (caravansPaused, renderers/caravan-poses.ts).
+import {
+  caravanDomPaused,
+  caravanNear,
+  caravanPauseStats,
+  onCaravansMoved,
+  setCaravanDomPaused,
+  syncCaravans
+} from "../renderers/caravan-poses";
 import { canvasAntialias, DETAIL_RESERVE, GPU_BUDGET, windowAllowance } from "./budget";
 import { type Camera, parseViewboxTransform, screenToWorld, type Viewport } from "./camera";
 import { forgetCompatClone, type Region } from "./compat";
@@ -30,7 +39,7 @@ import {
   IDLE_WATCH_MS,
   rootFilter
 } from "./lifecycle";
-import { classify, pixelRecords, TRADE_LAYER, TradeMarkers } from "./markers";
+import { classify, pixelRecords, TRADE_LAYER, TradeMarkers, withoutMarkerRecords } from "./markers";
 import { describeMutation, MOTION_IDLE, prepareStale, prepareStart, settleAction } from "./motion";
 import { NetChange } from "./net-change";
 import { type PickHit, resolveLeaf, worldLocation } from "./pick";
@@ -145,6 +154,9 @@ export interface GpuTelemetry {
   timing: TimingTelemetry | null; // opt-in diagnostics only (gpu-timer.ts); null in ordinary runs
   tessellation: Prepared["tessellation"] | null;
   markers: number; // trade markers mirrored into the last frame
+  // trade caravan poses kept out of the SVG (caravansPaused): paused now, pauses begun, syncs that wrote poses back
+  // (and how many poses), clicks re-dispatched because a written pose moved them onto or off a caravan
+  caravans: { paused: boolean; pauses: number; syncs: number; written: number; retargets: number };
   // canonical bitmap viewport crops: "missing" = the view is outside the committed window, SVG shown meanwhile
   windows: {
     coverage: "none" | "covered" | "missing";
@@ -202,6 +214,24 @@ const SETTLE_DELAY = 100;
 // Refresh bitmap crops in the background once the view comes this close (CSS px) to the committed window edge,
 // capped at half the margin it was captured with, so motion normally never reaches an uncovered view.
 const WINDOW_EDGE = 240;
+// Paused caravan ticks redraw the frame at most this often (ms), and less often while a prepare, refinement or
+// raster job shares the main thread (every frame would cost those jobs several times their own length).
+const CARAVAN_FRAME_MS = 33;
+const CARAVAN_BUSY_MS = 125;
+// Hidden-canvas reasons that end with the GPU frame back on screen, and how long the SVG shown meanwhile may keep its
+// caravans where they were (caravansPaused). Anything else (an editor, print, a refused root filter) is the model.
+const STAND_IN_MS = 15000;
+const STAND_IN = new Set([
+  "",
+  "not prepared",
+  "context lost",
+  "source replaced",
+  "trade markers loading",
+  "resume hold"
+]);
+// World units around a click within which a caravan may be its target: the click circle (draw-trade-animation.ts,
+// radius at most 6) and some slack; plus 2 CSS px at the current zoom.
+const CARAVAN_REACH = 8;
 
 function clearColor(svg: Element): Rgba {
   for (let node: Element | null = svg; node; node = node.parentElement) {
@@ -301,6 +331,15 @@ export class GpuRenderer {
   private pickProfile = { queries: 0, statusMs: 0, indexMs: 0 };
   private emblemCulling: HiddenEmblemCulling | null = null;
   private markers: TradeMarkers;
+  // --- PAINT (W3b): caravan poses stay out of the SVG while the canvas covers it (caravansPaused) ---
+  private detachCaravans: () => void = () => {};
+  private markerTimer = 0; // a throttled redraw for paused caravan ticks (caravansMoved)
+  private lastMarkerDraw = 0;
+  private standInUntil = 0; // until when a hidden canvas may keep the SVG's caravans paused
+  private caravanRetargets = 0;
+  // a canonical preview hides the canvas from outside (style visibility, the hidden attribute): the SVG it reveals
+  // must animate at once, as HiddenEmblemCulling reveals its emblems
+  private canvasWatch = new MutationObserver(() => this.updateCaravans());
   private resizes: ResizeObserver;
   private onWindowResize = () => this.resize();
   // --- LIFE: lifecycle hooks (lifecycle.ts decides; these feed it) ---
@@ -311,6 +350,7 @@ export class GpuRenderer {
   // Customization modes set a bare global no event announces: poll it so entering one hides the canvas (and leaving it
   // resumes) without waiting for the next camera, mutation or draw.
   private watchIdle = () => {
+    this.updateCaravans(); // a stand-in pause expires (caravansPaused)
     const mode = customizationMode();
     if (mode === this.customizationSeen) return;
     this.customizationSeen = mode;
@@ -391,6 +431,9 @@ export class GpuRenderer {
       attributeFilter: ["style", "class", "hidden"]
     });
     this.emblemCulling = new HiddenEmblemCulling(() => this.svg, this.canvas);
+    this.standInUntil = performance.now() + STAND_IN_MS; // no frame yet: the first prepare is a stand-in
+    this.detachCaravans = onCaravansMoved(() => this.caravansMoved());
+    this.canvasWatch.observe(this.canvas, { attributes: true, attributeFilter: ["style", "hidden"] });
     this.observeLongTasks();
     if (this.compatReuse) this.stopCompatWatch = watchCompatInputs();
     this.resizes = new ResizeObserver(() => this.resize());
@@ -523,6 +566,7 @@ export class GpuRenderer {
   worldReplaced(world: number): void {
     this.net.fail("world replaced");
     this.emblemCulling?.reset();
+    this.standInUntil = performance.now() + STAND_IN_MS; // the new world's first prepare
     this.world = world;
     this.generation++;
     this.worldEpoch++;
@@ -621,6 +665,7 @@ export class GpuRenderer {
       timing: this.timer?.telemetry() ?? null,
       tessellation: this.prepared?.tessellation ?? null,
       markers: this.markers.count,
+      caravans: { ...caravanPauseStats(), retargets: this.caravanRetargets },
       windows: {
         coverage: !windows ? "none" : windows.covers(this.view, this.viewport) ? "covered" : "missing",
         bytes: windows?.bytes ?? 0,
@@ -661,6 +706,9 @@ export class GpuRenderer {
 
   dispose(): void {
     this.stopCompatWatch();
+    this.detachCaravans();
+    this.canvasWatch.disconnect();
+    clearTimeout(this.markerTimer);
     this.emblemCulling?.dispose();
     this.recovery.dispose();
     this.generation++;
@@ -692,6 +740,8 @@ export class GpuRenderer {
     this.device.dispose();
     this.canvas.remove();
     forgetCompatClone();
+    // the SVG is the map again: every caravan at its pose, then live (caravansPaused is false once the device is gone)
+    setCaravanDomPaused(false);
   }
 
   // The canvas is shown by draw() right after a successful render, and hidden here whenever it cannot be correct
@@ -870,10 +920,74 @@ export class GpuRenderer {
 
   private hide(): void {
     this.emblemCulling?.reveal();
-    if (this.canvas.style.display === "none") return;
-    this.syncSvgCamera();
-    this.canvas.style.display = "none";
+    if (this.canvas.style.display !== "none") {
+      this.syncSvgCamera();
+      syncCaravans(); // revealed where the frame drew them, even if they then wait there (caravansPaused)
+      this.canvas.style.display = "none";
+      this.standInUntil = performance.now() + STAND_IN_MS;
+    }
+    this.updateCaravans();
   }
+
+  // ---- PAINT (W3b): trade caravans under the canvas. Every caravan tick used to write its <g transform>, and Chrome
+  // re-paints and re-layerizes the whole visible document for any SVG attribute write, covered or not (~115 ms a frame
+  // on the parity world with every layer on). The poses now stay in caravan-poses.ts while the canvas covers the SVG,
+  // the frame mirrors them (markers.ts) on a throttled redraw, and the SVG gets them back whenever it is the map again.
+
+  // Paused while the canvas is on screen, and while it is hidden only until the GPU frame comes back (STAND_IN: no
+  // frame yet, a replaced world, a lost context, loading marker textures, a window miss, a resume hold), for at most
+  // STAND_IN_MS: the SVG shown meanwhile keeps its caravans where they were, so they cannot slow the prepare that
+  // brings the frame back (with every frame a full layerize, a 2.5 s prepare took over 40 s). An editor, print, a
+  // refused root filter, a canvas hidden from outside or a disposed renderer show the SVG as the model: live caravans.
+  private caravansPaused(): boolean {
+    if (this.device.disposed || this.printing || this.suspendedReason) return false;
+    const style = this.canvas.style;
+    if (style.visibility === "hidden" || this.canvas.hidden) return false;
+    if (style.display !== "none") return true;
+    if (performance.now() > this.standInUntil) return false;
+    return STAND_IN.has(this.hiddenReason(this.suspendedReason) || (this.intentHold ? "resume hold" : ""));
+  }
+
+  private updateCaravans(): void {
+    setCaravanDomPaused(this.caravansPaused());
+  }
+
+  // A paused caravan tick: draw it, at most every CARAVAN_FRAME_MS (CARAVAN_BUSY_MS while background work runs). A
+  // pending frame already reads the latest poses; a hidden canvas is drawn by whatever brings it back.
+  private caravansMoved(): void {
+    if (this.raf || this.markerTimer || this.canvas.style.display === "none") return;
+    const busy = this.preparing || this.activeRefinements > 0 || this.windowJob || this.overlayJob;
+    const wait = this.lastMarkerDraw + (busy ? CARAVAN_BUSY_MS : CARAVAN_FRAME_MS) - performance.now();
+    if (wait <= 0) {
+      this.requestDraw();
+      return;
+    }
+    this.markerTimer = window.setTimeout(() => {
+      this.markerTimer = 0;
+      this.requestDraw();
+    }, wait);
+  }
+
+  // A trusted click on the map on or near a caravan whose SVG pose lags: every pose is written first, and when that
+  // moves the click onto or off a caravan, the element it now lands on (re-dispatched by createGpuRenderer). null keeps
+  // the native click. A stale camera is left to recoverClick/routeClick, which re-hit-test after syncing it.
+  caravanClick(event: MouseEvent): Element | null {
+    if (!event.isTrusted || !caravanDomPaused()) return null;
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target || !this.svg.contains(target)) return null;
+    const trade = (element: Element) => !!element.closest(`#${TRADE_LAYER}`);
+    if (!trade(target)) {
+      const rect = this.svg.getBoundingClientRect();
+      const [x, y] = screenToWorld(this.view, event.clientX - rect.left, event.clientY - rect.top);
+      if (!caravanNear(x, y, CARAVAN_REACH + 2 / this.view.k)) return null;
+    }
+    if (!syncCaravans() || this.canonicalCameraStale()) return null;
+    const hit = document.elementFromPoint(event.clientX, event.clientY);
+    if (!hit || hit === target || !this.svg.contains(hit) || (!trade(hit) && !trade(target))) return null;
+    this.caravanRetargets++;
+    return hit;
+  }
+  // ---- end PAINT ----
 
   // ---- MODE (W1, decision D10; resume display D13, W2 LIFE2): Navigate/Edit intent and the resume hold. The state
   // machine is in intent.ts and the UI in controllers/render-mode.ts. Outside this block: editorScan() below (wrapped by
@@ -948,9 +1062,10 @@ export class GpuRenderer {
 
   private suspensionEnded(from: number): void {
     this.suspendedFrom = null;
+    this.standInUntil = performance.now() + STAND_IN_MS; // PAINT: a resume hold is a stand-in (caravansPaused)
     // the close's own edits (an editor applying its change as it closes, in the same task) count as made inside it
     const records = this.mutations.takeRecords();
-    this.net.note(records);
+    this.net.note(withoutMarkerRecords(records)); // PAINT: moving caravans are not a change of the map
     this.definitions.flush();
     const net = this.net.end(this.svg); // before mutated(): it may see a dialog opening in the same task (a new session)
     if (records.length) this.mutated(records);
@@ -1013,7 +1128,7 @@ export class GpuRenderer {
 
   private mutated(records: MutationRecord[]): void {
     this.noticeSuspension();
-    this.net.note(records);
+    this.net.note(withoutMarkerRecords(records)); // PAINT: moving caravans are not a change of the map
     if (records.some(record => record.target === this.svg && record.type === "attributes")) this.applyRootFilter();
     const roots: Element[] = [];
     const change = classify(
@@ -1394,6 +1509,8 @@ export class GpuRenderer {
     } else this.graph.render(this.prepared!.frame, this.view, this.viewport, this.clear, markers);
     if (this.canvas.style.display !== "block") this.canvas.style.display = "block";
     this.emblemCulling?.update(this.view, this.viewport, this.clear[3] === 1, this.moving);
+    this.lastMarkerDraw = started;
+    this.updateCaravans();
     this.stats.frames++;
     this.stats.lastFrameMs = performance.now() - started;
     const windows = this.prepared!.windows;
@@ -1437,6 +1554,7 @@ export class GpuRenderer {
   private lost(): void {
     this.losses.count++;
     this.lostAt = performance.now();
+    this.standInUntil = this.lostAt + STAND_IN_MS; // the restored frame's prepare (caravansPaused)
     this.recovery.lost();
     this.generation++;
     this.prepareWanted = this.suspendWanted = false; // restored() prepares unconditionally
@@ -1553,7 +1671,9 @@ export function createGpuRenderer(fallBack: (reason: string) => void): GpuRender
     // on the document, matched against the live #map: a world load may replace the element the renderer started with
     const background = (el: EventTarget | null) => !!el && el === document.getElementById("map");
     const recover = (event: MouseEvent) => {
-      const target = recoverClick({ stale, sync, background, resolve }, event, telemetry);
+      // caravan poses first (paused while the canvas covers the SVG): the camera recovery re-hit-tests with them
+      const target =
+        renderer.caravanClick(event) ?? recoverClick({ stale, sync, background, resolve }, event, telemetry);
       if (!target) return;
       event.stopImmediatePropagation();
       target.dispatchEvent(new MouseEvent("click", event)); // once: the re-dispatched target is inside #viewbox

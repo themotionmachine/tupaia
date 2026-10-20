@@ -43,9 +43,9 @@ try {
  report.status=await page.evaluate(()=>({...(globalThis as any).rendererStatus?.(),temporaryExportClones:document.querySelectorAll("#fantasyMap").length}));
  if((report.status as any)?.active!=="gpu")report.failure="GPU fallback: "+(report.status as any)?.fallbackReason;
  if((report.status as any)?.gpu?.canvasVisible){
-  const before=await page.evaluate(()=>({poses:[...document.querySelectorAll("#tradeAnimation > g")].map(e=>e.getAttribute("transform")),frames:(globalThis as any).rendererStatus?.().gpu?.frames||0}));
+  const before=await page.evaluate(()=>({poses:[...document.querySelectorAll("#tradeAnimation > g")].map(e=>(globalThis as any).TradeAnimation?.transformOf?.(e)??e.getAttribute("transform")),frames:(globalThis as any).rendererStatus?.().gpu?.frames||0}));
   await page.waitForTimeout(150);
-  const after=await page.evaluate(()=>({poses:[...document.querySelectorAll("#tradeAnimation > g")].map(e=>e.getAttribute("transform")),frames:(globalThis as any).rendererStatus?.().gpu?.frames||0}));
+  const after=await page.evaluate(()=>({poses:[...document.querySelectorAll("#tradeAnimation > g")].map(e=>(globalThis as any).TradeAnimation?.transformOf?.(e)??e.getAttribute("transform")),frames:(globalThis as any).rendererStatus?.().gpu?.frames||0}));
   report.animation={markerCount:after.poses.length,moved:JSON.stringify(before.poses)!==JSON.stringify(after.poses),gpuFrameAdvance:after.frames-before.frames,frozenForFidelity:true};
   await page.evaluate(()=>{(globalThis as any).d3.select("#tradeAnimation").selectAll("*").interrupt();return new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));});
  }

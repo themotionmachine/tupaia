@@ -246,6 +246,8 @@ function showUploadMessage(type: string, mapData: string[] | null, mapVersion: s
 
 async function parseLoadedData(data: string[], mapVersion: string | null): Promise<void> {
   try {
+    // the previous map's caravans: TradeAnimation.sync() starts the loaded map's once it is parsed
+    TradeAnimation.stop();
     // exit customization
     if (typeof window.closeDialogs === "function") closeDialogs();
     resetEditorsOnLoad(document, customization === 1); // editor state outside the dialogs (editor-reset.ts)
