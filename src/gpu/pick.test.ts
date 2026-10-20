@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { PICK_TOLERANCE } from "./compat-pick";
 import { dashPieces, measureContour } from "./dash-measure";
 import {
+  END_SLACK,
   insideRings,
   PickIndex,
   polylineCovers,
@@ -242,6 +243,10 @@ describe("PickIndex", () => {
     expect(strokeCovers(10.050004, 0.1, tail, false, 0.25, [], 0, 1)).toBe(true);
     expect(polylineCovers(10.050004, 0.1, tail, false, 0.25, "butt")).toBe(true);
     expect(strokeCovers(10.06, 0.1, tail, false, 0.25, [], 0, 1)).toBe(false);
+    // a burg centre 3e-4 units past a trail's end (route702 over river1260): Blink misses it, so the index must too
+    expect(strokeCovers(10.0503, 0.1, tail, false, 0.25, [], 0, 1)).toBe(false);
+    expect(polylineCovers(10.0503, 0.1, tail, false, 0.25, "butt")).toBe(false);
+    expect(END_SLACK).toBeLessThan(5e-5); // Blink misses a synthetic butt end 5e-5 units past
     const corner = [0, 0, 10, 0, 10, 10];
     for (const covers of [
       (x: number, y: number) => strokeCovers(x, y, corner, false, 1, [], 0, 1),

@@ -11,8 +11,9 @@ import { normalizeDashes } from "./geometry";
 //
 // DOM dependency (transitional, prepare-time only): computed style, getScreenCTM, path/shape attributes and the
 // SVGTextContentElement character API are read when the scene is prepared, never per query or per camera frame.
-// Known approximations: <use> is its bbox, clip-path/mask are ignored, strokes use round joins, per-tspan paint
-// is taken from the <text>, non-scaling-stroke widths are not compensated.
+// Known approximations: <use> is its bbox (except a <use> of a viewBox <svg>, see useShapes), clip-path/mask are
+// ignored, strokes use round joins, per-tspan paint is taken from the <text>, non-scaling-stroke widths are not
+// compensated.
 import { type HitShape, leafPath } from "./pick";
 import { parseDashes, pointsToPath } from "./scene";
 import { flattenPath, type Subpath } from "./svg-path";
@@ -123,7 +124,14 @@ export function boxCorners(m: Affine, x: number, y: number, width: number, heigh
   return out;
 }
 
-const num = (node: Node, name: string) => Number.parseFloat(node.getAttribute?.(name) ?? "") || 0;
+// A length attribute in user units. A live element resolves it through its SVGAnimatedLength (em, ex, %: a ruler
+// point's r="1em" under font-size 4 is 4 units, not 1); test doubles without one fall back to the number in the text.
+const num = (node: Node, name: string) => {
+  const animated = (node as unknown as Record<string, { baseVal?: { value?: unknown } } | undefined>)[name]?.baseVal
+    ?.value;
+  if (typeof animated === "number" && Number.isFinite(animated)) return animated;
+  return Number.parseFloat(node.getAttribute?.(name) ?? "") || 0;
+};
 
 // Basic shapes as path data (SVG2 §10), in the element's user space; null when the shape renders nothing.
 export function shapePath(node: Node): string | null {
@@ -319,6 +327,109 @@ export function sensitivity(style: Style): { fill: boolean; stroke: boolean; box
   }
 }
 
+// Hit geometry of a <use> that references an <svg> with a viewBox (the emblem COAs: <use width=1em href=#burgCOA1>
+// of <svg viewBox="0 10 200 200"> holding defs, a <g clip-path=shield> and the shield outline <path>): the top-level
+// painted children mapped through the viewBox into the use's viewport, then by `m` into the world. A child with a
+// clip-path is its clip shapes (the content is assumed to fill its clip, as a COA field does). Blink hits the
+// instantiated shapes, so the transparent corners of the use's box are click-through; its bbox claimed them (PICK W3:
+// emblems over goods cells, lakes and relief). null = not this case (the caller keeps the bbox).
+function useShapes(leaf: Node, m: Affine): Pick<HitShape, "fill" | "stroke">[] | null {
+  const doc = (leaf as unknown as { ownerDocument?: Document }).ownerDocument;
+  const href = leaf.getAttribute?.("href") ?? leaf.getAttribute?.("xlink:href") ?? "";
+  if (!doc?.getElementById || !href.startsWith("#")) return null;
+  const ref = doc.getElementById(href.slice(1)) as unknown as Node | null;
+  if (!ref || ref.tagName.toLowerCase() !== "svg") return null;
+  const vb = (ref.getAttribute?.("viewBox") ?? "")
+    .trim()
+    .split(/[\s,]+/)
+    .map(Number);
+  if (vb.length !== 4 || !vb.every(Number.isFinite) || !(vb[2] > 0 && vb[3] > 0)) return null;
+  const align = (ref.getAttribute?.("preserveAspectRatio") ?? "").trim();
+  if (align && align !== "xMidYMid" && align !== "xMidYMid meet" && align !== "none") return null;
+  const width = leaf.getAttribute?.("width") != null ? num(leaf, "width") : num(ref, "width");
+  const height = leaf.getAttribute?.("height") != null ? num(leaf, "height") : num(ref, "height");
+  if (!(width > 0 && height > 0)) return null;
+  let sx = width / vb[2];
+  let sy = height / vb[3];
+  if (align !== "none") sx = sy = Math.min(sx, sy);
+  const tx = num(leaf, "x") + (width - vb[2] * sx) / 2 - vb[0] * sx;
+  const ty = num(leaf, "y") + (height - vb[3] * sy) / 2 - vb[1] * sy;
+  const view: Affine = {
+    a: m.a * sx,
+    b: m.b * sx,
+    c: m.c * sy,
+    d: m.d * sy,
+    e: m.a * tx + m.c * ty + m.e,
+    f: m.b * tx + m.d * ty + m.f
+  };
+  const scale = Math.sqrt(Math.abs(view.a * view.d - view.b * view.c));
+  if (!(scale > 0)) return null;
+  const rings = (node: Node) => {
+    const d = shapePath(node);
+    return d ? flattenPath(d, WORLD_TOLERANCE / scale).filter(s => s.points.length >= 2) : [];
+  };
+  const parts: Pick<HitShape, "fill" | "stroke">[] = [];
+  const children = (node: Node) => [...((node as unknown as { children?: Iterable<Node> }).children ?? [])];
+  const visit = (node: Node, depth: number) => {
+    const tag = node.tagName.toLowerCase();
+    if (UNPAINTED.split(",").includes(tag) || node.getAttribute?.("display") === "none") return;
+    const clip = /^url\(["']?#([^"')]+)["']?\)$/.exec(node.getAttribute?.("clip-path") ?? "");
+    if (clip) {
+      const region = doc.getElementById(clip[1]) as unknown as Node | null;
+      for (const shape of region ? children(region) : []) {
+        const subpaths = rings(shape);
+        if (subpaths.length)
+          parts.push({ fill: { rings: subpaths.map(sp => transform(view, sp.points)), evenOdd: false } });
+      }
+      return;
+    }
+    if (tag === "g") {
+      if (depth < 2) for (const child of children(node)) visit(child, depth + 1);
+      return;
+    }
+    const subpaths = rings(node);
+    if (!subpaths.length) return;
+    const ringsOf = () => subpaths.map(sp => transform(view, sp.points));
+    if (node.getAttribute?.("fill") !== "none")
+      parts.push({ fill: { rings: ringsOf(), evenOdd: node.getAttribute?.("fill-rule") === "evenodd" } });
+    const stroke = node.getAttribute?.("stroke");
+    if (stroke && stroke !== "none") {
+      const strokeWidth = node.getAttribute?.("stroke-width");
+      const w = strokeWidth == null ? 1 : Number.parseFloat(strokeWidth);
+      if (w > 0)
+        parts.push({ stroke: { rings: ringsOf(), closed: subpaths.map(sp => sp.closed), halfWidth: (w / 2) * scale } });
+    }
+  };
+  for (const child of children(ref)) visit(child, 0);
+  return parts.length ? parts : null;
+}
+
+// A <use> of one plain shape that carries no paint of its own (coastline and lake outlines: <use href=#feature_N> of
+// a bare <path> in #featurePaths): the instance is that shape at (x, y), painted with the use's inherited style, so
+// it is hit like a <path> leaf with the use's computed style. Its bbox claimed every point inside a coastline loop
+// when #coastline turned compat (blurFilter at zoom > 2.6: parity k 4, rivers 0/112). null = not this case.
+const OWN_PAINT = [
+  "fill",
+  "stroke",
+  "stroke-width",
+  "style",
+  "class",
+  "pointer-events",
+  "transform",
+  "stroke-dasharray"
+];
+function usePlainShape(leaf: Node): { d: string; x: number; y: number } | null {
+  const doc = (leaf as unknown as { ownerDocument?: Document }).ownerDocument;
+  const href = leaf.getAttribute?.("href") ?? leaf.getAttribute?.("xlink:href") ?? "";
+  if (!doc?.getElementById || !href.startsWith("#")) return null;
+  const ref = doc.getElementById(href.slice(1)) as unknown as Node | null;
+  if (!ref || !["path", "polyline", "polygon", "line", "circle", "ellipse", "rect"].includes(ref.tagName.toLowerCase()))
+    return null;
+  if (OWN_PAINT.some(name => ref.getAttribute?.(name) != null)) return null;
+  const d = shapePath(ref);
+  return d ? { d, x: num(leaf, "x"), y: num(leaf, "y") } : null;
+}
+
 // The viewport rect of the nearest nested <svg> (in the world), when its overflow clips. Root <svg> is not a clip.
 function nestedClip(
   leaf: Node,
@@ -446,8 +557,16 @@ function canonicalCompatShapes(element: CompatRoot, viewbox: { getScreenCTM?(): 
         const b = leaf.getBBox?.();
         return b && (b.width > 0 || b.height > 0) ? boxCorners(m, b.x, b.y, b.width, b.height) : undefined;
       };
-      if (sense.box || tag === "use" || tag === "image") {
-        // image: its viewport rect is the hit area for fill-sensitive values; <use>: approximated by its bbox
+      const referenced = tag === "use" && !sense.box ? useShapes(leaf, m) : null;
+      const plain = tag === "use" && !sense.box && !referenced ? usePlainShape(leaf) : null;
+      if (referenced) {
+        // <use> of an <svg> with a viewBox (emblems): its referenced shapes, not its bbox; one shape each, so
+        // overlapping rings never cancel under nonzero winding
+        for (const part of referenced) shapes.push({ ...shape, ...part });
+        continue;
+      }
+      if (sense.box || (tag === "use" && !plain) || tag === "image") {
+        // image: its viewport rect is the hit area for fill-sensitive values; other <use>: approximated by its bbox
         if (sense.box || sense.fill || (tag === "use" && sense.stroke)) shape.box = box();
       } else if (tag === "text") {
         if (sense.fill || sense.stroke) {
@@ -461,11 +580,15 @@ function canonicalCompatShapes(element: CompatRoot, viewbox: { getScreenCTM?(): 
           }
         }
       } else {
-        const d = shapePath(leaf);
+        const d = plain ? plain.d : shapePath(leaf);
         if (!d) continue;
         const scale = Math.sqrt(det);
         const subpaths = flattenPath(d, WORLD_TOLERANCE / scale).filter(s => s.points.length >= 2);
-        const rings = subpaths.map(s => transform(m, s.points));
+        // a plain-shape <use> places its instance at (x, y) in the use's user space
+        const placed: Affine = plain
+          ? { ...m, e: m.a * plain.x + m.c * plain.y + m.e, f: m.b * plain.x + m.d * plain.y + m.f }
+          : m;
+        const rings = subpaths.map(s => transform(placed, s.points));
         if (sense.fill && rings.length) {
           // fill areas close every subpath (an open path's fill is its implicit closure)
           shape.fill = { rings, evenOdd: css?.fillRule === "evenodd" };
@@ -483,7 +606,7 @@ function canonicalCompatShapes(element: CompatRoot, viewbox: { getScreenCTM?(): 
           );
           const linecap = css?.strokeLinecap;
           shape.stroke = {
-            rings: strokes.map(s => transform(m, s.points)),
+            rings: strokes.map(s => transform(placed, s.points)),
             closed: strokes.map(s => s.closed),
             halfWidth: (width / 2) * scale,
             cap: linecap === "butt" || linecap === "round" || linecap === "square" ? linecap : undefined

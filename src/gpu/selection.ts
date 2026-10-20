@@ -22,6 +22,8 @@ export type SelectionKind =
   | "coastline"
   | "lake"
   | "regiment"
+  | "market"
+  | "goods"
   | "none";
 
 // A relief glyph before commit (relief-canvas.ts ReliefPeek): its index in the raster data and its href@x,y key.
@@ -86,6 +88,10 @@ export function classifyElement(element: Element, depth = 0): Classified | null 
     }
     return "";
   };
+  // clicked()'s positional reads: chain[i] is the painted leaf's i-th ancestor; below `depth` it is anonymous and not
+  // at hand (the leaf's own tag is unknown then, and selectAt re-classifies the live leaf).
+  const at = (i: number) => (i < depth ? null : ancestorAt(element, i - depth));
+  const leafTag = depth ? "" : element.tagName.toLowerCase();
   if (within("burgLabels")) return { kind: "burg", id: dataId(), branch: "burgLabels" };
   if (within("burgIcons")) return { kind: "burg", id: dataId(), branch: "burgIcons" };
   if (within("labels")) return { kind: "label", id: element.closest("text")?.id ?? "", branch: "labels" };
@@ -93,11 +99,21 @@ export function classifyElement(element: Element, depth = 0): Classified | null 
   if (ids[1] === "rivers") return { kind: "river", id: leafId, branch: "rivers" };
   if (within("routes")) return { kind: "route", id: leafId, branch: "routes" };
   if (within("terrain")) return { kind: "relief", id: leafId, branch: "terrain" };
-  if (within("emblems")) return { kind: "emblem", id: element.parentElement?.id ?? "", branch: "emblems" };
+  // editEmblem() when grand.id === "emblems"; the selection names the leaf's parent group (burgEmblems, ...)
+  if (ids[2] === "emblems") return { kind: "emblem", id: ids[1], branch: "emblems" };
   if (ids[1] === "ice") return { kind: "ice", id: leafId, branch: "ice" };
   if (within("coastline")) return { kind: "coastline", id: leafId, branch: "coastline" };
   if (within("lakes")) return { kind: "lake", id: leafId, branch: "lakes" };
-  if (within("armies")) return { kind: "regiment", id: element.parentElement?.id ?? "", branch: "armies" };
+  // clicked() order after the markers branch: markets (not their paths), goods icons and cells, goods burgs, armies
+  if (ids[2] === "markets" && leafTag !== "path")
+    return { kind: "market", id: at(1)?.getAttribute("data-id") ?? "", branch: "markets" };
+  if (ids[2] === "goodsIcons") return { kind: "goods", id: "", branch: "goodsIcons" };
+  if (ids[1] === "goodsCells") return { kind: "goods", id: "", branch: "goodsCells" };
+  if (ids[2] === "goodsBurgs")
+    return { kind: "market", id: at(1)?.getAttribute("data-id") ?? "", branch: "goodsBurgs" };
+  // editRegiment("#" + parent.id) when great.id === "armies": the regiment <g> is the leaf's parent, whatever the leaf
+  // (rect, number or icon text, image). The indexed element of an anonymous leaf is that <g> itself (depth 1).
+  if (ids[3] === "armies") return { kind: "regiment", id: ids[1], branch: "armies" };
   return null;
 }
 
@@ -106,9 +122,6 @@ function ancestorAt(element: Element, steps: number): Element | null {
   for (let k = 0; k < steps && node; k++) node = node.parentElement;
   return node;
 }
-
-const sameClass = (a: Classified | null, b: Classified) =>
-  !!a && a.kind === b.kind && a.id === b.id && a.branch === b.branch;
 
 // x, y: SVG-local CSS px (the gpuPick convention).
 export function selectAt(sources: SelectionSources, x: number, y: number, tolerance = 0): GpuSelection {
@@ -123,20 +136,26 @@ export function selectAt(sources: SelectionSources, x: number, y: number, tolera
   const direct = element ? classifyElement(element, hit?.depth) : null;
   const base = { target: null, relief: null, hit, world };
   // An anonymous leaf (hit.depth) is indexed under its [id] ancestor: the branch and id are the leaf's. The target is
-  // the live leaf found by the hit's child-index path, re-checked here: exactly `depth` steps below the ancestor and
-  // classified the same. Anything else (no path, DOM moved) leaves the target null rather than handing the editor
-  // the ancestor or a sibling.
+  // the live leaf found by the hit's child-index path, re-checked here: exactly `depth` steps below the ancestor. When
+  // it resolves, the live leaf decides, classified at depth 0 like clicked()'s own target: its tag (a #markets fill or
+  // border <path> has no branch, so clicked() falls through to pickBurg/pickRelief) and its anonymous ancestors' data
+  // (the goodsBurgs <g data-id> sits between the leaf and its [id] ancestor). Anything else (no path, DOM moved)
+  // keeps the ancestry classification with a null target rather than handing the editor the ancestor or a sibling.
+  let passThrough = false;
   if (direct && hit?.depth && direct.branch !== "terrain") {
-    const leaf = sources.leaf?.(hit, element!) ?? null;
-    const ok = leaf && ancestorAt(leaf, hit.depth) === element && sameClass(classifyElement(leaf), direct);
-    return { ...direct, ...base, via: "index", target: ok ? leaf : null };
+    const found = sources.leaf?.(hit, element!) ?? null;
+    const leaf = found && ancestorAt(found, hit.depth) === element ? found : null;
+    if (!leaf) return { ...direct, ...base, via: "index", target: null };
+    const live = classifyElement(leaf);
+    if (live) return { ...live, ...base, via: "index", target: leaf };
+    passThrough = true;
   }
   // A materialized relief glyph (an id-less <use>, indexed under the #terrain group): clicked()'s terrain branch,
   // ahead of the fallbacks. An exact pick instance resolved to its live <use> is the target, keyed like
   // editReliefIcon's "(id)|href@x,y"; otherwise (unsupported symbol, stale index) the hit is reported unsupported
   // rather than given the group as a target or passed through.
   const glyph = direct?.branch === "terrain" && (!direct.id || element!.id === "terrain");
-  if (direct && !glyph) return { ...direct, ...base, via: "index", target: element };
+  if (direct && !glyph && !passThrough) return { ...direct, ...base, via: "index", target: element };
   if (glyph || (hit?.layer === "terrain" && !element)) {
     const use = hit && hit.instance !== undefined ? (sources.glyph?.(hit) ?? null) : null;
     const info = hit && hit.instance !== undefined ? (sources.glyphInfo?.(hit) ?? null) : null;

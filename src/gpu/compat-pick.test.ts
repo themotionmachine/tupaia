@@ -99,6 +99,7 @@ interface Fake {
   bbox?: { x: number; y: number; width: number; height: number };
   ctm?: Affine;
   chars?: { x: number; y: number; width: number; height: number; start: number[]; end: number[] }[];
+  lengths?: Record<string, number>; // resolved SVGAnimatedLength values (r="1em" -> 4)
 }
 
 const LEAF = new Set(["path", "circle", "ellipse", "rect", "line", "polyline", "polygon", "text", "use", "image"]);
@@ -108,8 +109,11 @@ const UNPAINTED = new Set(["defs", "clipPath", "mask", "pattern", "symbol", "mar
 function el(tagName: string, id = "", children: Fake[] = [], extra: Partial<Fake> = {}) {
   const node: Fake = { tagName, id, parentElement: null, children, attrs: {}, ...extra };
   for (const child of children) child.parentElement = node;
+  if (id) byId.set(id, node);
   return node;
 }
+const byId = new Map<string, Fake>();
+const ownerDocument = { getElementById: (id: string) => (byId.has(id) ? wrap(byId.get(id)!) : null) };
 const cache = new Map<Fake, any>();
 function wrap(node: Fake): any {
   const known = cache.get(node);
@@ -133,6 +137,11 @@ function wrap(node: Fake): any {
       return null;
     },
     getAttribute: (name: string) => node.attrs[name] ?? null,
+    ownerDocument,
+    get children() {
+      return node.children.map(wrap);
+    },
+    ...Object.fromEntries(Object.entries(node.lengths ?? {}).map(([name, value]) => [name, { baseVal: { value } }])),
     closest(selector: string) {
       for (let n: Fake | null = node; n; n = n.parentElement) if (matches(n, selector)) return wrap(n);
       return null;
@@ -353,6 +362,86 @@ describe("compatShapes", () => {
 
   it("falls back to the parent id like prepare.ts", () => {
     expect(pickId({ id: "", parentElement: { closest: () => ({ id: "parent" }) } })).toBe("parent");
+  });
+});
+
+describe("compatShapes <use> of a viewBox <svg>", () => {
+  // an emblem: <use width=20 href=#coaT> of <svg viewBox="0 10 200 200"> whose field is clipped to a round shield
+  // given as r="1em" (resolved to 50 by its SVGAnimatedLength); the shield maps to centre (10, 10), radius 5
+  const shield = el("clipPath", "shieldT", [
+    el("circle", "", [], { attrs: { cx: "100", cy: "110", r: "1em" }, lengths: { r: 50 } })
+  ]);
+  const coa = el("svg", "coaT", [
+    el("defs", "", [shield]),
+    el("g", "", [el("rect", "", [], { attrs: { x: "0", y: "10", width: "200", height: "200" } })], {
+      attrs: { "clip-path": "url(#shieldT)" }
+    })
+  ]);
+  coa.attrs.viewBox = "0 10 200 200";
+  const use = () =>
+    el("use", "useT", [], {
+      attrs: { href: "#coaT", x: "0", y: "0", width: "20", height: "20" },
+      bbox: { x: 0, y: 0, width: 20, height: 20 },
+      ctm: at(0, 0)
+    });
+
+  it("hits the clip shape, not the transparent corners of the box", () => {
+    const pick = index(el("g", "emblems", [el("g", "burgEmblems", [use()])]));
+    expect(pick.pick(10, 10, 0)?.id).toBe("useT");
+    expect(pick.pick(14.8, 10, 0)?.id).toBe("useT");
+    expect(pick.pick(15.3, 10, 0)).toBeNull(); // just outside r = 5 (the 1em value, not 1)
+    expect(pick.pick(1, 1, 0)).toBeNull(); // box corner
+  });
+
+  it("keeps the bbox for a <use> whose target is not a viewBox <svg>", () => {
+    const leaf = use();
+    leaf.attrs.href = "#missingT";
+    const pick = index(el("g", "emblems", [el("g", "burgEmblems", [leaf])]));
+    expect(pick.pick(1, 1, 0)?.id).toBe("useT");
+  });
+});
+
+describe("compatShapes <use> of a plain shape (coastline, lakes)", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  // #sea_island > <use href=#feature_N> of a bare <path> in defs: a stroke-only outline (pointer-events auto, fill
+  // none), as #coastline is when it goes compat (blurFilter at zoom > 2.6)
+  const outline = (refAttrs: Record<string, string> = {}, x = "0") => {
+    vi.stubGlobal("getComputedStyle", () => ({
+      pointerEvents: "auto",
+      visibility: "visible",
+      display: "inline",
+      fill: "none",
+      stroke: "rgb(31, 56, 70)",
+      strokeWidth: "0.5",
+      strokeDasharray: "none",
+      strokeDashoffset: "0"
+    }));
+    const id = `featureU${Object.keys(refAttrs).length}${x}`;
+    el("defs", "", [el("path", id, [], { attrs: { d: "M10,10L60,10L60,60L10,60Z", ...refAttrs } })]);
+    const use = el("use", "", [], {
+      attrs: { href: `#${id}`, x },
+      bbox: { x: 10, y: 10, width: 50, height: 50 },
+      ctm: at(0, 0)
+    });
+    return index(el("g", "coastline", [el("g", "sea_island", [use])]));
+  };
+
+  it("hits the referenced path's stroke, not the use's bbox", () => {
+    const pick = outline();
+    expect(pick.pick(10.2, 35, 0)?.id).toBe("sea_island");
+    expect(pick.pick(35, 35, 0)).toBeNull(); // inside the loop: the bbox claimed it (parity k 4, rivers 0/112)
+    expect(pick.pick(10.4, 35, 0)).toBeNull(); // past the 0.25 half-width
+  });
+
+  it("places the instance at the use's x, y", () => {
+    const pick = outline({}, "5");
+    expect(pick.pick(15.1, 35, 0)?.id).toBe("sea_island");
+    expect(pick.pick(10.1, 35, 0)).toBeNull();
+  });
+
+  it("keeps the bbox when the referenced shape carries its own paint", () => {
+    const pick = outline({ fill: "blue" });
+    expect(pick.pick(35, 35, 0)?.id).toBe("sea_island");
   });
 });
 

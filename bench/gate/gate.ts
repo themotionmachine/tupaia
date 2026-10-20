@@ -1389,8 +1389,9 @@ const DEFS: Record<string, CheckDef> = {
   "boundary-after": { lock: null, keys: [], timeout: 60, run: ctx => boundary(ctx, false) },
   picking: {
     lock: "shared",
-    keys: [...CAMERA, "phase", "reliefMode", "denseLabels"],
-    timeout: 900,
+    keys: [...CAMERA, "phase", "reliefMode", "denseLabels", "launcher"],
+    timeout: 1500,
+    // protocol v3 (W3 PICK): D3 semantic gate per cohort on parity, shared and the 100k world, multi-view, edge band
     run: ctx => {
       const report = join(ctx.dir, "report.json");
       const env = {
@@ -1401,18 +1402,36 @@ const DEFS: Record<string, CheckDef> = {
         PICK_NAME: basename(ctx.dir),
         PICK_OUTPUT: report,
         PICK_MAP: ctx.map(),
-        PICK_WORLDS: ctx.args.denseLabels ? "shared,100k,100k-labels" : "shared,100k"
+        PICK_PARITY_MAP: resolveNamedFixture("parity"),
+        PICK_LAUNCHER: String(ctx.args.launcher),
+        PICK_WORLDS: ctx.args.denseLabels ? "parity,shared,100k,100k-labels" : "parity,shared,100k"
       };
-      return runScript(ctx, nodeScript("bench/picking-parity.ts"), env, report, 900, data => ({
+      return runScript(ctx, nodeScript("bench/picking-parity.ts"), env, report, 1500, data => ({
         failure: reportFailure(data),
         metrics: data && {
           pageErrors: data.pageErrors?.length ?? 0,
+          adapter: data.config?.adapter?.renderer ?? null,
           worlds: data.results?.map((r: Json) => ({
             world: r.world,
             errors: r.errors?.length ?? 0,
-            mismatches: r.mismatchCount,
-            pickP95Ms: round(r.query?.pickMs?.p95, 2),
-            gate: r.gate && Object.fromEntries(Object.entries(r.gate).map(([k, v]: [string, Json]) => [k, v?.status]))
+            semanticMismatches: r.semantic?.mismatches?.length ?? null,
+            pickP95Ms: r.views?.length
+              ? round(Math.max(...(r.views as Json[]).map(v => Number(v.query?.pickMs?.p95) || 0)), 2)
+              : null,
+            cohorts:
+              r.gate?.cohorts &&
+              Object.fromEntries(
+                Object.entries(r.gate.cohorts as Record<string, Json>).map(([k, c]) => [k, `${c.agree}/${c.n} ${c.status}${c.required ? "*" : ""}`])
+              ),
+            cells: r.gate?.cells && `${r.gate.cells.agree}/${r.gate.cells.n} ${r.gate.cells.pass ? "pass" : "fail"}`,
+            edgeBand: r.gate?.edgeBand && {
+              px: r.gate.edgeBand.px,
+              excluded: r.gate.edgeBand.excluded,
+              agree: r.gate.edgeBand.agree,
+              failures: r.gate.edgeBand.failures
+            },
+            strictFailures: r.gate?.strict?.failures,
+            failures: r.gate?.failures
           }))
         }
       }));
