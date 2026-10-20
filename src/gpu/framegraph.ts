@@ -13,7 +13,7 @@ import { MARKER_FLOATS, type MarkerInstances } from "./markers";
 import { hatchUvAtZoom } from "./raster";
 import type { Rgba } from "./scene";
 import { fill, fringe, glyph, image, marker, sprite, stroke } from "./shaders";
-import { GLYPH_ATLAS } from "./text";
+import { GLYPH_ATLAS, GLYPH_FLOATS } from "./text";
 
 export interface FillBatch {
   bounds?: Rect4 | null;
@@ -567,18 +567,21 @@ export class FrameGraph {
     if (!frame.glyphs || !frame.atlas || !batch.count) return;
     const gl = this.device.gl;
     const program = this.use("glyph");
-    const stride = 15;
+    const stride = GLYPH_FLOATS;
     const first = batch.first * stride;
     this.attribute(program, "a_corner", this.square, 2, 2, 0, 0);
     this.attribute(program, "a_anchor", frame.glyphs, 3, stride, first, 1);
     this.attribute(program, "a_box", frame.glyphs, 4, stride, first + 3, 1);
     this.attribute(program, "a_uv", frame.glyphs, 4, stride, first + 7, 1);
     this.attribute(program, "a_color", frame.glyphs, 4, stride, first + 11, 1);
+    this.attribute(program, "a_baseline", frame.glyphs, 3, stride, first + 15, 1);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, frame.atlas.handle);
     this.state.uniform1i(program.uniforms.u_atlas, 0);
     // the atlas texture holds only the rows the instances use (prepare.ts); their uvs are normalized by the full atlas
     this.state.uniform1f(program.uniforms.u_atlasScale, GLYPH_ATLAS / frame.atlas.height);
+    // GLYPH2: central baselines and text-shadows follow the zoom per frame (shaders.ts glyph)
+    this.state.uniform1f(program.uniforms.u_k, this.camera.k);
     this.plain();
     gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, batch.count);
   }

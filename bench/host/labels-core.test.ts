@@ -6,6 +6,7 @@ import {
   classifyRegistration,
   decodeGlyphKey,
   glyphBaseline,
+  instanceCentralShift,
   gpuGlyphs,
   inkCount,
   labelHidden,
@@ -237,12 +238,13 @@ test("gpuGlyphs (the page-side reader) places glyphs where glyphBaseline does", 
     ["normal 400 16px Georgia|4|round|4|A", { u0: 0.5, v0: 0, top: -18, height: 24 }],
     ["normal 400 16px Georgia|0|rgb(0,0,0)||", { u0: 0.25, v0: 0.25, top: -14, height: 18 }]
   ]);
-  // GLYPH_FLOATS = 15: cx cy angle lx ly w h u0 v0 u1 v1 r g b a
+  // GLYPH_FLOATS = 18: cx cy angle lx ly w h u0 v0 u1 v1 r g b a ascent descent mode
   const instances = [
-    [100, 50, 0, -4, -3, 6, 10, 0, 0, 0.1, 0.1, 0, 0, 0, 1],
-    [120, 60, Math.PI / 2, -4, -2, 6, 9, 0.25, 0.25, 0.3, 0.3, 0, 0, 0, 1],
-    [140, 70, 0.3, -4, -3, 6, 12, 0.5, 0, 0.6, 0.1, 1, 1, 1, 1], // halo pass: skipped
-    [160, 80, 0, -4, -3, 6, 10, 0.9, 0.9, 1, 1, 0, 0, 0, 1] // no atlas entry: unknown
+    [100, 50, 0, -4, -3, 6, 10, 0, 0, 0.1, 0.1, 0, 0, 0, 1, 0, 0, 0],
+    // a nested central baseline: the shader adds instanceCentralShift at the view's k
+    [120, 60, Math.PI / 2, -4, -2, 6, 9, 0.25, 0.25, 0.3, 0.3, 0, 0, 0, 1, 11.545, 2.757, 2],
+    [140, 70, 0.3, -4, -3, 6, 12, 0.5, 0, 0.6, 0.1, 1, 1, 1, 1, 0, 0, 0], // halo pass: skipped
+    [160, 80, 0, -4, -3, 6, 10, 0.9, 0.9, 1, 1, 0, 0, 0, 1, 0, 0, 0] // no atlas entry: unknown
   ];
   const g = globalThis as Record<string, unknown>;
   g.gpuRenderer = { prepared: { payload: { glyphs: new Float32Array(instances.flat()), atlasGeneration: 3 } }, atlas: { glyphs: atlas, generation: 3 }, view: { k: 2, x: 10, y: -5 } };
@@ -258,7 +260,7 @@ test("gpuGlyphs (the page-side reader) places glyphs where glyphBaseline does", 
     ] as const) {
       const f32 = Float32Array.from(instances[index]);
       const glyph = atlas.get(entry)!;
-      const expected = glyphBaseline(f32, glyph)!;
+      const expected = glyphBaseline(f32, glyph, 2)!;
       const got = out.glyphs[index];
       assert.equal(got.char, decodeGlyphKey(entry)!.char);
       assert.equal(got.font, "normal 400 16px Georgia");
@@ -283,4 +285,11 @@ test("alongNormal splits an offset along the baseline and its normal", () => {
   assert.ok(Math.abs(turned.along - 4) < 1e-9 && Math.abs(turned.normal) < 1e-9);
   const across = alongNormal(-1.5, 0, 90);
   assert.ok(Math.abs(across.along) < 1e-9 && Math.abs(across.normal - 1.5) < 1e-9);
+});
+
+test("instanceCentralShift rounds the scaled ascent and descent to CSS px (text.ts centralShiftAt)", () => {
+  // ascent 11.545, descent 2.757 at k 2: round(23.09) - round(5.514) = 23 - 6 -> 8.5 CSS px, nested 9
+  assert.ok(Math.abs(instanceCentralShift(11.545, 2.757, 1, 2) - 8.5 / 2) < 1e-9);
+  assert.ok(Math.abs(instanceCentralShift(11.545, 2.757, 2, 2) - 9 / 2) < 1e-9);
+  assert.equal(instanceCentralShift(11.545, 2.757, 0, 2), 0);
 });

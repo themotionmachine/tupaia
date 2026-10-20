@@ -13,15 +13,17 @@
 //   glyphs      Glyph positions on a sample of LABELS_SAMPLE (200) labels per variant, collected over cameras at
 //               LABELS_GLYPH_K. Every character's SVG geometry comes from getStartPositionOfChar /
 //               getEndPositionOfChar / getRotationOfChar / getExtentOfChar.
-//               - analytic (native, curved): the GPU glyph instances are read back (renderer payload + atlas keys,
-//                 labels-core.ts glyphBaseline) and each SVG character's baseline midpoint ((start+end)/2, dy
-//                 included) is paired with the nearest GPU glyph of the same character; the distance in device px
-//                 must be ≤ TOL.glyphPx for every character, and no native character may go unmatched;
+//               - analytic (native, curved; INFO since W3b GLYPH2): the GPU glyph instances are read back (renderer
+//                 payload + atlas keys, labels-core.ts glyphBaseline) and each SVG character's baseline midpoint
+//                 ((start+end)/2, dy included) is paired with the nearest GPU glyph of the same character, distance in
+//                 device px. text.ts anchors laid-out glyphs on the same SVG APIs, so this is reported, not gated;
 //               - pixel (every label, native and compat, curved and straight): the shift that best aligns the GPU
 //                 arm's ink with the SVG arm's inside each character's extent box (labels-core.ts register);
 //                 TOL.registerShare of the characters must be within TOL.registerPx, where a window the GPU leaves
 //                 (nearly) empty is a missing character (labels-core.ts classifyRegistration), never a 0 px shift;
 //               - presence: a label whose whole box the GPU leaves (nearly) empty fails the variant.
+//               Pixel registration is the position gate. The `native` variant fails when it samples no native curved
+//               label (what it exists to exercise).
 //               Variant `map` is the fixture as saved. Every built-in preset gives state labels a text-shadow, and
 //               multi-line state labels end their first line with a space, so text.ts sends both to the compat lane;
 //               variant `native` removes the text-shadow and trims edge spaces in curved labels' tspans (both arms
@@ -60,6 +62,7 @@
 //   LABELS_FONTS         font-switch step: comma list of switch ids               default all
 //   LABELS_ADVANCE_FONTS advance step: at most this many families (0 = all)      default 0
 //   LABELS_ADVANCE_FAMILIES advance step: exactly these families (comma list)    default every pinned family
+//   LABELS_ZOOM_PARTS    zoom step: shadows and/or carry (comma list)                default shadows,carry
 //   LABELS_KEEP          all | fail: PNGs for every capture or failing ones only  default fail
 //   LABELS_BREAK         none | freeze | measure | shift | drop (self-test only):
 //                        freeze  stops the GPU from seeing DOM changes for the second probe of each threshold and for
@@ -77,7 +80,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { createServer } from "node:http";
 import { extname, join, relative, resolve } from "node:path";
 import { type BrowserContext, chromium, type Page } from "playwright";
-import { type CellMetrics, D1, heatmap, measureCell } from "../golden-metrics.ts";
+import { type CellMetrics, coverageOf, D1, heatmap, measureCell } from "../golden-metrics.ts";
 import { decodePng, encodePng } from "../png.ts";
 import { isolateLayer } from "./golden-isolation.ts";
 import { resolveFixture } from "./fixtures/index.ts";
@@ -94,6 +97,7 @@ import {
   matchGlyphs,
   probes,
   register,
+  scaleBucket,
   stats,
   strayInk,
   thresholds,
@@ -105,7 +109,7 @@ const env = process.env;
 const root = resolve(import.meta.dirname, "../..");
 const dist = resolve(root, "dist");
 const outDir = resolve(env.GATE_OUT_DIR || process.cwd());
-const STEPS = ["thresholds", "glyphs", "advance", "fonts"] as const;
+const STEPS = ["thresholds", "glyphs", "advance", "fonts", "zoom"] as const;
 type Step = (typeof STEPS)[number];
 const steps = (env.LABELS_STEPS || STEPS.join(",")).split(",").map(s => s.trim()).filter(Boolean) as Step[];
 for (const s of steps) if (!STEPS.includes(s)) throw Error(`LABELS_STEPS: unknown step ${s} (${STEPS.join(", ")})`);
@@ -938,7 +942,8 @@ async function stepGlyphs(page: Page, blanks: Blanks, dir: string): Promise<Json
               row.analytic = { ...stats(errors), unmatched: missed, baseline: label.baseline, meanAlong: mean(components.map(c => c.along)), meanNormal: mean(components.map(c => c.normal)) };
               if (missed) worst.push({ kind: "unmatched", label: label.id, k, count: missed, of: svgPoints.length });
             }
-            if ((row.analytic && (row.analytic.max > TOL.glyphPx || row.analytic.unmatched)) || (row.pixel.n && row.pixel.max > TOL.registerPx) || charsMissing || presenceStatus === "missing") {
+            // the analytic error is info (see the step's notes), so it does not mark a label failing
+            if ((row.pixel.n && row.pixel.max > TOL.registerPx) || charsMissing || presenceStatus === "missing") {
               failedHere = true;
               if (crops < 24) {
                 crops++;
@@ -988,9 +993,16 @@ async function stepGlyphs(page: Page, blanks: Blanks, dir: string): Promise<Json
       else v.note = `every on-screen label at k ${glyphKs.join("/")} sampled: ${v.labels.length} < ${sampleTarget} (${sampledIds.size} distinct labels)`;
     }
     if (missingLabels.length) failures.push(`presence: ${missingLabels.length} on-screen labels have (almost) no GPU ink where the SVG draws them (${missingLabels.slice(0, 4).map(m => `${m.id}@k${m.k}`).join(", ")})`);
-    if (analytic.length && v.summary.analytic.max > TOL.glyphPx) failures.push(`analytic: ${analytic.filter(e => e > TOL.glyphPx).length}/${analytic.length} native glyphs off by > ${TOL.glyphPx} device px (max ${v.summary.analytic.max}; along the baseline p95 ${v.summary.analytic.along.p95}, normal p95 ${v.summary.analytic.normal.p95})`);
-    if (unmatched) failures.push(`analytic: ${unmatched} native characters have no GPU glyph of the same character within reach`);
-    if (variant === "native" && !analytic.length) failures.push("analytic: no native curved glyph was sampled");
+    // W3b GLYPH2: the analytic check is info, not a gate. Since W3 GLYPH, text.ts anchors a laid-out glyph at the SVG's
+    // own getStart/EndPositionOfChar midpoint and the central shift with the same probe and ceil rule this harness
+    // reads, so the analytic error compares the SVG position API with itself (it reads 0 by construction) and cannot
+    // see a fidelity regression. Pixel registration (SVG ink against GPU ink, every label) is the position gate.
+    const info: string[] = [];
+    if (analytic.length && v.summary.analytic.max > TOL.glyphPx) info.push(`analytic: ${analytic.filter(e => e > TOL.glyphPx).length}/${analytic.length} native glyphs off by > ${TOL.glyphPx} device px (max ${v.summary.analytic.max}; along the baseline p95 ${v.summary.analytic.along.p95}, normal p95 ${v.summary.analytic.normal.p95})`);
+    if (unmatched) info.push(`analytic: ${unmatched} native characters have no GPU glyph of the same character within reach`);
+    v.info = info;
+    const nativeCurved = (v.labels as Json[]).filter(l => l.native && l.curved).length;
+    if (variant === "native" && !nativeCurved) failures.push("native: no native curved label was sampled (the variant exists to exercise them)");
     if (pixelCounted && pixelWithin / pixelCounted < TOL.registerShare) failures.push(`pixel: ${pixelCounted - pixelWithin}/${pixelCounted} glyphs shifted > ${TOL.registerPx} device px or missing (${missingGlyphs} missing; ${((pixelWithin / pixelCounted) * 100).toFixed(2)}% within, need ${TOL.registerShare * 100}%; p95 ${v.summary.pixel.p95}, max ${v.summary.pixel.max})`);
     if (!pixelCounted) failures.push("pixel: no glyph had enough ink to register");
     v.failures = failures;
@@ -1007,12 +1019,13 @@ async function stepGlyphs(page: Page, blanks: Blanks, dir: string): Promise<Json
 
 async function stepAdvance(page: Page): Promise<Json> {
   const out = await page.evaluate(
-    async ({ dpr, limit, only }) => {
+    async ({ dpr, limit, only, tolPx }) => {
       const w = globalThis as any;
       const families: string[] = [...new Set<string>([...(w.fonts as { family: string }[]).map(f => f.family), ...[...document.querySelectorAll("#labels g")].map(g => g.getAttribute("font-family") || "").filter(Boolean)])];
       const chosen = only ? families.filter(f => only.includes(f)) : limit > 0 ? families.slice(0, limit) : families;
       const mapStrings = [...new Set([...document.querySelectorAll("#labels text")].map(t => (t.textContent || "").replace(/\s+/g, " ").trim()).filter(s => s.length >= 3))].slice(0, 10);
-      const strings = ["Bothersian Empire", "Kingdom of Ardvale", "AVAWATo Ty. Wavy", "Hamlet Quaywick", "Ëlvenmoor Ærø", ...mapStrings];
+      // W3b: "Saffron Thistlefield" carries ligature triggers (ff, Th, fi), which no other probe string has
+      const strings = ["Bothersian Empire", "Kingdom of Ardvale", "AVAWATo Ty. Wavy", "Hamlet Quaywick", "Ëlvenmoor Ærø", "Saffron Thistlefield", ...mapStrings];
       const sizes = [6, 14, 22];
       const ks = [1, 1.5, 3];
       const renderings = ["auto", "optimizeSpeed"];
@@ -1028,6 +1041,10 @@ async function stepAdvance(page: Page): Promise<Json> {
       host.append(group);
       document.body.append(host);
       const context = document.createElement("canvas").getContext("2d")!;
+      // text.ts's own compat routing (shapingReason through the GPU renderer's atlas): a string it sends to compat is
+      // drawn from the SVG raster, so only the strings the GPU draws natively are held to the measured model
+      const atlas = w.gpuRenderer?.atlas;
+      if (typeof atlas?.shaping !== "function") throw new Error("gpuRenderer.atlas.shaping is not readable (text.ts shapingReason)");
       const rows: any[] = [];
       try {
         for (const family of families.filter(f => chosen.includes(f))) {
@@ -1046,7 +1063,10 @@ async function stepAdvance(page: Page): Promise<Json> {
             return context.measureText(sample).width;
           };
           const available = width(`40px "${family}", monospace`) !== width("40px monospace") || width(`40px "${family}", serif`) !== width("40px serif");
-          const row: any = { family, loadState, available, worst: null, maxCumPx: 0, maxAdvancePx: 0, cases: 0, byRendering: {} as Record<string, number>, worstBy: {} as Record<string, unknown>, byStrings: {} as Record<string, number>, grid: {} as Record<string, number> };
+          // maxCumPx: the measured model over every case (what the GPU would draw if it drew them all natively);
+          // maxNativePx: over the cases text.ts keeps native (gated); compat: cases text.ts routes to compat, and
+          // compatWithin those the model would have drawn within tolerance anyway (over-routing, reported)
+          const row: any = { family, loadState, available, worst: null, worstNative: null, maxCumPx: 0, maxNativePx: 0, maxAdvancePx: 0, cases: 0, compat: 0, compatWithin: 0, compatStrings: [] as string[], byRendering: {} as Record<string, number>, worstBy: {} as Record<string, unknown>, byStrings: {} as Record<string, number>, grid: {} as Record<string, number> };
           text.setAttribute("font-family", family);
           for (const rendering of renderings) {
             text.setAttribute("text-rendering", rendering);
@@ -1056,13 +1076,22 @@ async function stepAdvance(page: Page): Promise<Json> {
                 group.setAttribute("transform", `scale(${k})`);
                 const bucket = bucketOf(k * dpr);
                 const cs = getComputedStyle(text);
-                context.font = `${cs.fontStyle} ${cs.fontWeight} ${size * bucket}px ${cs.fontFamily}`;
-                // text.ts's measured layout (the path for a label the SVG has not laid out): always kerned, as SVG is
+                const font = `${cs.fontStyle} ${cs.fontWeight} ${size * bucket}px ${cs.fontFamily}`;
+                context.font = font;
+                // text.ts's measured layout (the path for a label the SVG has not laid out): always kerned, as SVG is;
+                // ligatures and contextual alternates off under optimizeSpeed, as SVG has them (text.ts shapingFeatures)
                 context.fontKerning = "auto";
+                context.textRendering = rendering === "optimizeSpeed" ? "optimizeSpeed" : "auto";
                 for (const s of strings) {
                   text.textContent = s;
                   const n = text.getNumberOfChars();
                   if (n !== s.length) continue;
+                  const routed = !!atlas.shaping(font, s, rendering, 0);
+                  // the routing call reuses canvases: restore this one's state
+                  context.font = font;
+                  context.fontKerning = "auto";
+                  context.textRendering = rendering === "optimizeSpeed" ? "optimizeSpeed" : "auto";
+                  let caseMax = 0;
                   let previousSvg = 0;
                   let previousGpu = 0;
                   const origin = text.getStartPositionOfChar(0).x;
@@ -1093,6 +1122,11 @@ async function stepAdvance(page: Page): Promise<Json> {
                     const advance = Math.abs(gpu - previousGpu - (svg - previousSvg)) * k * dpr;
                     previousSvg = svg;
                     previousGpu = gpu;
+                    caseMax = Math.max(caseMax, cum);
+                    if (!routed && cum > row.maxNativePx) {
+                      row.maxNativePx = cum;
+                      row.worstNative = { rendering, size, k, bucket, string: s, prefix: i, svg: Number(svg.toFixed(4)), gpu: Number(gpu.toFixed(4)) };
+                    }
                     if (cum > (row.byRendering[rendering] ?? 0)) row.worstBy[rendering] = { size, k, string: s, prefix: i, svg: Number(svg.toFixed(3)), gpu: Number(gpu.toFixed(3)) };
                     row.byRendering[rendering] = Math.max(row.byRendering[rendering] ?? 0, cum);
                     const set = mapStrings.includes(s) ? "mapStrings" : "probeStrings";
@@ -1106,11 +1140,17 @@ async function stepAdvance(page: Page): Promise<Json> {
                     row.maxAdvancePx = Math.max(row.maxAdvancePx, advance);
                   }
                   row.cases++;
+                  if (routed) {
+                    row.compat++;
+                    if (caseMax <= tolPx) row.compatWithin++;
+                    if (!row.compatStrings.includes(s) && row.compatStrings.length < 12) row.compatStrings.push(s);
+                  }
                 }
               }
             }
           }
           row.maxCumPx = Number(row.maxCumPx.toFixed(3));
+          row.maxNativePx = Number(row.maxNativePx.toFixed(3));
           row.maxAdvancePx = Number(row.maxAdvancePx.toFixed(3));
           for (const key of Object.keys(row.byRendering)) row.byRendering[key] = Number(row.byRendering[key].toFixed(3));
           for (const key of Object.keys(row.grid)) row.grid[key] = Number(row.grid[key].toFixed(3));
@@ -1122,19 +1162,37 @@ async function stepAdvance(page: Page): Promise<Json> {
       }
       return { families: families.length, measured: rows.length, strings, sizes, ks, renderings, rows };
     },
-    { dpr, limit: advanceFontLimit, only: advanceFamilies }
+    { dpr, limit: advanceFontLimit, only: advanceFamilies, tolPx: TOL.advancePx }
   );
   const rows = out.rows as Json[];
-  const failing = rows.filter(r => r.available && r.maxCumPx > TOL.advancePx);
+  const failing = rows.filter(r => r.available && r.maxNativePx > TOL.advancePx);
   const unavailable = rows.filter(r => !r.available);
-  for (const r of rows) log(`${r.available && r.maxCumPx > TOL.advancePx ? "FAIL" : r.available ? "PASS" : "SKIP"} advance ${r.family}: max cumulative ${r.maxCumPx} px (${Object.entries(r.byRendering).map(([k, v]) => `${k} ${v}`).join(", ")}), max advance ${r.maxAdvancePx} px (${r.loadState}${r.available ? "" : ", not available on this host"})`);
+  const available = rows.filter(r => r.available);
+  for (const r of rows) log(`${r.available && r.maxNativePx > TOL.advancePx ? "FAIL" : r.available ? "PASS" : "SKIP"} advance ${r.family}: native max ${r.maxNativePx} px over ${r.cases - r.compat}/${r.cases} cases (compat ${r.compat}, ${r.compatWithin} of them within tolerance); model over all cases ${r.maxCumPx} px (${Object.entries(r.byRendering).map(([k, v]) => `${k} ${v}`).join(", ")}), max advance ${r.maxAdvancePx} px (${r.loadState}${r.available ? "" : ", not available on this host"})`);
   const byRendering = (key: string) => rows.filter(r => r.available && (r.byRendering[key] ?? 0) > TOL.advancePx).length;
   const byStrings = (key: string) => rows.filter(r => r.available && (r.byStrings[key] ?? 0) > TOL.advancePx).length;
   return {
     ...out,
-    summary: { measured: rows.length, available: rows.length - unavailable.length, pass: rows.length - unavailable.length - failing.length, fail: failing.length, failAuto: byRendering("auto"), failOptimizeSpeed: byRendering("optimizeSpeed"), failMapStrings: byStrings("mapStrings"), failProbeStrings: byStrings("probeStrings"), unavailable: unavailable.map(r => `${r.family} (${r.loadState})`) },
+    summary: {
+      measured: rows.length,
+      available: rows.length - unavailable.length,
+      pass: rows.length - unavailable.length - failing.length,
+      fail: failing.length,
+      // the measured model over every case, as before W3b (what the GPU would draw if it kept them all native)
+      modelFail: rows.filter(r => r.available && r.maxCumPx > TOL.advancePx).length,
+      modelFailAuto: byRendering("auto"),
+      modelFailOptimizeSpeed: byRendering("optimizeSpeed"),
+      modelFailMapStrings: byStrings("mapStrings"),
+      modelFailProbeStrings: byStrings("probeStrings"),
+      cases: available.reduce((n, r) => n + r.cases, 0),
+      compatCases: available.reduce((n, r) => n + r.compat, 0),
+      compatWithin: available.reduce((n, r) => n + r.compatWithin, 0),
+      compatFonts: available.filter(r => r.compat).map(r => `${r.family} ${r.compat}/${r.cases}`),
+      allCompat: available.filter(r => r.cases && r.compat === r.cases).map(r => r.family),
+      unavailable: unavailable.map(r => `${r.family} (${r.loadState})`)
+    },
     failure: failing.length
-      ? `${failing.length}/${rows.length - unavailable.length} available fonts differ by > ${TOL.advancePx} device px (text-rendering auto: ${byRendering("auto")}, optimizeSpeed: ${byRendering("optimizeSpeed")}): ${failing.slice(0, 8).map(r => `${r.family} ${r.maxCumPx} px`).join(", ")}`
+      ? `${failing.length}/${rows.length - unavailable.length} available fonts draw natively > ${TOL.advancePx} device px off the SVG: ${failing.slice(0, 8).map(r => `${r.family} ${r.maxNativePx} px`).join(", ")}`
       : rows.length - unavailable.length
         ? null
         : "no available font measured"
@@ -1345,6 +1403,373 @@ async function stepFonts(page: Page, blanks: Blanks, dir: string, world: string)
   return result;
 }
 
+// ------------------------------------------------------------------ step: zoom (W3b GLYPH2)
+// Cameras between powers of two. Every other step captures where the GPU prepared (and gate cameras are powers of two,
+// where the raster bucket is exact), so two things Chromium does per zoom were invisible to the gate:
+// - shadows: text-shadow is screen space (CSS px), but glyph masks are cut at the raster bucket. Straight text outside
+//   #labels is what the GPU draws natively with its shadow (inside #labels a shadowed label is a compat run, and the
+//   map's are restyled by every zoom), so the harness places its own probe layer (shadowProbe: five straight texts,
+//   5-24 units, in the map's label face, #labels hidden meanwhile) with a visible shadow on both arms (a glow and an
+//   offset one). Each ZOOM_SHADOW_PAIRS camera is prepared at the first zoom and viewed at the second with the
+//   renderer blind to mutations (a carried frame, as a gesture shows until it settles), plus one fresh prepare
+//   between powers of two; the probe's padded boxes are judged as a golden: D1 (SSIM, over16, over44 per D11) and
+//   D11 coverage (ink ratio, over16 of the layer's ink). A cell where the GPU drew no probe text natively with a
+//   shadow fails (nothing to judge).
+// - carry: Chromium rounds the central baseline per zoom; a baked one drifts in a carried frame (W3b probe: up to
+//   3.5 device px). Each ZOOM_CARRY pair is prepared and viewed the same way, rescaleLabels off for the whole step
+//   (the label DOM is then the same at both zooms; the frame identity must hold), `native` variant. The GPU's own
+//   glyph instances (native curved labels) are pixel-registered as in the glyphs step (TOL.registerShare within
+//   TOL.registerPx, missing glyphs count against it; labels the zoom restyled, textSignatures, are left out). The
+//   labels golden against a fresh prepare of the same view (CARRY_MARGIN) and the fresh prepare's own D11 verdict
+//   are info (summary.freshD11): compat runs carry a raster of the prepared zoom until the settle refines it.
+const ZOOM_PARTS = (env.LABELS_ZOOM_PARTS || "shadows,carry").split(",");
+// [prepared, viewed] zoom pairs within one bucket at dpr 2; [1.5, 1.5] is a fresh prepare between powers of two
+const ZOOM_SHADOW_PAIRS: [number, number][] = [
+  [1.1, 1.9],
+  [1.9, 1.1],
+  [2.2, 3],
+  [1.5, 1.5]
+];
+const ZOOM_SHADOW_PAD = 12; // CSS px around a text: the offset shadow's 3px + 3 sigma (2px blur -> sigma 1) and the glow's 3 sigma (4px -> 6px)
+const ZOOM_SHADOWS = [
+  { id: "glow", value: "rgb(200, 30, 30) 0px 0px 4px" },
+  { id: "offset", value: "rgb(200, 30, 30) 3px 2px 2px" }
+];
+// info: how much worse a carried frame's labels golden may read than a fresh prepare of the same view before it is noted
+const CARRY_MARGIN = { ssim: 0.001, over16OfInk: 0.01, inkRatio: 0.01 };
+const ZOOM_CARRY: [number, number][] = [
+  [1.1, 1.9],
+  [1.9, 1.1],
+  [2.3, 3.7]
+];
+
+// The shadows probe: g#labelsHarnessShadow, a layer of its own in #viewbox after #labels (straight text outside
+// #labels is what the GPU draws natively with its shadow: scene.ts nativeText; inside #labels it is a compat run), with
+// straight texts at `at` (world units) in the face and fill of the map's first label group, sizes 5-24 units, and
+// `shadow` as their text-shadow; #labels itself is hidden meanwhile. null removes it and shows #labels again.
+function shadowProbe(args: { at: [number, number]; shadow: string } | null): number {
+  const w = globalThis as any;
+  document.getElementById("labelsHarnessShadow")?.remove();
+  const labels = document.getElementById("labels") as unknown as SVGGElement | null;
+  if (!labels?.parentElement) throw Error("shadowProbe: no #labels");
+  // the map's labels are hidden meanwhile: they are not what this probe judges, and they overlap it
+  if (w.__labelsProbeHid !== undefined) {
+    labels.style.display = w.__labelsProbeHid;
+    w.__labelsProbeHid = undefined;
+  }
+  if (!args) return 0;
+  w.__labelsProbeHid = labels.style.display;
+  labels.style.display = "none";
+  const ns = "http://www.w3.org/2000/svg";
+  const model = labels.querySelector<SVGTextElement>("g[data-size] text");
+  const style = model ? getComputedStyle(model) : null;
+  const g = document.createElementNS(ns, "g");
+  g.id = "labelsHarnessShadow";
+  g.setAttribute("font-family", style?.fontFamily ?? "Georgia");
+  g.setAttribute("fill", style?.fill ?? "#333");
+  g.setAttribute("text-anchor", "middle");
+  g.style.textShadow = args.shadow;
+  let y = args.at[1] - 40;
+  const texts = [
+    ["Bothersian Hold", 5],
+    ["Kingdom of Ardvale", 8],
+    ["Lake Varn Quaywick", 12],
+    ["Theodan Marches", 17],
+    ["Port Velmar", 24]
+  ] as const;
+  texts.forEach(([content, size], i) => {
+    const t = document.createElementNS(ns, "text");
+    t.id = `labelsHarnessShadow${i}`;
+    y += size * 1.3;
+    t.setAttribute("x", String(args.at[0]));
+    t.setAttribute("y", String(y));
+    t.setAttribute("font-size", String(size));
+    t.textContent = content;
+    g.append(t);
+  });
+  labels.after(g);
+  return texts.length;
+}
+
+// The probe texts as the page shows them: ids, padded device-px boxes, how many the GPU drew natively (no compat run
+// covers them) and the frame's soft (shadow) glyph cells (src/gpu/text.ts: negative alpha, GLYPH_FLOATS 18).
+function shadowProbeState(args: { dpr: number; pad: number }): Json {
+  const w = globalThis as any;
+  const compat = new Set<Element>();
+  for (const run of Array.isArray(w.gpuRenderer?.prepared?.runs) ? w.gpuRenderer.prepared.runs : []) for (const e of run.elements ?? []) compat.add(e);
+  const texts = [...document.querySelectorAll<SVGTextElement>("#labelsHarnessShadow text")];
+  const ids: string[] = [];
+  const boxes: { x0: number; y0: number; x1: number; y1: number }[] = [];
+  let native = 0;
+  for (const text of texts) {
+    ids.push(text.id);
+    let lane = !!w.gpuRenderer?.prepared;
+    for (let e: Element | null = text; e && e.id !== "viewbox"; e = e.parentElement) if (compat.has(e)) lane = false;
+    if (lane) native++;
+    const r = text.getBoundingClientRect();
+    if (r.width > 0 && r.height > 0) boxes.push({ x0: (r.left - args.pad) * args.dpr, y0: (r.top - args.pad) * args.dpr, x1: (r.right + args.pad) * args.dpr, y1: (r.bottom + args.pad) * args.dpr });
+  }
+  const data = w.gpuRenderer?.prepared?.payload?.glyphs;
+  let softCells = 0;
+  if (data instanceof Float32Array) for (let i = 0; i + 18 <= data.length; i += 18) if (data[i + 14] < 0) softCells++;
+  return { ids, boxes, native, softCells };
+}
+
+// Per #labels text (svgLabels' ids): what the app may change on a zoom (shown, font size, position, transform, text).
+// A text whose signature differs between two zooms is stale in a carried frame by design: the settle re-prepares it.
+function textSignatures(): Record<string, string> {
+  const out: Record<string, string> = {};
+  [...document.querySelectorAll<SVGTextElement>("#labels text, #labelsHarnessShadow text")].forEach((text, index) => {
+    const group = text.closest("#labels g[data-size]") as SVGGElement | null;
+    const id = text.id || `${group?.id ?? "labels"}#${index}`;
+    const style = getComputedStyle(text);
+    const shown = text.checkVisibility({ visibilityProperty: true } as any);
+    const attrs = ["x", "y", "dx", "dy", "transform"].map(a => text.getAttribute(a) ?? "").join(",");
+    const chain: string[] = [];
+    for (let e: Element | null = text.parentElement; e && e.id !== "viewbox"; e = e.parentElement) chain.push(e.getAttribute("transform") ?? "");
+    out[id] = `${shown}|${style.fontSize}|${style.fontFamily}|${attrs}|${chain.join(";")}|${text.textContent}`;
+  });
+  return out;
+}
+
+// The image outside `boxes` (device px) replaced by the blank capture: the golden then reads only those regions.
+function maskTo(img: ReturnType<typeof decode>, blank: ReturnType<typeof decode>, boxes: Box[]): ReturnType<typeof decode> {
+  const inside = new Uint8Array(img.width * img.height);
+  for (const box of boxes) {
+    const c = clipBox(box, img.width, img.height);
+    if (!c) continue;
+    for (let y = c.y0; y < c.y1; y++) inside.fill(1, y * img.width + c.x0, y * img.width + c.x1);
+  }
+  const data = new Uint8Array(img.data);
+  for (let i = 0; i < inside.length; i++) if (!inside[i]) for (let ch = 0; ch < 4; ch++) data[i * 4 + ch] = blank.data[i * 4 + ch];
+  return { ...img, data };
+}
+
+const reprepare = (page: Page) => page.evaluate(() => (globalThis as any).gpuRenderer?.invalidate?.());
+
+function judgeGolden(m: CellMetrics): { gates: Json; failures: string[] } {
+  const cover = coverageOf(m);
+  const gates = { ssim: m.ssim >= D1.ssimMin, over16: m.over16Fraction <= D1.over16Max, over44: m.over44Fraction <= D1.over44Max, coverageInk: cover.ink, coverageOver16: cover.over16 };
+  const failures: string[] = [];
+  if (!gates.ssim) failures.push(`ssim ${m.ssim.toFixed(4)} < ${D1.ssimMin}`);
+  if (!gates.over16) failures.push(`over16 ${(m.over16Fraction * 100).toFixed(3)}%`);
+  if (!gates.over44) failures.push(`over44 ${(m.over44Fraction * 100).toFixed(3)}%`);
+  if (!gates.coverageInk) failures.push(`coverage: ink ${m.inkGpu} GPU vs ${m.inkSvg} SVG px (ratio ${m.inkRatio.toFixed(3)})`);
+  if (!gates.coverageOver16) failures.push(`coverage: over16 is ${(m.over16OfInk * 100).toFixed(2)}% of the layer's ink`);
+  if (m.inkSvg < 4) failures.push(`empty in SVG arm (ink ${m.inkSvg} px)`);
+  return { gates, failures };
+}
+
+async function stepZoom(page: Page, dir: string): Promise<Json> {
+  const result: Json = { shadows: [] as Json[], carry: [] as Json[] };
+  const [gw, gh] = (await page.evaluate(() => [(globalThis as any).graphWidth, (globalThis as any).graphHeight])) as [number, number];
+  try {
+    // rescaleLabels off for both parts: the label DOM is then the same at every zoom, so a frame carried between two
+    // zooms differs from the SVG only by what the renderer does per zoom
+    const rescale = await page.evaluate(() => {
+      const box = (globalThis as any).rescaleLabels as HTMLInputElement | undefined;
+      const was = !!box?.checked;
+      if (box) box.checked = false;
+      return was;
+    });
+    result.rescaleLabelsWas = rescale;
+    // prepared at kPrepared, shown at kViewed with the renderer blind to mutations (freezeGpu, as a gesture does until
+    // it settles); kPrepared === kViewed is a fresh prepare
+    const carriedView = async (cell: Json, kPrepared: number, kViewed: number, at: [number, number]) => {
+      await zoomTo(page, centerOn(kPrepared, at[0], at[1]));
+      await settleApp(page);
+      await reprepare(page);
+      let status = await waitGpu(page);
+      const before = await page.evaluate(frameState);
+      const signed = await page.evaluate(textSignatures);
+      if (kPrepared !== kViewed) {
+        await page.evaluate(freezeGpu, true);
+        cell.camera = await zoomTo(page, centerOn(kViewed, at[0], at[1]));
+        await settleApp(page);
+        status = await waitGpu(page);
+      } else cell.camera = await page.evaluate(() => (0, eval)("(() => { const t = d3.zoomTransform(document.querySelector('#map')); return { k: t.k, x: t.x, y: t.y }; })()"));
+      const after = await page.evaluate(frameState);
+      cell.frames = { before, after };
+      if (status.active !== "gpu" || status.timedOut) cell.failures.push(`GPU not active/settled: ${JSON.stringify(status)}`);
+      if (kPrepared !== kViewed) {
+        cell.carried = before.frame !== null && before.frame === after.frame;
+        if (!cell.carried) cell.failures.push(`the renderer re-prepared between the zooms (frame ${before.frame} -> ${after.frame}): the pair does not test a carried frame`);
+      }
+      // the texts the app left alone between the zooms (shown at both, same size, place and text)
+      const now = await page.evaluate(textSignatures);
+      const stable = new Set(Object.keys(now).filter(id => now[id] === signed[id] && now[id].startsWith("true|")));
+      cell.stableTexts = stable.size;
+      cell.changedTexts = Object.keys(now).filter(id => now[id] !== signed[id]).length;
+      return stable;
+    };
+    const unfreeze = () => page.evaluate(() => {
+      const r = (globalThis as any).gpuRenderer;
+      return r && Object.hasOwn(r, "schedulePrepare");
+    }).then(frozen => (frozen ? page.evaluate(freezeGpu, false) : false));
+
+    // ---- shadows
+    // The map's own shadowed labels are compat runs or restyled by every zoom, so the harness places its own: a group
+    // of straight texts in #labels (no data-size, so the zoom styling leaves it alone) at the camera centre, in the
+    // map's label face, with the variant's text-shadow; judged on their padded boxes only.
+    const centre: [number, number] = [gw / 2, gh / 2];
+    result.shadowCentre = centre;
+    for (const [kPrepared, kViewed] of ZOOM_PARTS.includes("shadows") ? ZOOM_SHADOW_PAIRS : []) {
+      const blanks = await captureBlanks(page, centerOn(kViewed, centre[0], centre[1]));
+      for (const variant of ZOOM_SHADOWS) {
+        const cell: Json = { kPrepared, kViewed, variant: variant.id, control: kPrepared === kViewed, failures: [] as string[] };
+        result.shadows.push(cell);
+        try {
+          if (scaleBucket(kPrepared * dpr) !== scaleBucket(kViewed * dpr)) throw Error(`ZOOM_SHADOW_PAIRS ${kPrepared}/${kViewed} crosses a bucket at dpr ${dpr}`);
+          await isolateLabels(page, null);
+          cell.probe = await page.evaluate(shadowProbe, { at: centre, shadow: variant.value });
+          const stable = await carriedView(cell, kPrepared, kViewed, centre);
+          const probe = await page.evaluate(shadowProbeState, { dpr, pad: ZOOM_SHADOW_PAD });
+          cell.texts = { shown: probe.boxes.length, stable: probe.ids.filter((id: string) => stable.has(id)).length, native: probe.native, softCells: probe.softCells };
+          if (cell.texts.stable !== probe.ids.length) cell.failures.push(`the zoom restyled ${probe.ids.length - cell.texts.stable} probe texts: the pair does not test a carried frame`);
+          if (!probe.native || !probe.softCells) cell.failures.push(`the GPU drew no probe text natively with a shadow (native ${probe.native}, soft cells ${probe.softCells}): nothing to judge`);
+          const shots = await captureArms(page);
+          const svg = maskTo(decode(shots.svg), blanks.svg, probe.boxes);
+          const gpu = maskTo(decode(shots.gpu), blanks.gpu, probe.boxes);
+          const m = measureCell(svg, gpu, blanks.svg, blanks.gpu);
+          cell.metrics = roundMetrics(m);
+          const judged = judgeGolden(m);
+          cell.gates = judged.gates;
+          cell.failures.push(...judged.failures);
+          cell.pass = cell.failures.length === 0;
+          if (keep === "all" || !cell.pass) cell.images = saveShots(join(dir, "zoom", "shadows"), `${variant.id}-k${fmtK(kPrepared)}-to-k${fmtK(kViewed)}`, shots, svg, gpu);
+        } catch (error) {
+          cell.failures.push(`harness: ${String(error).slice(0, 400)}`);
+          cell.pass = false;
+        } finally {
+          await unfreeze();
+          await page.evaluate(shadowProbe, null);
+        }
+        log(`${cell.pass ? "PASS" : "FAIL"} zoom shadows ${variant.id} k ${kPrepared} -> ${kViewed}${cell.control ? " (fresh)" : ""}: ${cell.metrics ? `ssim ${cell.metrics.ssim} over16 ${cell.metrics.over16Fraction} over44 ${cell.metrics.over44Fraction} ink ${cell.metrics.inkRatio} over16OfInk ${cell.metrics.over16OfInk}` : ""} texts ${JSON.stringify(cell.texts ?? null)}${cell.pass ? "" : ` :: ${cell.failures.join("; ")}`}`);
+        write();
+      }
+    }
+    // ---- carry
+    // Within a bucket the renderer re-prepares only on a DOM change; the app's zoom styling always makes one (label
+    // font sizes when rescaleLabels is on, the states halo width), so a carried frame is what a gesture shows until it
+    // settles. The step reproduces that: rescaleLabels off (the label DOM is the same at both zooms) and the renderer
+    // blind to mutations between the zooms (freezeGpu, as the freeze self-test break does); then a fresh prepare at
+    // the viewed zoom is the control.
+    await page.evaluate(setVariant, "native");
+    const info = await page.evaluate(labelGroups);
+    const states = (info.groups as Json[]).find(g => g.id === "states" && g.anchors.length);
+    const judgeGlyphs = async (svgInk: Uint8Array, gpuInk: Uint8Array, width: number, height: number, only: Set<string> | null) => {
+      const state = await page.evaluate(svgLabels, { group: null, chars: true, dpr, ids: null });
+      let changed = 0;
+      const shifts: number[] = [];
+      const normals: number[] = [];
+      const worst: Json[] = [];
+      let missing = 0;
+      let nativeChars = 0;
+      // the GPU's own glyph instances only: native curved labels (straight text in #labels is a compat run)
+      for (const label of state.labels as Json[]) {
+        if (!label.inside || !label.native || !label.chars?.length) continue;
+        // a label the zoom restyled (shown, size, place: textSignatures) is stale in the carried frame by design: the
+        // settle after a gesture re-prepares it
+        if (only && !only.has(label.id)) {
+          changed++;
+          continue;
+        }
+        for (const c of label.chars as Json[]) {
+          if (c.empty) continue;
+          const box = clipBox(pad(c.extent, 1), width, height);
+          if (!box) continue;
+          const reg = register(svgInk, gpuInk, width, height, box, 3);
+          const kind = classifyRegistration(reg);
+          if (kind === "faint" || !reg) continue;
+          nativeChars++;
+          if (kind === "missing") {
+            missing++;
+            if (worst.length < 20) worst.push({ kind: "missing", label: label.id, group: label.group, char: c.char, curved: label.curved, fontPx: label.fontPx, svgInk: reg.svgInk, gpuInkAtShift: reg.gpuInkAtShift });
+            continue;
+          }
+          shifts.push(reg.shift);
+          normals.push(Math.abs(alongNormal(reg.dx, reg.dy, c.rotation).normal));
+          if (reg.shift > TOL.registerPx && worst.length < 20) worst.push({ label: label.id, char: c.char, curved: label.curved, fontPx: label.fontPx, dx: Number(reg.dx.toFixed(2)), dy: Number(reg.dy.toFixed(2)) });
+        }
+      }
+      const counted = shifts.length + missing;
+      const within = shifts.filter(v => v <= TOL.registerPx).length;
+      return { pixel: { ...stats(shifts), normal: stats(normals), missing, nativeChars, withinTol: counted ? Number((within / counted).toFixed(4)) : null, labelsChangedByZoom: changed }, counted, within, worst };
+    };
+    for (const [kPrepared, kViewed] of ZOOM_PARTS.includes("carry") ? ZOOM_CARRY : []) {
+      const cell: Json = { kPrepared, kViewed, bucket: [scaleBucket(kPrepared * dpr), scaleBucket(kViewed * dpr)], failures: [] as string[] };
+      result.carry.push(cell);
+      try {
+        if (cell.bucket[0] !== cell.bucket[1]) throw Error(`ZOOM_CARRY pair ${kPrepared}/${kViewed} crosses a bucket at dpr ${dpr}`);
+        const at: [number, number] = states ? states.anchors[0].at : [gw / 2, gh / 2];
+        const blanks = await captureBlanks(page, centerOn(kViewed, at[0], at[1]));
+        await isolateLabels(page, null);
+        const stable = await carriedView(cell, kPrepared, kViewed, at);
+        const shots = await captureArms(page);
+        const svg = decode(shots.svg);
+        const gpu = decode(shots.gpu);
+        const carried = await judgeGlyphs(inkOf(svg, blanks.svg), inkOf(gpu, blanks.gpu), svg.width, svg.height, stable);
+        cell.pixel = carried.pixel;
+        cell.worst = carried.worst;
+        const m = measureCell(svg, gpu, blanks.svg, blanks.gpu);
+        cell.metrics = roundMetrics(m);
+        // the control: the same view prepared fresh
+        await unfreeze();
+        await settleApp(page);
+        await reprepare(page);
+        await waitGpu(page);
+        const freshShots = await captureArms(page);
+        const freshSvg = decode(freshShots.svg);
+        const freshGpu = decode(freshShots.gpu);
+        const fresh = await judgeGlyphs(inkOf(freshSvg, blanks.svg), inkOf(freshGpu, blanks.gpu), freshSvg.width, freshSvg.height, stable);
+        const fm = measureCell(freshSvg, freshGpu, blanks.svg, blanks.gpu);
+        cell.fresh = { pixel: fresh.pixel, metrics: roundMetrics(fm), d11: judgeGolden(fm).failures };
+        if (!carried.pixel.nativeChars) cell.failures.push("no native glyph on screen: nothing carried to judge");
+        if (carried.counted && carried.within / carried.counted < TOL.registerShare)
+          cell.failures.push(`pixel: ${carried.counted - carried.within}/${carried.counted} carried glyphs shifted > ${TOL.registerPx} device px or missing (${carried.pixel.missing} missing; p95 ${carried.pixel.p95}, normal p95 ${carried.pixel.normal.p95}, max ${carried.pixel.max}; fresh max ${fresh.pixel.max})`);
+        // INFO: the labels golden of the carried frame against the fresh one (CARRY_MARGIN) and the fresh frame's own
+        // D11 verdict. Not gated: compat runs (burg labels here) carry a raster of the prepared zoom, which the settle
+        // after a gesture refines; that is the compat lane's carry, not the glyphs'.
+        const worse: string[] = [];
+        if (m.ssim < fm.ssim - CARRY_MARGIN.ssim) worse.push(`ssim ${m.ssim.toFixed(4)} vs fresh ${fm.ssim.toFixed(4)}`);
+        if (m.over16OfInk > fm.over16OfInk + CARRY_MARGIN.over16OfInk) worse.push(`over16 of ink ${(m.over16OfInk * 100).toFixed(2)}% vs fresh ${(fm.over16OfInk * 100).toFixed(2)}%`);
+        if (m.inkRatio < fm.inkRatio - CARRY_MARGIN.inkRatio) worse.push(`ink ratio ${m.inkRatio.toFixed(3)} vs fresh ${fm.inkRatio.toFixed(3)}`);
+        cell.goldenVsFresh = worse.length ? worse : "within CARRY_MARGIN";
+        cell.pass = cell.failures.length === 0;
+        if (keep === "all" || !cell.pass) {
+          cell.images = saveShots(join(dir, "zoom", "carry"), `k${fmtK(kPrepared)}-to-k${fmtK(kViewed)}`, shots, svg, gpu);
+          cell.freshImages = saveShots(join(dir, "zoom", "carry"), `k${fmtK(kPrepared)}-to-k${fmtK(kViewed)}-fresh`, freshShots, freshSvg, freshGpu);
+        }
+      } catch (error) {
+        cell.failures.push(`harness: ${String(error).slice(0, 400)}`);
+        cell.pass = false;
+      } finally {
+        await unfreeze();
+      }
+      log(`${cell.pass ? "PASS" : "FAIL"} zoom carry k ${kPrepared} -> ${kViewed}: pixel ${JSON.stringify(cell.pixel ?? null)} fresh max ${cell.fresh?.pixel?.max}${cell.metrics ? ` ssim ${cell.metrics.ssim} ink ${cell.metrics.inkRatio} over16OfInk ${cell.metrics.over16OfInk} (fresh ${cell.fresh?.metrics?.over16OfInk}, fresh D11 ${cell.fresh?.d11?.length ? cell.fresh.d11.join("/") : "pass"})` : ""}${cell.pass ? "" : ` :: ${cell.failures.join("; ")}`}`);
+      write();
+    }
+  } finally {
+    await page.evaluate(setVariant, "map");
+    if (result.rescaleLabelsWas !== undefined)
+      await page.evaluate(was => {
+        const box = (globalThis as any).rescaleLabels as HTMLInputElement | undefined;
+        if (box) box.checked = was;
+      }, result.rescaleLabelsWas);
+  }
+  const failing = [...result.shadows, ...result.carry].filter((c: Json) => !c.pass);
+  result.summary = {
+    shadows: result.shadows.length,
+    shadowFail: result.shadows.filter((c: Json) => !c.pass).map((c: Json) => `${c.variant}@k${c.kPrepared}->k${c.kViewed}`),
+    carry: result.carry.length,
+    carryFail: result.carry.filter((c: Json) => !c.pass).map((c: Json) => `k${c.kPrepared}->k${c.kViewed}`),
+    // INFO: a fresh prepare's labels layer at these cameras against the absolute D11 golden (not gated here)
+    freshD11: result.carry.map((c: Json) => `k${c.kViewed}: ${c.fresh?.d11?.length ? c.fresh.d11.join("/") : c.fresh ? "pass" : "n/a"}`)
+  };
+  result.failure = failing.length ? `${failing.length} zoom cells failed: ${failing.slice(0, 6).map((c: Json) => `${c.variant ? `shadow ${c.variant}@k${c.kPrepared}->k${c.kViewed}` : `carry k${c.kPrepared}->k${c.kViewed}`} (${c.failures[0]})`).join("; ")}` : null;
+  return result;
+}
+
 // ------------------------------------------------------------------ run
 
 try {
@@ -1370,6 +1795,7 @@ try {
           else if (step === "glyphs") w.steps.glyphs = await stepGlyphs(page, blanks, dir);
           else if (step === "advance") w.steps.advance = await stepAdvance(page);
           else if (step === "fonts") w.steps.fonts = await stepFonts(page, blanks, dir, world.name);
+          else if (step === "zoom") w.steps.zoom = await stepZoom(page, dir);
         } catch (error) {
           w.steps[step] = { ...(w.steps[step] ?? {}), failure: `harness: ${error instanceof Error ? error.stack : String(error)}` };
         }

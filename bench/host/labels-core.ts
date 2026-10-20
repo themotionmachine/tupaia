@@ -263,14 +263,24 @@ export function decodeGlyphKey(key: string): { font: string; halo: number; char:
   return { font: parts[0], halo, ink: parts[4], char: parts.slice(5).join("|") };
 }
 
+// The central baseline shift (user units) a glyph instance's last three floats ask the shader for at CSS px per user
+// unit k (src/gpu/text.ts centralShiftAt, shaders.ts glyph): ascent and descent rounded at the scaled font, halved,
+// a nested box (mode 2) rounded up to a whole CSS px; 0 for mode 0 (the shift is in ly).
+export function instanceCentralShift(ascent: number, descent: number, mode: number, k: number): number {
+  if (!(mode > 0.5) || !(k > 0)) return 0;
+  const css = (Math.floor(ascent * k + 0.5) - Math.floor(descent * k + 0.5)) / 2;
+  return (mode > 1.5 ? Math.ceil(css - 1e-3) : css) / k;
+}
+
 // The (dy-shifted) baseline point under a glyph's advance midpoint, in world units, from one instance
-// (cx cy angle lx ly w h …, GLYPH_FLOATS) and its atlas cell: text.ts puts the path sample at (cx, cy) and the cell at
-// ly = dy + baselineShift + top/scale in the glyph's rotated frame, with scale = cell px / world height.
-export function glyphBaseline(instance: ArrayLike<number>, glyph: { top: number; height: number }): { x: number; y: number; angle: number } | null {
+// (cx cy angle lx ly w h … ascent descent mode, GLYPH_FLOATS = 18) and its atlas cell at camera zoom k: text.ts puts
+// the path sample at (cx, cy) and the cell at ly = dy + baked shift + top/scale in the glyph's rotated frame, with
+// scale = cell px / world height, and the shader adds the per-zoom central shift.
+export function glyphBaseline(instance: ArrayLike<number>, glyph: { top: number; height: number }, k = 1): { x: number; y: number; angle: number } | null {
   const [cx, cy, angle, , ly, , h] = [instance[0], instance[1], instance[2], instance[3], instance[4], instance[5], instance[6]];
   if (!(h > 0) || !(glyph.height > 0)) return null;
   const scale = glyph.height / h;
-  const shift = ly - glyph.top / scale;
+  const shift = ly - glyph.top / scale + instanceCentralShift(instance[15] ?? 0, instance[16] ?? 0, instance[17] ?? 0, k);
   return { x: cx - Math.sin(angle) * shift, y: cy + Math.cos(angle) * shift, angle };
 }
 
@@ -290,7 +300,7 @@ export function gpuGlyphs(dpr: number): Record<string, any> {
   if (!view || !Number.isFinite(view.k)) return { error: "gpuRenderer.view is not readable" };
   const byUv = new Map<string, [string, any]>();
   for (const [key, glyph] of atlas.glyphs) byUv.set(`${glyph.u0},${glyph.v0}`, [key, glyph]);
-  const FLOATS = 15; // src/gpu/text.ts GLYPH_FLOATS
+  const FLOATS = 18; // src/gpu/text.ts GLYPH_FLOATS
   const data: Float32Array = payload.glyphs;
   const out: { char: string; font: string; scale: number; x: number; y: number; angle: number; shift: number }[] = [];
   let unknown = 0;
@@ -305,11 +315,17 @@ export function gpuGlyphs(dpr: number): Record<string, any> {
     const halo = Number(parts[1]);
     if (halo !== 0) continue;
     const char = parts.slice(3).join("|"); // decodeGlyphKey: `${font}|0|${ink}|${char}`
-    // glyphBaseline, inlined
+    // glyphBaseline (and instanceCentralShift at the view's zoom), inlined
     const h = data[i + 6];
     if (!(h > 0) || !(glyph.height > 0)) continue;
     const scale = glyph.height / h;
-    const shift = data[i + 4] - glyph.top / scale;
+    const [ascent, descent, mode] = [data[i + 15], data[i + 16], data[i + 17]];
+    let central = 0;
+    if (mode > 0.5) {
+      const css = (Math.floor(ascent * view.k + 0.5) - Math.floor(descent * view.k + 0.5)) / 2;
+      central = (mode > 1.5 ? Math.ceil(css - 1e-3) : css) / view.k;
+    }
+    const shift = data[i + 4] - glyph.top / scale + central;
     const angle = data[i + 2];
     const wx = data[i] - Math.sin(angle) * shift;
     const wy = data[i + 1] + Math.cos(angle) * shift;
