@@ -502,7 +502,9 @@ export class PickIndex {
         shape.fill.rings.map(() => true),
         shape.fill.evenOdd,
         0,
-        clip
+        clip,
+        // a box restarted in a nested level reaches past the index-space location box: grow the broadphase to it
+        typeof shape.square === "object" ? frameReach(shape.square.frames) : 0
       );
       const square = squareCells(shape.square, this.items[index].rings);
       this.items[index].square = square;
@@ -605,7 +607,8 @@ export class PickIndex {
     closed: boolean[],
     evenOdd: boolean,
     halfWidth: number,
-    clip: ArrayLike<number> | null = null
+    clip: ArrayLike<number> | null = null,
+    extraPad = 0
   ): number {
     const index = this.items.length;
     const copies = rings.map(ring => Float64Array.from(ring));
@@ -627,7 +630,7 @@ export class PickIndex {
     if (minX > maxX) {
       minX = minY = maxX = maxY = 0;
     }
-    const pad = kind === "stroke" ? halfWidth : 0;
+    const pad = (kind === "stroke" ? halfWidth : 0) + extraPad;
     const item: Item = {
       kind,
       layer,
@@ -759,4 +762,27 @@ function squareCells(square: HitShape["square"], rings: Float64Array[]): Item["s
     boxes.set([minX, minY, maxX, maxY], r * 4);
   });
   return { frames: [], boxes };
+}
+
+// How far (index units) a location box can reach from its point once it is carried down `frames`: a box restarted as
+// 1x1 in level j spans that unit box mapped back through the levels above it (a rotated or larger-unit space reaches
+// past the index-space box). 0 without frames; 1/16 slack covers the 1/64 snapping.
+function frameReach(frames: readonly Matrix[]): number {
+  let forward: Matrix = [1, 0, 0, 1, 0, 0];
+  let reach = 0;
+  for (const inverse of frames) {
+    const level = invertMatrix(inverse);
+    if (!level) continue;
+    const [a, b, c, d] = forward;
+    forward = [
+      a * level[0] + c * level[1],
+      b * level[0] + d * level[1],
+      a * level[2] + c * level[3],
+      b * level[2] + d * level[3],
+      0,
+      0
+    ];
+    reach = Math.max(reach, Math.abs(forward[0]) + Math.abs(forward[2]), Math.abs(forward[1]) + Math.abs(forward[3]));
+  }
+  return reach ? reach + 1 / 16 : 0;
 }

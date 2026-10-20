@@ -6,6 +6,7 @@ import {
   END_SLACK,
   insideRings,
   invertMatrix,
+  type Matrix,
   PickIndex,
   pointerLocation,
   polylineCovers,
@@ -459,6 +460,35 @@ describe("PickIndex", () => {
     expect(at(60.5, 60.5)).toBe("m");
     expect(at(59.9, 60.5)).toBe("m"); // local x -0.5: a fresh 1x1 box [-0.5, 0.5] in marker units overlaps [0, 5]
     expect(at(59.7, 60.5)).toBe("ocean"); // local x -1.5: box [-1.5, -0.5] does not
+  });
+
+  it("a rotated level's box reaches past the index-space box: the broadphase grows to it (Chrome probe tr7)", () => {
+    // text in <g transform="rotate(30 300 200)"> at camera k 1.37 (textbox2.mjs): elementFromPoint hit tr7 at CSS
+    // (357.121, 104.316); the location box carried into the rotated space overlaps the first cell, but its world
+    // footprint is wider than the camera-level box, which alone misses the cell's world bounds
+    const frame: Matrix = [
+      0.8660254115562509, -0.5000000134611738, 0.5000000134611738, 0.8660254115562509, -59.80762530126181,
+      176.7949217824272
+    ];
+    const forward = invertMatrix(frame)!;
+    const box = [218.640625, 107.59375, 221.375, 111.265625];
+    const corners = [box[0], box[1], box[2], box[1], box[2], box[3], box[0], box[3]];
+    const ring = corners.map((_, i) =>
+      i % 2
+        ? forward[1] * corners[i - 1] + forward[3] * corners[i] + forward[5]
+        : forward[0] * corners[i] + forward[2] * corners[i + 1] + forward[4]
+    );
+    const index = new PickIndex(1000, 1000);
+    index.addShape("labels", {
+      id: "tr7",
+      fill: { rings: [ring], evenOdd: false },
+      square: { frames: [frame], boxes: [box] }
+    });
+    const view = { k: 1.37, x: -20.1, y: -3.3 };
+    const [sx, sy] = [357.1211707849943, 104.31606979370117];
+    expect(
+      index.pick((sx - view.x) / view.k, (sy - view.y) / view.k, 0, undefined, worldLocation(view, sx, sy))?.id
+    ).toBe("tr7");
   });
 
   it("squareMeetsConvex matches a rotated cell exactly", () => {

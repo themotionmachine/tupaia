@@ -160,8 +160,11 @@ flooring the CSS point (the W3 PICK experiment) broke marker42 at zoom 2.
 
 Evidence:
 
-- `~/.tupaia-gates/w3b-pick2/probe/textbox.mjs` compares `elementFromPoint` with the index on about 33k edge samples.
-  The samples cover 120 labels and 60 marker `<svg>`s at seven cameras (k 1 identity, k 1 / 1.37 / 2 / 3.3 / 4 / 8,
-  off-grid translations).
-- Result: 0 mismatches for the new model, against 1,308 for the old square (`textbox.out.txt`).
+- `~/.tupaia-gates/w3b-pick2/probe/textbox2.mjs` compares `elementFromPoint` with the index on 39,705 edge samples.
+  The samples cover 120 labels, 60 marker `<svg>`s, and 40 texts in a rotated (30°) and a scaled `<g>`, a third of
+  them with their own `transform`. They run at seven cameras (k 1 identity, k 1 / 1.37 / 2 / 3.3 / 4 / 8, off-grid
+  translations).
+- Result: 0 mismatches for the new model, against 1,489 for the old square (`textbox2.out.txt`).
+- A rotated level makes the carried box reach past the index-space box, so such items grow their broadphase bounds
+  (`frameReach`). Without that, 17 rotated-group samples were missed.
 - `gate picking` at k 1: 100k burg band 107/118 → 111/112.
