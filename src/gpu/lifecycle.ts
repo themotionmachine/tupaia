@@ -99,12 +99,14 @@ export function canvasBackdrop(backgrounds: ArrayLike<string>): {
 // The id of the renderer's own copy of a root filter that ends over an ancestor's backdrop (backdropPrimitives).
 export const ROOT_BACKDROP_FILTER = "gpu-root-filter-backdrop";
 
-// The faint clear under the backdrop-ending copy (renderer frameClear): every canvas pixel the frame owns has some
-// alpha, so the copy can tell the canvas's own area (painted) from nothing at all. A canvas hidden with
-// visibility:hidden (a canonical preview) still runs its CSS filter on empty input, and a bare feFlood would then
-// cover the SVG; flooding only where the canvas painted cannot. 1/255 of black under the frame moves a colour by at
-// most one level.
-export const BACKDROP_CLEAR: readonly [number, number, number, number] = [0, 0, 0, 1 / 255];
+// The faint clear under the backdrop-ending copy (renderer frameClear: the backdrop colour at this alpha): every
+// canvas pixel the frame owns has some alpha, so the copy can tell the canvas's own area (painted) from nothing at
+// all. A canvas hidden with visibility:hidden (a canonical preview) still runs its CSS filter on empty input, and a
+// bare feFlood would then cover the SVG; flooding only where the canvas painted cannot. The copy takes that alpha back
+// out first (backdropPrimitives `prefix`), so the empty canvas is the backdrop exactly; and since the faint clear is
+// the backdrop's own colour, what it mixes into a translucent pixel (a white glow over white) is that colour, not
+// black: the golden counts a 1-level change as ink (black put 254 under every white text-shadow over a white page).
+export const BACKDROP_ALPHA = 1 / 255;
 
 export interface FilterPrimitive {
   tag: string;
@@ -113,21 +115,38 @@ export interface FilterPrimitive {
 }
 
 // What the renderer appends to its copy of a forwarded root filter when the backdrop is an ancestor's
-// (canvasBackdrop own = false): the canvas clears to BACKDROP_CLEAR, its copy of the filter grades what the frame
+// (canvasBackdrop own = false): the canvas clears faintly (BACKDROP_ALPHA), its copy of the filter grades what the frame
 // drew, and these primitives composite that over the backdrop colour, flooded where the canvas painted, in sRGB, as
 // the page composites the filtered svg over its ancestor; the canvas stays an opaque cover. `lastResult` names the
-// source's last primitive's output. Null for a filter without primitives.
+// source's last primitive's output. `prefix` goes before the source's primitives and undoes the faint clear's alpha,
+// (A - 1/255) / (1 - 1/255): the frame's own alpha (opaque stays opaque, empty becomes transparent); the source's
+// primitives read its result (`sourceResult`, for any that name SourceGraphic) instead of the raw canvas.
+// Null for a filter without primitives.
 export function backdropPrimitives(
   source: FilterSource,
   backdrop: readonly [number, number, number, number]
-): { lastResult: string; primitives: FilterPrimitive[] } | null {
+): { lastResult: string; sourceResult: string; prefix: FilterPrimitive[]; primitives: FilterPrimitive[] } | null {
   const children = Array.from(source.children);
   if (!children.length) return null;
   const lastResult = children[children.length - 1].getAttribute("result") || "gpu-filtered";
   const [r, g, b] = backdrop.slice(0, 3).map(v => Math.round(Math.min(1, Math.max(0, v)) * 255));
   const srgb = { "color-interpolation-filters": "sRGB" };
+  const faint = BACKDROP_ALPHA;
   return {
     lastResult,
+    sourceResult: "gpu-source",
+    prefix: [
+      {
+        tag: "feComponentTransfer",
+        attributes: { result: "gpu-source", ...srgb },
+        children: [
+          {
+            tag: "feFuncA",
+            attributes: { type: "linear", slope: String(1 / (1 - faint)), intercept: String(-faint / (1 - faint)) }
+          }
+        ]
+      }
+    ],
     primitives: [
       {
         tag: "feComponentTransfer",

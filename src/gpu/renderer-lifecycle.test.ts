@@ -230,6 +230,7 @@ describe("[LIFE] GpuRenderer lifecycle wiring", () => {
     expect(visible()).toBe(true);
     const copy = document.getElementById("gpu-root-filter-backdrop")!;
     expect([...copy.children].map(c => c.tagName.toLowerCase())).toEqual([
+      "fecomponenttransfer",
       "fecolormatrix",
       "fecomponenttransfer",
       "feflood",
@@ -240,8 +241,9 @@ describe("[LIFE] GpuRenderer lifecycle wiring", () => {
     expect(copy.querySelector("feFlood, feflood")!.getAttribute("flood-color")).toBe("rgb(255, 255, 255)");
     // the model's own filter is never written
     expect(document.getElementById("filter-sepia")!.firstElementChild!.getAttribute("result")).toBeNull();
+    // the backdrop's own colour, faintly: what it mixes into a translucent pixel is the backdrop, not black
     await vi.waitFor(() => expect(pipeline.clear![3]).toBeCloseTo(1 / 255));
-    expect(pipeline.clear!.slice(0, 3)).toEqual([0, 0, 0]);
+    expect(pipeline.clear!.slice(0, 3)).toEqual([1, 1, 1]);
     svg.removeAttribute("filter");
     await vi.waitFor(() => expect(renderer.canvas.style.filter).toBe(""));
     await vi.waitFor(() => expect(pipeline.clear).toEqual([1, 1, 1, 1]));

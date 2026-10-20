@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  BACKDROP_CLEAR,
+  BACKDROP_ALPHA,
   backdropPrimitives,
   canvasBackdrop,
   editorState,
@@ -149,6 +149,14 @@ describe("[LIFE] root filter over an ancestor's backdrop (W3c: monochrome over a
   it("composites the graded frame over the backdrop, flooded only where the canvas painted, in sRGB", () => {
     const plan = backdropPrimitives(BUILT_IN["filter-grayscale"] as unknown as FilterSource, [1, 1, 1, 1])!;
     expect(plan.lastResult).toBe("gpu-filtered");
+    // the faint clear's alpha comes back out before the source grades anything: empty -> 0, opaque -> 1
+    const [unfaint] = plan.prefix;
+    expect(plan.sourceResult).toBe(unfaint.attributes.result);
+    const { slope, intercept } = unfaint.children![0].attributes;
+    const alpha = (a: number) => Math.max(0, Number(slope) * a + Number(intercept));
+    expect(alpha(BACKDROP_ALPHA)).toBeCloseTo(0, 12);
+    expect(alpha(1)).toBeCloseTo(1, 12);
+    expect(alpha(0.5 + BACKDROP_ALPHA * 0.5)).toBeCloseTo(0.5, 12);
     const [mask, flood, clip, over] = plan.primitives;
     // a canvas hidden by visibility runs the filter on empty input: no alpha, no flood over the SVG
     expect(mask).toEqual({
@@ -157,7 +165,7 @@ describe("[LIFE] root filter over an ancestor's backdrop (W3c: monochrome over a
       children: [{ tag: "feFuncA", attributes: { type: "linear", slope: "255", intercept: "0" } }]
     });
     // the faint clear marks every pixel the frame owns: one 8-bit alpha step, which the mask lifts to 1
-    expect(BACKDROP_CLEAR[3] * 255).toBeCloseTo(1);
+    expect(BACKDROP_ALPHA * 255).toBeCloseTo(1);
     expect(flood.attributes).toMatchObject({
       "flood-color": "rgb(255, 255, 255)",
       "flood-opacity": "1",

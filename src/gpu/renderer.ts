@@ -32,7 +32,7 @@ import { HiddenEmblemCulling } from "./emblem-culling";
 import { FrameGraph } from "./framegraph";
 import { GpuFrameTimer, type TimingTelemetry, timingRequested } from "./gpu-timer";
 import {
-  BACKDROP_CLEAR,
+  BACKDROP_ALPHA,
   backdropPrimitives,
   canvasBackdrop,
   customizationMode,
@@ -244,7 +244,6 @@ function clearColor(svg: Element): { color: Rgba; own: boolean } {
     backgrounds.push(getComputedStyle(node).backgroundColor);
   return canvasBackdrop(backgrounds);
 }
-const BELOW_FILTER: Rgba = [...BACKDROP_CLEAR];
 
 export class GpuRenderer {
   readonly canvas = document.createElement("canvas");
@@ -256,7 +255,7 @@ export class GpuRenderer {
   private viewport: Viewport = { width: 1, height: 1, dpr: 1 };
   private clear: Rgba = [1, 1, 1, 1];
   // W3c: the backdrop is an ancestor's (canvasBackdrop own = false); with a root filter forwarded the canvas then
-  // clears to BACKDROP_CLEAR and its own copy of the filter ends over the backdrop (lifecycle.ts backdropPrimitives)
+  // clears faintly (BACKDROP_ALPHA) and its own copy of the filter ends over the backdrop (lifecycle.ts backdropPrimitives)
   private clearOwn = true;
   private clearBelowFilter = false;
   private backdropHost: SVGSVGElement | null = null;
@@ -778,9 +777,10 @@ export class GpuRenderer {
     });
   }
 
-  // the colour the frame clears to: BACKDROP_CLEAR under the renderer's backdrop-ending filter (backdropFilter)
+  // the colour the frame clears to: the backdrop at BACKDROP_ALPHA under the renderer's backdrop-ending filter
+  // (backdropFilter)
   private frameClear(): Rgba {
-    return this.clearBelowFilter ? BELOW_FILTER : this.clear;
+    return this.clearBelowFilter ? [this.clear[0], this.clear[1], this.clear[2], BACKDROP_ALPHA] : this.clear;
   }
 
   private sourceCurrent(): boolean {
@@ -843,6 +843,10 @@ export class GpuRenderer {
         for (const child of primitive.children ?? []) node.append(build(child));
         return node;
       };
+      for (const primitive of filter.querySelectorAll("[in='SourceGraphic'], [in2='SourceGraphic']"))
+        for (const name of ["in", "in2"])
+          if (primitive.getAttribute(name) === "SourceGraphic") primitive.setAttribute(name, plan.sourceResult);
+      filter.prepend(...plan.prefix.map(build));
       filter.append(...plan.primitives.map(build));
       this.backdropHost.replaceChildren(filter);
       this.backdropKey = key;
