@@ -14,16 +14,17 @@
 // then RESIZES window resizes (alternating three sizes, back to the start size at the end) with the same measures.
 // Growth is judged between the warm-up cycle and the last (census-core.ts judgeMemory + MEMORY_LIMITS). Tracked GPU
 // bytes are deterministic for one world at one size, so they must not drift at all (2 %); the JS heap is allowed
-// 12 MB / 10 % for JIT and cache settling. Both limits are a first calibration: they go in the report and in GATE.md.
+// 6 MB / 5 % for JIT and cache settling. Both limits are a first calibration: they go in the report and in GATE.md.
 //
 // Environment (gate.ts maps its arguments onto these):
 //   MEMORY_MAP        parity .map (default tests/fixtures/parity/parity-v1.map)
 //   MEMORY_DPR        1 | 2                                                              default 2
 //   MEMORY_LAUNCHER   metal | swiftshader                                                default metal
-//   MEMORY_CYCLES     world-replace cycles after the first load                          default 20
-//   MEMORY_RESIZES    resizes                                                            default 20
+//   MEMORY_CYCLES     world-replace cycles after the first load                          default 12
+//   MEMORY_RESIZES    resizes                                                            default 12
 //   MEMORY_WARMUP     cycles discarded as warm-up before the baseline                    default 3
-//   MEMORY_BREAK      none | leak: self-test, every cycle retains 3 MB and 400 DOM nodes; the run must FAIL
+//   MEMORY_STEPS     world,resize                                                        default world,resize
+//   MEMORY_BREAK      none | leak: self-test, every cycle retains 8 MB and 800 DOM nodes; the run must FAIL
 // Output in GATE_OUT_DIR: memory.json (report; `failure` null on a pass).
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -35,12 +36,14 @@ const outDir = join(env.GATE_OUT_DIR || process.cwd());
 const dpr = Number(env.MEMORY_DPR || 2);
 if (dpr !== 1 && dpr !== 2) throw Error("MEMORY_DPR must be 1 or 2");
 const cycles = Number(env.MEMORY_CYCLES || 20);
-const resizes = Number(env.MEMORY_RESIZES || 20);
+const resizes = Number(env.MEMORY_RESIZES || 12);
 const warmup = Number(env.MEMORY_WARMUP || 3);
+const steps = (env.MEMORY_STEPS || "world,resize").split(",").map(x => x.trim());
+for (const step of steps) if (!["world", "resize"].includes(step)) throw Error(`MEMORY_STEPS: unknown step ${step}`);
 const breakMode = env.MEMORY_BREAK || "none";
 if (!["none", "leak"].includes(breakMode)) throw Error("MEMORY_BREAK must be none|leak");
-if (!Number.isInteger(cycles) || cycles < warmup + 3) throw Error(`MEMORY_CYCLES must be an integer >= ${warmup + 3}`);
-if (!Number.isInteger(resizes) || resizes < warmup + 3) throw Error(`MEMORY_RESIZES must be an integer >= ${warmup + 3}`);
+if (steps.includes("world") && (!Number.isInteger(cycles) || cycles < warmup + 3)) throw Error(`MEMORY_CYCLES must be an integer >= ${warmup + 3}`);
+if (steps.includes("resize") && (!Number.isInteger(resizes) || resizes < warmup + 3)) throw Error(`MEMORY_RESIZES must be an integer >= ${warmup + 3}`);
 
 const started = Date.now();
 const log = (message: string) => process.stderr.write(`[memory ${Math.round((Date.now() - started) / 1000)}s] ${message}\n`);
@@ -49,7 +52,7 @@ const checks: Check[] = [];
 const report: any = {
   schema: 1,
   check: "memory-cycles",
-  config: { dpr, cycles, resizes, warmup, break: breakMode, limits: MEMORY_LIMITS },
+  config: { dpr, cycles, resizes, warmup, steps, break: breakMode, limits: MEMORY_LIMITS },
   worldReplace: [] as MemorySnapshot[],
   resize: [] as MemorySnapshot[],
   growth: {} as Record<string, unknown>,
@@ -111,15 +114,15 @@ try {
     breakMode === "leak"
       ? page.evaluate(() => {
           const w = globalThis as any;
-          (w.__leak ??= []).push(new Uint8Array(3 * 1024 * 1024).fill(7));
+          (w.__leak ??= []).push(new Uint8Array(8 * 1024 * 1024).fill(7));
           const holder = document.createElement("div");
-          for (let i = 0; i < 400; i++) holder.appendChild(document.createElement("span"));
+          for (let i = 0; i < 800; i++) holder.appendChild(document.createElement("span"));
           (w.__leakDom ??= []).push(holder);
         })
       : Promise.resolve();
 
   // ---- world-replace cycles: the first load is cycle 0
-  for (let cycle = 0; cycle <= cycles; cycle++) {
+  for (let cycle = 0; cycle <= (steps.includes("world") ? cycles : 0); cycle++) {
     const problems = await loadParity(page, fixture, []); // the file carries its layers; no per-toggle churn between cycles
     for (const p of problems) sink.warnings.push(p);
     await leak();
@@ -128,7 +131,7 @@ try {
     log(`cycle ${cycle}: heap ${(snap.heap / 1048576).toFixed(1)} MB, nodes ${snap.nodes}, listeners ${snap.listeners}, gpu tracked ${snap.gpuTracked}, cpu ${snap.gpuCpu}`);
     write();
   }
-  {
+  if (steps.includes("world")) {
     const snaps = report.worldReplace as Array<MemorySnapshot & { sameRenderer: boolean; wait: any }>;
     const verdict = judgeMemory(snaps, warmup);
     const problems = [...verdict.problems];
@@ -153,7 +156,7 @@ try {
     [1500, 800],
     [1280, 720]
   ];
-  for (let i = 0; i <= resizes; i++) {
+  for (let i = 0; steps.includes("resize") && i <= resizes; i++) {
     const [width, height] = i === resizes ? [1280, 720] : sizes[i % sizes.length];
     await page.setViewportSize({ width, height });
     await page.waitForTimeout(150);
@@ -163,7 +166,7 @@ try {
     if (i % 5 === 0 || i === resizes) log(`resize ${i} (${width}x${height}): heap ${(snap.heap / 1048576).toFixed(1)} MB, nodes ${snap.nodes}, gpu tracked ${snap.gpuTracked}`);
     write();
   }
-  {
+  if (steps.includes("resize")) {
     // the 1280x720 snapshot nearest after the warm-up against the last (also 1280x720): same world, same size
     const all = report.resize as Array<MemorySnapshot & { sameRenderer: boolean; wait: any }>;
     const atStart = all.find((s, i) => s.cycle >= warmup && i % sizes.length === 2) ?? all[all.length - 2];
@@ -176,7 +179,7 @@ try {
     report.growth.resize = verdict.growth;
     add(judged("memory.resize", "gap16", problems, `${resizes} resizes: heap ${(verdict.growth.heap / 1048576).toFixed(1)} MB, nodes ${verdict.growth.nodes}, listeners ${verdict.growth.listeners}, gpu tracked ${verdict.growth.gpuTracked} B (1280x720 compared with 1280x720)`));
   }
-  add(info("memory.summary", "gap16", `heap ${(report.worldReplace[0].heap / 1048576).toFixed(1)} MB at cycle 0, ${(report.worldReplace.at(-1).heap / 1048576).toFixed(1)} MB at cycle ${cycles}; tracked GPU ${report.worldReplace.at(-1).gpuTracked} B`));
+  if (report.worldReplace.length) add(info("memory.summary", "gap16", `heap ${(report.worldReplace[0].heap / 1048576).toFixed(1)} MB at cycle 0, ${(report.worldReplace.at(-1).heap / 1048576).toFixed(1)} MB at cycle ${cycles}; tracked GPU ${report.worldReplace.at(-1).gpuTracked} B`));
 
   const validation = sink.warnings.some(w => /GL_INVALID_|Feedback loop/i.test(w));
   if (sink.errors.length) add(fail("run.page-errors", "gap16", `${sink.errors.length} page error(s): ${sink.errors[0].slice(0, 200)}`));

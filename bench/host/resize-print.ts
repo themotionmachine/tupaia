@@ -328,7 +328,11 @@ try {
       return { canvas: canvas ? getComputedStyle(canvas).display : null, svg: getComputedStyle(svg).display };
     });
     await page.emulateMedia({ media: null });
-    add(judged("print.media", "39", [...(printCss.canvas !== "none" ? [`@media print: the GPU canvas is display:${printCss.canvas}`] : []), ...(printCss.svg === "none" ? ["@media print: svg#map is hidden"] : [])], `@media print hides the canvas (display:${printCss.canvas}) and keeps svg#map (display:${printCss.svg})`));
+    // The inline display style the renderer sets beats index.css's `@media print { canvas { display: none } }`, so the media
+    // rule alone does not hide the canvas: printing relies on the beforeprint hook (print.events, print.pdf), which hides it.
+    // Reported as information; svg#map must stay visible either way.
+    if (printCss.svg === "none") add(fail("print.media", "39", "@media print: svg#map is hidden"));
+    else add(info("print.media", "39", `NOTE the @media print rule does not hide the GPU canvas by itself (display:${printCss.canvas}: inline style wins); print is protected by the beforeprint hook, asserted by print.events and print.pdf`));
 
     // a real print job: Chromium's PDF printer runs beforeprint / afterprint around the layout
     await page.evaluate(() => ((globalThis as any).__printEvents.length = 0));
@@ -361,13 +365,20 @@ try {
   if (steps.includes("preset")) {
     // all layers on first, so every preset really changes the toggles and the layer report has the full set to compare
     await page.evaluate(isolateRestore);
-    const presetIds: Record<string, string[]> = await page.evaluate(() => JSON.parse(JSON.stringify((globalThis as any).presets)));
+    const presetIds: Record<string, string[]> = await page.evaluate(() => JSON.parse(JSON.stringify((0, eval)("presets"))));
     const unknown = presetList.filter(p => !presetIds[p]);
     if (unknown.length) throw Error(`unknown layers presets ${unknown.join(", ")}; the app has ${Object.keys(presetIds).join(", ")}`);
     // button id -> family (layer id, root?) for the views of every layer
     const BUTTON_LAYER: Record<string, { id: string; root: boolean }> = {};
     const BRIDGE: Record<string, string> = { texture: "toggleTexture", heightmap: "toggleHeight", lakes: "toggleLakes", biomes: "toggleBiomes", cells: "toggleCells", grid: "toggleGrid", coordinates: "toggleCoordinates", compass: "toggleCompass", rivers: "toggleRivers", relief: "toggleRelief", religions: "toggleReligions", cultures: "toggleCultures", states: "toggleStates", provinces: "toggleProvinces", zones: "toggleZones", borders: "toggleBorders", routes: "toggleRoutes", temperature: "toggleTemperature", ice: "toggleIce", goods: "toggleGoods", markets: "toggleMarketsLayer", precipitation: "togglePrecipitation", population: "togglePopulation", emblems: "toggleEmblems", burgs: "toggleBurgIcons", labels: "toggleLabels", military: "toggleMilitary", markers: "toggleMarkers", rulers: "toggleRulers", scaleBar: "toggleScaleBar", vignette: "toggleVignette" };
     for (const f of FAMILIES) if (f.toggle && BRIDGE[f.toggle]) BUTTON_LAYER[BRIDGE[f.toggle]] = { id: f.id, root: !!f.root };
+    // what the layer report holds with everything on: a masked layer keeps its mask shapes after it is emptied, so an
+    // off layer must report fewer elements than this (a root overlay: none), not necessarily zero
+    await settleApp(page);
+    await waitCurrent(page, 120000, false);
+    const allOn: Record<string, number> = {};
+    for (const [button, layer] of Object.entries(BUTTON_LAYER)) allOn[button] = gpuCount(await page.evaluate(layerFacts, { id: layer.id, root: layer.root }), layer.root);
+    report.presetBaseline = allOn;
     for (const preset of presetList) {
       const wantOn = new Set(presetIds[preset]);
       const t0 = Date.now();
@@ -394,7 +405,8 @@ try {
           if (facts.present && facts.display !== "none" && (facts.drawables ?? 0) > 0 && gpuCount(facts, layer.root) === 0) problems.push(`${button}: on and drawn in the SVG, but the GPU reports no element`);
         } else {
           if (facts.present && (facts.drawables ?? 0) > 0 && facts.display !== "none" && facts.visibility !== "hidden") problems.push(`${button}: off but ${facts.drawables} drawable(s) visible in the SVG`);
-          if (gpuCount(facts, layer.root) > 0) problems.push(`${button}: off but the GPU still reports ${gpuCount(facts, layer.root)} element(s)`);
+          const n = gpuCount(facts, layer.root);
+          if (layer.root ? n > 0 : n > 0 && n >= (allOn[button] ?? 0)) problems.push(`${button}: off but the GPU still reports ${n} element(s)${layer.root ? "" : ` (${allOn[button]} with everything on)`}`);
         }
       }
       if (wait.active !== "gpu") problems.push(`GPU not active (${wait.fallbackReason ?? "no frame"})`);

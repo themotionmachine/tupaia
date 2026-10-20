@@ -1064,6 +1064,10 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
     compatDirt.prune(
       [...runs, ...(ctx.previous?.runs ?? [])].reduce((min, run) => Math.min(min, run.stamp), compatDirt.now())
     );
+    // The frame's closures (release and the rest) share this function's scope, so keeping `ctx` alive keeps the frame it
+    // was built beside alive, and that frame's own `ctx` after it: every prepare would chain the one before (about 6 MB
+    // and 70 DOM nodes per prepare in the memory census). Nothing below this line reads the previous frame.
+    ctx.previous = null;
     return {
       frame,
       picking,

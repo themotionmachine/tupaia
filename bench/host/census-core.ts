@@ -260,9 +260,9 @@ export interface MemorySnapshot {
 
 export const MEMORY_LIMITS = {
   /** heap after the last cycle may exceed the heap after the warm-up cycle by this many bytes (JIT, caches settle) */
-  heapSlackBytes: 12 * 1024 * 1024,
+  heapSlackBytes: 6 * 1024 * 1024,
   /** ... and by this fraction of it */
-  heapSlackFraction: 0.1,
+  heapSlackFraction: 0.05,
   /** DOM nodes and listeners after the last cycle vs the warm-up cycle */
   nodeSlackFraction: 0.05,
   nodeSlackAbs: 400,
