@@ -46,7 +46,7 @@ import {
 import {
   compatDirt,
   documentStyle,
-  externalReference,
+  referenceClosure,
   releaseShared,
   retain,
   type StyleState,
@@ -1291,17 +1291,21 @@ function adoptRuns(device: GpuDevice, svg: SVGSVGElement, runs: CompatRun[], pre
       else if (previous.styleKey !== style.key) count("stylesheets");
       else pairs.push({ run, old });
     }
+    const document = svg.ownerDocument;
+    // what each run paints through: a definition change dirties only the runs that name it
+    const closures = pairs.map(({ run }) =>
+      referenceClosure(run.elements as unknown as Parameters<typeof referenceClosure>[0], id =>
+        document.getElementById(id)
+      )
+    );
     const verdicts = compatDirt.evaluate(
       pairs.map(pair => pair.old),
-      !!style.structural
+      !!style.structural,
+      closures.map(closure => closure.ids),
+      style.references
     );
-    const document = svg.ownerDocument;
     pairs.forEach(({ run, old }, i) => {
-      const external =
-        verdicts[i] ||
-        externalReference(run.elements as unknown as Parameters<typeof externalReference>[0], id =>
-          document.getElementById(id)
-        );
+      const external = verdicts[i] || closures[i].external;
       if (external) count(verdicts[i] || `reference ${external}`);
       else {
         if (run.screen) report.screenClean++;
