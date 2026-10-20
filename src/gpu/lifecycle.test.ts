@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { editorState, type FilterSource, hiddenReason, rootFilter } from "./lifecycle";
+import {
+  BACKDROP_CLEAR,
+  backdropPrimitives,
+  canvasBackdrop,
+  editorState,
+  type FilterSource,
+  hiddenReason,
+  rootFilter
+} from "./lifecycle";
 
 const shown = {
   prepared: true,
@@ -126,5 +134,54 @@ describe("[LIFE] rootFilter (row 28: root #map filter)", () => {
     expect(rootFilter("url(#notAFilter)", lookup).refused).toBe("root filter #notAFilter missing");
     expect(rootFilter("grayscale(1)", lookup).refused).toBe("root filter grayscale(1)");
     expect(rootFilter("url(#filter-sepia) blur(1px)", lookup).refused).toBe("root filter url(#filter-sepia) blur(1px)");
+  });
+});
+
+describe("[LIFE] root filter over an ancestor's backdrop (W3c: monochrome over a transparent #map)", () => {
+  it("says whose background the canvas clears to", () => {
+    // the app: #map paints its own background (index.css #000)
+    expect(canvasBackdrop(["rgb(0, 0, 0)", "rgb(255, 255, 255)"])).toEqual({ color: [0, 0, 0, 1], own: true });
+    // the golden's isolation: #map transparent, its parent white
+    expect(canvasBackdrop(["rgba(0, 0, 0, 0)", "rgb(255, 255, 255)"])).toEqual({ color: [1, 1, 1, 1], own: false });
+    expect(canvasBackdrop(["rgba(0, 0, 0, 0)", "rgba(0, 0, 0, 0)"])).toEqual({ color: [1, 1, 1, 1], own: false });
+  });
+
+  it("composites the graded frame over the backdrop, flooded only where the canvas painted, in sRGB", () => {
+    const plan = backdropPrimitives(BUILT_IN["filter-grayscale"] as unknown as FilterSource, [1, 1, 1, 1])!;
+    expect(plan.lastResult).toBe("gpu-filtered");
+    const [mask, flood, clip, over] = plan.primitives;
+    // a canvas hidden by visibility runs the filter on empty input: no alpha, no flood over the SVG
+    expect(mask).toEqual({
+      tag: "feComponentTransfer",
+      attributes: { in: "SourceAlpha", result: "gpu-painted" },
+      children: [{ tag: "feFuncA", attributes: { type: "linear", slope: "255", intercept: "0" } }]
+    });
+    // the faint clear marks every pixel the frame owns: one 8-bit alpha step, which the mask lifts to 1
+    expect(BACKDROP_CLEAR[3] * 255).toBeCloseTo(1);
+    expect(flood.attributes).toMatchObject({
+      "flood-color": "rgb(255, 255, 255)",
+      "flood-opacity": "1",
+      "color-interpolation-filters": "sRGB"
+    });
+    expect(clip.attributes).toMatchObject({
+      in: "gpu-flood",
+      in2: "gpu-painted",
+      operator: "in",
+      result: "gpu-backdrop"
+    });
+    expect(over.attributes).toMatchObject({
+      in: "gpu-filtered",
+      in2: "gpu-backdrop",
+      operator: "over",
+      "color-interpolation-filters": "sRGB"
+    });
+  });
+
+  it("keeps a named last result, and has nothing to add to an empty filter", () => {
+    const named = el("filter", {}, [el("feColorMatrix", { type: "saturate", values: "0", result: "grey" })]);
+    expect(backdropPrimitives(named as unknown as FilterSource, [0, 0, 0, 1])!.primitives[3].attributes.in).toBe(
+      "grey"
+    );
+    expect(backdropPrimitives(el("filter") as unknown as FilterSource, [1, 1, 1, 1])).toBeNull();
   });
 });

@@ -32,11 +32,16 @@ import { HiddenEmblemCulling } from "./emblem-culling";
 import { FrameGraph } from "./framegraph";
 import { GpuFrameTimer, type TimingTelemetry, timingRequested } from "./gpu-timer";
 import {
+  BACKDROP_CLEAR,
+  backdropPrimitives,
+  canvasBackdrop,
   customizationMode,
   editorState,
+  type FilterPrimitive,
   type FilterSource,
   hiddenReason,
   IDLE_WATCH_MS,
+  ROOT_BACKDROP_FILTER,
   rootFilter
 } from "./lifecycle";
 import { classify, pixelRecords, TRADE_LAYER, TradeMarkers, withoutMarkerRecords } from "./markers";
@@ -233,15 +238,13 @@ const STAND_IN = new Set([
 // radius at most 6) and some slack; plus 2 CSS px at the current zoom.
 const CARAVAN_REACH = 8;
 
-function clearColor(svg: Element): Rgba {
-  for (let node: Element | null = svg; node; node = node.parentElement) {
-    const match = getComputedStyle(node)
-      .backgroundColor.match(/[\d.]+/g)
-      ?.map(Number);
-    if (match && (match[3] ?? 1) > 0) return [match[0] / 255, match[1] / 255, match[2] / 255, match[3] ?? 1];
-  }
-  return [1, 1, 1, 1];
+function clearColor(svg: Element): { color: Rgba; own: boolean } {
+  const backgrounds: string[] = [];
+  for (let node: Element | null = svg; node; node = node.parentElement)
+    backgrounds.push(getComputedStyle(node).backgroundColor);
+  return canvasBackdrop(backgrounds);
 }
+const BELOW_FILTER: Rgba = [...BACKDROP_CLEAR];
 
 export class GpuRenderer {
   readonly canvas = document.createElement("canvas");
@@ -252,6 +255,12 @@ export class GpuRenderer {
   private view: Camera;
   private viewport: Viewport = { width: 1, height: 1, dpr: 1 };
   private clear: Rgba = [1, 1, 1, 1];
+  // W3c: the backdrop is an ancestor's (canvasBackdrop own = false); with a root filter forwarded the canvas then
+  // clears to BACKDROP_CLEAR and its own copy of the filter ends over the backdrop (lifecycle.ts backdropPrimitives)
+  private clearOwn = true;
+  private clearBelowFilter = false;
+  private backdropHost: SVGSVGElement | null = null;
+  private backdropKey = "";
   private generation = 0;
   private refines = 0;
   private revision = 0;
@@ -739,6 +748,7 @@ export class GpuRenderer {
     this.graph.dispose();
     this.device.dispose();
     this.canvas.remove();
+    this.backdropHost?.remove();
     forgetCompatClone();
     // the SVG is the map again: every caravan at its pose, then live (caravansPaused is false once the device is gone)
     setCaravanDomPaused(false);
@@ -768,6 +778,11 @@ export class GpuRenderer {
     });
   }
 
+  // the colour the frame clears to: BACKDROP_CLEAR under the renderer's backdrop-ending filter (backdropFilter)
+  private frameClear(): Rgba {
+    return this.clearBelowFilter ? BELOW_FILTER : this.clear;
+  }
+
   private sourceCurrent(): boolean {
     return this.svg === document.querySelector<SVGSVGElement>("#map");
   }
@@ -779,11 +794,60 @@ export class GpuRenderer {
       computed || this.svg.getAttribute("filter"),
       id => document.getElementById(id) as unknown as FilterSource | null
     );
-    if (this.canvas.style.filter !== next.css) this.canvas.style.filter = next.css;
+    const css = next.css && !this.clearOwn ? this.backdropFilter(next.css) : next.css;
+    if (this.canvas.style.filter !== css) this.canvas.style.filter = css;
+    if (this.clearBelowFilter !== (css !== next.css)) {
+      this.clearBelowFilter = css !== next.css;
+      this.requestDraw();
+    }
     if (next.refused === this.rootFilterState.refused && next.css === this.rootFilterState.css) return;
     if (next.refused) console.info(`GPU frame hidden: ${next.refused}`);
     this.rootFilterState = next;
     this.requestDraw();
+  }
+
+  // W3c: the renderer's copy of the root filter `css` names, ending over the ancestor's backdrop colour (lifecycle.ts
+  // backdropPrimitives), in a hidden svg of its own: the model svg is never written. Rebuilt when the source filter or
+  // the backdrop changes (checked whenever the root filter is applied: each prepare commit and #map attribute change).
+  private backdropFilter(css: string): string {
+    const id = /#([^"')\s]+)/.exec(css)?.[1];
+    const source = id ? document.getElementById(id) : null;
+    const plan = source ? backdropPrimitives(source as unknown as FilterSource, this.clear) : null;
+    if (!source || !plan) return css;
+    const space = getComputedStyle(source).colorInterpolationFilters || "linearRGB";
+    const key = `${source.outerHTML}|${space}|${this.clear.join(",")}`;
+    if (key !== this.backdropKey) {
+      const ns = "http://www.w3.org/2000/svg";
+      if (!this.backdropHost) {
+        this.backdropHost = document.createElementNS(ns, "svg");
+        this.backdropHost.setAttribute("aria-hidden", "true");
+        this.backdropHost.dataset.gpuRenderer = "backdrop-filter";
+        Object.assign(this.backdropHost.style, { position: "absolute", width: "0", height: "0", overflow: "hidden" });
+        document.body.append(this.backdropHost);
+      }
+      const filter = source.cloneNode(true) as Element;
+      const box = {
+        id: ROOT_BACKDROP_FILTER,
+        filterUnits: "objectBoundingBox",
+        x: "0",
+        y: "0",
+        width: "1",
+        height: "1"
+      };
+      for (const [name, value] of Object.entries({ ...box, "color-interpolation-filters": space }))
+        filter.setAttribute(name, value);
+      filter.lastElementChild?.setAttribute("result", plan.lastResult);
+      const build = (primitive: FilterPrimitive): Element => {
+        const node = document.createElementNS(ns, primitive.tag);
+        for (const [name, value] of Object.entries(primitive.attributes)) node.setAttribute(name, value);
+        for (const child of primitive.children ?? []) node.append(build(child));
+        return node;
+      };
+      filter.append(...plan.primitives.map(build));
+      this.backdropHost.replaceChildren(filter);
+      this.backdropKey = key;
+    }
+    return `url("#${ROOT_BACKDROP_FILTER}")`;
   }
 
   // The prepared bitmap crops cover the current view. Otherwise the canvas hides (SVG shown, never a frame missing
@@ -1373,7 +1437,7 @@ export class GpuRenderer {
       this.stats.lastPrepareMs = performance.now() - started;
       if (!this.moving)
         this.view = parseViewboxTransform(this.svg.querySelector("#viewbox")!.getAttribute("transform"));
-      this.clear = clearColor(this.svg);
+      ({ color: this.clear, own: this.clearOwn } = clearColor(this.svg));
       this.applyRootFilter();
       this.requestDraw();
       // crisp initial idle frame: refine compat runs for the current view without waiting for a camera gesture
@@ -1497,7 +1561,7 @@ export class GpuRenderer {
       const rendering = performance.now();
       timer.begin();
       try {
-        this.graph.render(this.prepared!.frame, this.view, this.viewport, this.clear, markers);
+        this.graph.render(this.prepared!.frame, this.view, this.viewport, this.frameClear(), markers);
       } finally {
         timer.end({
           cpuMs: performance.now() - rendering,
@@ -1506,7 +1570,7 @@ export class GpuRenderer {
           ...this.graph.passes
         });
       }
-    } else this.graph.render(this.prepared!.frame, this.view, this.viewport, this.clear, markers);
+    } else this.graph.render(this.prepared!.frame, this.view, this.viewport, this.frameClear(), markers);
     if (this.canvas.style.display !== "block") this.canvas.style.display = "block";
     this.emblemCulling?.update(this.view, this.viewport, this.clear[3] === 1, this.moving);
     this.lastMarkerDraw = started;

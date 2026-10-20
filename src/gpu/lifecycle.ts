@@ -79,6 +79,79 @@ export function rootFilter(
   return { css: `url("#${id}")`, refused: "" };
 }
 
+// W3c: the canvas clears to the first painted background from svg#map up (renderer clearColor); `own` says whether
+// that is the svg's own. A root filter grades the svg's own background with its content, but never an ancestor's:
+// under a transparent svg the SVG arm is the filtered content composited over the ancestor, so the canvas must not
+// clear to the ancestor's colour and then grade it with the frame (every anti-aliased edge would be blended before
+// the filter instead of after it: the monochrome preset's population bars over a white page, 20 levels darker).
+export function canvasBackdrop(backgrounds: ArrayLike<string>): {
+  color: [number, number, number, number];
+  own: boolean;
+} {
+  for (let i = 0; i < backgrounds.length; i++) {
+    const match = backgrounds[i].match(/[\d.]+/g)?.map(Number);
+    if (match && match.length >= 3 && (match[3] ?? 1) > 0)
+      return { color: [match[0] / 255, match[1] / 255, match[2] / 255, match[3] ?? 1], own: i === 0 };
+  }
+  return { color: [1, 1, 1, 1], own: false };
+}
+
+// The id of the renderer's own copy of a root filter that ends over an ancestor's backdrop (backdropPrimitives).
+export const ROOT_BACKDROP_FILTER = "gpu-root-filter-backdrop";
+
+// The faint clear under the backdrop-ending copy (renderer frameClear): every canvas pixel the frame owns has some
+// alpha, so the copy can tell the canvas's own area (painted) from nothing at all. A canvas hidden with
+// visibility:hidden (a canonical preview) still runs its CSS filter on empty input, and a bare feFlood would then
+// cover the SVG; flooding only where the canvas painted cannot. 1/255 of black under the frame moves a colour by at
+// most one level.
+export const BACKDROP_CLEAR: readonly [number, number, number, number] = [0, 0, 0, 1 / 255];
+
+export interface FilterPrimitive {
+  tag: string;
+  attributes: Record<string, string>;
+  children?: FilterPrimitive[];
+}
+
+// What the renderer appends to its copy of a forwarded root filter when the backdrop is an ancestor's
+// (canvasBackdrop own = false): the canvas clears to BACKDROP_CLEAR, its copy of the filter grades what the frame
+// drew, and these primitives composite that over the backdrop colour, flooded where the canvas painted, in sRGB, as
+// the page composites the filtered svg over its ancestor; the canvas stays an opaque cover. `lastResult` names the
+// source's last primitive's output. Null for a filter without primitives.
+export function backdropPrimitives(
+  source: FilterSource,
+  backdrop: readonly [number, number, number, number]
+): { lastResult: string; primitives: FilterPrimitive[] } | null {
+  const children = Array.from(source.children);
+  if (!children.length) return null;
+  const lastResult = children[children.length - 1].getAttribute("result") || "gpu-filtered";
+  const [r, g, b] = backdrop.slice(0, 3).map(v => Math.round(Math.min(1, Math.max(0, v)) * 255));
+  const srgb = { "color-interpolation-filters": "sRGB" };
+  return {
+    lastResult,
+    primitives: [
+      {
+        tag: "feComponentTransfer",
+        attributes: { in: "SourceAlpha", result: "gpu-painted" },
+        children: [{ tag: "feFuncA", attributes: { type: "linear", slope: "255", intercept: "0" } }]
+      },
+      {
+        tag: "feFlood",
+        attributes: {
+          "flood-color": `rgb(${r}, ${g}, ${b})`,
+          "flood-opacity": String(backdrop[3]),
+          result: "gpu-flood",
+          ...srgb
+        }
+      },
+      {
+        tag: "feComposite",
+        attributes: { in: "gpu-flood", in2: "gpu-painted", operator: "in", result: "gpu-backdrop", ...srgb }
+      },
+      { tag: "feComposite", attributes: { in: lastResult, in2: "gpu-backdrop", operator: "over", ...srgb } }
+    ]
+  };
+}
+
 // A primitive that leaves alpha alone, so an opaque canvas stays opaque: feColorMatrix whose alpha row is the identity
 // (or a type that never touches alpha), feComponentTransfer without a non-identity feFuncA.
 function keepsAlpha(primitive: FilterNode): boolean {
