@@ -1320,17 +1320,17 @@ const DEFS: Record<string, CheckDef> = {
   // bench/host/stroke-probe.ts: synthetic probe lines, SVG vs GPU stroke width, dash pitch/phase and dot shape (STROKE)
   "stroke-probe": {
     lock: "shared",
-    keys: ["dpr", "k"],
+    keys: ["dpr", "k", "params"],
     spec: { dpr: { type: "string", default: "1,2", check: text => { if (!text.split(",").every(d => d === "1" || d === "2")) throw new UsageError("dpr must be 1, 2 or 1,2"); } } },
     timeout: 600,
     run: ctx => {
       const report = join(ctx.dir, "stroke-probe.json");
-      return runScript(ctx, nodeScript("bench/host/stroke-probe.ts"), { PROBE_DPR: String(ctx.args.dpr), PROBE_K: String(ctx.args.k) }, report, 600, data => ({
+      return runScript(ctx, nodeScript("bench/host/stroke-probe.ts"), { PROBE_DPR: String(ctx.args.dpr), PROBE_K: String(ctx.args.k), PROBE_PARAMS: String(ctx.args.params ?? "") }, report, 600, data => ({
         failure: reportFailure(data),
         metrics: data && {
           cells: (data.cells ?? []).map((c: Json) => {
             const n = (list: unknown, status: string) => ((list as Json[] | undefined) ?? []).filter(l => l.status === status).length;
-            return `d${c.dpr} k${c.k}: lines ${n(c.lines, "pass")} pass ${n(c.lines, "fail")} fail ${n(c.lines, "not comparable")} n/c, joins ${n(c.joins, "pass")}/${((c.joins as Json[] | undefined) ?? []).length}`;
+            return `d${c.dpr} k${c.k}: lines ${n(c.lines, "pass")} pass ${n(c.lines, "fail")} fail ${n(c.lines, "not comparable")} n/c, joins ${n(c.joins, "pass")}/${((c.joins as Json[] | undefined) ?? []).length}, shapes ${n(c.shapes, "pass")} pass ${n(c.shapes, "fail")} fail ${n(c.shapes, "not comparable")} n/c`;
           }),
           worstJoinNotches: Math.max(0, ...(data.cells ?? []).flatMap((c: Json) => ((c.joins as Json[] | undefined) ?? []).map(l => Number(l.notches) || 0))),
           worstWidthDeltaPx: Math.max(0, ...(data.cells ?? []).flatMap((c: Json) => (c.lines as Json[]).map(l => Math.abs(Number(l.widthDeltaPx) || 0)))),
