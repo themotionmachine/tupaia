@@ -404,6 +404,32 @@ function useShapes(leaf: Node, m: Affine): Pick<HitShape, "fill" | "stroke">[] |
   return parts.length ? parts : null;
 }
 
+// A <use> of one plain shape that carries no paint of its own (coastline and lake outlines: <use href=#feature_N> of
+// a bare <path> in #featurePaths): the instance is that shape at (x, y), painted with the use's inherited style, so
+// it is hit like a <path> leaf with the use's computed style. Its bbox claimed every point inside a coastline loop
+// when #coastline turned compat (blurFilter at zoom > 2.6: parity k 4, rivers 0/112). null = not this case.
+const OWN_PAINT = [
+  "fill",
+  "stroke",
+  "stroke-width",
+  "style",
+  "class",
+  "pointer-events",
+  "transform",
+  "stroke-dasharray"
+];
+function usePlainShape(leaf: Node): { d: string; x: number; y: number } | null {
+  const doc = (leaf as unknown as { ownerDocument?: Document }).ownerDocument;
+  const href = leaf.getAttribute?.("href") ?? leaf.getAttribute?.("xlink:href") ?? "";
+  if (!doc?.getElementById || !href.startsWith("#")) return null;
+  const ref = doc.getElementById(href.slice(1)) as unknown as Node | null;
+  if (!ref || !["path", "polyline", "polygon", "line", "circle", "ellipse", "rect"].includes(ref.tagName.toLowerCase()))
+    return null;
+  if (OWN_PAINT.some(name => ref.getAttribute?.(name) != null)) return null;
+  const d = shapePath(ref);
+  return d ? { d, x: num(leaf, "x"), y: num(leaf, "y") } : null;
+}
+
 // The viewport rect of the nearest nested <svg> (in the world), when its overflow clips. Root <svg> is not a clip.
 function nestedClip(
   leaf: Node,
@@ -532,13 +558,14 @@ function canonicalCompatShapes(element: CompatRoot, viewbox: { getScreenCTM?(): 
         return b && (b.width > 0 || b.height > 0) ? boxCorners(m, b.x, b.y, b.width, b.height) : undefined;
       };
       const referenced = tag === "use" && !sense.box ? useShapes(leaf, m) : null;
+      const plain = tag === "use" && !sense.box && !referenced ? usePlainShape(leaf) : null;
       if (referenced) {
         // <use> of an <svg> with a viewBox (emblems): its referenced shapes, not its bbox; one shape each, so
         // overlapping rings never cancel under nonzero winding
         for (const part of referenced) shapes.push({ ...shape, ...part });
         continue;
       }
-      if (sense.box || tag === "use" || tag === "image") {
+      if (sense.box || (tag === "use" && !plain) || tag === "image") {
         // image: its viewport rect is the hit area for fill-sensitive values; other <use>: approximated by its bbox
         if (sense.box || sense.fill || (tag === "use" && sense.stroke)) shape.box = box();
       } else if (tag === "text") {
@@ -553,11 +580,15 @@ function canonicalCompatShapes(element: CompatRoot, viewbox: { getScreenCTM?(): 
           }
         }
       } else {
-        const d = shapePath(leaf);
+        const d = plain ? plain.d : shapePath(leaf);
         if (!d) continue;
         const scale = Math.sqrt(det);
         const subpaths = flattenPath(d, WORLD_TOLERANCE / scale).filter(s => s.points.length >= 2);
-        const rings = subpaths.map(s => transform(m, s.points));
+        // a plain-shape <use> places its instance at (x, y) in the use's user space
+        const placed: Affine = plain
+          ? { ...m, e: m.a * plain.x + m.c * plain.y + m.e, f: m.b * plain.x + m.d * plain.y + m.f }
+          : m;
+        const rings = subpaths.map(s => transform(placed, s.points));
         if (sense.fill && rings.length) {
           // fill areas close every subpath (an open path's fill is its implicit closure)
           shape.fill = { rings, evenOdd: css?.fillRule === "evenodd" };
@@ -575,7 +606,7 @@ function canonicalCompatShapes(element: CompatRoot, viewbox: { getScreenCTM?(): 
           );
           const linecap = css?.strokeLinecap;
           shape.stroke = {
-            rings: strokes.map(s => transform(m, s.points)),
+            rings: strokes.map(s => transform(placed, s.points)),
             closed: strokes.map(s => s.closed),
             halfWidth: (width / 2) * scale,
             cap: linecap === "butt" || linecap === "round" || linecap === "square" ? linecap : undefined

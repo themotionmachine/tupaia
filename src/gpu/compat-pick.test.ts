@@ -401,6 +401,50 @@ describe("compatShapes <use> of a viewBox <svg>", () => {
   });
 });
 
+describe("compatShapes <use> of a plain shape (coastline, lakes)", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  // #sea_island > <use href=#feature_N> of a bare <path> in defs: a stroke-only outline (pointer-events auto, fill
+  // none), as #coastline is when it goes compat (blurFilter at zoom > 2.6)
+  const outline = (refAttrs: Record<string, string> = {}, x = "0") => {
+    vi.stubGlobal("getComputedStyle", () => ({
+      pointerEvents: "auto",
+      visibility: "visible",
+      display: "inline",
+      fill: "none",
+      stroke: "rgb(31, 56, 70)",
+      strokeWidth: "0.5",
+      strokeDasharray: "none",
+      strokeDashoffset: "0"
+    }));
+    const id = `featureU${Object.keys(refAttrs).length}${x}`;
+    el("defs", "", [el("path", id, [], { attrs: { d: "M10,10L60,10L60,60L10,60Z", ...refAttrs } })]);
+    const use = el("use", "", [], {
+      attrs: { href: `#${id}`, x },
+      bbox: { x: 10, y: 10, width: 50, height: 50 },
+      ctm: at(0, 0)
+    });
+    return index(el("g", "coastline", [el("g", "sea_island", [use])]));
+  };
+
+  it("hits the referenced path's stroke, not the use's bbox", () => {
+    const pick = outline();
+    expect(pick.pick(10.2, 35, 0)?.id).toBe("sea_island");
+    expect(pick.pick(35, 35, 0)).toBeNull(); // inside the loop: the bbox claimed it (parity k 4, rivers 0/112)
+    expect(pick.pick(10.4, 35, 0)).toBeNull(); // past the 0.25 half-width
+  });
+
+  it("places the instance at the use's x, y", () => {
+    const pick = outline({}, "5");
+    expect(pick.pick(15.1, 35, 0)?.id).toBe("sea_island");
+    expect(pick.pick(10.1, 35, 0)).toBeNull();
+  });
+
+  it("keeps the bbox when the referenced shape carries its own paint", () => {
+    const pick = outline({ fill: "blue" });
+    expect(pick.pick(35, 35, 0)?.id).toBe("sea_island");
+  });
+});
+
 describe("compatShapes stroke dashes", () => {
   afterEach(() => vi.unstubAllGlobals());
 

@@ -1055,7 +1055,10 @@ try {
 
 
       const t = sampled.status?.gpu;
-      const [, tx, ty, tk] = /translate\(([-\d.e]+)[ ,]+([-\d.e]+)\)\s*scale\(([-\d.e]+)/.exec(sampled.transform || "") || [];
+      // no transform attribute = the identity camera (the app drops it at k 1, x 0, y 0: parity at zoom 1)
+      const [, tx, ty, tk] = sampled.transform
+        ? /translate\(([-\d.e]+)[ ,]+([-\d.e]+)\)\s*scale\(([-\d.e]+)/.exec(sampled.transform) || []
+        : [, "0", "0", "1"];
       const aligned =
         !!tk &&
         Math.abs(+tk - sampled.globalsCamera.k) < 1e-6 &&
