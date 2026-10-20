@@ -125,6 +125,28 @@ describe("memory allowances", () => {
   });
 });
 
+// The W2 incident (stroke + compat merge): the dense parity world at k 8, 1280x720 DPR 2, every layer on but the data
+// overlays, prepared alone after an editor closed. Bytes measured with a trace in prepareFrame's world loop.
+describe("dense parity prepare share (W2 budget regression)", () => {
+  const MiB = 1 << 20;
+  const screen = 14.55 * MiB; // compat screen overlays
+  const vertices = 5.47 * MiB; // fans 3.05, fill edges 2.05 (STROKE), segments 0.24, caps 0.09, glyph instances 0.04
+  const patterns = 1.06 * MiB;
+  const room = (atlas: number, owned: number) => compatAllowance(0, owned, vertices + atlas) - screen;
+
+  it("fell under the floor with the full glyph atlas and the uncropped relief viewport detail", () => {
+    // 16 MiB atlas (2048² RGBA) pending, 27.56 MiB relief viewport detail owned: 15.4 MiB, "world rasters need 25.1"
+    expect(room(16 * MiB, patterns + 27.56 * MiB)).toBeLessThan(MIN_COMPAT_BUDGET);
+    // the 2.05 MiB of fill edges alone was the difference: without them the share cleared the floor
+    expect(room(16 * MiB, patterns + 27.56 * MiB) + 2.05 * MiB).toBeGreaterThan(MIN_COMPAT_BUDGET);
+  });
+
+  it("clears it with room to spare once the atlas uploads its used rows", () => {
+    // 2.77 MiB of atlas rows at k 8; the detail now counts with the bitmap windows (28.7-31.3 MiB measured)
+    expect(room(2.77 * MiB, patterns + 31.26 * MiB)).toBeGreaterThan(MIN_COMPAT_BUDGET + 8 * MiB);
+  });
+});
+
 describe("fitScale", () => {
   it("keeps full resolution when within budget and scales area to the budget otherwise", () => {
     expect(fitScale(100, 200)).toBe(1);
