@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  CHURN_NOTICE_MS,
+  CHURN_NOTICE_REVISIONS,
   type IntentInputs,
   type KeyContext,
   type KeyLike,
@@ -41,6 +43,16 @@ describe("modeView", () => {
   it("Navigate only with a ready frame, no editor and the navigate intent", () => {
     expect(modeView(base).mode).toBe("navigate");
     expect(modeView(with_({ ready: false })).mode).toBe("preparing");
+  });
+
+  it("a resume hold under a stream of changes explains itself instead of spinning silently (D13 bound)", () => {
+    const plain = modeView(with_({ ready: false })).tip;
+    const held = (holdMs: number, holdRevisions: number) => modeView(with_({ ready: false, holdMs, holdRevisions }));
+    expect(held(CHURN_NOTICE_MS - 1, 10).tip).toBe(plain); // a slow prepare is not churn
+    expect(held(60000, CHURN_NOTICE_REVISIONS - 1).tip).toBe(plain); // nor a long one with a stray change
+    const churn = held(CHURN_NOTICE_MS, CHURN_NOTICE_REVISIONS);
+    expect(churn).toMatchObject({ mode: "preparing", label: "Preparing" });
+    expect(churn.tip).toMatch(/keeps changing/);
   });
 
   it("a GPU frame on screen that predates an edit reads Updating, not Navigate", () => {

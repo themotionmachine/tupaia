@@ -123,6 +123,9 @@ export interface Resume {
   prepares: number | null;
   lastPrepareMs: number | null;
   lastPrepare?: unknown;
+  /** D13: polls/reveals after the close input that saw the GPU canvas on screen with a frame older than the DOM revision. */
+  staleShown?: number;
+  staleFirst?: { at: number; frameRevision: number; revision: number; via: string } | null;
 }
 
 export interface StepObservation {
@@ -229,6 +232,28 @@ export function checkGpuStep(step: StepObservation, arm: Arm, resumeLimitMs: num
   return out;
 }
 
+/**
+ * D13: after an editor session that changed the model (any step since the previous close changed the model DOM or
+ * pack/grid/notes) closes, no GPU frame older than the latest DOM revision may be on screen. A session that changed
+ * nothing may return to the last frame at once, so only changing sessions are judged.
+ */
+export function checkStaleResume(steps: StepObservation[]): string[] {
+  const out: string[] = [];
+  let changed = false;
+  for (const step of steps) {
+    if (step.domDeltaCount || step.modelChanged.length) changed = true;
+    if (step.op !== "close") continue;
+    const stale = step.resume?.staleShown ?? 0;
+    if (changed && stale) {
+      const first = step.resume?.staleFirst;
+      const detail = first ? ` (first +${first.at} ms via ${first.via}: frame revision ${first.frameRevision} < ${first.revision})` : "";
+      out.push(`step ${step.index} close: stale GPU frame visible after a changing edit closed, ${stale}x${detail}`);
+    }
+    changed = false;
+  }
+  return out;
+}
+
 /** Problems with the recording itself (svg arm): a script that does not do what it says proves nothing. */
 export function checkRecording(script: EditorScript, steps: StepObservation[]): string[] {
   const out: string[] = [];
@@ -265,6 +290,7 @@ export function judgeArm(script: EditorScript, arm: Arm, recorded: StepObservati
     if (replayed.length !== recorded.length) failures.push(`${script.name}: replayed ${replayed.length} of ${recorded.length} steps`);
     for (let i = 0; i < Math.min(recorded.length, replayed.length); i++) failures.push(...compareStep(recorded[i], replayed[i]));
     for (const step of replayed) failures.push(...checkGpuStep(step, arm, resumeLimitMs));
+    failures.push(...checkStaleResume(replayed));
   }
   const closing = [...replayed].reverse().find(s => s.op === "close" && s.resume);
   return { script: script.name, arm, pass: failures.length === 0, failures, resume: closing?.resume ?? null, steps: replayed.length };

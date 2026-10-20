@@ -7,6 +7,7 @@ import {
   armQuery,
   checkGpuStep,
   checkRecording,
+  checkStaleResume,
   compareStep,
   type EditorScript,
   judgeArm,
@@ -170,5 +171,40 @@ describe("checkRecording / judgeArm", () => {
     assert.equal(fail.pass, false);
     assert.match(fail.failures.join(), /step 2 input: model differs in pack\.burgs/);
     assert.match(judgeArm(script, "gpu", recorded, replayed.slice(0, 2), 60000).failures.join(), /replayed 2 of 4/);
+  });
+});
+
+describe("D13 stale resume", () => {
+  const resume = (staleShown: number) => ({
+    currentMs: 900,
+    refinedMs: 1500,
+    timedOut: false,
+    prepares: 1,
+    lastPrepareMs: 800,
+    staleShown,
+    staleFirst: staleShown ? { at: 16, frameRevision: 3, revision: 5, via: "reveal" } : null
+  });
+  const open = step({ index: 1, domDeltaCount: 0, domDelta: [] });
+  const edit = step({ index: 2, op: "input", domDeltaCount: 2 });
+  const quiet = step({ index: 2, op: "input", domDeltaCount: 0, domDelta: [], modelChanged: [] });
+  const close = (staleShown: number, over: Partial<StepObservation> = {}) =>
+    step({ index: 3, op: "close", dialogs: [], domDeltaCount: 0, domDelta: [], resume: resume(staleShown), ...over });
+
+  it("fails a changing session whose close showed a frame older than the DOM", () => {
+    const out = checkStaleResume([open, edit, close(2)]);
+    assert.equal(out.length, 1);
+    assert.match(out[0], /stale GPU frame visible after a changing edit closed, 2x \(first \+16 ms via reveal: frame revision 3 < 5\)/);
+  });
+
+  it("passes a changing session with no stale frame, and a session that changed nothing", () => {
+    assert.deepEqual(checkStaleResume([open, edit, close(0)]), []);
+    assert.deepEqual(checkStaleResume([open, quiet, close(3)]), []);
+  });
+
+  it("a change made by the close itself or in the model only counts; each session is judged on its own", () => {
+    assert.equal(checkStaleResume([open, quiet, close(1, { domDeltaCount: 1 })]).length, 1);
+    assert.equal(checkStaleResume([open, step({ index: 2, op: "input", domDeltaCount: 0, modelChanged: ["pack.burgs"] }), close(1)]).length, 1);
+    assert.deepEqual(checkStaleResume([open, edit, close(0), step({ index: 4 }), close(1, { index: 5 })]).length, 1);
+    assert.deepEqual(checkStaleResume([open, edit, close(0), step({ index: 4, domDeltaCount: 0 }), close(1, { index: 5 })]), []);
   });
 });

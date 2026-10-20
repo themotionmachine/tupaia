@@ -64,6 +64,7 @@ export interface GpuTelemetry {
   state: "waiting" | "preparing" | "active" | "suspended" | "lost";
   world: number;
   revision: number;
+  frameRevision: number | null; // the DOM revision of the prepared frame (null: none); < revision means it is behind
   prepares: number;
   lastPrepareMs: number | null;
   frames: number;
@@ -107,6 +108,17 @@ export interface GpuTelemetry {
   layers: Prepared["layers"];
   compat: Prepared["compat"] | null;
   suspendedReason: string;
+  // resume hold (D13): the canvas stays hidden after a suspension that changed the model until the frame is current.
+  // active: held now (heldMs so far, revisions that arrived since it began); holds: holds begun; skipped: suspensions
+  // that ended with no revision (the last frame came back at once); lastMs: duration of the last finished hold
+  hold: {
+    active: boolean;
+    heldMs: number | null;
+    revisions: number;
+    holds: number;
+    skipped: number;
+    lastMs: number | null;
+  };
   dialogScans: number; // editor dialog scans (editorReason recomputes after a document mutation only)
   pickProfile: { queries: number; statusMs: number; indexMs: number };
   // state "active" means a frame is prepared and drawable; canvasVisible is whether the GPU canvas is on screen now
@@ -540,6 +552,7 @@ export class GpuRenderer {
       state,
       world: this.world,
       revision: this.revision,
+      frameRevision: this.prepared?.revision ?? null,
       ...this.stats,
       contextLosses: this.losses.count,
       lastRestoreMs: this.losses.lastRestoreMs,
@@ -571,6 +584,12 @@ export class GpuRenderer {
       layers: this.prepared?.layers ?? {},
       compat: this.prepared?.compat ?? null,
       suspendedReason: this.suspendedReason,
+      hold: {
+        active: this.intentHold,
+        heldMs: this.intentHold ? Math.round(performance.now() - this.holdFrom.at) : null,
+        revisions: this.intentHold ? this.revision - this.holdFrom.revision : 0,
+        ...this.holdStats
+      },
       dialogScans: this.dialogScans,
       pickProfile: { ...this.pickProfile },
       canvasVisible: this.canvas.style.display !== "none",
@@ -661,7 +680,7 @@ export class GpuRenderer {
   private active(): boolean {
     this.suspendedReason = this.editorReason();
     if (!this.suspendedReason) this.resume();
-    const reason = this.hiddenReason(this.suspendedReason) || (this.intentHeld() ? "edit mode hold" : ""); // MODE: hold
+    const reason = this.hiddenReason(this.suspendedReason) || (this.intentHeld() ? "resume hold" : ""); // MODE: D13 hold
     if (reason === "source replaced" && this.prepared) this.drop();
     if (reason) this.hide();
     return !reason;
@@ -836,22 +855,26 @@ export class GpuRenderer {
     this.canvas.style.display = "none";
   }
 
-  // ---- MODE (W1, decision D10): Navigate/Edit intent. Owned by packet MODE; the state machine is in intent.ts and
-  // the UI in controllers/render-mode.ts. Outside this block MODE only renamed the dialog scan below to editorScan()
-  // (this block's editorReason() wraps it) and added the hold to the visibility test in active().
-  // Edit suspends exactly like an open editor (reason "edit mode"). Leaving a chosen Edit (including through an editor
-  // opened inside it) ends in a hold: the canvas stays hidden, with the canonical SVG shown and usable, until the GPU
-  // frame has caught up with every DOM revision made meanwhile, so the frame from before the edits is never shown as
-  // the map. With no revision in between the hold clears at once. An editor opened from Navigate does not hold: its
-  // close shows the last GPU frame at once and the indicator reads "Updating" until the re-prepare lands (as before
-  // MODE; whether it should hold too is an open question for Ryan/LIFE).
+  // ---- MODE (W1, decision D10; resume display D13, W2 LIFE2): Navigate/Edit intent and the resume hold. The state
+  // machine is in intent.ts and the UI in controllers/render-mode.ts. Outside this block: editorScan() below (wrapped by
+  // editorReason() here), the hold in the visibility test in active(), and holding() in prepare()'s motion inputs.
+  // Edit suspends exactly like an open editor (reason "edit mode"). Every suspension (an editor or customization
+  // opened from Navigate, a chosen Edit, or both) records the DOM revision it began at. When it ends, a suspension
+  // that changed the model (any static revision since it began, same-task edits of the close included) ends in a hold:
+  // the canvas stays hidden, with the canonical SVG shown and usable and the indicator on "Preparing", until the GPU
+  // frame has caught up with every revision, so a frame from before the edit is never shown as the map (D13). One
+  // that changed nothing returns to the last GPU frame at once (still "Updating" if that frame was already behind
+  // before the suspension, e.g. a zoom-dependent DOM write). While held, motion does not abort or defer the prepare:
+  // the SVG is what is on screen, so no stale frame can be revealed and the GPU view returns as soon as possible.
   private intentEdit = false;
   private intentHold = false;
+  private suspendedFrom: number | null = null; // revision at which the current suspension began (null: none)
+  private holdFrom = { at: 0, revision: 0 }; // when the current hold began, and the revision it waits for then
+  private holdStats = { holds: 0, lastMs: null as number | null, skipped: 0 };
 
   setIntent(edit: boolean): void {
-    const records = this.mutations.takeRecords(); // same-task edits count before the hold is judged
+    const records = this.mutations.takeRecords(); // edits made before the request belong before the suspension
     if (records.length) this.mutated(records);
-    if (edit || this.intentEdit) this.intentHold = true;
     this.intentEdit = edit;
     this.active(); // Edit: hides now (camera synced). Navigate: runs the prepare the suspension deferred, if any.
     this.requestDraw();
@@ -859,32 +882,70 @@ export class GpuRenderer {
 
   // Cheap per-poll state for the mode indicator. editor: an open dialog or customization (not the Edit intent);
   // ready: the GPU canvas is on screen (not suspended or held, a frame, a live device, no pending markers, the view
-  // inside the bitmap windows: whatever hides it hides "Navigate"); current: that frame has every DOM revision.
-  intentProbe(): { editor: string; ready: boolean; current: boolean; lost: boolean } {
+  // inside the bitmap windows: whatever hides it hides "Navigate"); current: that frame has every DOM revision;
+  // holdMs/holdRevisions: how long the resume hold has waited and how many revisions arrived since it began (a model
+  // that keeps changing keeps the hold on: the indicator says why instead of spinning silently).
+  intentProbe(): {
+    editor: string;
+    ready: boolean;
+    current: boolean;
+    lost: boolean;
+    holdMs: number;
+    holdRevisions: number;
+  } {
     const reason = this.editorReason();
     if (reason && this.canvas.style.display !== "none") this.active();
     const current = this.prepared?.revision === this.revision;
+    const held = !reason && this.intentHeld();
     return {
       editor: reason === "edit mode" ? "" : reason,
-      ready:
-        !reason && !!this.prepared && !this.device.lost && !this.intentHeld() && this.canvas.style.display !== "none",
+      ready: !reason && !!this.prepared && !this.device.lost && !held && this.canvas.style.display !== "none",
       current,
-      lost: this.device.lost
+      lost: this.device.lost,
+      holdMs: held ? Math.round(performance.now() - this.holdFrom.at) : 0,
+      holdRevisions: held ? this.revision - this.holdFrom.revision : 0
     };
   }
 
-  // Why the GPU is suspended: an open editor or customization first (the dialog scan), else the Edit intent.
+  // Why the GPU is suspended: an open editor or customization first (the dialog scan), else the Edit intent. Also the
+  // one place a suspension's start and end are seen (every path that shows or prepares asks it first).
   private editorReason(): string {
     const reason = this.editorScan() || (this.intentEdit ? "edit mode" : "");
-    if (reason && this.intentEdit) this.intentHold = true;
+    if (reason) {
+      if (this.suspendedFrom === null) this.suspendedFrom = this.revision;
+    } else if (this.suspendedFrom !== null) this.suspensionEnded(this.suspendedFrom);
     return reason;
   }
 
-  // Only asked while not suspended (active() and intentProbe() test the suspension first), so an edit made in the same
-  // task as an editor's close is still held: the hold never clears during a suspension.
+  private suspensionEnded(from: number): void {
+    this.suspendedFrom = null;
+    // the close's own edits (an editor applying its change as it closes, in the same task) count as made inside it
+    const records = this.mutations.takeRecords();
+    if (records.length) this.mutated(records);
+    if (this.revision === from) {
+      this.holdStats.skipped++;
+      return;
+    }
+    if (!this.intentHold) {
+      this.holdStats.holds++;
+      this.holdFrom = { at: performance.now(), revision: this.revision };
+    }
+    this.intentHold = true;
+  }
+
+  // Only asked while not suspended (active() and intentProbe() test the suspension first): the hold clears when the
+  // prepared frame has every revision, including those that arrived while it was held.
   private intentHeld(): boolean {
-    if (this.intentHold && this.prepared?.revision === this.revision) this.intentHold = false;
+    if (this.intentHold && this.prepared?.revision === this.revision) {
+      this.intentHold = false;
+      this.holdStats.lastMs = Math.round(performance.now() - this.holdFrom.at);
+    }
     return this.intentHold;
+  }
+
+  // The canvas is hidden for a resume hold: motion moves the SVG, not a GPU frame, so it need not stop a prepare.
+  private holding(): boolean {
+    return this.intentHold && this.canvas.style.display === "none";
   }
   // ---- end MODE ----
 
@@ -930,6 +991,17 @@ export class GpuRenderer {
       return;
     }
     if (change === "overlay") {
+      // A world-layer overlay root (#coordinates, markers.ts VIEW_OVERLAYS) has no in-place refresh yet: the lane would
+      // answer "full" one timer hop later, and meanwhile neither an in-flight prepare nor a refine would see the change
+      // (the lane never bumps the revision). It is a revision now; only screen overlays (children of svg#map) wait for
+      // the lane. prepare.ts refreshOverlays() needs a world-run path before #coordinates can skip the full prepare.
+      const view = roots.find(root => root.parentNode !== this.svg);
+      if (view) {
+        this.invalidations.last = `view overlay #${view.id}`;
+        this.traceJob("revision", this.invalidations.last)();
+        this.invalidate(false);
+        return;
+      }
       for (const root of roots) this.pendingOverlays.add(root);
       this.refreshOverlays();
     }
@@ -1011,7 +1083,7 @@ export class GpuRenderer {
       preparing: this.preparing,
       lost: this.device.lost,
       hasFrame: !!this.prepared,
-      moving: this.moving,
+      moving: this.moving && !this.holding(), // MODE (D13): a held frame is hidden, motion cannot reveal it
       suspended: !!this.suspendedReason
     });
     if (start === "skip") return;
@@ -1047,7 +1119,7 @@ export class GpuRenderer {
       const reason = prepareStale(job, {
         generation: this.generation,
         revision: this.revision,
-        moving: this.moving,
+        moving: this.moving && !this.holding(),
         lost: this.device.lost,
         disposed: this.device.disposed,
         suspended: !!this.editorReason()

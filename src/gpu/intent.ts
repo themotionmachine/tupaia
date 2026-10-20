@@ -5,10 +5,11 @@
 // Edit: the canonical SVG is shown with its picking and editors; the GPU is suspended exactly as an open editor
 // suspends it. Edit is either chosen (the user asked: it stays until they leave) or automatic (an editor or
 // customization opened from Navigate: Navigate returns when the last one closes, as before this mode existed).
-// Preparing: Navigate was asked for, but the GPU frame is not on screen yet (first prepare, leaving Edit after edits,
-// a context restore, a pan outside the bitmap windows): the canonical SVG stays on screen, correct and usable, until
-// the GPU frame catches up. "Updating" (also the preparing view): the GPU frame is on screen but predates an edit
-// (an editor opened from Navigate, a remote or scripted change) and a re-prepare is on its way.
+// Preparing: Navigate was asked for, but the GPU frame is not on screen yet (first prepare, an editor or Edit closed
+// after changing the map (decision D13), a context restore, a pan outside the bitmap windows): the canonical SVG stays
+// on screen, correct and usable, until the GPU frame catches up. "Updating" (also the preparing view): the GPU frame is
+// on screen but predates a change made outside an editor (a zoom-dependent style write, a remote or scripted change)
+// and a re-prepare is on its way. An editor that changed nothing returns to that frame at once.
 
 export type Intent = "navigate" | "edit";
 export type ModeView = "navigate" | "edit" | "preparing" | "unavailable";
@@ -19,7 +20,14 @@ export interface IntentInputs {
   ready: boolean; // the GPU canvas is on screen (a Navigate hold keeps it hidden until its frame is current)
   current?: boolean; // that frame has every DOM revision (false: an edit is still being prepared); default true
   available: boolean; // a GPU renderer exists (false after a fallback to SVG)
+  holdMs?: number; // how long the GPU view has waited, after an edit, for a frame that includes it (0: not waiting)
+  holdRevisions?: number; // changes to the map that arrived during that wait (each one restarts the preparation)
 }
+
+// A wait this long with this many changes arriving during it is a map that keeps changing (a script, a collaborator):
+// each change restarts the preparation, so the indicator says why instead of spinning without explanation.
+export const CHURN_NOTICE_MS = 5000;
+export const CHURN_NOTICE_REVISIONS = 3;
 
 export interface ModeDisplay {
   mode: ModeView;
@@ -58,7 +66,10 @@ export function modeView(inputs: IntentInputs): ModeDisplay {
       mode: "preparing",
       auto: false,
       label: "Preparing",
-      tip: "Preparing the GPU view. The editable SVG map stays on screen until it is ready"
+      tip:
+        (inputs.holdMs ?? 0) >= CHURN_NOTICE_MS && (inputs.holdRevisions ?? 0) >= CHURN_NOTICE_REVISIONS
+          ? "The map keeps changing, so the GPU view waits until the changes stop. The editable SVG map stays on screen and is current"
+          : "Preparing the GPU view. The editable SVG map stays on screen until it is ready"
     };
   if (inputs.current === false)
     return {
