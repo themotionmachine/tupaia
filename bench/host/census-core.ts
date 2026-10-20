@@ -307,11 +307,25 @@ export function summarizePresets(cells: GoldenCellLike[], baseline = "default", 
 }
 
 /** The presets verdict: hard failures always fail; metric failures fail only past `allowInduced` per preset. */
-export function judgePresets(rows: PresetRow[], allowInduced = 0): string[] {
+// Induced cells Ryan accepted as documented exceptions (PHASE1-PLAN D14), keyed "preset/family/k". Each is exempt from
+// `allow=` only; a hard failure still fails, and the cell stays listed in `inducedCells`.
+export const PRESET_EXCEPTIONS: Readonly<Record<string, string>> = {
+  // cyberpunk paints labels white on the golden's white backdrop, so the cell's ink is the two fixture labels with their
+  // own halo style; their rotated / sub-pixel glyphs are resampled from the atlas where Skia rasterizes each in place
+  // (over16 25.4% of the layer's ink against the 20% cap at 4bc881d4). Default-preset labels pass.
+  "cyberpunk/labels/k1": "D14: rotated and sub-pixel glyph resampling on a near-empty labels layer"
+};
+
+export function judgePresets(
+  rows: PresetRow[],
+  allowInduced = 0,
+  exceptions: Readonly<Record<string, string>> = PRESET_EXCEPTIONS
+): string[] {
   const problems: string[] = [];
   for (const r of rows) {
+    const exempt = r.inducedCells.filter(cell => exceptions[`${r.preset}/${cell}`]).length;
     if (r.hard.length) problems.push(`${r.preset}: ${r.hard.length} hard failure(s), first ${r.hard[0]}`);
-    else if (r.induced > allowInduced) problems.push(`${r.preset}: ${r.induced} cell(s) fail a gate under this preset that passes under the baseline (${Object.entries(r.inducedGates).map(([g, n]) => `${g} ${n}`).join(", ")}; ${r.inducedCells.slice(0, 5).join(", ")}${r.induced > 5 ? ", ..." : ""})`);
+    else if (r.induced - exempt > allowInduced) problems.push(`${r.preset}: ${r.induced} cell(s) fail a gate under this preset that passes under the baseline (${Object.entries(r.inducedGates).map(([g, n]) => `${g} ${n}`).join(", ")}; ${r.inducedCells.slice(0, 5).join(", ")}${r.induced > 5 ? ", ..." : ""})`);
   }
   return problems;
 }

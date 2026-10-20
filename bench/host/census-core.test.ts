@@ -241,6 +241,23 @@ test("preset verdict: hard failures always fail, metric failures only past the a
   assert.equal(judgePresets(rows, 1).filter(p => /night/.test(p)).length, 1, "but never a hard failure");
 });
 
+test("preset exceptions (D14) forgive only the named induced cell, never a hard failure or another cell", () => {
+  const cells = [
+    cell("default", "ocean", 1, true),
+    cell("default", "labels", 1, true),
+    cell("cyberpunk", "labels", 1, false),
+    cell("night", "labels", 1, false),
+    cell("light", "labels", 1, false, { failures: ["GPU not active: boom"] })
+  ];
+  const { rows } = summarizePresets(cells);
+  const exceptions = { "cyberpunk/labels/k1": "test", "light/labels/k1": "test" };
+  const problems = judgePresets(rows, 0, exceptions);
+  assert.equal(problems.filter(p => /cyberpunk/.test(p)).length, 0, "the named cell is exempt");
+  assert.equal(problems.filter(p => /night/.test(p)).length, 1, "the same family under another preset is not");
+  assert.equal(problems.filter(p => /light: 1 hard failure/.test(p)).length, 1, "an exception never forgives a hard failure");
+  assert.equal(judgePresets(rows, 0, {}).filter(p => /cyberpunk/.test(p)).length, 1, "without the exception it fails");
+});
+
 test("preset cells empty in both arms are N/A: listed apart, neither failing nor induced; one empty arm still fails", () => {
   const empty = (preset: string, family: string, inkSvg: number, inkGpu: number, routed = 1): GoldenCellLike => {
     const failures = [
