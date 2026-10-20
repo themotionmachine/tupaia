@@ -4,7 +4,8 @@
 // For every (style preset, dpr, layer family, k) cell it renders ONE build of dist/ with only that family visible
 // (golden-isolation.ts) and captures, from the same DOM state, the GPU arm (canvas shown) and the SVG arm (canvas
 // hidden) at device resolution. SVG is the reference, GPU the candidate: a check never compares GPU with GPU. It then
-// computes SSIM, over16, over44 and the changed fraction (golden-metrics.ts), writes both PNGs plus a diff heatmap,
+// computes SSIM, over16, over44, the changed fraction and the D11 per-layer coverage (golden-metrics.ts), writes both
+// PNGs plus a diff heatmap,
 // and records the layer census: what the GPU scene classifier routed native / compat / skipped for the family
 // (rendererStatus().gpu.layers plus the opt-in src/gpu/scene-census.ts sink). A family that paints nothing in either
 // arm fails. An optional census expectations file turns a silent routing change into a failure.
@@ -17,10 +18,20 @@
 //   GOLDEN_DPR       comma list of device pixel ratios                           default 2
 //   GOLDEN_PRESET    "map" (keep the fixture's style), "all" or comma list       default default
 //   GOLDEN_BG        backdrop #rrggbb                                            default #ffffff
-//   GOLDEN_READING   conservative | over44 (which "≤0.5 % at Δ≤44" reading gates) default conservative
+//   GOLDEN_READING   over44 | conservative (which "≤0.5 % at Δ≤44" reading gates; D11)  default over44
+//                    Coverage (the layer's own ink, COVERAGE in golden-metrics.ts) gates under both readings.
 //   GOLDEN_KEEP      all | fail: keep PNGs for every cell or only failing ones   default all
 //   GOLDEN_CENSUS    census expectations JSON (same shape as the census.json this writes)
-//   GOLDEN_BREAK     none | drop-batch: self-test only, deliberately drops the GPU arm's bottom-most fill/stroke batch
+//   GOLDEN_BREAK     self-test only, breaks the GPU arm after its frame is drawn (the SVG arm is untouched):
+//                      none | drop-batch: drops the bottom-most fill/stroke batch (a dropped path)
+//                      thin-stroke: halves the width of every stroke batch (thinner strokes)
+//                      drop-icon: drops every 4th leaf draw batch and a quarter of sprite instances (dropped icons)
+//   GOLDEN_GPU_ARM   how the GPU arm is captured                                     default canvas
+//                      canvas: the canvas alone, over an opaque cover of the backdrop colour slipped between svg#map
+//                        and the canvas, so the SVG underneath can never count as GPU output
+//                      composite: the canvas over the live SVG (the pre-W2 capture; diagnosis only)
+//                      probe: canvas (judged) plus the composite and the canvas over a magenta cover; any pixel that
+//                        differs between them is the SVG or the cover showing through the canvas, and fails the cell
 //   GOLDEN_CAMERAS   fixture | centered: which camera frames a cell. "fixture" (default when GOLDEN_MAP is the parity
 //                    fixture) uses the manifest's recorded presets; "centered" centres the whole map at k
 //
@@ -37,11 +48,11 @@ import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { extname, join, relative, resolve } from "node:path";
 import { type BrowserContext, chromium, type Page } from "playwright";
-import { type CensusCounts, type CellMetrics, heatmap, judgeCell, measureCell, type Reading } from "../golden-metrics.ts";
+import { type CensusCounts, type CellMetrics, COVERAGE, DEFAULT_READING, heatmap, judgeCell, measureCell, type Reading } from "../golden-metrics.ts";
 import { decodePng, encodePng } from "../png.ts";
 import { type Family, parsePresets, parseZooms, selectFamilies } from "./golden-families.ts";
 import { isolateLayer } from "./golden-isolation.ts";
-import { type CameraPreset, resolveFixture } from "./fixtures/index.ts";
+import { type CameraPreset, COVERS_BY_FAMILY, resolveFixture } from "./fixtures/index.ts";
 
 const env = process.env;
 const root = resolve(import.meta.dirname, "../..");
@@ -54,13 +65,15 @@ const coastZooms = parseZooms(env.GOLDEN_COAST_K || "");
 const dprs = parseZooms(env.GOLDEN_DPR || "2");
 const presets = parsePresets(env.GOLDEN_PRESET || "default");
 const bg = env.GOLDEN_BG || "#ffffff";
-const reading = (env.GOLDEN_READING || "conservative") as Reading;
+const reading = (env.GOLDEN_READING || DEFAULT_READING) as Reading;
 const keep = env.GOLDEN_KEEP || "all";
 const breakMode = env.GOLDEN_BREAK || "none";
+const gpuArm = env.GOLDEN_GPU_ARM || "canvas";
 if (!/^#[\da-f]{6}$/i.test(bg)) throw Error(`GOLDEN_BG must be #rrggbb, got ${bg}`);
 if (!["over44", "conservative"].includes(reading)) throw Error(`GOLDEN_READING must be conservative|over44`);
 if (!["all", "fail"].includes(keep)) throw Error(`GOLDEN_KEEP must be all|fail`);
-if (!["none", "drop-batch"].includes(breakMode)) throw Error(`GOLDEN_BREAK must be none|drop-batch`);
+if (!["none", "drop-batch", "thin-stroke", "drop-icon"].includes(breakMode)) throw Error(`GOLDEN_BREAK must be none|drop-batch|thin-stroke|drop-icon`);
+if (!["canvas", "composite", "probe"].includes(gpuArm)) throw Error(`GOLDEN_GPU_ARM must be canvas|composite|probe`);
 if (dprs.some(d => d !== 1 && d !== 2)) throw Error("GOLDEN_DPR must be 1 and/or 2");
 if (!zooms.length) throw Error("GOLDEN_K is empty");
 
@@ -89,23 +102,8 @@ interface Camera {
   x?: number; // d3 zoom translate; absent = centre the whole map (graphWidth x graphHeight) at k
   y?: number;
 }
-// What the manifest's camera `covers` tags say about a family. Families without an entry are framed by the showcase.
-const COVERS: Record<string, string[]> = {
-  ice: ["ice"],
-  zones: ["zones-stock-hatch"],
-  labels: ["labels"],
-  emblems: ["emblems"],
-  compass: ["compass"],
-  markers: ["markers"],
-  military: ["regiments"],
-  rulers: ["measurers"],
-  grid: ["grid-dashed"],
-  coordinates: ["coordinates"],
-  landmass: ["coastline-filter"],
-  lakes: ["lakes"],
-  coastline: ["coastline-filter"],
-  states: ["halo"]
-};
+// What the manifest's camera `covers` tags say about a family (shared with build-parity-fixture.ts --verify).
+const COVERS = COVERS_BY_FAMILY;
 const fmtId = (k: number) => String(k).replace(".", "p");
 // d3 zoom that centres the whole map at k (the pre-parity framing, and the one for any k without a preset)
 const centered = (k: number): Camera => ({ id: `centered-k${fmtId(k)}`, k });
@@ -142,6 +140,9 @@ interface Cell {
   k: number;
   camera?: string;
   pass: boolean;
+  // pass | coverage (fails only the D11 coverage gate) | gap (a whole-frame gate: SSIM, over16, the reading's third
+  // clause) | empty | census (routing drift only) | harness
+  class?: string;
   failures: string[];
   notes?: string[];
   gates?: Record<string, boolean>;
@@ -153,6 +154,10 @@ interface Cell {
   domDrawables?: number;
   renderer?: { active: string; fallbackReason?: string; layers?: unknown };
   dropped?: unknown;
+  // GPU_ARM=probe: pixels where the composite or the canvas-over-magenta capture differs from the canvas-only one
+  showThrough?: { composite: number; magenta: number } | null;
+  // emblem COA symbols that were still missing when the cell was captured (async renderGroupCOAs)
+  pendingCoas?: number;
   images?: Record<string, string>;
   seconds?: number;
 }
@@ -161,11 +166,14 @@ const report = {
   schema: 1,
   runStartedUtc: new Date().toISOString(),
   fixture: { path: mapPath, sha256: mapSha },
-  args: { layers: families.map(f => f.name), k: zooms, coastk: coastZooms, dpr: dprs, preset: presets, bg, reading, keep, break: breakMode, cameras: cameraMode, parity: !!parity },
+  args: { layers: families.map(f => f.name), k: zooms, coastk: coastZooms, dpr: dprs, preset: presets, bg, reading, keep, break: breakMode, gpuArm, cameras: cameraMode, parity: !!parity },
+  coverage: COVERAGE,
   census: env.GOLDEN_CENSUS || null,
   diagnosticBreak: breakMode !== "none" ? `${breakMode}: the GPU arm is deliberately broken; this run is expected to FAIL` : null,
   errors: [] as string[],
   warnings: [] as string[],
+  // requests the route allowlist aborted (they log "Failed to load resource: net::ERR_FAILED" in the console)
+  aborted: [] as string[],
   failure: null as string | null,
   summary: null as unknown,
   cells: [] as Cell[]
@@ -215,7 +223,10 @@ async function openContext(dpr: number): Promise<{ context: BrowserContext; page
   if (parity?.pageScript) await context.addInitScript(parity.pageScript); // __parity.preamble / census, before the first frame
   await context.route("**/*", route => {
     const url = new URL(route.request().url());
-    return url.origin === origin || (route.request().method() === "GET" && url.hostname === "fonts.gstatic.com") ? route.continue() : route.abort();
+    if (url.origin === origin || (route.request().method() === "GET" && url.hostname === "fonts.gstatic.com")) return route.continue();
+    const what = `${route.request().method()} ${route.request().resourceType()} ${url.href.slice(0, 200)}`;
+    if (!report.aborted.includes(what) && report.aborted.length < 40) report.aborted.push(what);
+    return route.abort();
   });
   const page = await context.newPage();
   page.setDefaultTimeout(120000);
@@ -229,6 +240,12 @@ async function openContext(dpr: number): Promise<{ context: BrowserContext; page
     const ready = await (globalThis as any).__tupaia.call("ready", { timeoutMs: 120000 });
     if (!ready.ok) throw Error(JSON.stringify(ready));
   });
+  // Page chrome whose state changes on its own timer is hidden for the whole run (both arms alike), before any capture:
+  //   - the bottom tip bar ("Map is successfully loaded", cleared a few seconds later): a GPU blank captured while it
+  //     showed and an SVG blank after it cleared differed by ~77K px of "ink";
+  //   - the Navigate/Edit indicator (src/controllers/render-mode.ts), which can still read "Updating" for a moment after
+  //     the renderer reports a current frame: 2.5K px between two captures of one frame (GPU_ARM=probe).
+  await page.addStyleTag({ content: "#tooltip, #renderModeIndicator { visibility: hidden !important; }" });
   return { context, page };
 }
 
@@ -270,6 +287,27 @@ async function loadFixture(page: Page, preset: string, toggles: string[]): Promi
     const r = await page.evaluate(t => (globalThis as any).__tupaia.call("display", { on: [t] }), toggle);
     if (!r.ok) problems.push(`toggle ${toggle}: ${JSON.stringify(r).slice(0, 300)}`);
   }
+  // Render every emblem's COA symbol now, before any capture. The app renders a group's COAs lazily when zoom styling
+  // first shows it, inserting each symbol into #coas (in svg#defElements, outside svg#map) after fetching its charges.
+  // The GPU renderer does not observe #coas (only the opt-in compat reuse does), so a prepare that races those
+  // fetches keeps a raster with the emblems missing (seen ad hoc: emblems k 4 GPU ink 79K vs SVG 173K px). That race
+  // is a renderer finding, not something a parity cell should measure by luck; with the symbols in place first, zoom
+  // styling only flips group classes, which the renderer does observe.
+  const coas = await page.evaluate(async () => {
+    const w = globalThis as any;
+    if (!w.COArenderer || !w.renderGroupCOAs) return "no COA renderer";
+    for (const g of document.querySelectorAll<SVGGElement>("svg#map #emblems > g"))
+      if (g.children.length && !g.children[0].getAttribute("href")) await w.renderGroupCOAs(g);
+    const missing = () =>
+      [...document.querySelectorAll("svg#map #emblems use")].filter(use => {
+        const href = use.getAttribute("href") ?? "";
+        return !href.startsWith("#") || !document.getElementById(href.slice(1));
+      }).length;
+    const deadline = performance.now() + 30000;
+    while (missing() && performance.now() < deadline) await new Promise(done => setTimeout(done, 50));
+    return missing() ? `${missing()} emblem COA symbol(s) missing after 30 s` : null;
+  });
+  if (coas) problems.push(`emblems: ${coas}`);
   await settleApp(page);
   return problems;
 }
@@ -283,6 +321,32 @@ const zoomTo = (page: Page, camera: Camera) =>
     await w.__tupaia.settle();
     await Promise.all([w.reliefRenderReady, w.burgRenderReady]);
   }, camera);
+
+// The app's zoom styling (updateZoomStyling: label sizes, emblem group visibility and the COAs it renders lazily, ruler
+// sizes) only touches layers that are visible when the camera moves, and isolation had the next family hidden then:
+// the W1-merge sweep caught emblems at k 4 still in their k 1 state (burg and province groups hidden, ink 0 in both
+// arms). So with the family shown, run it again as the app does after every zoom, then wait for the COA symbols it
+// asked for (renderGroupCOAs sets each href at once and inserts the symbol into #coas after fetching its charges).
+// Returns the visible emblem <use>s whose symbol is still missing after 20 s (0 when settled).
+const applyZoomStyling = (page: Page) =>
+  page.evaluate(async () => {
+    const w = globalThis as any;
+    w.invokeActiveZooming?.();
+    // checkVisibility() is not reliable for SVG content here (it reported uses inside display:none groups as visible)
+    const shown = (element: Element) => {
+      for (let node: Element | null = element; node && node.id !== "map"; node = node.parentElement) if (getComputedStyle(node).display === "none") return false;
+      return getComputedStyle(element).visibility === "visible";
+    };
+    const missing = () =>
+      [...document.querySelectorAll("svg#map #emblems use")].filter(use => {
+        if (!shown(use)) return false;
+        const href = use.getAttribute("href") ?? use.getAttribute("xlink:href") ?? "";
+        return !href.startsWith("#") || !document.getElementById(href.slice(1));
+      }).length;
+    const deadline = performance.now() + 20000;
+    while (missing() && performance.now() < deadline) await new Promise(done => setTimeout(done, 50));
+    return missing();
+  });
 
 // Waits for a GPU frame of the current DOM revision, drawn and refined, or for a fallback. Returns the status.
 async function waitGpu(page: Page): Promise<{ active: string; fallbackReason?: string; timedOut?: boolean }> {
@@ -310,28 +374,75 @@ async function waitGpu(page: Page): Promise<{ active: string; fallbackReason?: s
   return timedOut ? { ...status, timedOut } : status;
 }
 
-// Self-test only: removes one fill/stroke batch from the GPU frame (a dropped path) and redraws. SVG is untouched.
-const dropBatch = (page: Page) =>
-  page.evaluate(async () => {
+// Self-test only: breaks the GPU frame in place and redraws. SVG is untouched. Each mode reports what it changed; a
+// mode that changed nothing makes the cell fail as a harness error (a no-op break would make the self-test vacuous).
+//   drop-batch:  removes the bottom-most fill/stroke batch (for ocean that is the opaque #oceanBase fill; the largest
+//                batch by count is a poor pick: ocean's is a faint depth ring whose loss stays under one code value)
+//   thin-stroke: halves the width of every stroke batch, including inside groups (thinner borders, rivers, routes)
+//   drop-icon:   drops every 4th leaf draw batch (fill, stroke, sprites, glyphs; the icons and small shapes the renderer
+//                draws separately, e.g. goods and zones) and the last quarter of every sprite batch's instances
+const breakFrame = (page: Page, mode: string) =>
+  page.evaluate(async mode => {
     const r = (globalThis as any).gpuRenderer;
     const batches: any[] | undefined = r?.prepared?.frame?.batches;
-    if (!batches?.length) return { dropped: null, total: 0 };
-    // The bottom-most fill/stroke batch: for ocean that is the opaque #oceanBase fill. (The largest batch by count
-    // is a poor pick: ocean's is a faint depth ring whose loss stays under one code value.)
-    let index = batches.findIndex(b => b.kind === "fill" || b.kind === "stroke");
-    if (index < 0) index = 0;
+    if (!batches?.length) return { dropped: null, changed: 0, total: 0 };
     const frames = () => (globalThis as any).rendererStatus?.()?.gpu?.frames ?? null;
     const before = frames();
-    const [gone] = batches.splice(index, 1);
+    const all: any[] = [];
+    const walk = (list: any[]) => {
+      for (const b of list) {
+        all.push(b);
+        if (b.kind === "group" && Array.isArray(b.children)) walk(b.children);
+      }
+    };
+    walk(batches);
+    let dropped: unknown = null;
+    let changed = 0;
+    if (mode === "drop-batch") {
+      let index = batches.findIndex(b => b.kind === "fill" || b.kind === "stroke");
+      if (index < 0) index = 0;
+      const [gone] = batches.splice(index, 1);
+      dropped = { index, kind: gone.kind, count: gone.count ?? null };
+      changed = 1;
+    } else if (mode === "thin-stroke") {
+      for (const b of all)
+        if (b.kind === "stroke" && b.width > 0) {
+          b.width *= 0.5;
+          changed++;
+        }
+      dropped = changed ? { strokes: changed } : null;
+    } else if (mode === "drop-icon") {
+      // every 4th leaf draw (fill, stroke, sprites, glyphs) in frame order, groups included: the icons and small
+      // shapes the renderer draws as separate batches; then the last quarter of each sprite batch's instances
+      const leaves = ["fill", "stroke", "sprites", "glyphs"];
+      const drop = new Set(all.filter(b => leaves.includes(b.kind)).filter((_, i) => i % 4 === 3));
+      const prune = (list: any[]) => {
+        for (let i = list.length - 1; i >= 0; i--) {
+          if (drop.has(list[i])) list.splice(i, 1);
+          else if (list[i].kind === "group" && Array.isArray(list[i].children)) prune(list[i].children);
+        }
+      };
+      prune(batches);
+      let instances = 0;
+      for (const b of all)
+        if (b.kind === "sprites" && !drop.has(b) && b.count > 1) {
+          const keep = Math.ceil(b.count * 0.75);
+          instances += b.count - keep;
+          b.count = keep;
+        }
+      changed = drop.size + (instances ? 1 : 0);
+      dropped = changed ? { batchesDropped: drop.size, of: all.filter(b => leaves.includes(b.kind)).length, spriteInstancesDropped: instances } : null;
+    }
     r.requestDraw();
     await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)));
     return {
-      dropped: { index, kind: gone.kind, count: gone.count ?? null },
-      total: batches.length + 1,
-      kinds: [...batches.slice(0, index), gone, ...batches.slice(index)].map((b: any) => `${b.kind}:${b.count ?? "-"}`),
+      dropped,
+      changed,
+      total: all.length,
+      kinds: all.map((b: any) => `${b.kind}:${b.count ?? "-"}`).slice(0, 60),
       framesDrawn: (frames() ?? 0) - (before ?? 0)
     };
-  });
+  }, mode);
 
 const readCensus = (page: Page, family: Family) =>
   page.evaluate(
@@ -348,16 +459,88 @@ const readCensus = (page: Page, family: Family) =>
       const runsReadable = Array.isArray(runs);
       for (const run of runsReadable ? runs : []) for (const e of run.elements ?? []) if (target && (e === target || target.contains(e))) compatRunElements++;
       let domDrawables = 0;
+      // computed display along the ancestry (checkVisibility() reported uses inside display:none groups as visible)
+      const hidden = new Map<Element, boolean>();
+      const displayed = (node: Element | null): boolean => {
+        if (!node || node === target) return !!node && getComputedStyle(node).display !== "none";
+        let v = hidden.get(node);
+        if (v === undefined) hidden.set(node, (v = getComputedStyle(node).display !== "none" && displayed(node.parentElement)));
+        return v;
+      };
       if (target)
         for (const e of target.querySelectorAll("path,polygon,polyline,rect,circle,ellipse,line,text,use,image"))
-          if ((e as any).checkVisibility ? (e as any).checkVisibility({ visibilityProperty: true }) : true) domDrawables++;
+          if (displayed(e) && getComputedStyle(e).visibility === "visible") domDrawables++;
       return { layer, sink, compatRunElements, runsReadable, domDrawables, build: w.__gpuSceneCensus?.last?.build ?? null };
     },
     { id: family.id, root: !!family.root }
   );
 
-async function captureArms(page: Page): Promise<{ gpu: Buffer; svg: Buffer }> {
-  const gpu = await page.screenshot({ animations: "disabled" });
+const twoFrames = (page: Page) => page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
+const gpuStamp = (page: Page) =>
+  page.evaluate(() => {
+    const g = (globalThis as any).rendererStatus?.()?.gpu;
+    return g ? `${g.prepares}/${g.revision}/${g.canvasVisible}` : "none";
+  });
+// An opaque cover slipped between svg#map and the GPU canvas (same rect as the canvas, below it in paint order). It is
+// outside svg#map, so the renderer's observer does not see it and nothing is re-prepared; null removes it.
+const setCover = (page: Page, colour: string | null) =>
+  page.evaluate(colour => {
+    const canvas = document.querySelector("canvas[data-gpu-renderer]") as HTMLCanvasElement | null;
+    let div = document.getElementById("__goldenCover");
+    if (!colour) return void div?.remove();
+    if (!canvas) throw Error("no GPU canvas to cover under");
+    if (!div) {
+      div = document.createElement("div");
+      div.id = "__goldenCover";
+    }
+    if (div.nextElementSibling !== canvas) canvas.before(div);
+    const rect = canvas.getBoundingClientRect();
+    Object.assign(div.style, {
+      position: "fixed",
+      left: `${rect.left}px`,
+      top: `${rect.top}px`,
+      width: `${rect.width}px`,
+      height: `${rect.height}px`,
+      background: colour,
+      pointerEvents: "none"
+    });
+  }, colour);
+const countDiff = (a: Buffer, b: Buffer) => {
+  const x = decodePng(a);
+  const y = decodePng(b);
+  let n = 0;
+  for (let i = 0; i < x.data.length; i += 4) if (x.data[i] !== y.data[i] || x.data[i + 1] !== y.data[i + 1] || x.data[i + 2] !== y.data[i + 2]) n++;
+  return n;
+};
+
+// The GPU arm (see GOLDEN_GPU_ARM), then the SVG arm (canvas hidden), from one DOM state. A GPU re-prepare between
+// the shots would mean the arms are not the same frame, so it is an error.
+async function captureArms(page: Page): Promise<{ gpu: Buffer; svg: Buffer; showThrough: { composite: number; magenta: number } | null; probe: Record<string, Buffer> }> {
+  const stamp = await gpuStamp(page);
+  let gpu: Buffer;
+  let showThrough: { composite: number; magenta: number } | null = null;
+  let probe: Record<string, Buffer> = {};
+  if (gpuArm === "composite") gpu = await page.screenshot({ animations: "disabled" });
+  else {
+    const composite = gpuArm === "probe" ? await page.screenshot({ animations: "disabled" }) : null;
+    let magenta: Buffer | null = null;
+    try {
+      if (composite) {
+        await setCover(page, "#ff00ff");
+        await twoFrames(page);
+        magenta = await page.screenshot({ animations: "disabled" });
+      }
+      await setCover(page, bg);
+      await twoFrames(page);
+      gpu = await page.screenshot({ animations: "disabled" });
+    } finally {
+      await setCover(page, null);
+    }
+    if (composite && magenta) {
+      showThrough = { composite: countDiff(composite, gpu), magenta: countDiff(magenta, gpu) };
+      probe = { composite, magenta };
+    }
+  }
   const old = await page.evaluate(() => {
     const c = document.querySelector("canvas[data-gpu-renderer]") as HTMLCanvasElement | null;
     if (!c) return null;
@@ -365,13 +548,15 @@ async function captureArms(page: Page): Promise<{ gpu: Buffer; svg: Buffer }> {
     c.style.visibility = "hidden";
     return value;
   });
-  await page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
+  await twoFrames(page);
   const svg = await page.screenshot({ animations: "disabled" });
   await page.evaluate(value => {
     const c = document.querySelector("canvas[data-gpu-renderer]") as HTMLCanvasElement | null;
     if (c) c.style.visibility = value || "";
   }, old);
-  return { gpu, svg };
+  const after = await gpuStamp(page);
+  if (after !== stamp) throw Error(`GPU frame changed while the arms were captured (prepares/revision/visible ${stamp} → ${after})`);
+  return { gpu, svg, showThrough, probe };
 }
 
 // The blanks: every family hidden, captured in both arms. They are what "painted nothing" looks like in each arm
@@ -383,6 +568,16 @@ async function captureBlanks(page: Page): Promise<{ gpu: Buffer; svg: Buffer; gp
   await page.evaluate(isolateLayer, { id: null, bg });
   const gpuStatus = await waitGpu(page);
   return { ...(await captureArms(page)), gpuStatus };
+}
+
+// One word per cell for the per-layer table: what failed first, in order of how much it says about the GPU arm.
+function classify(cell: Cell, gates: Record<string, boolean>): string {
+  if (cell.pass) return "pass";
+  if (cell.failures.some(f => f.startsWith("harness:") || f.startsWith("GPU not active") || f.startsWith("GPU frame did not") || f.startsWith("GPU arm is not"))) return "harness";
+  if (!gates.populated) return "empty";
+  if (!gates.ssim || !gates.over16 || !gates[reading]) return "gap";
+  if (!gates.coverage) return "coverage";
+  return "census";
 }
 
 // ------------------------------------------------------------------ run
@@ -421,18 +616,24 @@ try {
             try {
               const toggleProblem = problems.find(p => family.toggle && p.startsWith(`toggle ${family.toggle}:`));
               if (toggleProblem) cell.failures.push(toggleProblem);
+              const coaProblem = family.id === "emblems" && problems.find(p => p.startsWith("emblems:"));
+              if (coaProblem) cell.failures.push(`harness: ${coaProblem}`);
               await page.evaluate(isolateLayer, { id: family.id, root: family.root, bg });
+              await settleApp(page);
+              await page.evaluate(isolateLayer, { id: family.id, root: family.root, bg });
+              cell.pendingCoas = await applyZoomStyling(page);
+              if (cell.pendingCoas) cell.failures.push(`harness: ${cell.pendingCoas} visible emblem(s) still without a COA symbol after 20 s`);
               await settleApp(page);
               await page.evaluate(isolateLayer, { id: family.id, root: family.root, bg });
               const status = await waitGpu(page);
               cell.renderer = status;
               if (status.active !== "gpu") cell.failures.push(`GPU not active: ${status.fallbackReason ?? "no frame"}`);
               else if (status.timedOut) cell.failures.push("GPU frame did not settle within 60 s");
-              if (breakMode === "drop-batch") {
-                const dropped = await dropBatch(page);
+              if (breakMode !== "none") {
+                const dropped = await breakFrame(page, breakMode);
                 cell.dropped = dropped;
                 // the self-test must break something; a no-op here would make it vacuous
-                if (!dropped.dropped) cell.failures.push("harness: break=drop-batch found no gpuRenderer.prepared.frame.batches to drop");
+                if (!dropped.dropped) cell.failures.push(`harness: break=${breakMode} found nothing to break in gpuRenderer.prepared.frame.batches`);
               }
               const seen = await readCensus(page, family);
               if (family.root && !seen.runsReadable) cell.failures.push("harness: gpuRenderer.prepared.runs is not readable; root-family GPU census unknown");
@@ -449,6 +650,16 @@ try {
               census.cells[key] = { ...(cell.census ?? { native: 0, compat: 0, skipped: 0 }), kinds: cell.censusKinds };
               cell.expected = expectations?.cells?.[key] ? { native: expectations.cells[key].native, compat: expectations.cells[key].compat, skipped: expectations.cells[key].skipped } : null;
               const shots = await captureArms(page);
+              if (gpuArm === "probe") {
+                cell.showThrough = shots.showThrough;
+                const t = shots.showThrough;
+                if (!t) cell.failures.push("harness: GOLDEN_GPU_ARM=probe captured no composite");
+                else if (t.composite || t.magenta) {
+                  cell.failures.push(`GPU arm is not the canvas alone: ${t.composite} px differ from the composite (SVG under the canvas), ${t.magenta} px over a magenta cover`);
+                  const base = join(cellDir, `${family.name}-k${fmt(k)}${first ? "" : `@${camera.id}`}`);
+                  for (const [name, png] of Object.entries(shots.probe)) writeFileSync(`${base}-probe-${name}.png`, png);
+                }
+              }
               const svg = decodePng(shots.svg);
               const gpu = decodePng(shots.gpu);
               cell.metrics = measureCell(svg, gpu, blankSvg, blankGpu);
@@ -457,6 +668,7 @@ try {
               if (verdict.notes.length) cell.notes = verdict.notes;
               cell.failures.push(...verdict.failures);
               cell.pass = cell.failures.length === 0;
+              cell.class = classify(cell, verdict.gates);
               if (keep === "all" || !cell.pass) {
                 const base = join(cellDir, `${family.name}-k${fmt(k)}${first ? "" : `@${camera.id}`}`);
                 writeFileSync(`${base}-svg.png`, shots.svg);
@@ -467,6 +679,7 @@ try {
             } catch (error) {
               cell.failures.push(`harness: ${String(error).slice(0, 500)}`);
               cell.pass = false;
+              cell.class = "harness";
             }
             cell.seconds = Number(((Date.now() - started) / 1000).toFixed(1));
             const m = cell.metrics;
@@ -490,18 +703,26 @@ try {
 } finally {
   const failed = report.cells.filter(c => !c.pass);
   const byFamily: Record<string, { pass: number; fail: number }> = {};
+  const byClass: Record<string, number> = {};
+  // family → "k1:pass k4:coverage ..." (the per-layer table)
+  const table: Record<string, string[]> = {};
   for (const c of report.cells) {
     byFamily[c.family] ??= { pass: 0, fail: 0 };
     byFamily[c.family][c.pass ? "pass" : "fail"]++;
+    const cls = c.class ?? (c.pass ? "pass" : "harness");
+    byClass[cls] = (byClass[cls] ?? 0) + 1;
+    (table[`${c.preset}/d${c.dpr}/${c.family}`] ??= []).push(`${c.key.split("/").pop()}:${cls}`);
   }
   report.summary = {
     cells: report.cells.length,
     pass: report.cells.length - failed.length,
     fail: failed.length,
     empty: report.cells.filter(c => c.gates && !c.gates.populated).length,
-    // passing cells whose layer footprint differs between arms (not gated; see INK_NOTE in golden-metrics.ts)
-    passWithNotes: report.cells.filter(c => c.pass && c.notes?.length).map(c => c.key),
-    byFamily
+    byClass,
+    // cells the default (over44) reading passes and the strict (conservative) reading would fail
+    strictOnly: report.cells.filter(c => c.pass && c.gates && !c.gates.conservative).length,
+    byFamily,
+    table: Object.fromEntries(Object.entries(table).map(([k, v]) => [k, v.join(" ")]))
   };
   const validation = report.warnings.some(w => /GL_INVALID_|Feedback loop/i.test(w));
   const reasons: string[] = [];

@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { crc32, deflateSync } from "node:zlib";
 import type { Rgba } from "./fidelity-metrics.ts";
-import { type CellMetrics, censusDrift, D1, heatmap, INK_NOTE, judgeCell, measureCell, MIN_INK_PIXELS } from "./golden-metrics.ts";
+import { type CellMetrics, COVERAGE, censusDrift, coverageOf, D1, DEFAULT_READING, heatmap, judgeCell, measureCell, MIN_INK_PIXELS } from "./golden-metrics.ts";
 import { decodePng, encodePng } from "./png.ts";
 
 function image(width: number, height: number, f: (x: number, y: number) => [number, number, number]): Rgba {
@@ -65,38 +65,102 @@ test("over16 is Δ > 16 over the whole frame and gates at ≤ 1 %", () => {
   assert.match(over.failures.join(), /over16 1\.010%/);
 });
 
-test("over44 reading (opt-in): at most 0.5 % of pixels beyond Δ 44", () => {
+test("over44 reading (the D11 default): at most 0.5 % of pixels beyond Δ 44", () => {
+  assert.equal(DEFAULT_READING, "over44");
   assert.equal(measureCell(svg, perturb(svg, 60, 44), white).over44Fraction, 0, "Δ = 44 is within");
-  assert.equal(judge(perturb(svg, 50, 45), {}, "over44").gates.over44, true);
-  const over = judge(perturb(svg, 51, 45), {}, "over44");
-  assert.equal(over.pass, false);
+  assert.equal(judge(perturb(svg, 50, 45)).gates.over44, true);
+  const over = judge(perturb(svg, 51, 45));
+  assert.equal(over.pass, false, "the default gates on over44");
   assert.match(over.failures.join(), /over44 0\.510%/);
 });
 
-test("conservative reading is the default: changed ≤ 0.5 % and max Δ ≤ 44", () => {
+test("conservative is the strict reading: changed ≤ 0.5 % and max Δ ≤ 44, opt-in, always reported", () => {
   const few = perturb(svg, 50, 44);
-  assert.equal(judge(few).pass, true);
-  const many = perturb(svg, 51, 1); // tiny deltas, but more than 0.5 % changed
-  assert.equal(judge(many).gates.conservative, false);
-  assert.equal(judge(many).pass, false, "the default gates on the conservative reading");
-  assert.match(judge(many).failures.join(), /conservative: changed 0\.510%/);
-  assert.equal(judge(many, {}, "over44").pass, true, "only the opt-in over44 reading ignores sub-16 deltas");
+  assert.equal(judge(few, {}, "conservative").pass, true);
+  const many = perturb(svg, 51, 1); // tiny deltas, but more than 0.5 % changed: invisible rounding
+  assert.equal(judge(many, {}, "conservative").gates.conservative, false);
+  assert.equal(judge(many, {}, "conservative").pass, false);
+  assert.match(judge(many, {}, "conservative").failures.join(), /conservative: changed 0\.510%/);
+  const relaxed = judge(many);
+  assert.equal(relaxed.pass, true, "over44 ignores rounding");
+  assert.equal(relaxed.gates.conservative, false, "the strict verdict is still in the report");
+  assert.match(relaxed.notes.join(), /strict reading fails/);
   const spike = perturb(svg, 1, 100);
-  assert.equal(judge(spike).gates.conservative, false, "one pixel over Δ44 fails it");
-  assert.equal(judge(spike).pass, false);
+  assert.equal(judge(spike, {}, "conservative").gates.conservative, false, "one pixel over Δ44 fails it");
+  assert.equal(judge(spike, {}, "conservative").pass, false);
 });
 
-test("ink-footprint notes are reported next to the verdict but do not gate", () => {
-  // GPU arm loses the right half of the layer's ink: whole-frame fractions are small, the footprint is not
-  const half = image(W, H, (x, y) => (x < W / 2 ? layer(x, y) : [255, 255, 255]));
-  const m = measureCell(svg, half, white);
-  assert.ok(m.inkRatio < INK_NOTE.inkRatioMin, `ink ratio ${m.inkRatio}`);
-  const v = judgeCell({ metrics: { ...m, ssim: 1, over16Fraction: 0, changedFraction: 0, maxDelta: 0 }, census: counts, domDrawables: 4 });
-  assert.equal(v.pass, true, "notes never fail a cell");
-  assert.match(v.notes.join(), /ink footprint/);
-  assert.match(v.notes.join(), /of the layer's ink/);
-  assert.deepEqual(judge(svg).notes, [], "identical arms carry no note");
-  assert.equal(measureCell(svg, svg, white).inkRatio, 1);
+// A sparse layer on a big frame: whole-frame fractions are diluted, so only the coverage gate sees a loss.
+const BW = 800;
+const BH = 400; // 320 000 px: 1 % = 3200 px, 0.5 % = 1600 px
+const bigWhite = image(BW, BH, () => [255, 255, 255]);
+// vertical strokes `width` px wide every 200 px (rivers, borders), and 6×6 icons every 50 px (burgs, markers)
+const strokes = (width: number) => (x: number, _y: number): [number, number, number] => (x % 200 < width ? [40, 70, 120] : [255, 255, 255]);
+const icons = (keep: (i: number) => boolean) => (x: number, y: number): [number, number, number] =>
+  x % 50 < 6 && y % 50 < 6 && keep(Math.floor(x / 50) + 16 * Math.floor(y / 50)) ? [120, 30, 30] : [255, 255, 255];
+const judgeBig = (s: Rgba, g: Rgba, reading?: "over44" | "conservative") =>
+  judgeCell({ metrics: measureCell(s, g, bigWhite), census: counts, domDrawables: 4 }, reading);
+const wholeFrame = (v: ReturnType<typeof judgeCell>) => v.gates.ssim && v.gates.over16 && v.gates.over44;
+
+test("coverage: a thinner stroke passes every whole-frame gate and fails on the layer's own ink", () => {
+  const v = judgeBig(image(BW, BH, strokes(3)), image(BW, BH, strokes(2))); // a third of the ink gone (W1 rivers k 1: 0.66)
+  assert.equal(wholeFrame(v), true, "0.5 % of the frame: invisible to SSIM, over16 and over44");
+  assert.equal(v.gates.coverageInk, false);
+  assert.equal(v.gates.coverageOver16, false);
+  assert.equal(v.pass, false);
+  assert.match(v.failures.join(), /coverage: ink 3200 GPU vs 4800 SVG px \(ratio 0\.667 < 0\.9\)/);
+  assert.match(v.failures.join(), /coverage: over16 is 33\.333% of the layer's ink \(max 20\.000%\)/);
+  assert.equal(judgeBig(image(BW, BH, strokes(3)), image(BW, BH, strokes(2)), "conservative").gates.coverage, false, "gated under the strict reading too");
+});
+
+test("coverage: dropped icons pass the whole-frame gates and fail the ink rule", () => {
+  const v = judgeBig(image(BW, BH, icons(() => true)), image(BW, BH, icons(i => i % 8 !== 0))); // 1 in 8 dropped
+  assert.equal(wholeFrame(v), true, "0.18 % of the frame");
+  assert.equal(v.gates.coverageInk, false);
+  assert.equal(v.gates.coverageOver16, true, "12.5 % of the layer's ink differs: under the 20 % cap");
+  assert.equal(v.pass, false);
+  assert.match(v.failures.join(), /coverage: ink 4032 GPU vs 4608 SVG px \(ratio 0\.875 < 0\.9\)/);
+});
+
+test("coverage: extra GPU ink (a heavier stroke) fails the symmetric ink rule", () => {
+  const v = judgeBig(image(BW, BH, strokes(2)), image(BW, BH, strokes(3)));
+  assert.equal(wholeFrame(v), true);
+  assert.equal(v.gates.coverageInk, false, "GPU 1.5× the SVG's ink");
+  assert.equal(v.pass, false);
+});
+
+test("coverage: a colour shift on half the layer fails over16-of-ink, not the ink rule", () => {
+  const tinted = image(BW, BH, (x, y) => (x % 200 < 3 && y < BH / 2 ? [80, 100, 140] : strokes(3)(x, y)));
+  const v = judgeBig(image(BW, BH, strokes(3)), tinted);
+  assert.equal(wholeFrame(v), true, "Δ 40: over16 0.75 % of the frame, nothing over 44");
+  assert.equal(v.gates.coverageInk, true, "same footprint");
+  assert.equal(v.gates.coverageOver16, false, "half the layer's ink differs by more than 16");
+  assert.equal(v.pass, false);
+});
+
+test("coverage: anti-aliased edges alone pass", () => {
+  // 6-px strokes; the GPU adds a light edge pixel on every other row (an AA fringe the SVG lacks)
+  const fringe = image(BW, BH, (x, y) => (x % 200 === 6 && y % 2 === 0 ? [200, 210, 225] : strokes(6)(x, y)));
+  const m = measureCell(image(BW, BH, strokes(6)), fringe, bigWhite);
+  assert.ok(m.inkRatio < 1 && m.inkRatio >= COVERAGE.inkRatioMin, `ratio ${m.inkRatio}`);
+  assert.ok(m.over16OfInk > 0.05 && m.over16OfInk < COVERAGE.over16OfInkMax, `over16 of ink ${m.over16OfInk}`);
+  assert.equal(judgeBig(image(BW, BH, strokes(6)), fringe).pass, true);
+});
+
+test("coverage: tiny layers get a 16 px slack, so a 30-pixel layer is judged on whole pixels, not ratios", () => {
+  const dot = (n: number) => image(W, H, (x, y) => (y * W + x < n ? [0, 0, 0] : [255, 255, 255]));
+  const thirty = dot(30);
+  // 30 px vs 27 px: ratio 0.9 → passes; 30 vs 20: ratio 0.67 but within the slack (20 ≥ 27 − 16) → passes
+  assert.equal(judgeCell({ metrics: measureCell(thirty, dot(20), white), census: counts, domDrawables: 1 }).gates.coverage, true);
+  // 30 vs 10: beyond the slack → fails
+  const ten = judgeCell({ metrics: measureCell(thirty, dot(10), white), census: counts, domDrawables: 1 });
+  assert.equal(ten.gates.coverageInk, false);
+  assert.equal(ten.pass, false);
+  // the slack is absolute (16 px): on a 10 000-px layer it moves the bounds by 0.16 % and nothing more
+  assert.deepEqual(coverageOf({ inkSvg: 10000, inkGpu: 8984, inkUnion: 10000, over16Px: 0 }), { ink: true, over16: true });
+  assert.deepEqual(coverageOf({ inkSvg: 10000, inkGpu: 8983, inkUnion: 10000, over16Px: 0 }), { ink: false, over16: true });
+  assert.deepEqual(coverageOf({ inkSvg: 10000, inkGpu: 9000, inkUnion: 10000, over16Px: 2016 }), { ink: true, over16: true });
+  assert.deepEqual(coverageOf({ inkSvg: 10000, inkGpu: 9000, inkUnion: 10000, over16Px: 2017 }), { ink: true, over16: false });
 });
 
 test("SSIM catches a structural change that stays under the pixel-count gates' radar", () => {
@@ -151,8 +215,10 @@ test("judgeCell rejects non-finite metrics", () => {
   assert.throws(() => judgeCell({ metrics: m, census: counts, domDrawables: 1 }), /non-finite/);
 });
 
-test("D1 thresholds are the PROOF-PLAN §4 numbers", () => {
+test("D1 thresholds are the PROOF-PLAN §4 numbers; the D11 coverage numbers are pinned", () => {
   assert.deepEqual({ ...D1 }, { ssimMin: 0.95, over16Max: 0.01, over44Max: 0.005, conservativeChangedMax: 0.005, conservativeMaxDelta: 44 });
+  // changing these is a gate change (golden-metrics.ts COVERAGE says why they are what they are)
+  assert.deepEqual({ ...COVERAGE }, { inkRatioMin: 0.9, over16OfInkMax: 0.2, slackPx: 16 });
 });
 
 test("heatmap colours each band and fades unchanged pixels", () => {

@@ -137,10 +137,13 @@ const ARG_SPEC: Record<string, Spec> = {
   fixture: { type: "string", default: "shared" },
   census: { type: "string" },
   bg: { type: "string", default: "#ffffff", check: listOf(text => { if (!/^#[\da-f]{6}$/i.test(text)) throw new Error("bg must be #rrggbb"); }) },
-  // "conservative" is the repo convention (P2-FIDELITY-MEASUREMENT.md); over44 is an unapproved, looser opt-in
-  reading: { type: "enum", values: ["conservative", "over44"], default: "conservative" },
+  // D11 (Ryan, 2026-10-19): over44 plus the per-layer coverage gate is the default; conservative is the strict
+  // reading, kept available and always reported (golden-metrics.ts)
+  reading: { type: "enum", values: ["over44", "conservative"], default: "over44" },
   keep: { type: "enum", values: ["all", "fail"], default: "all" },
-  break: { type: "enum", values: ["none", "drop-batch"], default: "none" }
+  break: { type: "enum", values: ["none", "drop-batch", "thin-stroke", "drop-icon"], default: "none" },
+  // how the golden captures its GPU arm: canvas alone over an opaque cover (default), composite, or probe (both)
+  gpu_arm: { type: "enum", values: ["canvas", "composite", "probe"], default: "canvas" }
 };
 // golden takes a list of device pixel ratios (D5 nightly runs 1,2)
 const DPR_LIST: Spec = {
@@ -634,7 +637,8 @@ async function goldenCheck(ctx: Ctx): Promise<Partial<Result>> {
     GOLDEN_BG: String(ctx.args.bg),
     GOLDEN_READING: String(ctx.args.reading),
     GOLDEN_KEEP: String(ctx.args.keep),
-    GOLDEN_BREAK: String(ctx.args.break)
+    GOLDEN_BREAK: String(ctx.args.break),
+    GOLDEN_GPU_ARM: String(ctx.args.gpu_arm)
   };
   if (ctx.args.census) {
     const path = resolve(String(ctx.args.census));
@@ -650,13 +654,17 @@ async function goldenCheck(ctx: Ctx): Promise<Partial<Result>> {
         fixture: data.fixture?.sha256?.slice(0, 12),
         break: data.args?.break,
         reading: data.args?.reading,
-        // passing cells with a non-gating ink-footprint note: read these before trusting a small family's PASS
-        notes: (data?.cells ?? []).filter((c: Json) => c.pass && c.notes?.length).slice(0, 20).map((c: Json) => `${c.key}: ${c.notes.join("; ")}`),
+        arm: data.args?.gpuArm,
+        // requests the route allowlist aborted (each logs "Failed to load resource: net::ERR_FAILED")
+        aborted: data.aborted,
         failing: failing.slice(0, 20).map((c: Json) => ({
           cell: c.key,
+          class: c.class,
           ssim: round(c.metrics?.ssim, 4),
           over16: round(c.metrics?.over16Fraction, 5),
           over44: round(c.metrics?.over44Fraction, 5),
+          inkRatio: round(c.metrics?.inkRatio, 3),
+          over16OfInk: round(c.metrics?.over16OfInk, 4),
           census: c.census,
           why: c.failures?.[0]
         }))
@@ -671,50 +679,84 @@ async function goldenCheck(ctx: Ctx): Promise<Partial<Result>> {
   return result;
 }
 
-// Re-proves that the golden harness can still tell pass from fail: ocean at k=1 must pass, and the same cell with the
-// GPU arm's bottom-most fill batch dropped (break=drop-batch) must fail on a metric gate (not on a harness error, and
-// only after a batch was actually dropped). Runs on the shared fixture so it does not wait for the parity map.
+// Re-proves that the golden harness can still tell pass from fail, on the shared fixture (so it does not wait for the
+// parity map), centred cameras, k 1, dpr 2:
+//   clean:       ocean, GOLDEN_SELFTEST_STROKE and GOLDEN_SELFTEST_ICON must pass, captured with GOLDEN_GPU_ARM=probe,
+//                which also proves the GPU arm is the canvas alone (no pixel of the SVG under it shows through);
+//   drop-batch:  ocean with its bottom-most fill batch dropped must fail on a whole-frame metric gate;
+//   thin-stroke: rulers (two native strokes, 6.6K px) with every stroke batch at half width must fail the D11
+//                coverage gate while every whole-frame gate passes: the case D11 exists for;
+//   drop-icon:   goods (15K small native fills: the resource icons) with every 4th leaf batch dropped must fail the
+//                coverage gate (its whole-frame gates fail too: a quarter of goods is 4 % of the frame).
+// A broken arm that breaks nothing, or fails on a harness error instead of a metric, fails the self-test.
+// shared fixture families that pass clean at k 1 and have the batch kinds the breaks need (2026-10-20 survey: relief,
+// markers and burgs are single compat rasters there, and no family draws sprites)
+const SELFTEST_STROKE = "rulers";
+const SELFTEST_ICON = "goods";
 async function goldenSelftestCheck(ctx: Ctx): Promise<Partial<Result>> {
-  const base = {
-    GOLDEN_MAP: ctx.map(),
-    GOLDEN_LAYERS: "ocean",
-    GOLDEN_K: "1",
-    GOLDEN_DPR: "2",
-    GOLDEN_PRESET: "default",
-    GOLDEN_READING: String(ctx.args.reading),
-    GOLDEN_KEEP: "all"
-  };
+  const base = { GOLDEN_MAP: ctx.map(), GOLDEN_K: "1", GOLDEN_DPR: "2", GOLDEN_PRESET: "default", GOLDEN_READING: String(ctx.args.reading), GOLDEN_KEEP: "all" };
+  const runs = [
+    { arm: "clean", layers: ["ocean", SELFTEST_STROKE, SELFTEST_ICON], brk: "none", gpuArm: "probe" },
+    { arm: "drop-batch", layers: ["ocean"], brk: "drop-batch", gpuArm: "canvas" },
+    { arm: "thin-stroke", layers: [SELFTEST_STROKE], brk: "thin-stroke", gpuArm: "canvas" },
+    { arm: "drop-icon", layers: [SELFTEST_ICON], brk: "drop-icon", gpuArm: "canvas" }
+  ];
   const arms: Record<string, Json> = {};
-  for (const arm of ["clean", "broken"] as const) {
-    const dir = join(ctx.dir, arm);
+  for (const run of runs) {
+    const dir = join(ctx.dir, run.arm);
     mkdirSync(dir, { recursive: true });
-    const report = join(dir, "golden.json");
-    const env = { ...base, GATE_OUT_DIR: dir, GOLDEN_BREAK: arm === "broken" ? "drop-batch" : "none" };
+    const env = { ...base, GATE_OUT_DIR: dir, GOLDEN_LAYERS: run.layers.join(","), GOLDEN_BREAK: run.brk, GOLDEN_GPU_ARM: run.gpuArm };
     const code = await exec(nodeScript("bench/host/layer-golden.ts"), ctx.env(env), ctx.log, DEFS["golden-selftest"].timeout, true);
-    arms[arm] = { code, data: readJson(report) };
+    arms[run.arm] = { code, data: readJson(join(dir, "golden.json")) };
   }
-  const cellOf = (arm: string): Json | undefined => arms[arm].data?.cells?.[0];
-  const clean = cellOf("clean");
-  const broken = cellOf("broken");
+  const cellOf = (arm: string, family: string): Json | undefined => (arms[arm].data?.cells ?? []).find((c: Json) => c.family === family);
   const problems: string[] = [];
-  if (arms.clean.code !== 0 || !arms.clean.data) problems.push(`clean run exit ${arms.clean.code}, report ${arms.clean.data ? "written" : "missing"}`);
-  else if (!clean?.pass || arms.clean.data.failure) problems.push(`ocean k=1 should pass and failed: ${arms.clean.data.failure ?? clean?.failures?.[0] ?? "no cell"}`);
-  if (arms.broken.code !== 0 || !arms.broken.data) problems.push(`broken run exit ${arms.broken.code}, report ${arms.broken.data ? "written" : "missing"}`);
-  else if (!broken) problems.push("broken run captured no cell");
-  else if (!broken.dropped?.dropped) problems.push("break=drop-batch dropped nothing: the self-test is vacuous");
-  else if (broken.pass) problems.push("break=drop-batch passed: the golden can no longer see a dropped path");
-  else if ((broken.failures ?? []).some((f: string) => f.startsWith("harness:"))) problems.push(`broken run failed on a harness error, not a metric: ${broken.failures[0]}`);
-  else if (broken.gates && broken.gates.ssim && broken.gates.over16 && broken.gates[String(ctx.args.reading)]) problems.push(`broken run failed but no metric gate tripped: ${broken.failures?.[0]}`);
-  const metricsOf = (c: Json) => c && { pass: c.pass, ssim: round(c.metrics?.ssim, 4), over16: round(c.metrics?.over16Fraction, 5), changed: round(c.metrics?.changedFraction, 5), why: c.failures?.[0] ?? null };
-  const images: Record<string, string> = {};
-  for (const [arm, cell] of [["clean", clean], ["broken", broken]] as const)
-    if (cell?.images) for (const [kind, path] of Object.entries(cell.images)) images[`${arm}/${kind}`] = join(ctx.dir, arm, String(path));
-  return {
-    exit_code: problems.length ? 1 : 0,
-    failure: problems.length ? problems.join(" | ") : null,
-    metrics: { reading: ctx.args.reading, clean: metricsOf(clean), broken: { ...metricsOf(broken), dropped: broken?.dropped?.dropped ?? null } },
-    images
+  const clean = arms.clean;
+  if (clean.code !== 0 || !clean.data) problems.push(`clean run exit ${clean.code}, report ${clean.data ? "written" : "missing"}`);
+  else
+    for (const family of runs[0].layers) {
+      const cell = cellOf("clean", family);
+      if (!cell) problems.push(`clean run captured no ${family} cell`);
+      else if (!cell.pass) problems.push(`clean ${family} k=1 should pass and failed: ${cell.failures?.[0] ?? "?"}`);
+      else if (!cell.showThrough || cell.showThrough.composite || cell.showThrough.magenta)
+        problems.push(`clean ${family}: GPU arm not proven canvas-only (${JSON.stringify(cell.showThrough ?? null)})`);
+    }
+  const broken = (arm: string, family: string, tripped: (gates: Json) => boolean, what: string) => {
+    const run = arms[arm];
+    const cell = run.data && cellOf(arm, family);
+    if (run.code !== 0 || !run.data) return problems.push(`${arm} run exit ${run.code}, report ${run.data ? "written" : "missing"}`);
+    if (!cell) return problems.push(`${arm} run captured no ${family} cell`);
+    if (!cell.dropped?.dropped) return problems.push(`break=${arm} changed nothing in ${family}: the self-test is vacuous`);
+    if (cell.pass) return problems.push(`break=${arm} passed: the golden can no longer see ${what}`);
+    if ((cell.failures ?? []).some((f: string) => f.startsWith("harness:"))) return problems.push(`${arm} failed on a harness error, not a metric: ${cell.failures[0]}`);
+    if (!cell.gates || !tripped(cell.gates)) return problems.push(`${arm} failed but not on the gate that should see ${what}: ${cell.failures?.[0]}`);
   };
+  broken("drop-batch", "ocean", g => !(g.ssim && g.over16 && g[String(ctx.args.reading)]), "a dropped path");
+  broken("thin-stroke", SELFTEST_STROKE, g => g.coverage === false && g.ssim && g.over16 && g[String(ctx.args.reading)], "a thinner stroke the whole-frame gates miss");
+  broken("drop-icon", SELFTEST_ICON, g => g.coverage === false, "dropped icons");
+  const metricsOf = (c: Json) =>
+    c && {
+      pass: c.pass,
+      ssim: round(c.metrics?.ssim, 4),
+      over16: round(c.metrics?.over16Fraction, 5),
+      over44: round(c.metrics?.over44Fraction, 5),
+      inkRatio: round(c.metrics?.inkRatio, 3),
+      over16OfInk: round(c.metrics?.over16OfInk, 4),
+      wholeFrame: c.gates ? c.gates.ssim && c.gates.over16 && c.gates[String(ctx.args.reading)] : null,
+      coverage: c.gates?.coverage ?? null,
+      showThrough: c.showThrough ?? undefined,
+      dropped: c.dropped?.dropped ?? undefined,
+      why: c.failures?.[0] ?? null
+    };
+  const cells: Record<string, Json> = {};
+  const images: Record<string, string> = {};
+  for (const run of runs)
+    for (const family of run.layers) {
+      const cell = cellOf(run.arm, family);
+      cells[`${run.arm}/${family}`] = metricsOf(cell);
+      if (cell?.images) for (const [kind, path] of Object.entries(cell.images)) images[`${run.arm}/${family}/${kind}`] = join(ctx.dir, run.arm, String(path));
+    }
+  return { exit_code: problems.length ? 1 : 0, failure: problems.length ? problems.join(" | ") : null, metrics: { reading: ctx.args.reading, cells }, images };
 }
 
 
@@ -1102,10 +1144,10 @@ const DEFS: Record<string, CheckDef> = {
     run: consumersCheck
   },
   "consumers-selftest": { lock: "shared", keys: [], timeout: 1200, run: consumersSelftestCheck },
-  "golden-selftest": { lock: "shared", keys: ["reading"], timeout: 600, run: goldenSelftestCheck },
+  "golden-selftest": { lock: "shared", keys: ["reading"], timeout: 900, run: goldenSelftestCheck },
   golden: {
     lock: "shared",
-    keys: ["layers", "k", "coastk", "dpr", "preset", "fixture", "census", "bg", "reading", "keep", "break"],
+    keys: ["layers", "k", "coastk", "dpr", "preset", "fixture", "census", "bg", "reading", "keep", "break", "gpu_arm"],
     spec: { dpr: DPR_LIST },
     timeout: 3600,
     run: goldenCheck
