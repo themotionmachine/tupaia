@@ -1550,7 +1550,7 @@ const DEFS: Record<string, CheckDef> = {
     lock: "exclusive",
     keys: ["editors", "launcher", "fixture"],
     spec: { fixture: { type: "string", default: "parity" } },
-    timeout: 1200,
+    timeout: 5400, // 39 scripts × 3 arms one after another, one fresh page per script (~45-60 min)
     run: ctx => replayCheck(ctx, { REPLAY_ARMS: "svg,gpu,gpu-select", REPLAY_PARALLEL: "0" })
   },
   // The replay must still fail: corrupt pack, the model DOM and the dispatch count on the replay arm, and reveal the GPU
