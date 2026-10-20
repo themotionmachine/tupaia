@@ -46,6 +46,25 @@ export const MIN_INK_PIXELS = 4;
 // passing side, so the gate errs toward catching a gap. Changing these is a gate change: say so loudly.
 export const COVERAGE = { inkRatioMin: 0.9, over16OfInkMax: 0.2, slackPx: 16 } as const;
 
+// FAINT layers (W4 FAINT). Ink is "differs from the blank by any code value", which is only a footprint while the layer
+// is much louder than the 8-bit rounding of the two arms. A layer whose strongest pixel (its CONTRAST: the largest
+// per-pixel max-channel delta from its own blank, over BOTH arms) is at most maxContrast code values is below that
+// floor: whether a pixel reaches a whole code value is decided by how Chrome's SVG compositor and the GPU round the same
+// fraction of a level, so the ink count measures rounding, not the layer (legacy-v1.99 ice, group opacity 0.008, is
+// 0.18 of a level at its strongest; its ink differed 12 % between arms while 93 % of the pixels agreed and no pixel
+// differed by more than 1). The cell is then judged for coverage on the SAME layer lifted to full opacity (the family
+// root's opacity forced to 1 in the page, both arms recaptured), where the footprint is plain. Nothing is loosened:
+//   - a layer louder than maxContrast, in either arm, never takes this path (a GPU that paints a faint layer at full
+//     strength is far over maxContrast in its own arm, so the plain gates judge it);
+//   - the lifted capture is judged by the unchanged COVERAGE rule (ink ratio, over16 of ink);
+//   - a lift that does not reveal the layer (contrast still ≤ maxContrast: white on white, or the opacity sits on
+//     children) falls back to the plain judgement, so those cells are exactly as strict as before;
+//   - the whole-frame gates (SSIM, over16, over44) always read the plain capture.
+// 3 = the largest contrast in the evidence that is noise-bound: the rounding noise between the two arms' own blanks is
+// one code value, and a layer needs about 1 + the noise to have a footprint that survives it. The loudest layer the
+// path was designed for (ice) is at 2.
+export const FAINT = { maxContrast: 3 } as const;
+
 export interface CellMetrics {
   width: number;
   height: number;
@@ -66,7 +85,11 @@ export interface CellMetrics {
   over44OfInk: number;
   // min(inkSvg, inkGpu) / max(...): 1 when both arms paint the same footprint, 0 when one is empty
   inkRatio: number;
+  // the layer's strongest pixel against its own blank, either arm (max-channel code values): FAINT.maxContrast
+  contrast: number;
 }
+
+export const isFaint = (m: Pick<CellMetrics, "contrast">): boolean => m.contrast <= FAINT.maxContrast;
 
 const delta = (a: ArrayLike<number>, b: ArrayLike<number>, i: number) =>
   Math.max(Math.abs(a[i] - b[i]), Math.abs(a[i + 1] - b[i + 1]), Math.abs(a[i + 2] - b[i + 2]));
@@ -79,9 +102,14 @@ export function measureCell(svg: Rgba, gpu: Rgba, blank: Rgba, gpuBlank: Rgba = 
   let inkSvg = 0;
   let inkGpu = 0;
   let inkUnion = 0;
+  let contrast = 0;
   for (let i = 0; i < svg.data.length; i += 4) {
-    const a = delta(svg.data, blank.data, i) > 0;
-    const b = delta(gpu.data, gpuBlank.data, i) > 0;
+    const da = delta(svg.data, blank.data, i);
+    const db = delta(gpu.data, gpuBlank.data, i);
+    const a = da > 0;
+    const b = db > 0;
+    if (da > contrast) contrast = da;
+    if (db > contrast) contrast = db;
     if (a) inkSvg++;
     if (b) inkGpu++;
     if (a || b) inkUnion++;
@@ -102,7 +130,8 @@ export function measureCell(svg: Rgba, gpu: Rgba, blank: Rgba, gpuBlank: Rgba = 
     over16Px: diff.over16,
     over16OfInk: inkUnion ? diff.over16 / inkUnion : 0,
     over44OfInk: inkUnion ? diff.over44 / inkUnion : 0,
-    inkRatio: Math.max(inkSvg, inkGpu) ? Math.min(inkSvg, inkGpu) / Math.max(inkSvg, inkGpu) : 0
+    inkRatio: Math.max(inkSvg, inkGpu) ? Math.min(inkSvg, inkGpu) / Math.max(inkSvg, inkGpu) : 0,
+    contrast
   };
 }
 
@@ -118,6 +147,9 @@ export interface CellInput {
   census: CensusCounts | null;
   domDrawables: number; // visible drawable SVG elements in the family (SVG arm)
   expected?: CensusCounts | null; // optional census expectation for this cell
+  // the same cell with the layer lifted to full opacity (FAINT). Used only when `metrics` is faint and the lift revealed
+  // the layer; ignored otherwise, so a caller cannot weaken a normal layer's judgement by passing it.
+  lifted?: CellMetrics | null;
 }
 
 export interface CellVerdict {
@@ -125,6 +157,8 @@ export interface CellVerdict {
   failures: string[];
   // non-gating observations (today: what the strict reading says about a cell the over44 reading passes)
   notes: string[];
+  // set when coverage and the empty check were judged on the lifted capture instead of the plain one (FAINT)
+  faint: { contrast: number; lifted: boolean } | null;
   // every gate is computed and reported under either reading; `reading` picks which of over44/conservative gates.
   // coverage = coverageInk && coverageOver16 (D11), gated under both readings (an empty arm fails as empty instead).
   gates: {
@@ -156,13 +190,24 @@ export function judgeCell(input: CellInput, reading: Reading = DEFAULT_READING):
   const m = input.metrics;
   for (const v of [m.ssim, m.over16Fraction, m.over44Fraction, m.changedFraction]) if (!Number.isFinite(v)) throw new Error("non-finite metric");
   const failures: string[] = [];
+  const notes: string[] = [];
+  // ink, emptiness and coverage read the lifted capture of a faint layer (FAINT); everything else reads `m`
+  const faint = isFaint(m);
+  const lifted = faint && input.lifted && input.lifted.contrast > FAINT.maxContrast ? input.lifted : null;
+  const c = lifted ?? m;
+  if (faint)
+    notes.push(
+      lifted
+        ? `faint layer (contrast ${m.contrast} code value${m.contrast === 1 ? "" : "s"}): coverage judged at full opacity, ink ${lifted.inkGpu} GPU vs ${lifted.inkSvg} SVG px (plain ${m.inkGpu} vs ${m.inkSvg})`
+        : `faint layer (contrast ${m.contrast}) and the lift ${input.lifted ? `revealed nothing (contrast ${input.lifted.contrast})` : "was not captured"}: coverage judged on the plain capture`
+    );
   const routed = input.census ? input.census.native + input.census.compat : 0;
-  const svgEmpty = m.inkSvg < MIN_INK_PIXELS || input.domDrawables === 0;
-  const gpuEmpty = m.inkGpu < MIN_INK_PIXELS || routed === 0;
-  if (svgEmpty) failures.push(`empty in SVG arm (ink ${m.inkSvg} px, ${input.domDrawables} drawables)`);
-  if (gpuEmpty) failures.push(`empty in GPU arm (ink ${m.inkGpu} px, ${routed} routed)`);
+  const svgEmpty = c.inkSvg < MIN_INK_PIXELS || input.domDrawables === 0;
+  const gpuEmpty = c.inkGpu < MIN_INK_PIXELS || routed === 0;
+  if (svgEmpty) failures.push(`empty in SVG arm (ink ${c.inkSvg} px, ${input.domDrawables} drawables)`);
+  if (gpuEmpty) failures.push(`empty in GPU arm (ink ${c.inkGpu} px, ${routed} routed)`);
   const populated = !svgEmpty && !gpuEmpty;
-  const cover = coverageOf(m);
+  const cover = coverageOf(c);
   const gates = {
     ssim: m.ssim >= D1.ssimMin,
     over16: m.over16Fraction <= D1.over16Max,
@@ -180,9 +225,10 @@ export function judgeCell(input: CellInput, reading: Reading = DEFAULT_READING):
   if (reading === "conservative" && !gates.conservative)
     failures.push(`conservative: changed ${pct(m.changedFraction)} (max ${pct(D1.conservativeChangedMax)}), maxDelta ${m.maxDelta} (max ${D1.conservativeMaxDelta})`);
   // an empty arm already failed as such; its coverage is reported in `gates` but not listed a second time
+  const at = lifted ? " at full opacity" : "";
   if (populated && !gates.coverageInk)
-    failures.push(`coverage: ink ${m.inkGpu} GPU vs ${m.inkSvg} SVG px (ratio ${m.inkRatio.toFixed(3)} < ${COVERAGE.inkRatioMin})`);
-  if (populated && !gates.coverageOver16) failures.push(`coverage: over16 is ${pct(m.over16OfInk)} of the layer's ink (max ${pct(COVERAGE.over16OfInkMax)})`);
+    failures.push(`coverage${at}: ink ${c.inkGpu} GPU vs ${c.inkSvg} SVG px (ratio ${c.inkRatio.toFixed(3)} < ${COVERAGE.inkRatioMin})`);
+  if (populated && !gates.coverageOver16) failures.push(`coverage${at}: over16 is ${pct(c.over16OfInk)} of the layer's ink (max ${pct(COVERAGE.over16OfInkMax)})`);
   if (input.expected) {
     const drift = censusDrift(input.expected, input.census);
     if (drift.length) {
@@ -191,10 +237,9 @@ export function judgeCell(input: CellInput, reading: Reading = DEFAULT_READING):
     }
   }
   // non-gating: the strict reading's verdict on a cell the default reading passes (both are in `gates` too)
-  const notes: string[] = [];
   if (reading === "over44" && failures.length === 0 && !gates.conservative)
     notes.push(`strict reading fails: changed ${pct(m.changedFraction)}, maxDelta ${m.maxDelta}`);
-  return { pass: failures.length === 0, failures, notes, gates };
+  return { pass: failures.length === 0, failures, notes, faint: faint ? { contrast: m.contrast, lifted: !!lifted } : null, gates };
 }
 
 export function censusDrift(expected: CensusCounts, observed: CensusCounts | null): string[] {

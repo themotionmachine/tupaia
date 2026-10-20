@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { crc32, deflateSync } from "node:zlib";
 import type { Rgba } from "./fidelity-metrics.ts";
-import { type CellMetrics, COVERAGE, censusDrift, coverageOf, D1, DEFAULT_READING, heatmap, judgeCell, measureCell, MIN_INK_PIXELS } from "./golden-metrics.ts";
+import { type CellMetrics, COVERAGE, censusDrift, coverageOf, D1, DEFAULT_READING, FAINT, heatmap, isFaint, judgeCell, measureCell, MIN_INK_PIXELS } from "./golden-metrics.ts";
 import { decodePng, encodePng } from "./png.ts";
 
 function image(width: number, height: number, f: (x: number, y: number) => [number, number, number]): Rgba {
@@ -213,6 +213,98 @@ test("census expectations catch a silent routing change", () => {
 test("judgeCell rejects non-finite metrics", () => {
   const m = { ...measureCell(svg, svg, white), ssim: Number.NaN } as CellMetrics;
   assert.throws(() => judgeCell({ metrics: m, census: counts, domDrawables: 1 }), /non-finite/);
+});
+
+// FAINT layers. A layer at 0.008 opacity is 0.18 of a code value at its strongest, so each renderer's rounding decides
+// which of its pixels reach a whole value: the same footprint, a different ink count (legacy-v1.99 ice, 3164 vs 3618).
+// `faintShot(w, eighths)` is the strokes(w) footprint with `eighths` of every 8 pixels rounded to 254 (what the arm's
+// rounding happens to produce) and the rest left at 255.
+const faintShot = (width: number, eighths: number) => (x: number, y: number): [number, number, number] =>
+  x % 200 < width && (x * 7 + y * 3) % 8 < eighths ? [254, 254, 254] : [255, 255, 255];
+const judgeFaint = (s: Rgba, g: Rgba, lifted: Rgba[] | null) =>
+  judgeCell({
+    metrics: measureCell(s, g, bigWhite),
+    census: counts,
+    domDrawables: 4,
+    lifted: lifted && measureCell(lifted[0], lifted[1], bigWhite)
+  });
+
+test("faint: the contrast is the layer's strongest pixel over both arms, and a normal layer is not faint", () => {
+  assert.equal(FAINT.maxContrast, 3, "changing this is a gate change (golden-metrics.ts FAINT says why)");
+  const faintSvg = image(BW, BH, faintShot(6, 5));
+  assert.equal(measureCell(faintSvg, faintSvg, bigWhite).contrast, 1);
+  assert.equal(isFaint(measureCell(faintSvg, faintSvg, bigWhite)), true);
+  assert.equal(isFaint(measureCell(image(BW, BH, strokes(3)), image(BW, BH, strokes(3)), bigWhite)), false, "Δ 215 is a normal layer");
+  // either arm's contrast counts: a GPU that paints a faint layer at full strength is not faint
+  const loud = measureCell(faintSvg, image(BW, BH, strokes(6)), bigWhite);
+  assert.equal(loud.contrast, 215);
+  assert.equal(isFaint(loud), false);
+  assert.equal(measureCell(white, white, white).contrast, 0);
+});
+
+test("faint: rounding alone moves the plain ink ratio below the floor and the lifted capture judges the layer", () => {
+  const svgFaint = image(BW, BH, faintShot(6, 5));
+  const gpuFaint = image(BW, BH, faintShot(6, 6)); // same footprint, rounded to a different set of whole values
+  const plain = judgeFaint(svgFaint, gpuFaint, null);
+  assert.equal(plain.gates.coverageInk, false, `plain ink ratio ${measureCell(svgFaint, gpuFaint, bigWhite).inkRatio}`);
+  assert.deepEqual(plain.faint, { contrast: 1, lifted: false });
+  assert.match(plain.notes.join(), /the lift was not captured/);
+  const v = judgeFaint(svgFaint, gpuFaint, [image(BW, BH, strokes(6)), image(BW, BH, strokes(6))]);
+  assert.equal(v.pass, true, v.failures.join());
+  assert.deepEqual(v.faint, { contrast: 1, lifted: true });
+  assert.match(v.notes.join(), /faint layer \(contrast 1 code value\): coverage judged at full opacity/);
+});
+
+test("faint: a real gap on a faint layer still fails, on the lifted capture", () => {
+  const svgFaint = image(BW, BH, faintShot(6, 5));
+  const gpuFaint = image(BW, BH, faintShot(6, 6));
+  // thinner strokes, a third of the ink gone
+  const thin = judgeFaint(svgFaint, gpuFaint, [image(BW, BH, strokes(6)), image(BW, BH, strokes(4))]);
+  assert.equal(thin.pass, false);
+  assert.match(thin.failures.join(), /coverage at full opacity: ink 6400 GPU vs 9600 SVG px \(ratio 0\.667 < 0\.9\)/);
+  // dropped icons
+  const dropped = judgeFaint(svgFaint, gpuFaint, [image(BW, BH, icons(() => true)), image(BW, BH, icons(i => i % 3 !== 0))]);
+  assert.equal(dropped.gates.coverageInk, false);
+  // a colour shift on the lifted layer
+  const tinted = image(BW, BH, (x, y) => (x % 200 < 3 && y < BH / 2 ? [80, 100, 140] : strokes(3)(x, y)));
+  assert.equal(judgeFaint(svgFaint, gpuFaint, [image(BW, BH, strokes(3)), tinted]).gates.coverageOver16, false);
+  // the layer missing from the GPU arm altogether
+  const gone = judgeFaint(svgFaint, image(BW, BH, () => [255, 255, 255]), [image(BW, BH, strokes(6)), bigWhite]);
+  assert.equal(gone.pass, false);
+  assert.match(gone.failures.join(), /empty in GPU arm \(ink 0 px/);
+});
+
+test("faint: a layer too faint to show even lifted is judged on the plain capture, exactly as before", () => {
+  const svgFaint = image(BW, BH, faintShot(6, 5));
+  const gpuFaint = image(BW, BH, faintShot(6, 6));
+  // the lift changed nothing (white on white; the opacity sits on children): contrast still ≤ 3
+  const still = judgeFaint(svgFaint, gpuFaint, [svgFaint, gpuFaint]);
+  assert.deepEqual(still.faint, { contrast: 1, lifted: false });
+  assert.equal(still.gates.coverageInk, false);
+  assert.match(still.notes.join(), /revealed nothing/);
+});
+
+test("faint: a lifted capture never rescues a normal layer", () => {
+  const thin = judgeBig(image(BW, BH, strokes(3)), image(BW, BH, strokes(2)));
+  assert.equal(thin.pass, false);
+  const withLift = judgeCell({
+    metrics: measureCell(image(BW, BH, strokes(3)), image(BW, BH, strokes(2)), bigWhite),
+    census: counts,
+    domDrawables: 4,
+    lifted: measureCell(image(BW, BH, strokes(3)), image(BW, BH, strokes(3)), bigWhite)
+  });
+  assert.equal(withLift.pass, false, "contrast 215 > 3: the plain capture decides");
+  assert.deepEqual(withLift.failures, thin.failures);
+  assert.equal(withLift.faint, null);
+});
+
+test("faint: an opacity-0.008 layer that paints nothing in 8 bits is judged populated by its lifted capture", () => {
+  const lifted = [image(BW, BH, strokes(6)), image(BW, BH, strokes(6))];
+  const v = judgeFaint(bigWhite, bigWhite, lifted); // no plain ink at all
+  assert.equal(v.pass, true, v.failures.join());
+  assert.equal(judgeFaint(bigWhite, bigWhite, null).pass, false, "without a lift the same cell is empty");
+  // no DOM drawables: nothing to lift, empty stands
+  assert.match(judgeCell({ metrics: measureCell(bigWhite, bigWhite, bigWhite), census: counts, domDrawables: 0 }).failures.join(), /empty in SVG arm/);
 });
 
 test("D1 thresholds are the PROOF-PLAN §4 numbers; the D11 coverage numbers are pinned", () => {

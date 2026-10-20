@@ -68,3 +68,36 @@ export function isolateLayer(args: IsolateArgs): { target: boolean; hidden: numb
   }
   return { target: !!target, hidden: wanted.size };
 }
+
+// Sets the target family root's inline opacity (FAINT: the golden lifts a faint layer to full opacity, and its self-test
+// makes a normal layer faint). Page-side like isolateLayer, self-contained, and it only writes the live SVG, which both
+// arms read. `value: null` puts every opacity this function changed back (the original inline value and priority,
+// removed if there was none); the first change to an element records what was there. The element's `opacity` attribute
+// is left alone: the inline style wins over it, as for the app's own opacity slider.
+export interface OpacityArgs {
+  id: string | null;
+  root?: boolean;
+  value: string | null;
+}
+export function setLayerOpacity(args: OpacityArgs): { found: boolean; before: string; after: string } {
+  const page = globalThis as any;
+  const svg = document.querySelector<SVGSVGElement>("svg#map");
+  const view = svg?.querySelector(":scope > #viewbox");
+  if (!svg || !view) throw Error("setLayerOpacity: svg#map > #viewbox not found");
+  const saved: Map<SVGElement, [string, string]> = (page.__goldenOpacity ??= new Map());
+  if (args.value === null) {
+    for (const [element, [value, priority]] of saved) {
+      if (value) element.style.setProperty("opacity", value, priority);
+      else element.style.removeProperty("opacity");
+    }
+    saved.clear();
+    return { found: false, before: "", after: "" };
+  }
+  const parent = args.root ? svg : view;
+  const target = args.id ? parent.querySelector<SVGElement>(`:scope > #${CSS.escape(args.id)}`) : null;
+  if (!target) return { found: false, before: "", after: "" };
+  const before = target.style.getPropertyValue("opacity");
+  if (!saved.has(target)) saved.set(target, [before, target.style.getPropertyPriority("opacity")]);
+  if (before !== args.value) target.style.setProperty("opacity", args.value);
+  return { found: true, before, after: target.style.getPropertyValue("opacity") };
+}
