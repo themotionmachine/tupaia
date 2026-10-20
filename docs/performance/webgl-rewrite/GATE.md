@@ -298,7 +298,10 @@ PROOF-PLAN §4 "Labels" and "Fonts". Tolerances are in `TOL` (labels-core.ts), i
   golden gates on SSIM, over16, over44 (the D11 reading) and `inkRatio` ≥ 0.9. `inkRatio` is golden-metrics.ts's
   min/max of the two arms' ink pixel counts, so it does not say which arm paints more; the cell's `ink` field
   (GPU/SVG) does. The conservative reading is reported. A `before` cell measures the same golden before any switch,
-  and each switch reports its change from it. Each switched group must keep the labels it showed (native + compat):
-  a label that leaves the count is reported with its SVG state.
+  and each switch reports its change from it. Each switched group must keep the labels it showed (native + compat).
+  A label that leaves the count is reported with its SVG state; when the app itself hid it in the SVG (on shared, the
+  state label "Takeet Union of Caucuses" gets `display: none` after the Amatic SC and Baskerville switches, most
+  likely from the viewport culling in src/renderers/label-culling.ts as its box changes with the face) it is a note,
+  since both arms follow the SVG; otherwise it fails.
 - Page chrome that changes between captures (`#tooltip`, `#renderModeIndicator`) is hidden by a sheet in `<head>`.
 

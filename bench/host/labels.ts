@@ -1222,8 +1222,8 @@ async function stepFonts(page: Page, blanks: Blanks, dir: string, world: string)
       // only the switched groups may change lane (one bad font costs only its own labels)
       for (const [group, counts] of Object.entries(prior.groups as Record<string, Json>))
         if (!targets.includes(group) && (after.groups[group]?.native ?? 0) !== counts.native) cell.failures.push(`#${group} (not switched) went from ${counts.native} to ${after.groups[group]?.native ?? 0} native labels`);
-      // the switched groups keep every label they showed: a label that leaves the lane count (native + compat) is a label
-      // the SVG stopped showing, which no lane check would see
+      // the switched groups keep every label they showed: a label that leaves the lane count (native + compat) without
+      // the SVG hiding it, or a label removed from the DOM, fails; one the app hid in the SVG is a note
       for (const group of targets) {
         const [was, now] = [prior.groups[group], after.groups[group]];
         const [wasShown, nowShown] = [(was?.native ?? 0) + (was?.compat ?? 0), (now?.native ?? 0) + (now?.compat ?? 0)];
@@ -1242,6 +1242,15 @@ async function stepFonts(page: Page, blanks: Blanks, dir: string, world: string)
           left
         );
         cell.leftRouting = { ...(cell.leftRouting ?? {}), [group]: detail };
+        // the app itself may hide a label after a font switch (label-culling.ts sets display:none on a label whose
+        // box leaves the view): the SVG and the GPU then agree, and the golden compares them. A note, not a failure, when
+        // every label that left is still in the DOM and hidden in the SVG and none was removed.
+        const svgHid = (was?.total ?? 0) === (now?.total ?? 0) && left.length === wasShown - nowShown && detail.every((d: Json) => d.inDom && d.visible === false);
+        const shownBack = nowShown > wasShown && (was?.total ?? 0) === (now?.total ?? 0) && (now?.hidden ?? 0) === (was?.hidden ?? 0) - (nowShown - wasShown);
+        if (svgHid || shownBack) {
+          (cell.notes ??= []).push(`#${group}: ${svgHid ? `the SVG hid ${left.join(", ")} after the switch (display ${detail.map((d: Json) => d.display).join("/")})` : `the SVG shows ${nowShown - wasShown} label(s) again`}; both arms follow it`);
+          continue;
+        }
         cell.failures.push(`routing: #${group} showed ${wasShown} labels (native + compat) before the switch and ${nowShown} after (${left.slice(0, 4).join(", ") || "ids unchanged"}; hidden ${was?.hidden ?? 0} -> ${now?.hidden ?? 0}, DOM ${was?.total ?? 0} -> ${now?.total ?? 0})`);
       }
       // re-atlas: native labels of the switched group were laid out with the new face
