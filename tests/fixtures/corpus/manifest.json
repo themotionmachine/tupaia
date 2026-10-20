@@ -343,15 +343,6 @@
    "maxOver16": 5.1
   },
   {
-   "family": "ocean",
-   "maps": [
-    "legacy-v1.4"
-   ],
-   "reason": "legacy-only gap, cause not confirmed: ocean over16 1.9% on the v1.4 file (the parity fixture's ocean passes over44 and over16); old ocean layer markup",
-   "maxOver16": 2.5,
-   "maxOver44": 1.9
-  },
-  {
    "family": "texture",
    "maps": [
     "demo-v1.112"

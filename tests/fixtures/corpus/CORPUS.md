@@ -67,10 +67,11 @@ exactly this one gate.
    `minSsim`: the worst value measured across the corpus plus about 30 %; a metric with no bound has no tolerance). `empty in GPU arm`, `empty in SVG arm`,
    `census changed`, a dropped GPU path or a harness error are never excused, so a routed-but-invisible layer fails whatever the family. The bounds for
    `zones` are a guess (no corpus map failed zones).
-   Limit: under the centred camera every cell carries about 76901 px of baseline ink against the blank, so the golden's ink-emptiness test never fires;
-   only a layer with zero drawables is reported as empty, and a layer that is in the document but paints nothing in both arms (for example `states`,
-   `borders`, `lakes`, `fog`, `vignette` on `demo-v1.112`) passes vacuously. The gpu-routed check (5) is the backstop for routing, not for ink. Measuring ink
-   relative to the per-map baseline is a change to `bench/host/layer-golden.ts` (COVER's file).
+   The ink-emptiness test used to be vacuous: every cell carried about 76901 px of baseline "ink" against the blank (the "Map is successfully loaded" toast was
+   in the blank of one arm only), so a layer that paints nothing passed. With the toast and the Navigate/Edit indicator kept out of the capture (two small
+   edits in `layer-golden.ts`, COVER's file) the baseline is 0 and the test works. A layer with drawables that paints nothing in either arm (opacity 0, hidden
+   by the file: `states`, `lakes`, `fog`, `vignette` on `demo-v1.112`) is reported under `golden.quiet`, not judged: there is nothing to compare. A layer that
+   paints in one arm and not the other stays judged and is never excused. The gpu-routed check (5) remains the backstop for routing.
 
 ## Findings: migration ordering (decision for Ryan)
 
@@ -115,8 +116,10 @@ Observed, not changed:
 - The loader's `0.70.0` floor (above).
 - With the floor lowered to `0.7.0` (scratch build, reverted), `legacy-v0.9b` loads and migrates under both arms with equal hashes and saves, but
   the GPU draws nothing for `#borders` (the 1.0.0 gate builds fresh `stateBorders`/`provinceBorders` groups; SVG ink 79k px, 0 routed) and `ocean`
-  differs by 2% over16. Evidence: `~/.tupaia-gates/w2-corpus/exp09c`.
+  differed by 2% over16 (very likely the load toast artifact described next, not a map finding). Evidence: `~/.tupaia-gates/w2-corpus/exp09c`.
+- The `ocean` over16 ~2% failures seen intermittently (v1.4 in one run, v1.123 in another) were not map gaps: the GPU arm of the first golden cell was captured
+  while the 7 s "Map is successfully loaded" toast was still showing at the bottom of the frame (diff: a 1400x35 bar). `layer-golden.ts` now clears the main tip after the
+  load (a small change in COVER's file), and the `ocean` known gap for v1.4 was dropped from the manifest.
 - Legacy-only golden gaps (scoped known gaps in the manifest, cause not confirmed): `ice` on v1.7 and v1.99 (the files carry `style="opacity: 0.04"` from a
-  fade caught mid-way by the old version, on top of `opacity="0.9"`; the SVG honours the style, the GPU draws the ice far stronger), `ocean` on v1.4
-  (over16 1.9%), `texture` on demo.map (a fixed 1280x720 image in a 1680x849 world) and a borderline `rivers` on demo.map (over44 0.57%).
+  fade caught mid-way by the old version, on top of `opacity="0.9"`; the SVG honours the style, the GPU draws the ice far stronger), `texture` on demo.map (a fixed 1280x720 image in a 1680x849 world) and a borderline `rivers` on demo.map (over44 0.57%).
 - The golden on every legacy map fails the known parity families (cells, states, provinces, coordinates, markets, military, markers).

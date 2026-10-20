@@ -32,7 +32,7 @@ import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { extname, join, resolve } from "node:path";
 import { type Browser, chromium, type Page } from "playwright";
-import { gateCoverage, gatesOf, gatesTriggered, isEmptyGoldenCell, splitKnownGaps, type Manifest, type ManifestEntry as Entry, parseMapVersion } from "./corpus-lib.ts";
+import { gateCoverage, gatesOf, gatesTriggered, isEmptyGoldenCell, paintsNothingInBothArms, splitKnownGaps, type Manifest, type ManifestEntry as Entry, parseMapVersion } from "./corpus-lib.ts";
 import { type Check, compareSaves, describeSaveDiff, fail, info, maskHeader, pass, SECTION_COUNT, skip, splitSections, verdict } from "./consumers-lib.ts";
 
 const env = process.env;
@@ -352,9 +352,11 @@ function runGolden(entry: Entry): GoldenOutcome {
   }
   const cells: any[] = data.cells ?? [];
   // A cell that paints nothing in both arms and has no drawables in the document is a layer this old map does not have.
+  // A layer that has drawables but paints nothing in the SVG arm and nothing in the GPU arm (opacity 0, hidden by the file) has nothing to compare.
   const isEmpty = isEmptyGoldenCell;
   const empty = cells.filter(isEmpty);
-  const judged = cells.filter(c => !isEmpty(c));
+  const quiet = cells.filter(c => !isEmpty(c) && paintsNothingInBothArms(c));
+  const judged = cells.filter(c => !isEmpty(c) && !paintsNothingInBothArms(c));
   // Families that fail the same way on the parity fixture are known GPU gaps (manifest.goldenKnownGaps): reported, not gated.
   // CORPUS_STRICT=1 gates them too.
   const known = strict ? [] : manifest.goldenKnownGaps.filter(k => !k.maps || k.maps.includes(entry.id));
@@ -363,9 +365,10 @@ function runGolden(entry: Entry): GoldenOutcome {
   checks.push(verdict(judged.length > 0 && !bad.length, 33, id("cells"), `${entry.id}: every populated layer family passes the golden at k 1 (SVG arm vs GPU arm, over44 reading, the file's own style), known parity gaps aside`, `${judged.length - bad.length - excused.length}/${judged.length} pass${bad.length ? `; failing: ${bad.slice(0, 6).map(c => `${c.family} (${c.failures?.[0]?.slice(0, 110)})`).join("; ")}` : ""}${excused.length ? `; ${excused.length} known-gap failures excused` : ""}`, `${entry.id}/golden/golden.json`));
   checks.push(info(33, id("known-gaps"), `${entry.id}: known-gap families that failed within their bounds (not gated; the ten blanket families also fail on the parity fixture, the map-scoped ones are corpus findings)`, excused.map(c => `${c.family}: ${c.failures?.[0]?.slice(0, 100)}`).join(" | ") || "none"));
   checks.push(info(33, id("empty"), `${entry.id}: families with nothing to paint in this map (not judged)`, empty.map(c => c.family).join(", ") || "none"));
+  checks.push(info(33, id("quiet"), `${entry.id}: families with drawables that paint nothing in either arm (not judged; there is nothing to compare)`, quiet.map(c => `${c.family} (${c.domDrawables} drawables)`).join(", ") || "none"));
   const notes = judged.filter(c => c.pass && c.notes?.length);
   if (notes.length) checks.push(info(33, id("notes"), `${entry.id}: passing cells with a footprint note`, notes.slice(0, 8).map(c => `${c.family}: ${c.notes.join("; ")}`).join(" | ")));
-  return { checks, summary: { cells: cells.length, judged: judged.length, failing: bad.length, knownGaps: excused.map(c => c.family), empty: empty.map(c => c.family) } };
+  return { checks, summary: { cells: cells.length, judged: judged.length, failing: bad.length, knownGaps: excused.map(c => c.family), empty: empty.map(c => c.family), quiet: quiet.map(c => c.family) } };
 }
 
 // ------------------------------------------------------------------ main

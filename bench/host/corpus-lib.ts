@@ -73,6 +73,7 @@ export interface GoldenCell {
   gates?: Record<string, boolean>;
   domDrawables?: number;
   notes?: string[];
+  metrics?: { inkSvg?: number; inkGpu?: number };
 }
 
 /**
@@ -81,6 +82,22 @@ export interface GoldenCell {
  * drawables, or a failure other than "painted nothing", stays judged.
  */
 export const isEmptyGoldenCell = (cell: GoldenCell): boolean => cell.gates?.populated === false && !cell.domDrawables;
+
+/** The ink floor of bench/golden-metrics.ts (MIN_INK_PIXELS); a unit test keeps the two equal. */
+export const MIN_INK = 4;
+
+/**
+ * A cell whose layer has drawables but paints nothing in either arm (opacity 0, fully transparent, outside the camera,
+ * a layer the file leaves hidden). SVG is the reference and shows nothing, and the GPU shows nothing either, so there is
+ * nothing to compare: reported, not judged. It is only this when BOTH arms are below the ink floor and every failure is
+ * an emptiness one; a GPU that paints what the SVG does not, or paints nothing where the SVG does, stays judged.
+ */
+export const paintsNothingInBothArms = (cell: GoldenCell): boolean =>
+  !cell.pass &&
+  (cell.failures ?? []).length > 0 &&
+  (cell.failures ?? []).every(f => /^empty in (SVG|GPU) arm/.test(f)) &&
+  (cell.metrics?.inkSvg ?? Number.POSITIVE_INFINITY) < MIN_INK &&
+  (cell.metrics?.inkGpu ?? Number.POSITIVE_INFINITY) < MIN_INK;
 
 /** A failure that is a metric gate (ssim, over16, over44, conservative drift). "empty in ... arm" and "census changed" are not: a layer that paints nothing, or routes differently, is never a known gap. */
 export const isMetricFailure = (failure: string): boolean => /^(ssim |over16 |over44 |conservative:)/.test(failure);

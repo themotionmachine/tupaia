@@ -6,7 +6,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import vm from "node:vm";
-import { splitKnownGaps, gateCoverage, gatesOf, gatesTriggered, isEmptyGoldenCell, isOlder, type Manifest, parseMapVersion } from "./corpus-lib.ts";
+import { splitKnownGaps, gateCoverage, gatesOf, gatesTriggered, isEmptyGoldenCell, isOlder, MIN_INK, paintsNothingInBothArms, type Manifest, parseMapVersion } from "./corpus-lib.ts";
 
 const root = resolve(import.meta.dirname, "../..");
 const corpus = join(root, "tests/fixtures/corpus");
@@ -123,4 +123,18 @@ test("a known gap is bounded: drift beyond the measured value plus margin gates,
   );
   assert.equal(excused.length, 1);
   assert.equal(gating.length, 4);
+});
+
+test("a cell that paints nothing in both arms is quiet; a one-sided empty cell stays judged", () => {
+  const e = (inkSvg: number, inkGpu: number, failures: string[]) => ({ family: "states", pass: false, failures, domDrawables: 40, metrics: { inkSvg, inkGpu } });
+  assert.equal(paintsNothingInBothArms(e(0, 0, ["empty in SVG arm (ink 0 px, 40 drawables)", "empty in GPU arm (ink 0 px, 80 routed)"])), true);
+  assert.equal(paintsNothingInBothArms(e(900, 0, ["empty in GPU arm (ink 0 px, 80 routed)"])), false); // SVG paints, GPU does not
+  assert.equal(paintsNothingInBothArms(e(0, 900, ["empty in SVG arm (ink 0 px, 40 drawables)"])), false); // GPU paints what SVG does not
+  assert.equal(paintsNothingInBothArms(e(0, 0, ["empty in SVG arm (ink 0 px, 40 drawables)", "census changed: native 3->0"])), false);
+  assert.equal(paintsNothingInBothArms({ family: "x", pass: false, failures: ["empty in GPU arm (ink 0 px, 0 routed)"] }), false); // no metrics: not quiet
+});
+
+test("the corpus ink floor equals the golden's", async () => {
+  const { MIN_INK_PIXELS } = await import("../golden-metrics.ts");
+  assert.equal(MIN_INK, MIN_INK_PIXELS);
 });
