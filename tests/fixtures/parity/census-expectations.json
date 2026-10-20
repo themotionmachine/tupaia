@@ -2,7 +2,7 @@
  "schema": 1,
  "fixtureSha256": "fd1dd2f3508fbbd7ea325133b2937a328909a84cc38e81c6afc95eef640ba119",
  "notes": [
-  "Routing snapshot of the GPU scene classifier per golden cell on the parity fixture (default preset, dpr 2, k 1/2/4/8 plus the coastline switch frames), taken at gpu/w1-glue after the camera fixes and re-taken at gpu/w2-text (straight non-label text as native glyphs; military also picks up the empty-image skip). A cell fails when native/compat/skipped drift, so a routing change (new native primitive, a layer sliding to compat) must update this file in the same commit.",
+  "Routing snapshot of the GPU scene classifier per golden cell on the parity fixture (default preset, dpr 2, k 1/2/4/8 plus the coastline switch frames), taken at gpu/w1-glue after the camera fixes and re-taken at the wave 2 merge on gpu/integrate (straight non-label text native; #armies one compat run; the cell mesh a compat run; emblem cells styled for their zoom). A cell fails when native/compat/skipped drift, so a routing change (new native primitive, a layer sliding to compat) must update this file in the same commit.",
   "Regenerate: node bench/gate/gate.ts golden fixture=parity k=1,2,4,8 coastk=1.4,1.6,2.5,2.7, then keep the census.json of that run without the kinds field.",
   "Lake k 2/4/8 cells use the k*-lake cameras added after this snapshot; their counts are identical to the k 1 cell."
  ],
@@ -68,23 +68,23 @@
    "skipped": 0
   },
   "default/d2/cells/k1": {
-   "native": 1,
-   "compat": 0,
+   "native": 0,
+   "compat": 1,
    "skipped": 0
   },
   "default/d2/cells/k2": {
-   "native": 1,
-   "compat": 0,
+   "native": 0,
+   "compat": 1,
    "skipped": 0
   },
   "default/d2/cells/k4": {
-   "native": 1,
-   "compat": 0,
+   "native": 0,
+   "compat": 1,
    "skipped": 0
   },
   "default/d2/cells/k8": {
-   "native": 1,
-   "compat": 0,
+   "native": 0,
+   "compat": 1,
    "skipped": 0
   },
   "default/d2/coastline/k1": {
@@ -194,8 +194,8 @@
   },
   "default/d2/emblems/k2": {
    "native": 0,
-   "compat": 8,
-   "skipped": 2
+   "compat": 133,
+   "skipped": 0
   },
   "default/d2/emblems/k4": {
    "native": 0,
@@ -204,8 +204,8 @@
   },
   "default/d2/emblems/k8": {
    "native": 0,
-   "compat": 133,
-   "skipped": 0
+   "compat": 125,
+   "skipped": 1
   },
   "default/d2/fog/k1": {
    "native": 0,
@@ -448,23 +448,23 @@
    "skipped": 7
   },
   "default/d2/military/k1": {
-   "native": 228,
-   "compat": 82,
+   "native": 0,
+   "compat": 1,
    "skipped": 76
   },
   "default/d2/military/k2": {
-   "native": 228,
-   "compat": 82,
+   "native": 0,
+   "compat": 1,
    "skipped": 76
   },
   "default/d2/military/k4": {
-   "native": 228,
-   "compat": 82,
+   "native": 0,
+   "compat": 1,
    "skipped": 76
   },
   "default/d2/military/k8": {
-   "native": 228,
-   "compat": 82,
+   "native": 0,
+   "compat": 1,
    "skipped": 76
   },
   "default/d2/ocean/k1": {
