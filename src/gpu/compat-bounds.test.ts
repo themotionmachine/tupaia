@@ -122,7 +122,7 @@ describe("geometry bounds", () => {
   // label culling hides off-screen labels with display:none, which getBBox cannot measure, while the export clone draws
   // them: the culling sheet is off during the measurement and back on after it
   it("measures with the label-culling sheet off and restores it", () => {
-    document.body.innerHTML = `<svg id="map" xmlns="${svgNs}"><g id="viewbox"><text id="t">x</text></g><style id="map-label-culling-style">.viewport-culled{display:none!important;pointer-events:none!important}</style></svg>`;
+    document.body.innerHTML = `<svg id="map" xmlns="${svgNs}"><g id="viewbox"><text id="t" class="viewport-culled">x</text><text id="u">y</text></g><style id="map-label-culling-style">.viewport-culled{display:none!important;pointer-events:none!important}</style></svg>`;
     const viewbox = document.getElementById("viewbox")!;
     const style = document.getElementById("map-label-culling-style") as unknown as HTMLStyleElement;
     // happy-dom drops the text of an svg <style> parsed through innerHTML
@@ -152,6 +152,16 @@ describe("geometry bounds", () => {
     item.bounds = "kept";
     measureBounds([item] as never, viewbox);
     expect(item.bounds).toBe("kept");
+    // nothing culled among the measured elements: the sheet stays on (switching it restyles and repaints the map)
+    Object.assign(document.getElementById("u")!, {
+      getBBox: () => {
+        seen.push(sheet.disabled);
+        return { x: 0, y: 0, width: 1, height: 1 };
+      },
+      getScreenCTM: () => matrix(0, 0)
+    });
+    measureBounds([{ elements: [document.getElementById("u")!], screen: false }] as never, viewbox);
+    expect(seen).toEqual([true, false]);
   });
 });
 

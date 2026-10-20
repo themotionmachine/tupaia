@@ -117,9 +117,16 @@ export interface Measured {
 export function measureBounds(items: readonly Measured[], viewbox: Element): void {
   const todo = items.filter(item => !item.screen && item.bounds === undefined);
   if (!todo.length) return;
+  // Turning the sheet off and on restyles and repaints the whole map, and every repaint re-layerizes it (hundreds of ms
+  // on a dense map): only when a culled element is measured.
+  const culled = todo.some(item =>
+    item.elements.some(
+      element => element.classList?.contains("viewport-culled") || !!element.querySelector?.(".viewport-culled")
+    )
+  );
   const sheets: CSSStyleSheet[] = [];
   const svg = (viewbox as SVGGraphicsElement).ownerSVGElement ?? viewbox.parentElement;
-  for (const style of svg?.querySelectorAll("style") ?? []) {
+  for (const style of (culled && svg?.querySelectorAll("style")) || []) {
     const sheet = (style as HTMLStyleElement).sheet;
     if (sheet && !sheet.disabled && (style.textContent || "").replace(/\s+/g, "").includes(CULLING)) {
       sheet.disabled = true;

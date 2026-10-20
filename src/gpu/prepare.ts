@@ -1319,6 +1319,8 @@ function adoptRuns(device: GpuDevice, svg: SVGSVGElement, runs: CompatRun[], pre
       run.slot.texture = texture && retain(texture);
       run.slot.rect = [...old.slot.rect];
       run.stamp = now; // verified clean up to now
+      // the same geometry: measuring it again would restyle the map (compat-bounds.ts measureBounds)
+      if (old.bounds !== undefined) run.bounds = old.bounds;
       reusedBytes += texture ? texture.width * texture.height * 4 : 0;
     }
     for (const [run, old] of adopted) {
@@ -1439,6 +1441,13 @@ export async function refineCompat(
   const windowStats = newWindowStats();
   prepared.compat.refineWindows = windowStats;
   let refined = false;
+  // every run this pass may cut, measured in one batch: one restyle at most (measureBounds)
+  const viewbox = runs[0]?.elements[0]?.closest?.("#viewbox"); // absent on partial test elements
+  if (viewbox)
+    measureBounds(
+      runs.filter(run => !kept.has(run)),
+      viewbox
+    );
   for (const run of runs) {
     const element = run.elements[0];
     const entry = {
@@ -1471,7 +1480,7 @@ export async function refineCompat(
     const resolved = resolveManyInClone(run.elements, clone);
     if (resolved.some(item => typeof item === "string")) return false;
     // the detail is cut at device density: dpr raster px per live CSS px, over the run's window of the visible raster
-    const viewbox = element.closest?.("#viewbox"); // absent on partial test elements
+    // a kept detail dropped above: measured now
     if (viewbox) measureBounds([run], viewbox);
     let cropped = await rasterizeWindowed({
       clone,
