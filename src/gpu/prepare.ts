@@ -53,7 +53,15 @@ import {
 } from "./compat-reuse";
 import type { GpuDevice, TextureSource, TrackedBuffer, TrackedTexture } from "./device";
 import type { Batch, FillBatch, Frame, ImageBatch, StrokeBatch } from "./framegraph";
-import { appendSegments, appendStrokeCaps, capCode, F32, normalizeDashes, pathBounds } from "./geometry";
+import {
+  appendFillEdges,
+  appendSegments,
+  appendStrokeCaps,
+  capCode,
+  F32,
+  normalizeDashes,
+  pathBounds
+} from "./geometry";
 import { appendStencilMeshes, type MeshStats, newMeshStats } from "./mesh";
 import { indexOverlays, releaseRuns, swapOverlays, uploadAll } from "./overlays";
 import { type HitShape, leafPath, PickIndex } from "./pick";
@@ -234,7 +242,13 @@ interface Payload {
   relief: Prepared["relief"];
   tessellation: MeshStats;
   batches: Batch[]; // the committed batch tree: its textures are matched to recipes, window slots and compat runs
-  vertices: { fans: Float32Array; segments: Float32Array; caps: Float32Array; sprites: Float32Array };
+  vertices: {
+    fans: Float32Array;
+    segments: Float32Array;
+    caps: Float32Array;
+    sprites: Float32Array;
+    edges: Float32Array;
+  };
   glyphs: Float32Array;
   glyphCount: number;
   // the glyph atlas canvas the instances index: the renderer's live atlas (the next prepare clears it), or the copy a
@@ -445,6 +459,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
   const tessellation = newMeshStats();
   const segments = new F32(1 << 16);
   const caps = new F32(1 << 14);
+  const edges = new F32(1 << 14); // fill anti-aliasing edges (framegraph fringe)
   const sprites = new F32(1 << 10);
   const glyphs: Float32Array[] = [];
   let glyphCount = 0;
@@ -509,6 +524,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
 
   const fill = (subpaths: Subpath[], evenOdd: boolean): FillBatch => {
     const first = fans.length / 2;
+    const edgeFirst = edges.length / 4;
     return {
       kind: "fill",
       first,
@@ -516,7 +532,9 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
       color: null,
       tile: null,
       evenOdd,
-      bounds: pathBounds(subpaths)
+      bounds: pathBounds(subpaths),
+      edgeFirst,
+      edgeCount: appendFillEdges(subpaths, edges, evenOdd)
     };
   };
 
@@ -819,7 +837,8 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
       fans: fans.view(),
       segments: segments.view(),
       caps: caps.view(),
-      sprites: sprites.view()
+      sprites: sprites.view(),
+      edges: edges.view()
     };
     let glyphData = retained?.glyphs ?? null;
     if (retained) glyphCount = retained.glyphCount;
@@ -832,6 +851,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
         vertices.segments.length +
         vertices.caps.length +
         vertices.sprites.length +
+        vertices.edges.length +
         glyphCount * GLYPH_FLOATS) *
       4;
     const pending = glyphBytes + vertexBytes;
@@ -1026,6 +1046,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
       fans: upload("fans", vertices.fans),
       segments: upload("segments", vertices.segments),
       caps: upload("stroke caps", vertices.caps),
+      edges: upload("fill edges", vertices.edges),
       sprites: upload("sprites", vertices.sprites),
       glyphs: upload("glyphs", glyphData),
       atlas

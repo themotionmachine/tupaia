@@ -54,7 +54,8 @@ function frame() {
       fans: new Float32Array(6),
       segments: new Float32Array(0),
       caps: new Float32Array(0),
-      sprites: new Float32Array(14)
+      sprites: new Float32Array(14),
+      edges: new Float32Array(0)
     },
     glyphs: new Float32Array(0),
     glyphCount: 0,

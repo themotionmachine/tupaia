@@ -1,15 +1,17 @@
 // DOM-ordered passes over prepared batches: stencil-then-cover fills, instanced strokes/sprites/glyphs, compat
 // images, and opacity/mask groups composited from an offscreen target. Camera changes only touch uniforms.
-// Stencil layout: bit 0x80 = group mask, bits 0x7F = fill winding (bit 0x01 doubles as per-path stroke coverage).
+// Stencil layout (STENCIL below): bit 0x80 = group mask, set where a masked group's content is hidden; bits 0x78 = the
+// id of the last anti-aliased batch that drew the pixel (first fragment wins within a batch); bits 0x07 = fill winding.
+// Every test that draws colour requires the mask bit clear, so unmasked targets (bit never set) share the same tests.
 import { TARGET_BUDGET, targetSamples } from "./budget";
 import { type Camera, screenToClip, type Viewport, visibleWorld, worldScissor, worldToClip } from "./camera";
 import type { GpuDevice, TrackedBuffer, TrackedProgram, TrackedTarget, TrackedTexture } from "./device";
-import { outsideView } from "./geometry";
+import { discProfile, outsideView, squareCapDashes } from "./geometry";
 import { GlState } from "./gl-state";
 import { MARKER_FLOATS, type MarkerInstances } from "./markers";
 import { hatchUvAtZoom } from "./raster";
 import type { Rgba } from "./scene";
-import { fill, glyph, image, marker, sprite, stroke } from "./shaders";
+import { fill, fringe, glyph, image, marker, sprite, stroke } from "./shaders";
 
 export interface FillBatch {
   bounds?: Rect4 | null;
@@ -19,6 +21,9 @@ export interface FillBatch {
   color: Rgba | null;
   tile: { texture: TrackedTexture; worldToUv: Float32Array; referenceZoom?: number } | null;
   evenOdd: boolean;
+  // boundary edges in Frame.edges (geometry.ts appendFillEdges) for the anti-aliasing fringe; absent: no fringe
+  edgeFirst?: number;
+  edgeCount?: number;
 }
 export interface StrokeBatch {
   bounds?: Rect4 | null;
@@ -89,6 +94,7 @@ export interface Frame {
   fans: TrackedBuffer | null; // vec2 triangles
   caps: TrackedBuffer | null;
   segments: TrackedBuffer | null; // x0 y0 x1 y1 distance
+  edges?: TrackedBuffer | null; // fill boundary edges x0 y0 x1 y1, filled side on the left
   sprites: TrackedBuffer | null; // x y s u0 v0 u1 v1
   glyphs: TrackedBuffer | null; // GLYPH_FLOATS per instance
   atlas: TrackedTexture | null;
@@ -109,7 +115,7 @@ export function emptyOnView(frame: Frame, batch: Batch, visible: Rect4, pad: num
     case "glyphs":
       return !frame.glyphs || !frame.atlas || !batch.count;
     case "group":
-      // Mask bit 0x80 starts clear and only white items set it, so with no drawable white item on view every masked
+      // A masked group starts hidden (bit 0x80) and only white items clear it, so with no drawable white item on view every masked
       // child fragment fails the stencil test.
       if (batch.mask?.every(({ fill, white }) => !white || emptyOnView(frame, fill, visible, pad))) return true;
       return batch.children.every(child => emptyOnView(frame, child, visible, pad));
@@ -118,9 +124,20 @@ export function emptyOnView(frame: Frame, batch: Batch, visible: Rect4, pad: num
   }
 }
 
-const shaders = { fill, stroke, sprite, glyph, image, marker };
+const shaders = { fill, fringe, stroke, sprite, glyph, image, marker };
 type Kind = keyof typeof shaders;
 const FLOAT = 4;
+export const STENCIL = { hidden: 0x80, id: 0x78, winding: 0x07, idShift: 3, ids: 15 } as const;
+
+// Fill edge anti-aliasing is on wherever the target has no MSAA (the DPR >= 2 canvas and every group target there);
+// ?gpu-fill-aa=0 turns it off for A/B comparisons.
+function fillAaFlag(): boolean {
+  try {
+    return new URLSearchParams(globalThis.location?.search ?? "").get("gpu-fill-aa") !== "0";
+  } catch {
+    return true;
+  }
+}
 
 export class FrameGraph {
   readonly drawBatches = { submitted: 0, culled: 0 };
@@ -129,6 +146,8 @@ export class FrameGraph {
   // at full opacity (pixel-work telemetry)
   readonly passes = {
     composites: 0,
+    fringes: 0,
+    idClears: 0,
     stencilClears: 0,
     maskFills: 0,
     maskCulled: 0,
@@ -149,12 +168,22 @@ export class FrameGraph {
   private masked = false;
   private markerBuffer: TrackedBuffer | null = null;
   private markerInstances: MarkerInstances | null = null;
+  // anti-aliased batch ids (STENCIL.id) in the current target, and the device box they touched since the last id clear
+  private id = 0;
+  private idBox: [number, number, number, number] | null = null;
+  private idUnbounded = false;
+  // whether the current target is multisampled (fills need no fringe there)
+  private multisampled = false;
+  private readonly canvasMultisampled: boolean;
+  private readonly fillAa = fillAaFlag();
+  private patternMatrixFringe = new Float32Array(9);
   readonly state: GlState;
 
   constructor(private device: GpuDevice) {
     const gl = device.gl;
     this.state = new GlState(gl);
-    for (const kind of ["fill", "stroke", "sprite", "glyph", "image", "marker"] as Kind[]) {
+    this.canvasMultisampled = !!gl.getContextAttributes()?.antialias && Number(gl.getParameter(gl.SAMPLES)) > 0;
+    for (const kind of ["fill", "fringe", "stroke", "sprite", "glyph", "image", "marker"] as Kind[]) {
       this.programs[kind] = device.program(kind, shaders[kind].vs, shaders[kind].fs);
       this.vaos[kind] = gl.createVertexArray()!;
     }
@@ -196,6 +225,10 @@ export class FrameGraph {
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
     gl.enable(gl.STENCIL_TEST);
+    this.id = 0;
+    this.idBox = null;
+    this.idUnbounded = false;
+    this.multisampled = this.canvasMultisampled;
     if (frame) this.batches(frame, frame.batches);
     gl.disable(gl.STENCIL_TEST);
     state.bindVertexArray(null);
@@ -249,19 +282,21 @@ export class FrameGraph {
     return [color[0] * a, color[1] * a, color[2] * a, a];
   }
 
-  // Winding into bits 0x7F with color writes off; the caller then covers the same triangles.
-  private stencilFan(frame: Frame, fill: FillBatch): TrackedProgram {
+  // Winding into bits 0x07 (mod 8; even-odd: bit 0x01) with color writes off; the caller then covers the same
+  // triangles. Hidden pixels of a masked group keep winding 0 unless the fan builds the mask itself.
+  private stencilFan(frame: Frame, fill: FillBatch, everywhere = false): TrackedProgram {
     const gl = this.device.gl;
     const state = this.state;
     const program = this.use("fill");
     this.attribute(program, "a_position", frame.fans!, 2, 2, 0, 0);
     state.colorMask(false);
-    state.stencilFunc(gl.ALWAYS, 0, 0xff);
+    if (everywhere) state.stencilFunc(gl.ALWAYS, 0, 0xff);
+    else state.stencilFunc(gl.EQUAL, 0, STENCIL.hidden);
     if (fill.evenOdd) {
       state.stencilMask(0x01);
       state.stencilOp(gl.KEEP, gl.KEEP, gl.INVERT);
     } else {
-      state.stencilMask(0x7f);
+      state.stencilMask(STENCIL.winding);
       state.stencilOpSeparate(gl.FRONT, gl.KEEP, gl.KEEP, gl.INCR_WRAP);
       state.stencilOpSeparate(gl.BACK, gl.KEEP, gl.KEEP, gl.DECR_WRAP);
     }
@@ -274,13 +309,23 @@ export class FrameGraph {
     if (!frame.fans || !fill.count) return;
     const gl = this.device.gl;
     const state = this.state;
-    const program = this.stencilFan(frame, fill);
-    if (this.masked)
-      state.stencilFunc(fill.evenOdd ? gl.EQUAL : gl.LESS, fill.evenOdd ? 0x81 : 0x80, fill.evenOdd ? 0x81 : 0xff);
-    else state.stencilFunc(gl.NOTEQUAL, 0, fill.evenOdd ? 0x01 : 0x7f);
-    // every covered fragment, drawn or not, resets its winding bits
-    state.stencilMask(0x7f);
+    this.stencilFan(frame, fill);
+    const winding = fill.evenOdd ? 0x01 : STENCIL.winding;
+    if (this.fillAa && !this.multisampled && frame.edges && fill.edgeCount) this.fringe(frame, fill, winding);
+    const program = this.use("fill");
+    this.attribute(program, "a_position", frame.fans, 2, 2, 0, 0);
+    // pixel centres inside the fill (winding set: visible ones only, see stencilFan); every covered fragment, drawn or
+    // not, resets its winding bits
+    state.stencilFunc(gl.NOTEQUAL, 0, winding);
+    state.stencilMask(STENCIL.winding);
     state.stencilOp(gl.ZERO, gl.ZERO, gl.ZERO);
+    this.paint(program, fill, this.patternMatrix);
+    gl.drawArrays(gl.TRIANGLES, fill.first, fill.count);
+  }
+
+  private paint(program: TrackedProgram, fill: FillBatch, matrix: Float32Array): void {
+    const gl = this.device.gl;
+    const state = this.state;
     state.uniform1i(program.uniforms.u_patterned, fill.tile ? 1 : 0);
     if (fill.tile) {
       gl.activeTexture(gl.TEXTURE0);
@@ -288,10 +333,78 @@ export class FrameGraph {
       state.uniform1i(program.uniforms.u_tile, 0);
       state.uniformMatrix3fv(
         program.uniforms.u_worldToUv,
-        hatchUvAtZoom(fill.tile.worldToUv, fill.tile.referenceZoom, this.camera.k, this.patternMatrix)
+        hatchUvAtZoom(fill.tile.worldToUv, fill.tile.referenceZoom, this.camera.k, matrix)
       );
     } else state.uniform4fv(program.uniforms.u_color, this.premultiplied(fill.color ?? [0, 0, 0, 0]));
-    gl.drawArrays(gl.TRIANGLES, fill.first, fill.count);
+  }
+
+  private pxPerWorld(): number {
+    const gl = this.device.gl;
+    return (
+      this.camera.k *
+      Math.min(gl.drawingBufferWidth / this.viewport.width, gl.drawingBufferHeight / this.viewport.height)
+    );
+  }
+
+  // A new anti-aliasing batch id; when the ids run out, the id bits are cleared where earlier batches drew them.
+  private nextId(bounds: Rect4 | null | undefined): number {
+    const gl = this.device.gl;
+    if (this.id >= STENCIL.ids) {
+      const box = this.idUnbounded ? null : this.idBox;
+      if (box) {
+        gl.enable(gl.SCISSOR_TEST);
+        gl.scissor(box[0], box[1], box[2] - box[0], box[3] - box[1]);
+      }
+      this.state.stencilMask(STENCIL.id);
+      gl.clearStencil(0);
+      gl.clear(gl.STENCIL_BUFFER_BIT);
+      if (box) gl.disable(gl.SCISSOR_TEST);
+      this.passes.idClears++;
+      this.id = 0;
+      this.idBox = null;
+      this.idUnbounded = false;
+    }
+    const scissor = bounds
+      ? worldScissor(bounds, this.camera, this.viewport, gl.drawingBufferWidth, gl.drawingBufferHeight)
+      : null;
+    if (!bounds) this.idUnbounded = true;
+    else if (scissor) {
+      const [x, y, w, h] = scissor;
+      const box = this.idBox;
+      this.idBox = box
+        ? [Math.min(box[0], x), Math.min(box[1], y), Math.max(box[2], x + w), Math.max(box[3], y + h)]
+        : [x, y, x + w, y + h];
+    }
+    return ++this.id;
+  }
+
+  // The anti-aliasing fringe of a fill (shaders.ts `fringe`), between its stencil and cover passes. Pixel centres
+  // outside the fill take the first edge's partial coverage (marked with the batch id); centres inside within half a
+  // pixel of an edge take theirs and clear their winding so the cover skips them.
+  private fringe(frame: Frame, fill: FillBatch, winding: number): void {
+    const gl = this.device.gl;
+    const state = this.state;
+    const id = this.nextId(fill.bounds) << STENCIL.idShift;
+    const program = this.use("fringe");
+    this.attribute(program, "a_corner", this.strip, 2, 2, 0, 0);
+    this.attribute(program, "a_edge", frame.edges!, 4, 4, fill.edgeFirst! * 4, 1);
+    const px = this.pxPerWorld();
+    state.uniform1f(program.uniforms.u_pad, 1 / px);
+    state.uniform1f(program.uniforms.u_pxPerWorld, px);
+    this.paint(program, fill, this.patternMatrixFringe);
+    // outside: visible (mask bit clear) and not yet drawn by this batch (id below the current one); winding untouched
+    state.stencilFunc(gl.GREATER, id, STENCIL.hidden | STENCIL.id);
+    state.stencilMask(STENCIL.id);
+    state.stencilOp(gl.KEEP, gl.KEEP, gl.REPLACE);
+    state.uniform1i(program.uniforms.u_inside, 0);
+    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, fill.edgeCount!);
+    // inside (winding set, hence visible): the first edge wins by clearing the winding
+    state.stencilFunc(gl.NOTEQUAL, 0, winding);
+    state.stencilMask(STENCIL.winding);
+    state.stencilOp(gl.KEEP, gl.KEEP, gl.ZERO);
+    state.uniform1i(program.uniforms.u_inside, 1);
+    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, fill.edgeCount!);
+    this.passes.fringes++;
   }
 
   private stroke(frame: Frame, stroke: StrokeBatch): void {
@@ -302,77 +415,46 @@ export class FrameGraph {
     this.attribute(program, "a_segment", frame.segments, 4, 5, stroke.first * 5, 1);
     this.attribute(program, "a_distance", frame.segments, 1, 5, stroke.first * 5 + 4, 1);
     if (frame.caps) this.attribute(program, "a_caps", frame.caps, 2, 2, stroke.first * 2, 1);
-    // hairlines: at least one device-independent pixel wide, coverage folded into alpha
-    const screenWidth = stroke.width * this.camera.k;
-    const pixelRatio = Math.min(
-      gl.drawingBufferWidth / this.viewport.width,
-      gl.drawingBufferHeight / this.viewport.height
-    );
-    const physicalWidth = screenWidth * pixelRatio;
-    const thin = physicalWidth < 1;
-    const color = this.premultiplied(stroke.color, thin ? Math.max(physicalWidth, 0) : 1);
     const state = this.state;
-    state.uniform1f(program.uniforms.u_halfWidth, thin ? 0.5 / (this.camera.k * pixelRatio) : stroke.width / 2);
-    // opaque, non-hairline strokes take analytic edge coverage over a one-device-pixel fringe (no stencil involved)
-    const opaque = color[3] >= 1 && !thin;
-    const pxPerWorld = this.camera.k * pixelRatio;
-    state.uniform1f(program.uniforms.u_aaPad, opaque ? 1 / pxPerWorld : 0);
-    state.uniform1f(program.uniforms.u_pxPerWorld, pxPerWorld);
-    state.uniform4fv(program.uniforms.u_color, color);
-    state.uniform1fv(program.uniforms.u_dashes, stroke.dashes);
-    state.uniform1i(program.uniforms.u_dashCount, stroke.dashCount);
-    state.uniform1f(program.uniforms.u_dashPeriod, stroke.dashPeriod);
-    state.uniform1f(program.uniforms.u_dashOffset, stroke.dashOffset);
-    // Hairline coverage is folded into alpha across the widened quad, so a round dash cap becomes a linear extension
-    // of equal area (pi/4 of the half width) instead of a disc test against the widened half width.
-    const dashCap = stroke.dashCap ?? 1;
-    const round = thin && dashCap === 2;
-    state.uniform1f(program.uniforms.u_dashCap, round ? 0 : dashCap);
-    state.uniform1f(program.uniforms.u_capReach, (round ? Math.PI / 4 : 1) * (stroke.width / 2));
-    const base = this.masked ? 0x80 : 0;
-    if (color[3] >= 1) {
-      this.plain();
-      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, stroke.count);
-      return;
-    }
-    // translucent: segment overlaps at joins blend once via per-path coverage bit, then the bit is cleared
-    state.stencilMask(0x01);
-    state.stencilFunc(gl.EQUAL, base, base | 0x01);
-    state.stencilOp(gl.KEEP, gl.KEEP, gl.INCR);
+    const px = this.pxPerWorld();
+    const half = Math.max(0, stroke.width) / 2;
+    state.uniform1f(program.uniforms.u_halfWidth, half);
+    state.uniform1f(program.uniforms.u_pad, 1 / px);
+    state.uniform1f(program.uniforms.u_pxPerWorld, px);
+    const disc = this.disc(half * px);
+    state.uniform1f(program.uniforms.u_discRadius, disc.radius);
+    state.uniform1f(program.uniforms.u_discScale, disc.scale);
+    state.uniform4fv(program.uniforms.u_color, this.premultiplied(stroke.color));
+    const dash = strokeDashes(stroke);
+    state.uniform1fv(program.uniforms.u_dashes, dash.dashes);
+    state.uniform1i(program.uniforms.u_dashCount, dash.count);
+    state.uniform1f(program.uniforms.u_dashPeriod, dash.period);
+    state.uniform1f(program.uniforms.u_dashOn, dash.on);
+    state.uniform1f(program.uniforms.u_dashOffset, dash.offset);
+    state.uniform1f(program.uniforms.u_dashCap, dash.cap);
+    // Joins overlap: the first fragment per pixel wins (this batch's id), so nothing blends twice, opaque or not.
+    const id = this.nextId(stroke.bounds) << STENCIL.idShift;
+    state.stencilFunc(gl.GREATER, id, STENCIL.hidden | STENCIL.id);
+    state.stencilMask(STENCIL.id);
+    state.stencilOp(gl.KEEP, gl.KEEP, gl.REPLACE);
     gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, stroke.count);
-    // Clear just the per-path coverage bit; glClear honours the stencil write mask, preserving the group mask.
-    // This avoids rasterizing every translucent/hairline segment a second time.
-    if (stroke.bounds) {
-      const box = worldScissor(
-        stroke.bounds,
-        this.camera,
-        this.viewport,
-        gl.drawingBufferWidth,
-        gl.drawingBufferHeight
-      );
-      if (box) {
-        gl.enable(gl.SCISSOR_TEST);
-        gl.scissor(...box);
-        state.stencilMask(0x01);
-        gl.clearStencil(0);
-        gl.clear(gl.STENCIL_BUFFER_BIT);
-        gl.disable(gl.SCISSOR_TEST);
-        this.passes.stencilClears++;
-      }
-    } else {
-      // Unknown bounds retain the localized geometry cleanup instead of an expensive full-viewport masked clear.
-      state.colorMask(false);
-      state.stencilFunc(gl.ALWAYS, 0, 0xff);
-      state.stencilOp(gl.ZERO, gl.ZERO, gl.ZERO);
-      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, stroke.count);
-      state.colorMask(true);
+  }
+
+  private discs = new Map<number, { radius: number; scale: number }>();
+  private disc(h: number): { radius: number; scale: number } {
+    let profile = this.discs.get(h);
+    if (!profile) {
+      if (this.discs.size > 256) this.discs.clear();
+      profile = discProfile(h);
+      this.discs.set(h, profile);
     }
+    return profile;
   }
 
   private plain(): void {
     const gl = this.device.gl;
     this.state.stencilMask(0);
-    if (this.masked) this.state.stencilFunc(gl.EQUAL, 0x80, 0x80);
+    if (this.masked) this.state.stencilFunc(gl.EQUAL, 0, STENCIL.hidden);
     else this.state.stencilFunc(gl.ALWAYS, 0, 0xff);
   }
 
@@ -478,9 +560,18 @@ export class FrameGraph {
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.group.framebuffer);
     gl.clearColor(0, 0, 0, 0);
     this.state.stencilMask(0xff);
+    // a masked group starts hidden everywhere (bit 0x80); its content draws only where white mask items cleared it
+    gl.clearStencil(batch.mask ? STENCIL.hidden : 0);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
+    gl.clearStencil(0);
+    // the group target has its own stencil: fresh ids there, the outer target's ids resume afterwards
+    const outer = { id: this.id, idBox: this.idBox, idUnbounded: this.idUnbounded, multisampled: this.multisampled };
+    this.id = 0;
+    this.idBox = null;
+    this.idUnbounded = false;
+    this.multisampled = this.group.samples > 0;
     if (batch.mask) {
-      // binary luminance mask: white items set bit 0x80, black items clear it, in document order
+      // binary luminance mask: white items clear the hidden bit, black items set it, in document order
       for (const { fill, white } of batch.mask) {
         if (!frame.fans || !fill.count) continue;
         // Same conservative cull as fill batches: every mask triangle lies inside its path bounds, so an item wholly
@@ -490,9 +581,10 @@ export class FrameGraph {
           continue;
         }
         this.passes.maskFills++;
-        this.stencilFan(frame, fill);
+        this.stencilFan(frame, fill, true);
         this.state.colorMask(false);
-        this.state.stencilFunc(gl.NOTEQUAL, white ? 0x80 : 0, fill.evenOdd ? 0x01 : 0x7f);
+        // passes where the winding is set (ref & mask is 0) and replaces the whole value: 0 visible, 0x80 hidden
+        this.state.stencilFunc(gl.NOTEQUAL, white ? 0 : STENCIL.hidden, fill.evenOdd ? 0x01 : STENCIL.winding);
         this.state.stencilMask(0xff);
         this.state.stencilOp(gl.KEEP, gl.KEEP, gl.REPLACE);
         gl.drawArrays(gl.TRIANGLES, fill.first, fill.count);
@@ -502,6 +594,7 @@ export class FrameGraph {
     }
     this.batches(frame, batch.children);
     this.masked = false;
+    ({ id: this.id, idBox: this.idBox, idUnbounded: this.idUnbounded, multisampled: this.multisampled } = outer);
     if (this.group.samples) {
       gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.group.framebuffer);
       gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this.group.resolve);
@@ -523,4 +616,37 @@ export class FrameGraph {
     this.markerBuffer = null;
     this.markerInstances = null;
   }
+}
+
+// The dash uniforms of a stroke batch: square caps become butt dashes over the extended intervals (geometry.ts
+// squareCapDashes), and a pattern that closes up entirely draws solid.
+export function strokeDashes(stroke: StrokeBatch): {
+  dashes: Float32Array;
+  count: number;
+  period: number;
+  on: number;
+  offset: number;
+  cap: number;
+} {
+  const cap = stroke.dashCap ?? 1;
+  let dashes = stroke.dashes;
+  let count = stroke.dashCount;
+  let offset = stroke.dashOffset;
+  if (count && cap === 0) {
+    const square = squareCapDashes(Array.from(stroke.dashes.subarray(0, count)), Math.max(0, stroke.width) / 2);
+    if (square.solid) count = 0;
+    else if (square.dashes.length <= 8) {
+      dashes = new Float32Array(8);
+      dashes.set(square.dashes);
+      count = square.dashes.length;
+      offset += square.shift;
+    }
+  }
+  let period = 0,
+    on = 0;
+  for (let i = 0; i < count; i++) {
+    period += dashes[i];
+    if (!(i & 1)) on += dashes[i];
+  }
+  return { dashes, count: period > 0 ? count : 0, period, on, offset, cap: cap === 0 ? 1 : cap };
 }
