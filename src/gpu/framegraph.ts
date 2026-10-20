@@ -622,6 +622,8 @@ export class FrameGraph {
     this.state.uniform1f(program.uniforms.u_atlasScale, GLYPH_ATLAS / frame.atlas.height);
     // GLYPH2: central baselines and text-shadows follow the zoom per frame (shaders.ts glyph)
     this.state.uniform1f(program.uniforms.u_k, this.camera.k);
+    // W3c: unrotated glyphs at atlas resolution sit on whole device rows like Skia's (shaders.ts glyph rowSnap)
+    this.state.uniform1f(program.uniforms.u_rows, gl.drawingBufferHeight);
     this.plain();
     gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, batch.count);
   }

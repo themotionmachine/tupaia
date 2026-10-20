@@ -531,6 +531,8 @@ void main() {
 //   adds the missing Gaussian, sqrt(sigma^2 - shown^2) device px, as a weighted grid of bilinear taps clamped to the
 //   cell (text.ts gives the cell a 6-sigma margin, enough for the bucket's 2x).
 export const SHADOW_MASK_SIGMA = 2;
+// text.ts GLYPH_ATLAS (the atlas edge its uvs are normalized by), repeated here because text.ts imports this file
+export const GLYPH_ATLAS_EDGE = 2048;
 export const glyph = {
   vs: `${header}
 in vec2 a_corner;
@@ -542,6 +544,7 @@ in vec3 a_baseline;
 uniform mat3 u_matrix;
 uniform float u_atlasScale; // GLYPH_ATLAS / the uploaded atlas rows (text.ts glyphAtlasRows)
 uniform float u_k; // CSS px per world unit at the current camera
+uniform float u_rows; // device rows of the render target (the drawing buffer)
 out vec2 v_uv;
 out vec4 v_color;
 out float v_soft;
@@ -552,6 +555,19 @@ float centralShift() {
   float css = (floor(a_baseline.x * u_k + 0.5) - floor(a_baseline.y * u_k + 0.5)) * 0.5;
   if (a_baseline.z > 1.5) css = ceil(css - 1e-3);
   return css / u_k;
+}
+// W3c: the world y offset that puts an unrotated glyph cell's top on a whole device row, when the cell is drawn at
+// its atlas resolution (one texel per device px). Skia draws axis-aligned text with the baseline rounded to a whole
+// device row (subpixel positioning in x only); the atlas cuts every cell with its baseline on a whole texel row, so
+// at that resolution a top on a whole row is the baseline on one, and the Lanczos taps land on texel centres
+// vertically. Elsewhere (rotated, soft, resampled cells) 0. text.ts glyphRowSnap is the reference copy.
+float rowSnap(vec2 top) {
+  if (abs(a_anchor.z) > 1e-4 || u_rows <= 0.0) return 0.0;
+  float perWorld = u_matrix[1][1] * 0.5 * u_rows; // device rows per world unit (signed: the clip y axis)
+  float texels = (a_uv.w - a_uv.y) * ${GLYPH_ATLAS_EDGE.toFixed(1)};
+  if (abs(perWorld) < 1e-6 || abs(abs(perWorld) * a_box.w - texels) > 1e-3 * texels) return 0.0;
+  float rows = ((u_matrix * vec3(top, 1.0)).y + 1.0) * 0.5 * u_rows;
+  return (floor(rows + 0.5) - rows) / perWorld;
 }
 void main() {
   vec2 world;
@@ -565,6 +581,7 @@ void main() {
     float c = cos(a_anchor.z);
     float s = sin(a_anchor.z);
     world = a_anchor.xy + vec2(c * local.x - s * local.y, s * local.x + c * local.y);
+    world.y += rowSnap(a_anchor.xy + a_box.xy + vec2(0.0, shift));
     v_sigma = 0.0;
   }
   v_uv = mix(a_uv.xy, a_uv.zw, a_corner) * vec2(1.0, u_atlasScale);
