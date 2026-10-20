@@ -263,9 +263,14 @@ const settleApp = (page: Page) =>
 
 async function loadFixture(page: Page, preset: string, toggles: string[]): Promise<string[]> {
   const problems: string[] = [];
+  // The Navigate/Edit indicator (gpu arm only; its text changes with the renderer state: "Updating" vs "Navigate") is page chrome, not a layer: left visible it
+  // shows up as ~2.5k px of ink in whichever cell catches it mid-change.
+  await page.addStyleTag({ content: "#renderModeIndicator { visibility: hidden !important; }" });
   await page.evaluate(async text => {
     const w = globalThis as any;
     await w.__tupaia.fns.loadMap({ text, timeoutMs: 120000 });
+    // The "Map is successfully loaded" toast (7 s, bottom of the frame) otherwise lands in whichever arm of the first cell is captured inside that window.
+    w.clearMainTip?.();
     await w.__tupaia.settle();
   }, mapText);
   if (preset !== "map") {

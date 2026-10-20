@@ -1,0 +1,2 @@
+# The manifest pins sha256 and size of these files, and they mix CRLF and LF: never convert line endings.
+*.map -text

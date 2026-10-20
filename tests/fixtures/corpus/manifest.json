@@ -1,0 +1,362 @@
+{
+ "schema": 1,
+ "generatedBy": "bench/host/corpus-generate.ts for the legacy-* maps; seed 7319, 1280x720, each version's default cell density",
+ "entries": [
+  {
+   "id": "legacy-v0.9b",
+   "file": "legacy-v0.9b.map",
+   "version": "0.9b",
+   "expect": "ancient",
+   "gates": [
+    "1.0.0",
+    "1.1.0",
+    "1.11.0",
+    "1.21.0",
+    "1.22.0",
+    "1.3.0",
+    "1.4.0",
+    "1.5.0",
+    "1.6.0",
+    "1.61.0",
+    "1.62.0",
+    "1.63.0",
+    "1.64.0",
+    "1.65.0",
+    "1.65.2",
+    "1.7.0",
+    "1.72.0",
+    "1.73.0",
+    "1.84.0",
+    "1.85.0",
+    "1.86.0",
+    "1.88.0",
+    "1.91.0",
+    "1.92.0",
+    "1.94.0",
+    "1.95.0",
+    "1.96.0",
+    "1.98.0",
+    "1.99.0",
+    "1.100.0",
+    "1.104.0",
+    "1.105.0",
+    "1.106.0",
+    "1.107.0",
+    "1.108.0",
+    "1.109.0",
+    "1.111.0",
+    "1.113.0",
+    "1.124.0",
+    "1.127.0"
+   ],
+   "source": "git tag v0.9b of this repo (Azgaar upstream history, 2019-06-30)",
+   "bytes": 1040169,
+   "sha256": "0bc00968ce90a1804e638748b055cc81a73c1a268b973fd635d33a4399a882e5",
+   "notes": "Version 0.9b parses as 0.9.0, below the loader's 0.70.0 floor, so the loader refuses it as ancient. The 1.0.0 gate is only reachable by such files."
+  },
+  {
+   "id": "legacy-v1.0",
+   "file": "legacy-v1.0.map",
+   "version": "1.0",
+   "expect": "load",
+   "gates": [
+    "1.1.0",
+    "1.11.0",
+    "1.21.0",
+    "1.22.0",
+    "1.3.0",
+    "1.4.0",
+    "1.5.0",
+    "1.6.0",
+    "1.61.0",
+    "1.62.0",
+    "1.63.0",
+    "1.64.0",
+    "1.65.0",
+    "1.65.2",
+    "1.7.0",
+    "1.72.0",
+    "1.73.0",
+    "1.84.0",
+    "1.85.0",
+    "1.86.0",
+    "1.88.0",
+    "1.91.0",
+    "1.92.0",
+    "1.94.0",
+    "1.95.0",
+    "1.96.0",
+    "1.98.0",
+    "1.99.0",
+    "1.100.0",
+    "1.104.0",
+    "1.105.0",
+    "1.106.0",
+    "1.107.0",
+    "1.108.0",
+    "1.109.0",
+    "1.111.0",
+    "1.113.0",
+    "1.124.0",
+    "1.127.0"
+   ],
+   "source": "git tag v1.0 (2019-08-31)",
+   "bytes": 1545210,
+   "sha256": "7317334c577880e92da6f4336b0b58a90adb1c31bdc8ca2c9a47987331c4c511",
+   "notes": "Oldest loadable map. Header has 6 fields (no map id). Triggers every gate but 1.0.0."
+  },
+  {
+   "id": "legacy-v1.4",
+   "file": "legacy-v1.4.map",
+   "version": "1.4",
+   "expect": "load",
+   "gates": [
+    "1.11.0",
+    "1.21.0",
+    "1.22.0",
+    "1.5.0",
+    "1.6.0",
+    "1.61.0",
+    "1.62.0",
+    "1.63.0",
+    "1.64.0",
+    "1.65.0",
+    "1.65.2",
+    "1.7.0",
+    "1.72.0",
+    "1.73.0",
+    "1.84.0",
+    "1.85.0",
+    "1.86.0",
+    "1.88.0",
+    "1.91.0",
+    "1.92.0",
+    "1.94.0",
+    "1.95.0",
+    "1.96.0",
+    "1.98.0",
+    "1.99.0",
+    "1.100.0",
+    "1.104.0",
+    "1.105.0",
+    "1.106.0",
+    "1.107.0",
+    "1.108.0",
+    "1.109.0",
+    "1.111.0",
+    "1.113.0",
+    "1.124.0",
+    "1.127.0"
+   ],
+   "source": "git tag v1.4 (2020-06-21)",
+   "bytes": 1607750,
+   "sha256": "b0936bc7f52a947ab4b2cd90159cef2aa84954c6cf01c9665d272606a9ee2900",
+   "notes": "First map with a map id (7 header fields)."
+  },
+  {
+   "id": "legacy-v1.7",
+   "file": "legacy-v1.7.map",
+   "version": "1.7",
+   "expect": "load",
+   "gates": [
+    "1.11.0",
+    "1.21.0",
+    "1.22.0",
+    "1.61.0",
+    "1.62.0",
+    "1.63.0",
+    "1.64.0",
+    "1.65.0",
+    "1.65.2",
+    "1.72.0",
+    "1.73.0",
+    "1.84.0",
+    "1.85.0",
+    "1.86.0",
+    "1.88.0",
+    "1.91.0",
+    "1.92.0",
+    "1.94.0",
+    "1.95.0",
+    "1.96.0",
+    "1.98.0",
+    "1.99.0",
+    "1.100.0",
+    "1.104.0",
+    "1.105.0",
+    "1.106.0",
+    "1.107.0",
+    "1.108.0",
+    "1.109.0",
+    "1.111.0",
+    "1.113.0",
+    "1.124.0",
+    "1.127.0"
+   ],
+   "source": "git tag v1.7 (2021-10-06)",
+   "bytes": 1990459,
+   "sha256": "b5aefa2a97053d8afa9004ab1db8c1b756a473fecf5f2371cf73381bc7ad5ecd",
+   "notes": "Pre markers-data rewrite (the 1.7.0 gate is skipped, the 1.72+ gates run)."
+  },
+  {
+   "id": "legacy-v1.99",
+   "file": "legacy-v1.99.map",
+   "version": "1.99.01",
+   "expect": "load",
+   "gates": [
+    "1.100.0",
+    "1.104.0",
+    "1.105.0",
+    "1.106.0",
+    "1.107.0",
+    "1.108.0",
+    "1.109.0",
+    "1.111.0",
+    "1.113.0",
+    "1.124.0",
+    "1.127.0"
+   ],
+   "source": "git tag v1.99 (2024-08-15), header 1.99.01",
+   "bytes": 1714918,
+   "sha256": "919e2958815c6d7dee554af7cc1f9c84a72351af16ed86b2d8018e51d3efac9a",
+   "notes": "Static pre-Vite tree."
+  },
+  {
+   "id": "legacy-v1.109",
+   "file": "legacy-v1.109.map",
+   "version": "1.109.1",
+   "expect": "load",
+   "gates": [
+    "1.111.0",
+    "1.113.0",
+    "1.124.0",
+    "1.127.0"
+   ],
+   "source": "git tag v1.109 (2026-01-08), header 1.109.1",
+   "bytes": 1956675,
+   "sha256": "1df42df65e233e5bd5ef9a2f0c755c0aef05496128a4a9d529788b047f2c941f",
+   "notes": "Runs 1.111, 1.113, 1.124 and 1.127."
+  },
+  {
+   "id": "legacy-v1.123",
+   "file": "legacy-v1.123.map",
+   "version": "1.123.0",
+   "expect": "load",
+   "gates": [
+    "1.124.0",
+    "1.127.0"
+   ],
+   "source": "git tag v1.123 (2026-06-12), built with vite --base=/, header 1.123.0",
+   "bytes": 2143078,
+   "sha256": "ccb86041bbb9fec5dd5e4315a36302771f7819afcdfaa0b635809e2fc0d0f117",
+   "notes": "Vite-era build. Runs only 1.124 (goods, markets, #tradeAnimation) and 1.127."
+  },
+  {
+   "id": "demo-v1.112",
+   "file": "../demo.map",
+   "version": "1.112.1",
+   "expect": "load",
+   "gates": [
+    "1.113.0",
+    "1.124.0",
+    "1.127.0"
+   ],
+   "source": "tests/fixtures/demo.map (already in the repo; written by 1.112.1)",
+   "bytes": 4313645,
+   "sha256": "f1ab797dcf7e2a383b0753e965342c374e86c6ce1db666ea2a4abc8122504799",
+   "notes": "Not copied: referenced in place. Runs 1.113, 1.124 and 1.127."
+  }
+ ],
+ "knownUnreachable": [
+  {
+   "gate": "1.0.0",
+   "reason": "only a map older than 1.0.0 triggers it, and the loader refuses everything below 0.70.0 as ancient while real pre-1.0 files (0.9b) parse to 0.9.0; see CORPUS.md (decision for Ryan)"
+  }
+ ],
+ "goldenKnownGaps": [
+  {
+   "family": "cells",
+   "reason": "the same family fails the golden on the parity fixture at k 1 (W1 triage in build-GLUE.md); a GPU fidelity gap owned by another packet, not a corpus finding",
+   "maxOver16": 6.7,
+   "minSsim": 0.821
+  },
+  {
+   "family": "coordinates",
+   "reason": "the same family fails the golden on the parity fixture at k 1 (W1 triage in build-GLUE.md); a GPU fidelity gap owned by another packet, not a corpus finding",
+   "maxOver16": 2.1,
+   "maxOver44": 2.0,
+   "minSsim": 0.915
+  },
+  {
+   "family": "states",
+   "reason": "the same family fails the golden on the parity fixture at k 1 (W1 triage in build-GLUE.md); a GPU fidelity gap owned by another packet, not a corpus finding",
+   "maxOver16": 25.3,
+   "maxOver44": 7.5
+  },
+  {
+   "family": "provinces",
+   "reason": "the same family fails the golden on the parity fixture at k 1 (W1 triage in build-GLUE.md); a GPU fidelity gap owned by another packet, not a corpus finding",
+   "maxOver16": 78.5
+  },
+  {
+   "family": "zones",
+   "reason": "the same family fails the golden on the parity fixture at k 1 (W1 triage in build-GLUE.md); a GPU fidelity gap owned by another packet, not a corpus finding; bounds for zones are a guess (no corpus map failed it)",
+   "maxOver16": 5.0,
+   "maxOver44": 2.0,
+   "minSsim": 0.8
+  },
+  {
+   "family": "markets",
+   "reason": "the same family fails the golden on the parity fixture at k 1 (W1 triage in build-GLUE.md); a GPU fidelity gap owned by another packet, not a corpus finding",
+   "maxOver16": 2.1,
+   "maxOver44": 1.5
+  },
+  {
+   "family": "markers",
+   "reason": "the same family fails the golden on the parity fixture at k 1 (W1 triage in build-GLUE.md); a GPU fidelity gap owned by another packet, not a corpus finding",
+   "maxOver16": 1.4,
+   "maxOver44": 1.0
+  },
+  {
+   "family": "emblems",
+   "reason": "the same family fails the golden on the parity fixture at k 1 (W1 triage in build-GLUE.md); a GPU fidelity gap owned by another packet, not a corpus finding",
+   "maxOver16": 2.0
+  },
+  {
+   "family": "labels",
+   "reason": "the same family fails the golden on the parity fixture at k 1 (W1 triage in build-GLUE.md); a GPU fidelity gap owned by another packet, not a corpus finding",
+   "maxOver44": 0.8
+  },
+  {
+   "family": "military",
+   "reason": "the same family fails the golden on the parity fixture at k 1 (W1 triage in build-GLUE.md); a GPU fidelity gap owned by another packet, not a corpus finding",
+   "maxOver16": 2.2,
+   "maxOver44": 0.9
+  },
+  {
+   "family": "ice",
+   "maps": [
+    "legacy-v1.7",
+    "legacy-v1.99"
+   ],
+   "reason": "legacy-only gap, cause not confirmed: both files carry style=\"opacity: 0.04\" (a jQuery fade caught mid-way by the old version) on #ice next to opacity=\"0.9\" and filter dropShadow05; the SVG honours the style (CSS beats the attribute) and the GPU draws the polygons far stronger (over16 3.8%, whole polygons orange in the diff). Suspect: the scene reads the opacity attribute, not the inline style. Evidence ~/.tupaia-gates/w2-corpus/corpus-20261020T013057-325Z/legacy-v1.7/golden",
+   "maxOver16": 5.1
+  },
+  {
+   "family": "texture",
+   "maps": [
+    "demo-v1.112"
+   ],
+   "reason": "legacy-only gap, cause not confirmed: the diff shows the GPU and SVG differ outside the 1280x720 image rectangle of a 1680x849 world (over16 9.3%); the texture <image> is a fixed 1280x720 with preserveAspectRatio slice and the layer is masked by #land",
+   "maxOver16": 12.1
+  },
+  {
+   "family": "rivers",
+   "maps": [
+    "demo-v1.112"
+   ],
+   "reason": "borderline legacy-only gap: over44 0.57% against 0.5% on demo.map; rivers pass on the parity fixture",
+   "maxOver44": 0.8
+  }
+ ]
+}

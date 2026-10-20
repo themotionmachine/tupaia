@@ -27,6 +27,7 @@ import { decodePng, encodePng } from "../png.ts";
 import { BinaryMapArchive, isBinaryMap } from "../../src/io/binary-map.ts";
 import {
   type Check,
+  type Pixels,
   type PixelComparison,
   type SvgFacts,
   SECTION_COUNT,
@@ -39,6 +40,7 @@ import {
   firstDifference,
   info,
   judgeSvgFacts,
+  maskHeader,
   pass,
   rowStatus,
   sha256,
@@ -102,6 +104,7 @@ interface ArmRun {
   facts: Record<string, any>;
   texts: Record<string, string>;
   bytes: Record<string, Buffer>;
+  pixels: Record<string, Pixels>; // JPEGs decoded by the browser's decoder at capture time (the node side has no JPEG decoder)
   steps: StepRecord[];
   errors: string[];
   warnings: string[];
@@ -198,7 +201,7 @@ const browser: Browser = await chromium.launch({ headless: true, channel: "chrom
 async function openArm(world: string, arm: Arm, label = arm as string): Promise<{ context: BrowserContext; page: Page; run: ArmRun; downloads: { count: number; files: string[] } }> {
   const dir = join(outDir, world, label);
   mkdirSync(dir, { recursive: true });
-  const run: ArmRun = { world, arm, label, dir, facts: {}, texts: {}, bytes: {}, steps: [], errors: [], warnings: [], failure: null };
+  const run: ArmRun = { world, arm, label, dir, facts: {}, texts: {}, bytes: {}, pixels: {}, steps: [], errors: [], warnings: [], failure: null };
   const context = await browser.newContext({ viewport: { width: 1280, height: 720 }, deviceScaleFactor: dpr, serviceWorkers: "block", acceptDownloads: true });
   await context.addInitScript(() => {
     localStorage.setItem("autosaveInterval", "0");
@@ -264,6 +267,25 @@ async function settled(run: ArmRun, page: Page, label: string, allowSuspended = 
 // and whose transforms would make two exports of one state differ
 const freeze = (page: Page): Promise<number> => page.evaluate(() => (globalThis as any).__cons.freezeTrade());
 
+/** RGBA pixels of an image as the browser decodes it (no colour conversion, no premultiplication), same decoder for both arms. */
+async function decodeInPage(page: Page, bytes: Buffer, type: string): Promise<Pixels> {
+  const out = await page.evaluate(
+    async ([b64, mime]) => {
+      const blob = new Blob([Uint8Array.from(atob(b64), c => c.charCodeAt(0))], { type: mime });
+      const bitmap = await createImageBitmap(blob, { colorSpaceConversion: "none", premultiplyAlpha: "none" });
+      const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+      const context = canvas.getContext("2d", { willReadFrequently: true })!;
+      context.drawImage(bitmap, 0, 0);
+      const data = context.getImageData(0, 0, bitmap.width, bitmap.height).data;
+      let binary = "";
+      for (let i = 0; i < data.length; i += 0x8000) binary += String.fromCharCode.apply(null, data.subarray(i, i + 0x8000) as unknown as number[]);
+      return { width: bitmap.width, height: bitmap.height, base64: btoa(binary) };
+    },
+    [bytes.toString("base64"), type] as const
+  );
+  return { width: out.width, height: out.height, data: new Uint8Array(Buffer.from(out.base64, "base64")) };
+}
+
 async function capture(page: Page, run: ArmRun, file: string, trigger: () => Promise<unknown>): Promise<Buffer> {
   const wait = page.waitForEvent("download", { timeout: 120000 });
   wait.catch(() => {});
@@ -273,6 +295,7 @@ async function capture(page: Page, run: ArmRun, file: string, trigger: () => Pro
   await download.saveAs(path);
   const bytes = readFileSync(path);
   run.bytes[file] = bytes;
+  if (/\.jpe?g$/.test(file)) run.pixels[file] = await decodeInPage(page, bytes, "image/jpeg");
   run.facts[`${file}:suggested`] = download.suggestedFilename().replace(/\d{4}-\d{2}-\d{2}.*?(?=\.)/, "<time>");
   return bytes;
 }
@@ -295,7 +318,6 @@ async function runArm(world: string, arm: Arm, label: string = arm): Promise<Arm
   const { context, page, run, downloads } = await openArm(world, arm, label);
   const evalp = <T>(fn: (...a: any[]) => T | Promise<T>, arg?: unknown) => page.evaluate(fn as any, arg) as Promise<T>;
   const tamper = arm === "gpu" && breakMode;
-  const toB64 = (bytes: Uint8Array | Buffer) => Buffer.from(bytes).toString("base64");
   try {
     // ---- boot: load the world, hash it (row 40)
     await step(run, page, "boot", async () => {
@@ -380,6 +402,9 @@ async function runArm(world: string, arm: Arm, label: string = arm): Promise<Arm
       // I12: customization blocks every save path
       const before = downloads.count;
       run.facts.blocked = await evalp(() => (globalThis as any).__cons.saveBlockedProbe());
+      // Playwright delivers the download event asynchronously: an unblocked saveMap('machine') could still be in flight
+      // when the evaluate returns. Wait for one (expected to time out) before counting.
+      await page.waitForEvent("download", { timeout: 2500 }).catch(() => null);
       run.facts.blocked.downloads = downloads.count - before;
       run.facts.afterBlocked = await settled(run, page, "after customization probe");
       // reload the binary, save text again (I2: save, load, save)
@@ -399,7 +424,6 @@ async function runArm(world: string, arm: Arm, label: string = arm): Promise<Arm
       const viaLdb = await evalp(async () => (await (globalThis as any).lazy.save()).prepareMapData());
       put(run, "save-after-ldb-reload.map", viaLdb);
       run.facts.hash2 = await evalp(() => (globalThis as any).__cons.hashWorld());
-      void toB64;
     });
 
     // ---- the rest runs on the freshly reloaded world, back at the non-identity camera
@@ -493,7 +517,8 @@ async function runArm(world: string, arm: Arm, label: string = arm): Promise<Arm
       run.facts.afterTransform = await settled(run, page, "after transform tool");
     });
 
-    // ---- row 35: minimap (suspends the gpu renderer today: the bridge), viewport rect, click-to-pan target
+    // ---- row 35: minimap (viewport rect, click-to-pan target). Whether opening it suspends the gpu canvas depends on the build (W1 CONS saw it stay
+    // visible; at gpu/integrate with MODE/LIFE merged the dialog suspends it with "editor dialog open"): recorded, never asserted.
     await step(run, page, "minimap", async () => {
       const opened = await evalp(() => (globalThis as any).__cons.openMinimap());
       run.facts.minimapOpen = opened;
@@ -666,6 +691,21 @@ function judgePixels(row: number, id: string, name: string, a: Buffer | undefine
   }
 }
 
+/** JPEG files: byte-identical passes; otherwise the decoded pixels are compared like a PNG (a size proxy cannot see a changed image). */
+function judgeJpeg(row: number, id: string, name: string, svgRun: ArmRun, gpuRun: ArmRun, file: string, inputsIdentical: boolean, evidence: string): Check {
+  const a = svgRun.bytes[file];
+  const b = gpuRun.bytes[file];
+  if (!a || !b) return fail(row, id, name, `missing: svg ${!!a}, gpu ${!!b}`, evidence);
+  if (Buffer.compare(a, b) === 0) return pass(row, id, name, `byte-identical (${a.length} bytes)`, evidence);
+  const pa = svgRun.pixels[file];
+  const pb = gpuRun.pixels[file];
+  if (!pa || !pb) return fail(row, id, name, `bytes differ (${a.length} vs ${b.length}) and a JPEG could not be decoded`, evidence);
+  const cmp = comparePixels(pa, pb);
+  if (cmp.equal) return pass(row, id, name, `decoded pixels identical although the bytes differ: ${describePixels(cmp)}`, evidence);
+  if (inputsIdentical && withinNoise(cmp)) return pass(row, id, name, `rasterizer noise only (the encoder input is identical): ${describePixels(cmp)}`, evidence);
+  return fail(row, id, name, `${describePixels(cmp)}${inputsIdentical ? " (encoder input identical, difference exceeds rasterizer noise)" : " (encoder input differs too)"}`, evidence);
+}
+
 function judgeWorld(world: string, svgRun: ArmRun, gpuRun: ArmRun): Check[] {
   const checks: Check[] = [];
   const both = [svgRun, gpuRun];
@@ -697,7 +737,6 @@ function judgeWorld(world: string, svgRun: ArmRun, gpuRun: ArmRun): Check[] {
     return d ? `@${d.offset}: svg ${JSON.stringify(d.a.slice(60, 200))} | gpu ${JSON.stringify(d.b.slice(60, 200))}` : "";
   };
   const sameBytes = (file: string) => !!svgRun.bytes[file] && !!gpuRun.bytes[file] && Buffer.compare(svgRun.bytes[file], gpuRun.bytes[file]) === 0;
-  const GPU = gpuRun.label;
 
   // ---------------- row 31: save .map
   if (guard(31, "save.ran", "save step completed in both arms (gpu arm on the gpu path)", "save")) {
@@ -800,15 +839,12 @@ function judgeWorld(world: string, svgRun: ArmRun, gpuRun: ArmRun): Check[] {
     for (const r of both) {
       const a = r.bytes["export.png"];
       const b = r.bytes["export-again.png"];
-      if (a && b && !r.label.endsWith("tamper")) {
+      if (a && b) {
         const c = comparePixels(decode(a), decode(b));
         checks.push(info(34, tag(`export.${r.label}.png-repeat`), "noise floor: two exportToPng calls in one arm", describePixels(c), ev("export-again.png")));
       }
     }
-    const jpegEqual = sameBytes("export.jpeg");
-    const sizeClose = Math.abs((svgRun.bytes["export.jpeg"]?.length ?? 0) - (gpuRun.bytes["export.jpeg"]?.length ?? 0)) / Math.max(1, svgRun.bytes["export.jpeg"]?.length ?? 1) < 0.005;
-    const pngChecked = checks.find(c => c.id === tag("export.png"));
-    checks.push(verdict(jpegEqual || (pngChecked?.status === "PASS" && inputsPng && sizeClose), 34, tag("export.jpeg"), "exportToJpeg: gpu file equals the svg file (byte-identical, or the same encoder input up to rasterizer noise)", `${svgRun.bytes["export.jpeg"]?.length} vs ${gpuRun.bytes["export.jpeg"]?.length}${jpegEqual ? "" : "; bytes differ"}`, ev("export.jpeg")));
+    checks.push(judgeJpeg(34, tag("export.jpeg"), "exportToJpeg: gpu image equals the svg image pixel for pixel after decoding both JPEGs (the same encoder input may differ by rasterizer noise)", svgRun, gpuRun, "export.jpeg", inputsPng, ev("export.jpeg")));
     try {
       const tiles = (r: ArmRun) => unzipTiles(new Uint8Array(r.bytes["export-tiles.zip"]));
       const st = tiles(svgRun);
@@ -848,7 +884,8 @@ function judgeWorld(world: string, svgRun: ArmRun, gpuRun: ArmRun): Check[] {
     // The satellite water shimmer is not bit-stable between two screenshots of one page (the floor below), so that
     // view is held to the floor; the mesh view has no such noise and is held to D1.
     const floorOf = (again: string) => {
-      const fl = both.filter(r => r.bytes[again] && r.bytes[again.replace("-again", "")]).map(r => comparePixels(decode(r.bytes[again.replace("-again", "")]), decode(r.bytes[again])));
+      // the svg arm only: a noisier gpu arm must not raise its own bar
+      const fl = [svgRun].filter(r => r.bytes[again] && r.bytes[again.replace("-again", "")]).map(r => comparePixels(decode(r.bytes[again.replace("-again", "")]), decode(r.bytes[again])));
       return fl.length ? { changed: Math.max(...fl.map(c => c.changedFraction ?? 0)), over16: Math.max(...fl.map(c => c.over16Fraction ?? 0)) } : null;
     };
     const view = (file: string, label: string, floor: { changed: number; over16: number } | null = null) => {
@@ -921,7 +958,7 @@ function judgeWorld(world: string, svgRun: ArmRun, gpuRun: ArmRun): Check[] {
     checks.push(verdict(sa.scale === ga.scale && sa.viewX === ga.viewX && sa.viewY === ga.viewY, 35, tag("minimap.camera-after-close"), "after the minimap closes the gpu arm's camera equals the svg arm's", `svg ${JSON.stringify(sa)} | gpu ${JSON.stringify(ga)}`));
     const after = gpuRun.facts.afterMinimap;
     checks.push(verdict(after?.active === "gpu" && after?.canvasVisible === true && !after?.waitError && ga.canonicalStale !== true, 35, tag("minimap.gpu-resumes"), "closing the minimap resumes the gpu canvas on the clicked camera", JSON.stringify(after && { a: after.active, v: after.canvasVisible, s: after.suspendedReason, w: after.waitError, stale: ga.canonicalStale })));
-    checks.push(info(35, tag("minimap.suspends"), "renderer state while the minimap is open (bridge today: the gpu canvas is suspended and the SVG draws)", `gpu: ${JSON.stringify(go.status && { visible: go.status.canvasVisible, suspended: go.status.suspendedReason, active: go.status.active })}`));
+    checks.push(info(35, tag("minimap.suspends"), "renderer state 300 ms after the minimap opens (recorded, not gated: it varies by build; the checks that matter are the rect, the click target and that the gpu canvas resumes on close)", `gpu: ${JSON.stringify(go.status && { visible: go.status.canvasVisible, suspended: go.status.suspendedReason, active: go.status.active })}`));
     noErrors(35, "minimap");
   }
 
@@ -959,8 +996,7 @@ function judgeWorld(world: string, svgRun: ArmRun, gpuRun: ArmRun): Check[] {
       checks.push(verdict(se.visible && ge.visible && se.coaInDoc && ge.coaInDoc && !!se.imageHref && !!ge.imageHref, 38, tag("emblem.content"), "the emblem editor resolves the coat of arms from #coas in both arms", JSON.stringify({ svg: [se.visible, se.coaInDoc, !!se.imageHref], gpu: [ge.visible, ge.coaInDoc, !!ge.imageHref] })));
       checks.push(verdict(sameBytes("emblem.svg"), 38, tag("emblem.svg"), "emblem.svg download is byte-identical between arms", `${svgRun.bytes["emblem.svg"]?.length} vs ${gpuRun.bytes["emblem.svg"]?.length} ${svgRun.facts["emblem.svg:error"] ?? ""} ${gpuRun.facts["emblem.svg:error"] ?? ""}`, ev("emblem.svg")));
       checks.push(judgePixels(38, tag("emblem.png"), "emblem.png equals the svg arm's pixel for pixel", svgRun.bytes["emblem.png"], gpuRun.bytes["emblem.png"], sameBytes("emblem.svg"), ev("emblem.png")));
-      const jpegOk = sameBytes("emblem.jpeg") || (sameBytes("emblem.svg") && Math.abs((svgRun.bytes["emblem.jpeg"]?.length ?? 0) - (gpuRun.bytes["emblem.jpeg"]?.length ?? 0)) / Math.max(1, svgRun.bytes["emblem.jpeg"]?.length ?? 1) < 0.005);
-      checks.push(verdict(jpegOk && !!svgRun.bytes["emblem.jpeg"] && !!gpuRun.bytes["emblem.jpeg"], 38, tag("emblem.jpeg"), "emblem.jpeg equals the svg arm's (byte-identical, or the same input up to rasterizer noise)", `${svgRun.bytes["emblem.jpeg"]?.length} vs ${gpuRun.bytes["emblem.jpeg"]?.length}`, ev("emblem.jpeg")));
+      checks.push(judgeJpeg(38, tag("emblem.jpeg"), "emblem.jpeg equals the svg arm's pixel for pixel after decoding both JPEGs (the same encoder input may differ by rasterizer noise)", svgRun, gpuRun, "emblem.jpeg", sameBytes("emblem.svg"), ev("emblem.jpeg")));
     }
     checks.push(verdict(gpuRun.facts.afterEmblem?.active === "gpu" && !gpuRun.facts.afterEmblem?.waitError, 38, tag("emblem.gpu-active"), "after closing the editor the gpu renderer is active and settles", JSON.stringify(gpuRun.facts.afterEmblem && { a: gpuRun.facts.afterEmblem.active, f: gpuRun.facts.afterEmblem.fallbackReason, w: gpuRun.facts.afterEmblem.waitError })));
     noErrors(38, "emblem");
@@ -991,6 +1027,11 @@ function judgeWorld(world: string, svgRun: ArmRun, gpuRun: ArmRun): Check[] {
         const changed = Object.keys(r.facts.hash0.hash).filter(k => r.facts.hash0.hash[k] !== r.facts.hash1.hash[k]);
         checks.push(verdict(!changed.length && r.facts.sameObjects === true, 40, tag(`api.${r.label}.read-only`), "pure navigation (4 zoom/pan moves, settled) leaves pack, grid and their members byte-identical, and window.pack/grid are the same objects", changed.length ? `changed: ${changed.slice(0, 8).join(", ")}` : `${r.facts.hash0.keys} members hashed; same objects ${r.facts.sameObjects}`));
       }
+      // The map id is left out of the comparison below on purpose: showStatistics() (main.js) sets mapId = Date.now() at the end
+      // of EVERY load, so the id of a loaded map is a load timestamp, different in each page (the file's id is not kept; upstream
+      // behaviour). Recorded raw so that stays visible; a renderer cannot be told apart from the clock by it.
+      const idOf = (t: string) => maskHeader(splitSections(t)[0] ?? "").fields?.mapId;
+      checks.push(info(40, tag("api.map-id-is-load-time"), "the map id after loading the same file differs per page (a load-time Date.now(), not the file's id)", `world hash: svg ${svgRun.facts.hash0?.hash.mapId}, gpu ${gpuRun.facts.hash0?.hash.mapId}; first save header: svg ${idOf(svgRun.texts["save-trade-on.map"])}, gpu ${idOf(gpuRun.texts["save-trade-on.map"])}`));
       const differs = (key: string) => Object.keys(svgRun.facts[key].hash).filter(k => svgRun.facts[key].hash[k] !== gpuRun.facts[key].hash[k] && k !== "mapId");
       for (const [key, name] of [["hash0", "after loading the same map"], ["hash1", "after the navigation sequence"], ["hash2", "after the binary and ldb reloads"], ["hashEnd", "after every probe (reloads, cloud load, restore)"]] as const) {
         if (!svgRun.facts[key] || !gpuRun.facts[key]) {
@@ -1020,7 +1061,6 @@ function judgeWorld(world: string, svgRun: ArmRun, gpuRun: ArmRun): Check[] {
   checks.push(info("run", tag("run.gpu-settle-times"), "slowest times for the gpu renderer to settle", slowest.map(x => `${x.label} ${((x.waitedMs ?? 0) / 1000).toFixed(1)}s`).join(", ")));
   const gpuFinal = gpuRun.facts.final;
   checks.push(verdict(!!gpuFinal && gpuFinal.active === "gpu" && !gpuFinal.fallbackReason, "run", tag("run.gpu-never-fell-back"), "the gpu arm is still on the gpu path at the end of the run", JSON.stringify(gpuFinal && { a: gpuFinal.active, f: gpuFinal.fallbackReason })));
-  void GPU;
   return checks;
 }
 
@@ -1057,7 +1097,10 @@ try {
       report.checks.push(...(control ? checks.map(c => (/\.(gpu-active|gpu-resumes|gpu-survives|gpu-never-fell-back)$/.test(c.id) ? skip(c.row, c.id, c.name, "control run: no gpu arm") : c)) : checks));
     }
   }
-  for (const row of [31, 32, 34, 35, 36, 37, 38, 40, "run"]) {
+  // Row 33 (load + auto-update migrations) needs maps written by old versions; both fixtures here are already
+  // 1.130.1, so no migration runs. Say so in the report instead of leaving the row out (`gate corpus` covers it).
+  report.checks.push(skip(33, "corpus.not-run-here", "row 33 (load + auto-update.ts migrations) is not exercised by this harness", "UNTESTED here: both fixtures are 1.130.1 and no migration runs; the legacy corpus (`gate corpus`, bench/host/corpus-load.ts) covers it"));
+  for (const row of [31, 32, 33, 34, 35, 36, 37, 38, 40, "run"]) {
     const mine = report.checks.filter(c => String(c.row) === String(row));
     report.rows[String(row)] = { status: rowStatus(report.checks, row), checks: mine.length, failed: mine.filter(c => c.status === "FAIL").length };
   }
