@@ -991,6 +991,17 @@ export class GpuRenderer {
       return;
     }
     if (change === "overlay") {
+      // A world-layer overlay root (#coordinates, markers.ts VIEW_OVERLAYS) has no in-place refresh yet: the lane would
+      // answer "full" one timer hop later, and meanwhile neither an in-flight prepare nor a refine would see the change
+      // (the lane never bumps the revision). It is a revision now; only screen overlays (children of svg#map) wait for
+      // the lane. prepare.ts refreshOverlays() needs a world-run path before #coordinates can skip the full prepare.
+      const view = roots.find(root => root.parentNode !== this.svg);
+      if (view) {
+        this.invalidations.last = `view overlay #${view.id}`;
+        this.traceJob("revision", this.invalidations.last)();
+        this.invalidate(false);
+        return;
+      }
       for (const root of roots) this.pendingOverlays.add(root);
       this.refreshOverlays();
     }

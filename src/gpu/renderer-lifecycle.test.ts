@@ -238,14 +238,28 @@ describe("[LIFE] GpuRenderer lifecycle wiring", () => {
     await vi.waitFor(() => expect(pipeline.prepares).toHaveLength(2));
   });
 
-  it("row 5: #coordinates churn goes to the overlay lane with the layer as its root", async () => {
+  it("row 5: #coordinates churn is a revision at once (no in-place world-overlay refresh yet), not a lane hop", async () => {
     const coordinates = document.getElementById("coordinates")!;
     coordinates.replaceChildren(document.createElementNS(SVG_NS, "g"));
     coordinates.setAttribute("font-size", "9");
-    await vi.waitFor(() => expect(pipeline.overlayRoots).toEqual([[coordinates]]));
-    // the lane cannot refresh a world run in place yet, so it hands the change to one full prepare
+    await vi.waitFor(() => expect(renderer.telemetry().revision).toBe(1));
+    expect(renderer.telemetry().invalidations.last).toBe("view overlay #coordinates");
     await vi.waitFor(() => expect(pipeline.prepares).toHaveLength(2));
-    expect(renderer.telemetry().overlays.fulls).toBe(1);
+    expect(pipeline.overlayRoots).toEqual([]);
+    expect(renderer.telemetry().overlays.fulls).toBe(0);
+  });
+
+  it("row 5: a #coordinates redraw during a prepare makes that prepare stale (it never commits the old grid)", async () => {
+    let open = () => {};
+    pipeline.gate = new Promise(resolve => (open = resolve));
+    document.getElementById("rivers")!.setAttribute("opacity", "0.5");
+    await vi.waitFor(() => expect(pipeline.prepares).toHaveLength(2));
+    document.getElementById("coordinates")!.setAttribute("font-size", "9");
+    await vi.waitFor(() => expect(renderer.telemetry().revision).toBe(2));
+    open();
+    pipeline.gate = null;
+    await vi.waitFor(() => expect(pipeline.prepares.at(-1)?.revision).toBe(2));
+    await vi.waitFor(() => expect(renderer.telemetry().frameRevision).toBe(2));
   });
 
   it("any other world change is still a static revision", async () => {
