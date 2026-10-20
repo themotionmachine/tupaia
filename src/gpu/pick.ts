@@ -195,9 +195,14 @@ function dotCovers(px: number, py: number, x: number, y: number, cap: number, re
   return cap === 0 ? Math.abs(px - x) <= reach && Math.abs(py - y) <= reach : Math.hypot(px - x, py - y) <= reach;
 }
 
-// How far past a butt end still counts as on it. Click points arrive as float32 screen coordinates, so a burg centre
-// sitting exactly on a route's endpoint lands a few millionths of a unit to either side of the end line; Blink hits it.
-const END_SLACK = 1e-3;
+// How far past a butt end still counts as on it (user units). Click points arrive as float32 screen coordinates, so a
+// burg centre sitting exactly on a route's endpoint lands a few millionths of a unit to either side of the end line, and
+// Blink, which tests the exact point in float32 local coordinates, hits it (route931: 4e-6 past). It is no wider than
+// that float noise: at 1e-3 the trails' butt ends reached 0.002 CSS px (k 2) past Blink's, and burg centres 3e-4 to
+// 6e-4 units past a trail's end were indexed on the route while SVG selected the river, route or burg below
+// (route702 over river1260, route447 over route2, route286 over burg 1085, route466 over route393; PICK W3).
+// Measured on a synthetic butt end: Blink hits 5e-6 units past and misses 5e-5.
+export const END_SLACK = 2e-5;
 
 function isPoint(points: ArrayLike<number>, n: number): boolean {
   for (let k = 1; k < n; k++) if (points[2 * k] !== points[0] || points[2 * k + 1] !== points[1]) return false;
