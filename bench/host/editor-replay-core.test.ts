@@ -251,7 +251,31 @@ describe("D13 stale resume", () => {
   it("a change made by the close itself or in the model only counts; each session is judged on its own", () => {
     assert.equal(checkStaleResume([open, quiet, close(1, { domDeltaCount: 1 })]).length, 1);
     assert.equal(checkStaleResume([open, step({ index: 2, op: "input", domDeltaCount: 0, modelChanged: ["pack.burgs"] }), close(1)]).length, 1);
-    assert.deepEqual(checkStaleResume([open, edit, close(0), step({ index: 4 }), close(1, { index: 5 })]).length, 1);
+    const moved = { "#viewbox>#labels": "x2", "#defs": "y" }; // the second session's edit, net
+    assert.deepEqual(checkStaleResume([open, edit, close(0), step({ index: 4 }), close(1, { index: 5, dom: moved })]).length, 1);
     assert.deepEqual(checkStaleResume([open, edit, close(0), step({ index: 4, domDeltaCount: 0 }), close(1, { index: 5 })]), []);
+  });
+
+  it("judges the net change from the step before the open to the close (W3 LIFE3 net-change reading)", () => {
+    const before = step({ index: 0, op: "display", dialogs: [], dom: { "#viewbox>#icons": "raster" } });
+    const swapped = step({ index: 1, dom: { "#viewbox>#icons": "vectors" } }); // open: rasters to vectors
+    const restored = { dom: { "#viewbox>#icons": "raster" } };
+    // the DOM moved on open and came back on close: nothing changed, the last frame may show
+    assert.deepEqual(checkStaleResume([before, swapped, close(2, restored)]), []);
+    // the close left it different: changed, a stale frame fails
+    assert.equal(checkStaleResume([before, swapped, close(2, { dom: { "#viewbox>#icons": "moved" } })]).length, 1);
+    // a net change of the model the map paints from outside svg#map (a coat of arms in pack.burgs) counts although
+    // the DOM came back
+    const coa = { "pack.burgs": "coa edited", "pack.cells.h": "b" };
+    const modelEdit = step({ index: 2, op: "input", modelChanged: ["pack.burgs"], model: coa, dom: { "#viewbox>#icons": "vectors" } });
+    assert.equal(checkStaleResume([before, swapped, modelEdit, close(2, { index: 3, model: coa, ...restored })]).length, 1);
+    // the model changed and changed back (burg groups: apply, restore the defaults, apply), or changed only where the
+    // map does not paint from (options): the SVG shows what it showed, the last frame may show
+    assert.deepEqual(checkStaleResume([before, swapped, modelEdit, close(2, { index: 3, ...restored })]), []);
+    const settings = step({ index: 2, op: "input", modelChanged: ["options"], model: { ...before.model, options: "2" } });
+    assert.deepEqual(checkStaleResume([before, swapped, settings, close(2, { index: 3, model: settings.model, ...restored })]), []);
+    // steps before the open (display, camera) are not part of the session
+    const display = step({ index: 0, op: "display", dialogs: [], domDeltaCount: 5, dom: { "#viewbox>#icons": "raster" } });
+    assert.deepEqual(checkStaleResume([display, swapped, close(1, restored)]), []);
   });
 });

@@ -4,6 +4,7 @@ import { restoreReliefOnLoad } from "@/renderers/relief-settings";
 import { calculateVoronoi, ensureEl, last, link, minmax, parseError, rn } from "@/utils";
 import { decodeBinaryMap, isBinaryMap, type MapCellArray } from "./binary-map";
 import { applyBiomeExtras } from "./biome-extras"; // tupaia-mcp: biome icon density/icons/cost
+import { resetCameraGlobals, resetEditorsOnLoad } from "./editor-reset";
 import { assignMapRecords } from "./lazy-map-records";
 import { repairInvalidCultures, repairStateCapital } from "./load-repairs"; // tupaia-mcp: load repairs
 
@@ -247,6 +248,7 @@ async function parseLoadedData(data: string[], mapVersion: string | null): Promi
   try {
     // exit customization
     if (typeof window.closeDialogs === "function") closeDialogs();
+    resetEditorsOnLoad(document, customization === 1); // editor state outside the dialogs (editor-reset.ts)
     customization = 0;
     if (ensureEl("customizationMenu").offsetParent) ensureEl("styleTab").click();
 
@@ -358,6 +360,7 @@ async function parseLoadedData(data: string[], mapVersion: string | null): Promi
     // v5 global `d3.event`, breaking mouse/zoom handlers after a map load (#1508).
     // Every layer selection below chains off `svg`, so they all inherit v5.
     svg = (window as any).d3.select("#map") as typeof svg;
+    resetCameraGlobals(); // the new #map's zoom is identity: zoomRaf must not drop a zoom to the old camera
     defs = svg.select<SVGDefsElement>("#deftemp");
     viewbox = svg.select<SVGElement>("#viewbox");
     scaleBar = svg.select<SVGGElement>("#scaleBar");

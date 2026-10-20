@@ -262,25 +262,49 @@ export function checkGpuStep(step: StepObservation, arm: Arm, resumeLimitMs: num
 }
 
 /**
- * D13: after an editor session that changed the model (any step since the previous close changed the model DOM or
- * pack/grid/notes) closes, no GPU frame older than the latest DOM revision may be on screen. A session that changed
- * nothing may return to the last frame at once, so only changing sessions are judged.
+ * D13: after an editor session that changed the model closes, no GPU frame older than the latest DOM revision may be
+ * on screen. A session that changed nothing may return to the last frame at once, so only changing sessions are judged.
+ * "Changed" (W3 LIFE3, the renderer's net-change test): what the SVG reference shows at the close differs from what
+ * it showed just before the editor opened. That is the model DOM (per-layer `dom` hashes, 2d canvases included) or the
+ * one model the map paints from outside svg#map: coats of arms, rendered into svg#defElements from the `coa` of pack
+ * burgs/states/provinces (DEFINITION_MODEL, compared net). An editor that rewrites the DOM on open and restores it on
+ * close (burg icons: rasters to vectors and back), or that changes the model and changes it back (burg groups: apply,
+ * restore the defaults, apply), changed nothing on screen; a model change with no DOM trace (options, notes) cannot
+ * make the frame differ from the SVG. Without a step before the open to compare with, any step's DOM delta or model
+ * change since the previous close counts, as before.
  */
 export function checkStaleResume(steps: StepObservation[]): string[] {
   const out: string[] = [];
-  let changed = false;
+  let touched = false; // any step's DOM delta or model change since the previous close (the fallback reading)
+  let base: StepObservation | null | undefined; // undefined: no editor opened yet in this session
+  let previous: StepObservation | null = null;
   for (const step of steps) {
-    if (step.domDeltaCount || step.modelChanged.length) changed = true;
+    if (base === undefined && step.dialogs.length) base = previous && !previous.dialogs.length ? previous : null;
+    if (step.domDeltaCount || step.modelChanged.length) touched = true;
+    previous = step;
     if (step.op !== "close") continue;
+    const changed = base
+      ? !sameHashes(base.dom, step.dom) || DEFINITION_MODEL.some(key => base!.model[key] !== step.model[key])
+      : touched;
     const stale = step.resume?.staleShown ?? 0;
     if (changed && stale) {
       const first = step.resume?.staleFirst;
       const detail = first ? ` (first +${first.at} ms via ${first.via}: frame revision ${first.frameRevision} < ${first.revision})` : "";
       out.push(`step ${step.index} close: stale GPU frame visible after a changing edit closed, ${stale}x${detail}`);
     }
-    changed = false;
+    touched = false;
+    base = undefined;
   }
   return out;
+}
+
+// model sections the GPU frame reads outside svg#map: their coats of arms (svg#defElements #coas)
+const DEFINITION_MODEL = ["pack.burgs", "pack.states", "pack.provinces"];
+
+function sameHashes(a: Record<string, string>, b: Record<string, string>): boolean {
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  for (const key of keys) if (a[key] !== b[key]) return false;
+  return true;
 }
 
 /** Problems with the recording itself (svg arm): a script that does not do what it says proves nothing. */

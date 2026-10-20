@@ -5,8 +5,6 @@ function editHeightmap(options) {
   if (options?.tupaiaExport) return { restoreKeptData, restoreRiskedData, regenerateErasedData };
   const { mode, tool } = options || {};
   restartHistory();
-  viewbox.selectAll("#heights").remove();
-  viewbox.insert("g", "#terrs").attr("id", "heights");
 
   if (!mode) showModeDialog();
   else enterHeightmapEditMode(mode);
@@ -53,6 +51,10 @@ function editHeightmap(options) {
   }
 
   function enterHeightmapEditMode(mode) {
+    // tupaia: the edit layer exists only in the edit mode. Inserted before the mode dialog, it stayed in the map (and in
+    // a save) when that dialog was cancelled or closed with its X.
+    viewbox.selectAll("#heights").remove();
+    viewbox.insert("g", "#terrs").attr("id", "heights");
     editHeightmap.layers = Array.from(mapLayers.querySelectorAll("li:not(.buttonoff)")).map(node => node.id); // store layers preset
     editHeightmap.layers.forEach(l => ensureEl(l).click()); // turn off all layers
 

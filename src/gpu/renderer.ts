@@ -9,6 +9,7 @@ import { canvasAntialias, DETAIL_RESERVE, GPU_BUDGET, windowAllowance } from "./
 import { type Camera, parseViewboxTransform, screenToWorld, type Viewport, visibleWorld } from "./camera";
 import { forgetCompatClone, type Region } from "./compat";
 import { compatDirt, watchCompatInputs } from "./compat-reuse";
+import { type DefinitionStats, DefinitionWatch } from "./definitions";
 import { GpuDevice } from "./device";
 import {
   type ClickTelemetry,
@@ -31,6 +32,7 @@ import {
 } from "./lifecycle";
 import { classify, pixelRecords, TRADE_LAYER, TradeMarkers } from "./markers";
 import { describeMutation, MOTION_IDLE, prepareStale, prepareStart, settleAction } from "./motion";
+import { NetChange } from "./net-change";
 import { type PickHit, resolveLeaf } from "./pick";
 import {
   BudgetError,
@@ -110,7 +112,9 @@ export interface GpuTelemetry {
   suspendedReason: string;
   // resume hold (D13): the canvas stays hidden after a suspension that changed the model until the frame is current.
   // active: held now (heldMs so far, revisions that arrived since it began); holds: holds begun; skipped: suspensions
-  // that ended with no revision (the last frame came back at once); lastMs: duration of the last finished hold
+  // that ended with no revision (the last frame came back at once); lastMs: duration of the last finished hold;
+  // netUnchanged: suspensions with revisions whose net DOM change was nil (no hold either), netUnsure: ones the net
+  // test could not judge (the revision rule held); net: the last verdict and what decided it
   hold: {
     active: boolean;
     heldMs: number | null;
@@ -118,7 +122,11 @@ export interface GpuTelemetry {
     holds: number;
     skipped: number;
     lastMs: number | null;
+    netUnchanged: number;
+    netUnsure: number;
+    net: { verdict: string; detail: string } | null;
   };
+  definitions: DefinitionStats; // svg#defElements batches that re-prepared (referenced by the map) or were ignored
   dialogScans: number; // editor dialog scans (editorReason recomputes after a document mutation only)
   pickProfile: { queries: number; statusMs: number; indexMs: number };
   // state "active" means a frame is prepared and drawable; canvasVisible is whether the GPU canvas is on screen now
@@ -257,6 +265,8 @@ export class GpuRenderer {
   private peaks = { lifetime: 0, lastPrepare: null as number | null };
   private recovery = new RestoreClock(() => performance.now());
   private mutations: MutationObserver;
+  // LIFE3: svg#defElements (COAs, icon symbols, patterns) outside svg#map; a change the map references re-prepares
+  private definitions: DefinitionWatch;
   private stopCompatWatch: () => void = () => {};
   // compat raster reuse (prepare.ts compatReuseEnabled, opt-in): only then are the reuse tracker fed and the
   // document-wide outside-input watcher installed, and previous details carried; off, prepare and refine release
@@ -268,12 +278,18 @@ export class GpuRenderer {
   // Likewise an opening dialog: nothing else may follow it, and without a draw the last GPU frame would stay on screen
   // over the SVG the editor changes (editor replay, bench/host/editor-replay.ts).
   // A replaced #map (a load in progress, or one that failed before map:loaded) hides the previous world at once.
-  private dialogs = new MutationObserver(records => {
+  // A dialog wrapper's own change is also where a suspension starts (D13): seen here, before the map records of the
+  // same task are classified (mutated() drains this observer first), so an editor that edits as it opens counts the
+  // edit as made inside it.
+  private dialogs = new MutationObserver(records => this.dialogsChanged(records));
+  private dialogsChanged(records: MutationRecord[]): void {
     this.dialogsDirty = true;
     if (!this.sourceCurrent()) return void this.active();
+    const touched = records.some(touchesDialog);
+    if (touched && this.suspendedFrom === null) this.editorReason();
     this.resume();
-    if (this.suspendedReason || records.some(touchesDialog)) this.requestDraw();
-  });
+    if (this.suspendedReason || touched) this.requestDraw();
+  }
   private dialogsDirty = true;
   private dialogShown = false;
   private dialogScans = 0;
@@ -357,13 +373,13 @@ export class GpuRenderer {
     // a screen overlay (e.g. #scaleBar redraws) refresh only that overlay's batch; any other record is a static
     // revision and re-prepares.
     this.mutations = new MutationObserver(records => this.mutated(records));
-    this.mutations.observe(svg, {
-      subtree: true,
-      childList: true,
-      attributes: true,
-      attributeOldValue: true,
-      characterData: true
-    });
+    this.mutations.observe(svg, MAP_OBSERVED);
+    // created after `mutations`, so a task that both names a definition from the map and adds it is classified in
+    // that order (the reference is seen before the definition is judged)
+    this.definitions = new DefinitionWatch(
+      () => this.svg,
+      reason => this.definitionChanged(reason)
+    );
     this.dialogs.observe(document.documentElement, {
       subtree: true,
       childList: true,
@@ -501,6 +517,7 @@ export class GpuRenderer {
   }
 
   worldReplaced(world: number): void {
+    this.net.fail("world replaced");
     this.emblemCulling?.reset();
     this.world = world;
     this.generation++;
@@ -513,15 +530,11 @@ export class GpuRenderer {
       this.resizes.unobserve(this.svg);
       this.svg = current;
       current.after(this.canvas);
-      this.mutations.observe(current, {
-        subtree: true,
-        childList: true,
-        attributes: true,
-        attributeOldValue: true,
-        characterData: true
-      });
+      this.mutations.observe(current, MAP_OBSERVED);
       this.resizes.observe(current);
     }
+    this.definitions.attach();
+    this.definitions.mapChanged();
     // the replaced #map is canonical: adopt its camera so hiding cannot write the previous world's transform over it
     const transform = this.svg.querySelector("#viewbox")?.getAttribute("transform");
     if (transform != null) this.view = parseViewboxTransform(transform);
@@ -588,8 +601,10 @@ export class GpuRenderer {
         active: this.intentHold,
         heldMs: this.intentHold ? Math.round(performance.now() - this.holdFrom.at) : null,
         revisions: this.intentHold ? this.revision - this.holdFrom.revision : 0,
-        ...this.holdStats
+        ...this.holdStats,
+        net: this.net.last && { ...this.net.last }
       },
+      definitions: { ...this.definitions.stats },
       dialogScans: this.dialogScans,
       pickProfile: { ...this.pickProfile },
       canvasVisible: this.canvas.style.display !== "none",
@@ -655,6 +670,7 @@ export class GpuRenderer {
     clearTimeout(this.windowTimer);
     clearTimeout(this.overlayTimer);
     this.mutations.disconnect();
+    this.definitions.dispose();
     this.dialogs.disconnect();
     this.suspendWanted = false; // no resume after disposal
     this.longTaskObserver?.disconnect();
@@ -866,11 +882,17 @@ export class GpuRenderer {
   // that changed nothing returns to the last GPU frame at once (still "Updating" if that frame was already behind
   // before the suspension, e.g. a zoom-dependent DOM write). While held, motion does not abort or defer the prepare:
   // the SVG is what is on screen, so no stale frame can be revealed and the GPU view returns as soon as possible.
+  // W3 LIFE3: "changed" is the net change of the model DOM (net-change.ts), not any revision. A suspension whose
+  // records leave svg#map as it was (an editor opened and closed: burg icons swapped to vectors and back, a marker
+  // raised) returns to the last GPU frame at once ("Updating" while the re-prepare its revisions asked for runs).
+  // When the test cannot tell (records it cannot place, too many, a changed definition outside svg#map) the revision
+  // rule decides, as before.
   private intentEdit = false;
   private intentHold = false;
   private suspendedFrom: number | null = null; // revision at which the current suspension began (null: none)
   private holdFrom = { at: 0, revision: 0 }; // when the current hold began, and the revision it waits for then
-  private holdStats = { holds: 0, lastMs: null as number | null, skipped: 0 };
+  private holdStats = { holds: 0, lastMs: null as number | null, skipped: 0, netUnchanged: 0, netUnsure: 0 };
+  private readonly net = new NetChange();
 
   setIntent(edit: boolean): void {
     const records = this.mutations.takeRecords(); // edits made before the request belong before the suspension
@@ -912,7 +934,10 @@ export class GpuRenderer {
   private editorReason(): string {
     const reason = this.editorScan() || (this.intentEdit ? "edit mode" : "");
     if (reason) {
-      if (this.suspendedFrom === null) this.suspendedFrom = this.revision;
+      if (this.suspendedFrom === null) {
+        this.suspendedFrom = this.revision;
+        this.net.begin();
+      }
     } else if (this.suspendedFrom !== null) this.suspensionEnded(this.suspendedFrom);
     return reason;
   }
@@ -921,11 +946,19 @@ export class GpuRenderer {
     this.suspendedFrom = null;
     // the close's own edits (an editor applying its change as it closes, in the same task) count as made inside it
     const records = this.mutations.takeRecords();
+    this.net.note(records);
+    this.definitions.flush();
+    const net = this.net.end(this.svg); // before mutated(): it may see a dialog opening in the same task (a new session)
     if (records.length) this.mutated(records);
     if (this.revision === from) {
       this.holdStats.skipped++;
       return;
     }
+    if (net === "unchanged") {
+      this.holdStats.netUnchanged++;
+      return;
+    }
+    if (net === "unsure") this.holdStats.netUnsure++;
     if (!this.intentHold) {
       this.holdStats.holds++;
       this.holdFrom = { at: performance.now(), revision: this.revision };
@@ -975,6 +1008,8 @@ export class GpuRenderer {
   }
 
   private mutated(records: MutationRecord[]): void {
+    this.noticeSuspension();
+    this.net.note(records);
     if (records.some(record => record.target === this.svg && record.type === "attributes")) this.applyRootFilter();
     const roots: Element[] = [];
     const change = classify(
@@ -986,6 +1021,7 @@ export class GpuRenderer {
     // per record, for compat raster reuse: which runs a change can reach (compat-reuse.ts)
     if (this.compatReuse && (change === "static" || change === "overlay")) compatDirt.note(pixelRecords(records));
     if (change === "static") {
+      this.definitions.mapChanged();
       this.traceJob("revision", this.invalidations.last)();
       this.invalidate(false);
       return;
@@ -1006,6 +1042,26 @@ export class GpuRenderer {
       this.refreshOverlays();
     }
     if (change !== "none") this.requestDraw();
+  }
+
+  // A suspension that begins in the same task as these records must see them (D13): an editor dialog that opens and
+  // edits at once (its records wait on the dialog observer, which may be notified after this one), or a customization
+  // mode, a bare global no event announces, set together with its first DOM writes.
+  private noticeSuspension(): void {
+    if (this.suspendedFrom !== null) return;
+    const pending = this.dialogs.takeRecords();
+    if (pending.length) this.dialogsChanged(pending);
+    else if (typeof customizationMode() === "number" && customizationMode()) this.editorReason();
+  }
+
+  // A definition the map references changed outside svg#map (definitions.ts): a static revision. No record of it
+  // reaches the net-change test, so a suspension it lands in is judged by the revision rule.
+  private definitionChanged(reason: string): void {
+    this.net.fail(reason);
+    compatDirt.all(reason);
+    this.invalidations.last = reason;
+    this.traceJob("revision", reason)();
+    this.invalidate(false);
   }
 
   // `forced`: a re-prepare no observed mutation explains (bench controls), so no compat raster may be reused
@@ -1393,6 +1449,16 @@ export class GpuRenderer {
     }
   }
 }
+
+// characterDataOldValue: the D13 net-change test (net-change.ts) needs the original text of an edited text node
+const MAP_OBSERVED: MutationObserverInit = {
+  subtree: true,
+  childList: true,
+  attributes: true,
+  attributeOldValue: true,
+  characterData: true,
+  characterDataOldValue: true
+};
 
 // A mutation that can open a jQuery UI dialog: its wrapper added, or the wrapper's own style/class changed.
 function touchesDialog(record: MutationRecord): boolean {
