@@ -97,6 +97,20 @@ describe("GpuDevice", () => {
     });
   });
 
+  it("uploads only the requested top rows of a source (WebGL2 sub-rectangle) and tracks that size", () => {
+    const uploads: unknown[][] = [];
+    const { device } = setup({ texImage2D: (...args: unknown[]) => void uploads.push(args) });
+    const canvas = { width: 2048, height: 2048 } as unknown as HTMLCanvasElement;
+    const atlas = device.texture("glyph atlas", canvas, { rows: 90 });
+    expect(atlas).toMatchObject({ width: 2048, height: 90, bytes: 2048 * 90 * 4 });
+    // explicit width and height, then the source: the top-left 2048 x 90 sub-rectangle
+    expect(uploads[0].slice(3, 5)).toEqual([2048, 90]);
+    expect(uploads[0].at(-1)).toBe(canvas);
+    // rows past the source clamp to it, and the full upload keeps the 6-argument form
+    expect(device.texture("t", canvas, { rows: 4096 })).toMatchObject({ height: 2048 });
+    expect(uploads[1]).toHaveLength(6);
+  });
+
   it("resets premultiply and deletes the texture when upload is tainted", () => {
     const { gl, device } = setup({
       texImage2D: () => {

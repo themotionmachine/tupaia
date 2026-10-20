@@ -74,7 +74,7 @@ import { buildScene, type Draw, type LayerReport, type Scene, type ShapeStyle } 
 import { cloneLayers, type SceneCache, type SceneKey } from "./scene-cache";
 import { createSlicer, slicePolicy } from "./slice";
 import { flattenPath, type Subpath } from "./svg-path";
-import { GLYPH_FLOATS, type GlyphAtlas, layoutLabels } from "./text";
+import { GLYPH_FLOATS, type GlyphAtlas, glyphAtlasRows, layoutLabels } from "./text";
 
 export interface PrepareContext {
   device: GpuDevice;
@@ -387,9 +387,10 @@ export function retainFrame(
   if (glyphCount && atlasCopy) copy = atlasCanvas;
   else if (glyphCount) {
     if (!atlasCanvas || atlasCanvas !== live.canvas || live.generation !== atlasGeneration) return null;
+    // only the rows the instances sample (the upload takes no more); uvs stay normalized by the full atlas
     copy = document.createElement("canvas");
     copy.width = atlasCanvas.width;
-    copy.height = atlasCanvas.height;
+    copy.height = Math.min(atlasCanvas.height, glyphAtlasRows(prepared.payload.glyphs, glyphCount));
     const context = copy.getContext("2d");
     if (!context) return null;
     context.drawImage(atlasCanvas, 0, 0);
@@ -867,8 +868,20 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
     if (retained) glyphCount = retained.glyphCount;
     const atlasCanvas = retained ? retained.atlas : ctx.atlas.canvas;
 
+    if (!glyphData) {
+      glyphData = new Float32Array(glyphCount * GLYPH_FLOATS);
+      let offset = 0;
+      for (const chunk of glyphs) {
+        glyphData.set(chunk, offset);
+        offset += chunk.length;
+      }
+    }
+    // the glyph atlas uploads only the rows its instances sample (glyphAtlasRows)
+    const atlasRows =
+      glyphCount && atlasCanvas ? Math.min(atlasCanvas.height, glyphAtlasRows(glyphData, glyphCount)) : 0;
+
     // Still to upload after the compat rasters: glyph atlas and vertex data (≈ CPU arrays).
-    const glyphBytes = glyphCount && atlasCanvas ? atlasCanvas.width * atlasCanvas.height * 4 : 0;
+    const glyphBytes = atlasCanvas ? atlasCanvas.width * atlasRows * 4 : 0;
     const vertexBytes =
       (vertices.fans.length +
         vertices.segments.length +
@@ -1060,17 +1073,9 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
       buffers.push(buffer);
       return buffer;
     };
-    if (!glyphData) {
-      glyphData = new Float32Array(glyphCount * GLYPH_FLOATS);
-      let offset = 0;
-      for (const chunk of glyphs) {
-        glyphData.set(chunk, offset);
-        offset += chunk.length;
-      }
-    }
     let atlas: TrackedTexture | null = null;
     if (glyphCount && atlasCanvas) {
-      atlas = device.texture("glyph atlas", atlasCanvas);
+      atlas = device.texture("glyph atlas", atlasCanvas, { rows: atlasRows });
       textures.push(atlas);
     }
     const tree = [...before, ...batches, ...after];
