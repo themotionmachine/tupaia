@@ -258,29 +258,62 @@ const describe = (node: Node): string => {
 };
 
 // The parent's child list before `records` (its own childList records of one batch, in order), from the list after
-// them. null when a record cannot be placed (the records and the list disagree).
+// them. null when a record cannot be placed (the records and the list disagree). Linear in the list plus the records: the
+// list is held as a doubly linked list keyed by node, so placing a record never scans (a redraw that appends or removes
+// tens of thousands of children under one parent, the heightmap editor's #heights, used to cost Array.indexOf per node).
+interface Link {
+  node: Node;
+  prev: Link | null;
+  next: Link | null;
+}
+
 export function undo(list: Node[], records: readonly NetRecord[]): Node[] | null {
-  const out = [...list];
+  const links = new Map<Node, Link>();
+  let head: Link | null = null;
+  let tail: Link | null = null;
+  const append = (node: Node) => {
+    const link: Link = { node, prev: tail, next: null };
+    if (tail) tail.next = link;
+    else head = link;
+    tail = link;
+    links.set(node, link);
+  };
+  for (const node of list) append(node);
   for (let r = records.length - 1; r >= 0; r--) {
     const record = records[r];
     for (const node of Array.from(record.addedNodes)) {
-      const at = out.indexOf(node);
-      if (at < 0) return null;
-      out.splice(at, 1);
+      const link = links.get(node);
+      if (!link) return null;
+      if (link.prev) link.prev.next = link.next;
+      else head = link.next;
+      if (link.next) link.next.prev = link.prev;
+      else tail = link.prev;
+      links.delete(node);
     }
     const removed = Array.from(record.removedNodes);
     if (!removed.length) continue;
-    let at: number;
+    // the links the removed nodes go between
+    let before: Link | null; // they go after this one (null: at the start)
     if (record.previousSibling) {
-      const previous = out.indexOf(record.previousSibling);
-      if (previous < 0) return null;
-      at = previous + 1;
+      before = links.get(record.previousSibling) ?? null;
+      if (!before) return null;
     } else if (record.nextSibling) {
-      at = out.indexOf(record.nextSibling);
-      if (at < 0) return null;
-    } else at = out.length === 0 ? 0 : -1;
-    if (at < 0) return null;
-    out.splice(at, 0, ...removed);
+      const next = links.get(record.nextSibling);
+      if (!next) return null;
+      before = next.prev;
+    } else if (!head) before = null;
+    else return null;
+    for (const node of removed) {
+      const link: Link = { node, prev: before, next: before ? before.next : head };
+      if (link.prev) link.prev.next = link;
+      else head = link;
+      if (link.next) link.next.prev = link;
+      else tail = link;
+      links.set(node, link);
+      before = link;
+    }
   }
+  const out: Node[] = [];
+  for (let link = head as Link | null; link; link = link.next) out.push(link.node);
   return out;
 }

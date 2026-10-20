@@ -2,7 +2,7 @@
 // D13 net-change test (W3 LIFE3): an editor session that leaves svg#map as it found it is "unchanged" whatever it did
 // in between; anything else is "changed", and what the tracker cannot account for is "unsure".
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { NetChange, undo } from "./net-change";
+import { NetChange, type NetRecord, undo } from "./net-change";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 let svg: SVGSVGElement;
@@ -161,5 +161,132 @@ describe("[LIFE3] net-change test (D13)", () => {
     ];
     expect(undo([a, c, d], records)).toEqual([a, b, c]);
     expect(undo([a, c], records)).toBeNull(); // d is not there: the records do not describe this list
+  });
+
+  // the reference the linked list replaced: Array.indexOf per node, splice per record
+  const reference = (
+    list: Node[],
+    records: readonly {
+      addedNodes: ArrayLike<Node>;
+      removedNodes: ArrayLike<Node>;
+      previousSibling?: Node | null;
+      nextSibling?: Node | null;
+    }[]
+  ): Node[] | null => {
+    const out = [...list];
+    for (let r = records.length - 1; r >= 0; r--) {
+      const record = records[r];
+      for (const node of Array.from(record.addedNodes)) {
+        const at = out.indexOf(node);
+        if (at < 0) return null;
+        out.splice(at, 1);
+      }
+      const removed = Array.from(record.removedNodes);
+      if (!removed.length) continue;
+      let at: number;
+      if (record.previousSibling) {
+        const previous = out.indexOf(record.previousSibling);
+        if (previous < 0) return null;
+        at = previous + 1;
+      } else if (record.nextSibling) {
+        at = out.indexOf(record.nextSibling);
+        if (at < 0) return null;
+      } else at = out.length === 0 ? 0 : -1;
+      if (at < 0) return null;
+      out.splice(at, 0, ...removed);
+    }
+    return out;
+  };
+
+  it("undo agrees with the indexOf reference on random edit sequences (including ones that do not describe the list)", () => {
+    let seed = 7;
+    const random = (n: number) => {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      return seed % n;
+    };
+    for (let round = 0; round < 300; round++) {
+      const pool = Array.from({ length: 12 }, (_, i) => ({ id: `n${i}` }) as unknown as Node);
+      const live: Node[] = pool.slice(0, 1 + random(8));
+      const records: NetRecord[] = [];
+      const outside = new Set(pool.filter(n => !live.includes(n)));
+      for (let step = 0; step < 1 + random(6); step++) {
+        if (random(2) && outside.size) {
+          const node = [...outside][random(outside.size)];
+          const at = random(live.length + 1);
+          records.push({
+            type: "childList",
+            target: pool[0],
+            addedNodes: [node],
+            removedNodes: [],
+            previousSibling: live[at - 1] ?? null,
+            nextSibling: live[at] ?? null
+          });
+          live.splice(at, 0, node);
+          outside.delete(node);
+        } else if (live.length) {
+          const at = random(live.length);
+          const [node] = live.splice(at, 1);
+          records.push({
+            type: "childList",
+            target: pool[0],
+            addedNodes: [],
+            removedNodes: [node],
+            previousSibling: live[at - 1] ?? null,
+            nextSibling: live[at] ?? null
+          });
+          outside.add(node);
+        }
+      }
+      expect(undo([...live], records)).toEqual(reference([...live], records));
+      // a corrupted list: the same verdict (null or the same list) as the reference
+      const wrong = live.slice(1);
+      expect(undo([...wrong], records)).toEqual(reference([...wrong], records));
+    }
+  });
+
+  it("undo is linear in the records: tens of thousands of children under one parent finish within a time bound", () => {
+    const parent = { id: "p" } as unknown as Node;
+    const kids = Array.from({ length: 200_000 }, (_, i) => ({ id: `k${i}` }) as unknown as Node);
+    // 50k appended one at a time
+    const appended = kids.slice(0, 50_000);
+    const appends: NetRecord[] = appended.map((node, i) => ({
+      type: "childList",
+      target: parent,
+      addedNodes: [node],
+      removedNodes: [],
+      previousSibling: appended[i - 1] ?? null,
+      nextSibling: null
+    }));
+    let t = performance.now();
+    expect(undo([...appended], appends)).toEqual([]);
+    expect(performance.now() - t).toBeLessThan(500);
+    // 200k appended in a loop of one-node records (the quadratic shape took seconds here)
+    const many: NetRecord[] = kids.map((node, i) => ({
+      type: "childList",
+      target: parent,
+      addedNodes: [node],
+      removedNodes: [],
+      previousSibling: kids[i - 1] ?? null,
+      nextSibling: null
+    }));
+    t = performance.now();
+    expect(undo([...kids], many)).toEqual([]);
+    expect(performance.now() - t).toBeLessThan(1500);
+    // 50k removed one at a time from the front (replaceChildren / remove-all), restored in order
+    const removals: NetRecord[] = appended.map(node => ({
+      type: "childList",
+      target: parent,
+      addedNodes: [],
+      removedNodes: [node],
+      previousSibling: null,
+      nextSibling: null
+    }));
+    // removing from an emptying list: every record sees previousSibling null and nextSibling null only for the last one
+    removals.forEach((record, i) => {
+      record.nextSibling = appended[i + 1] ?? null;
+    });
+    t = performance.now();
+    expect(undo([], removals)).toEqual(appended);
+    expect(performance.now() - t).toBeLessThan(500);
   });
 });
