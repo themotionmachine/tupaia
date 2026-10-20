@@ -1,11 +1,15 @@
 import { describe, expect, it } from "vitest";
+import { measureContour, parseContours } from "./dash-measure";
 import {
+  analyticShape,
   appendFan,
   appendFillEdges,
   appendSegments,
   appendStrokeCaps,
+  COVERAGE_SAMPLES,
   capCode,
   cumulativeLengths,
+  curveTolerance,
   dashAlongCoverage,
   dashCovered,
   dashGap,
@@ -13,21 +17,27 @@ import {
   dashOnLength,
   discCoverage,
   F32,
+  fillEdgeList,
+  hasCurves,
   hasSharedSegments,
   JOIN,
   joinCode,
   layoutOnPath,
   mayWindDeep,
+  measuredSubpaths,
   normalizeDashes,
   outsideView,
   packEnd,
   pathBounds,
   polylineLength,
+  radialSegmentsPerRadian,
   sampleAt,
   spanCoverage,
   squareCapDashes,
   stripCoverage,
+  strokeCovers,
   strokeEdgeCoverage,
+  thinFill,
   unpackEnd,
   windingNumber
 } from "./geometry";
@@ -453,10 +463,15 @@ describe("appendFillEdges", () => {
     points: ccw ? [x, y, x + s, y, x + s, y + s, x, y + s] : [x, y, x, y + s, x + s, y + s, x + s, y],
     closed: true
   });
+  // the edges the fringe draws from the stream (straddling instances skipped)
+  const edgesOf = (subpaths: Subpath[], evenOdd: boolean) => {
+    const out = new F32();
+    const count = appendFillEdges(subpaths, out, evenOdd);
+    return fillEdgeList(out.view(), count);
+  };
   // the filled side of every edge must be its left: a point just left of each edge's midpoint is inside the fill
-  const leftInside = (edges: Float32Array, inside: (x: number, y: number) => boolean) => {
-    for (let i = 0; i < edges.length; i += 4) {
-      const [ax, ay, bx, by] = [edges[i], edges[i + 1], edges[i + 2], edges[i + 3]];
+  const leftInside = (edges: number[][], inside: (x: number, y: number) => boolean) => {
+    for (const [ax, ay, bx, by] of edges) {
       const len = Math.hypot(bx - ax, by - ay);
       const [nx, ny] = [-(by - ay) / len, (bx - ax) / len];
       const [mx, my] = [(ax + bx) / 2, (ay + by) / 2];
@@ -467,30 +482,62 @@ describe("appendFillEdges", () => {
 
   it("orients both windings of a simple ring with the fill on the left", () => {
     for (const ccw of [true, false]) {
-      const out = new F32();
-      expect(appendFillEdges([square(0, 0, 4, ccw)], out, false)).toBe(4);
-      leftInside(out.view(), (x, y) => x > 0 && x < 4 && y > 0 && y < 4);
+      const edges = edgesOf([square(0, 0, 4, ccw)], false);
+      expect(edges).toHaveLength(4);
+      leftInside(edges, (x, y) => x > 0 && x < 4 && y > 0 && y < 4);
     }
+  });
+
+  it("gives every edge its ring neighbours: the previous edge ends at its start, the next starts at its end", () => {
+    const edges = edgesOf([square(0, 0, 4, false), { points: [10, 0, 14, 0, 12, 3], closed: true }], false);
+    expect(edges).toHaveLength(7);
+    for (const ring of [edges.slice(0, 4), edges.slice(4)])
+      ring.forEach(([ax, ay, bx, by, px, py, nx, ny], i) => {
+        const prev = ring[(i + ring.length - 1) % ring.length];
+        const next = ring[(i + 1) % ring.length];
+        expect([prev[0], prev[1], prev[2], prev[3]]).toEqual([px, py, ax, ay]);
+        expect([next[0], next[1], next[2], next[3]]).toEqual([bx, by, nx, ny]);
+      });
+  });
+
+  it("shares endpoints: a ring of n points takes n + 4 points of 2 floats, not 4 floats per edge", () => {
+    const n = 100;
+    const ring: Subpath = {
+      points: Array.from({ length: n }, (_, i) => i).flatMap(i => [
+        Math.cos((i / n) * 2 * Math.PI),
+        Math.sin((i / n) * 2 * Math.PI)
+      ]),
+      closed: true
+    };
+    const out = new F32();
+    expect(appendFillEdges([ring, ring], out, true)).toBe(2 * (n + 4) - 3);
+    expect(out.length).toBe(2 * (n + 4) * 2);
+    expect(fillEdgeList(out.view(), 2 * (n + 4) - 3)).toHaveLength(2 * n);
   });
 
   it("orients holes (reversed for nonzero, either way for even-odd) toward the filled ring between them", () => {
     const inside = (x: number, y: number) => x > 0 && x < 10 && y > 0 && y < 10 && !(x > 3 && x < 6 && y > 3 && y < 6);
-    const nonzero = new F32();
-    expect(appendFillEdges([square(0, 0, 10), square(3, 3, 3, false)], nonzero, false)).toBe(8);
-    leftInside(nonzero.view(), inside);
+    const nonzero = edgesOf([square(0, 0, 10), square(3, 3, 3, false)], false);
+    expect(nonzero).toHaveLength(8);
+    leftInside(nonzero, inside);
     for (const ccw of [true, false]) {
-      const evenOdd = new F32();
-      expect(appendFillEdges([square(0, 0, 10), square(3, 3, 3, ccw)], evenOdd, true)).toBe(8);
-      leftInside(evenOdd.view(), inside);
+      const evenOdd = edgesOf([square(0, 0, 10), square(3, 3, 3, ccw)], true);
+      expect(evenOdd).toHaveLength(8);
+      leftInside(evenOdd, inside);
     }
   });
 
-  it("omits internal edges where nonzero fills both sides, and degenerate or zero-area rings", () => {
-    const out = new F32();
+  it("omits internal edges where nonzero fills both sides, and degenerate, zero-area or repeated points", () => {
     // same-direction nested rings: winding 2 inside the inner one, still filled, so its edges are internal
-    expect(appendFillEdges([square(0, 0, 10), square(3, 3, 3)], out, false)).toBe(4);
+    expect(edgesOf([square(0, 0, 10), square(3, 3, 3)], false)).toHaveLength(4);
+    const out = new F32();
     expect(appendFillEdges([{ points: [0, 0, 1, 1], closed: true }], out, false)).toBe(0);
     expect(appendFillEdges([{ points: [0, 0, 2, 0, 4, 0], closed: true }], out, false)).toBe(0);
+    expect(out.length).toBe(0);
+    // repeated and closing points do not make zero-length edges
+    const repeated = edgesOf([{ points: [0, 0, 0, 0, 4, 0, 4, 4, 4, 4, 0, 4, 0, 0], closed: true }], false);
+    expect(repeated).toHaveLength(4);
+    for (const [ax, ay, bx, by] of repeated) expect(Math.hypot(bx - ax, by - ay)).toBe(4);
   });
 
   it("orients a ring that touches another at a vertex from an edge midpoint, not the shared vertex", () => {
@@ -498,9 +545,9 @@ describe("appendFillEdges", () => {
     const hole: Subpath = { points: [10, 4, 7, 2, 7, 6], closed: true };
     const inside = (x: number, y: number) =>
       x > 0 && x < 10 && y > 0 && y < 10 && !(x > 7 && Math.abs(y - 4) < (2 * (10 - x)) / 3);
-    const out = new F32();
-    expect(appendFillEdges([square(0, 0, 10), hole], out, false)).toBe(7);
-    leftInside(out.view(), inside);
+    const edges = edgesOf([square(0, 0, 10), hole], false);
+    expect(edges).toHaveLength(7);
+    leftInside(edges, inside);
   });
 
   it("counts winding numbers with the shoelace orientation", () => {
@@ -508,6 +555,176 @@ describe("appendFillEdges", () => {
     expect(windingNumber(2, 2, ring)).toBe(1);
     expect(windingNumber(5, 2, ring)).toBe(0);
     expect(windingNumber(2, 2, square(0, 0, 4, false).points)).toBe(-1);
+  });
+});
+
+describe("analyticShape", () => {
+  const line: Subpath = { points: [0, 0, 5, 3], closed: false };
+  const polyline: Subpath = { points: [0, 0, 5, 3, 9, 1], closed: false };
+  it("is analytic only for what Chrome draws analytically: rect, circle, ellipse, and a lone undashed line", () => {
+    for (const tag of ["rect", "circle", "ellipse", "RECT"]) expect(analyticShape(tag, [polyline])).toBe(true);
+    expect(analyticShape("path", [line])).toBe(true);
+    expect(analyticShape("line", [line])).toBe(true);
+    expect(analyticShape("path", [line], true)).toBe(false);
+    expect(analyticShape("rect", [polyline], true)).toBe(false);
+    expect(analyticShape("path", [polyline])).toBe(false);
+    expect(analyticShape("path", [line, line])).toBe(false);
+    expect(analyticShape("path", [{ points: [0, 0, 5, 3], closed: true }])).toBe(false);
+    expect(analyticShape("polygon", [polyline])).toBe(false);
+  });
+});
+
+describe("strokeCovers (sampled stroke coverage, shaders.ts strokeCovers)", () => {
+  // Reference outline of a polyline stroke: a point is inside when it lies in some segment's body (its band between
+  // the ends, butt) or in some interior vertex's join (round: disc; miter: the outer wedge up to the miter tip, a
+  // bevel past the limit).
+  const reference = (pts: number[][], h: number, join: "round" | "miter", x: number, y: number) => {
+    for (let i = 0; i + 1 < pts.length; i++) {
+      const [ax, ay] = pts[i],
+        [bx, by] = pts[i + 1];
+      const len = Math.hypot(bx - ax, by - ay);
+      const [dx, dy] = [(bx - ax) / len, (by - ay) / len];
+      const t = (x - ax) * dx + (y - ay) * dy;
+      const n = -(x - ax) * dy + (y - ay) * dx;
+      if (t >= 0 && t <= len && Math.abs(n) <= h) return true;
+    }
+    for (let i = 1; i + 1 < pts.length; i++) {
+      const [vx, vy] = pts[i];
+      if (join === "round") {
+        if (Math.hypot(x - vx, y - vy) <= h) return true;
+        continue;
+      }
+      const din = [pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]].map((v, _, a) => v / Math.hypot(a[0], a[1]));
+      const dout = [pts[i + 1][0] - vx, pts[i + 1][1] - vy].map((v, _, a) => v / Math.hypot(a[0], a[1]));
+      // outer side: opposite to the turn; the wedge between the two outer offset points and the tip
+      const turn = Math.sign(din[0] * dout[1] - din[1] * dout[0]);
+      const nin = [turn * din[1], -turn * din[0]];
+      const nout = [turn * dout[1], -turn * dout[0]];
+      const c = Math.sqrt((1 + din[0] * dout[0] + din[1] * dout[1]) / 2);
+      const bis = [nin[0] + nout[0], nin[1] + nout[1]].map((v, _, a) => v / Math.hypot(a[0], a[1]));
+      const tip = [vx + (bis[0] * h) / c, vy + (bis[1] * h) / c];
+      // past the miter limit 4 (c < 1/4) the join is a bevel: the triangle without the tip
+      const poly = [
+        [vx, vy],
+        [vx + nin[0] * h, vy + nin[1] * h],
+        ...(c >= 0.25 ? [tip] : []),
+        [vx + nout[0] * h, vy + nout[1] * h]
+      ];
+      if (
+        windingNumber(
+          x,
+          y,
+          poly.flatMap(p => p)
+        ) !== 0
+      )
+        return true;
+    }
+    return false;
+  };
+  // Per pixel: the segment owning the pixel centre (its side of both bisectors, as the shader discards), counting its
+  // samples with strokeCovers; must equal the reference's sample count at every pixel.
+  const check = (pts: number[][], h: number, join: "round" | "miter") => {
+    const code = join === "round" ? JOIN.round : JOIN.miter;
+    const segs = pts.slice(0, -1).map((a, i) => {
+      const b = pts[i + 1];
+      const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      return { a, len, dir: [(b[0] - a[0]) / len, (b[1] - a[1]) / len] };
+    });
+    const local = (s: (typeof segs)[number], x: number, y: number): [number, number] => [
+      (x - s.a[0]) * s.dir[0] + (y - s.a[1]) * s.dir[1],
+      -(x - s.a[0]) * s.dir[1] + (y - s.a[1]) * s.dir[0]
+    ];
+    const toLocal = (s: (typeof segs)[number], d: number[]): [number, number] => [
+      d[0] * s.dir[0] + d[1] * s.dir[1],
+      -d[0] * s.dir[1] + d[1] * s.dir[0]
+    ];
+    let mismatches = 0,
+      covered = 0;
+    for (let py = -12; py < 40; py++)
+      for (let px = -12; px < 60; px++) {
+        const [cx, cy] = [px + 0.5, py + 0.5];
+        const expected = COVERAGE_SAMPLES.filter(([ox, oy]) => reference(pts, h, join, cx + ox, cy + oy)).length;
+        // owner: the first segment whose bisector half-planes hold the centre
+        const owner = segs.findIndex((s, i) => {
+          const [x, y] = local(s, cx, cy);
+          const dIn = i > 0 ? toLocal(s, segs[i - 1].dir) : null;
+          const dOut = i + 1 < segs.length ? toLocal(s, segs[i + 1].dir) : null;
+          const side = (q: number[], n: number[]) => (q[0] * n[0] + q[1] * n[1]) / Math.hypot(n[0], n[1]);
+          return (
+            (!dIn || side([x, y], [dIn[0] + 1, dIn[1]]) >= 0) &&
+            (!dOut || side([s.len - x, -y], [1 + dOut[0], dOut[1]]) >= 0)
+          );
+        });
+        let got = 0;
+        if (owner >= 0) {
+          const s = segs[owner];
+          const dIn = owner > 0 ? toLocal(s, segs[owner - 1].dir) : ([1, 0] as [number, number]);
+          const dOut = owner + 1 < segs.length ? toLocal(s, segs[owner + 1].dir) : ([1, 0] as [number, number]);
+          const c0 = owner > 0 ? code : capCode("butt");
+          const c1 = owner + 1 < segs.length ? code : capCode("butt");
+          got = COVERAGE_SAMPLES.filter(([ox, oy]) =>
+            strokeCovers(local(s, cx + ox, cy + oy), s.len, c0, c1, dIn, dOut, h)
+          ).length;
+        }
+        if (got !== expected) mismatches++;
+        if (expected) covered++;
+      }
+    return { mismatches, covered };
+  };
+  const zigzag = (turn: number) => {
+    const a = ((turn / 2) * Math.PI) / 180;
+    return Array.from({ length: 5 }, (_, i) => [3.3 + i * 11 * Math.sin(a), 2.7 + (i % 2) * 11 * Math.cos(a)]);
+  };
+
+  it("stays close on a curve flattened into sub-pixel segments (neighbour bands are taken as half-infinite)", () => {
+    // an arc of radius 20 px in 0.6 px chords, as a curve flattens at k 1
+    const arc = Array.from({ length: 60 }, (_, i) => [2.3 + 20 * Math.sin(i * 0.03), 22.7 - 20 * Math.cos(i * 0.03)]);
+    for (const join of ["round", "miter"] as const)
+      for (const h of [0.4, 1.3]) {
+        const { mismatches, covered } = check(arc, h, join);
+        expect(mismatches, `${join} h${h}`).toBeLessThanOrEqual(Math.ceil(covered * 0.01));
+      }
+  });
+
+  it("counts exactly the samples of the joined outline at every pixel: no notch or spur at joins", () => {
+    // zigzag(a): segments a degrees apart, so a 20 turns by 160 degrees (bevelled past the miter limit)
+    for (const turn of [20, 60, 90, 120, 170])
+      for (const join of ["round", "miter"] as const)
+        for (const h of [0.4, 1.3]) {
+          const { mismatches, covered } = check(zigzag(turn), h, join);
+          expect(covered).toBeGreaterThan(20);
+          expect(mismatches, `${join} ${turn} h${h}`).toBe(0);
+        }
+  });
+
+  it("draws round caps and joins as Skia's chord fans: a dot of radius 0.5 px is a diamond", () => {
+    expect(radialSegmentsPerRadian(0.5)).toBeCloseTo(0.5 / Math.acos(0.5), 10);
+    const round = capCode("round");
+    const per = radialSegmentsPerRadian(0.5);
+    for (let y = -0.6; y <= 0.6; y += 0.05)
+      for (let x = -0.6; x <= 0.6; x += 0.05) {
+        if (Math.abs(Math.abs(x) + Math.abs(y) - 0.5) < 1e-9) continue;
+        expect(strokeCovers([x, y], 0, round, round, [1, 0], [1, 0], 0.5, per), `${x} ${y}`).toBe(
+          Math.abs(x) + Math.abs(y) < 0.5
+        );
+      }
+    // a dot near a pixel centre: the diamond covers 2 of its samples where the disc covers 3
+    const samples = (per: number) =>
+      COVERAGE_SAMPLES.filter(([ox, oy]) =>
+        strokeCovers([ox - 0.1, oy - 0.05], 0, round, round, [1, 0], [1, 0], 0.5, per)
+      ).length;
+    expect(samples(per)).toBe(2);
+    expect(samples(0)).toBe(3);
+    // a round join's fan stays within the arc and holds its chord's midpoint distance
+    const dOut: [number, number] = [0, 1]; // a left turn of 90 degrees at the end: the outer wedge is x > 0, y < 0
+    const n = Math.ceil((Math.PI / 2) * radialSegmentsPerRadian(4));
+    for (let i = 0; i <= 40; i++) {
+      const a = (-i / 40) * (Math.PI / 2);
+      const inner = 4 * Math.cos(Math.PI / 4 / n) - 1e-6;
+      const q = (r: number): [number, number] => [10 + r * Math.cos(a), r * Math.sin(a)];
+      expect(strokeCovers(q(inner), 10, 1, JOIN.round, [1, 0], dOut, 4, radialSegmentsPerRadian(4))).toBe(true);
+      expect(strokeCovers(q(4.001), 10, 1, JOIN.round, [1, 0], dOut, 4, radialSegmentsPerRadian(4))).toBe(false);
+    }
   });
 });
 
@@ -537,5 +754,58 @@ describe("hasSharedSegments", () => {
     ];
     expect(hasSharedSegments(cross)).toBe(false);
     expect(hasSharedSegments([{ points: [0, 0, 1, 0, 0, 0], closed: false }])).toBe(false);
+  });
+});
+
+describe("bucket curve flattening", () => {
+  it("keeps strokes within DEVICE_CURVE_TOLERANCE device px of the curve at the raster bucket, never coarser than the scene", () => {
+    expect(curveTolerance(1)).toBe(0.2);
+    expect(curveTolerance(2)).toBeCloseTo(0.15, 12);
+    expect(curveTolerance(16)).toBeCloseTo(0.01875, 12);
+    expect(hasCurves("M0 0L5 5")).toBe(false);
+    expect(hasCurves("M0 0C1 1 2 2 3 0")).toBe(true);
+    expect(hasCurves("m0 0a5 5 0 0 1 10 0")).toBe(true);
+  });
+
+  it("tells a river-like fill from a region by its mean half width", () => {
+    const rect = (w: number, h: number): Subpath => ({ points: [0, 0, w, 0, w, h, 0, h], closed: true });
+    expect(thinFill([rect(100, 2)])).toBe(true);
+    expect(thinFill([rect(50, 50)])).toBe(false);
+    expect(thinFill([])).toBe(false);
+  });
+});
+
+describe("measuredSubpaths (dash distances on SVG's contour measure)", () => {
+  const route = "M10,10C30,0 50,40 70,20S110,0 130,30Q150,50 170,30L190,35";
+  it("gives every point the measure's distance: the end is the measure's length at any flattening tolerance", () => {
+    for (const resScale of [2, 16]) {
+      const length = measureContour(parseContours(route)[0], resScale).length;
+      for (const tolerance of [0.2, 0.02]) {
+        const { subpaths, distances } = measuredSubpaths(route, tolerance, resScale);
+        expect(subpaths).toHaveLength(1);
+        const d = distances[0];
+        expect(d.length).toBe(subpaths[0].points.length / 2);
+        expect(d[0]).toBe(0);
+        for (let i = 1; i < d.length; i++) expect(d[i]).toBeGreaterThanOrEqual(d[i - 1]);
+        expect(d[d.length - 1]).toBeCloseTo(length, 9);
+      }
+    }
+    // a finer polyline is longer than the coarse measure SVG dashes on: the chord sum would drift
+    const fine = measuredSubpaths(route, 0.02, 2).subpaths[0].points;
+    let chords = 0;
+    for (let i = 2; i < fine.length; i += 2) chords += Math.hypot(fine[i] - fine[i - 2], fine[i + 1] - fine[i - 1]);
+    expect(chords).toBeGreaterThan(measureContour(parseContours(route)[0], 2).length);
+  });
+
+  it("matches chord lengths on lines, restarts per subpath, and drops a closed contour's repeated start", () => {
+    const { subpaths, distances } = measuredSubpaths("M0,0L10,0L10,5M20,0L20,3L23,3Z", 0.2, 2);
+    expect(subpaths.map(s => s.closed)).toEqual([false, true]);
+    expect(Array.from(distances[0])).toEqual([0, 10, 15]);
+    expect(subpaths[1].points).toEqual([20, 0, 20, 3, 23, 3]);
+    expect(Array.from(distances[1])).toEqual([0, 3, 6]);
+    const out = new F32();
+    expect(appendSegments(subpaths, out, distances)).toBe(5);
+    // the closing segment starts at the last point's distance
+    expect(Array.from(out.view().subarray(20, 25))).toEqual([23, 3, 20, 0, 6]);
   });
 });
