@@ -50,6 +50,7 @@ export function resolveVersionConflicts(mapVersion: string): void {
     // v1.0 added state relations, provinces, forms and full names
     provs = viewbox.insert("g", "#borders").attr("id", "provs").attr("opacity", 0.6);
     States.collectStatistics();
+    States.findNeighbors(); // collectStatistics no longer computes them, and campaigns and diplomacy read them
     States.generateCampaigns();
     States.generateDiplomacy();
     States.defineStateForms();
@@ -261,8 +262,11 @@ export function resolveVersionConflicts(mapVersion: string): void {
   }
 
   if (isOlderThan("1.22.0")) {
-    // v1.22 changed state neighbors from Set object to array
+    // v1.22 changed state neighbors from Set object to array. collectStatistics() used to compute them; it was split
+    // from findNeighbors(), so the gate must call both or a pre-1.22 map keeps the serialized Set ({}) and
+    // Military.generate() in the 1.3.0 gate throws "neighbors.map is not a function" (corpus map legacy-v1.0).
     States.collectStatistics();
+    States.findNeighbors();
   }
 
   if (isOlderThan("1.3.0")) {
@@ -535,7 +539,10 @@ export function resolveVersionConflicts(mapVersion: string): void {
     }
   }
 
-  if (isOlderThan("1.652.0")) {
+  // Upstream's gate was the float `version < 1.652`, which is 1.65.2 in this file's compact form ("1.652" is parsed as
+  // 1.65.2 by parseMapVersion). Written as "1.652.0" it read as minor 652 and so was newer than every real map,
+  // including current ones: every load stripped `style` from #rivers and #borders and re-showed layers the author hid.
+  if (isOlderThan("1.65.2")) {
     // remove style to unhide layers
     rivers.attr("style", null);
     borders.attr("style", null);
