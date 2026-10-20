@@ -6,6 +6,7 @@ import { TRADE_LAYER } from "./markers";
 import { SceneCensus } from "./scene-census";
 import { flattenPath, type Subpath } from "./svg-path";
 import { basicShapePath, isIdentityTransform, nearestViewport, type Viewport } from "./svg-shapes";
+import { straightTextReason } from "./text";
 
 export type Rgba = [number, number, number, number];
 export interface ShapeStyle {
@@ -208,6 +209,11 @@ export interface SceneOptions {
   // the parity golden regresses on precipitation (circles) and population (lines) because native edges are not
   // analytically antialiased like the SVG/compat raster, and layers of thousands of tiny primitives are mostly edge.
   nativeShapes?: boolean;
+  // Straight <text> outside #labels (temperature, regiment numbers, coordinates, wind arrows, rulers...) as native
+  // glyphs, text-shadow included. Default on (opt out with ?gpu-native-text=0): on the compat lane this small text was
+  // only as sharp as the budget-fitted world raster (about 1.2 px per unit at k 1), so until the settle refinement it
+  // was illegible, and its CSS-pixel text-shadow scaled with the raster density.
+  nativeText?: boolean;
 }
 
 function reliefIcons(value: string | null): ReliefSprite[] | null {
@@ -251,14 +257,18 @@ export function materializedIcons(group: Element): ReliefSprite[] | null {
 export function buildScene(viewbox: Element, curveTolerance = 0.2, options: SceneOptions = {}): Scene {
   const maskRects = options.maskRects ?? flag("gpu-mask-rects") === "1";
   const nativeShapes = options.nativeShapes ?? flag("gpu-native-shapes") === "1";
-  return withCanonicalEmblemPaint(() => canonicalBuildScene(viewbox, curveTolerance, maskRects, nativeShapes));
+  const nativeText = options.nativeText ?? flag("gpu-native-text") !== "0";
+  return withCanonicalEmblemPaint(() =>
+    canonicalBuildScene(viewbox, curveTolerance, maskRects, nativeShapes, nativeText)
+  );
 }
 
 function canonicalBuildScene(
   viewbox: Element,
   curveTolerance: number,
   maskRects: boolean,
-  nativeShapes: boolean
+  nativeShapes: boolean,
+  nativeText: boolean
 ): Scene {
   const layers: Record<string, LayerReport> = {};
   // null unless a bench page installed globalThis.__gpuSceneCensus (scene-census.ts); read-only either way
@@ -439,6 +449,18 @@ function canonicalBuildScene(
         report(layer, true);
         out.push({ kind: "label", element: element as SVGTextElement, layer });
         return;
+      }
+      // #labels keeps its own rules (curved labels above); elsewhere a plain straight <text> is drawn as glyphs
+      if (nativeText && layer !== "labels") {
+        if (!element.children.length && !(element.textContent || "").trim())
+          return census?.skip(layer, element, "empty text");
+        const reason = straightTextReason(element, cs as unknown as Record<string, string>);
+        if (!reason) {
+          report(layer, true);
+          out.push({ kind: "label", element: element as SVGTextElement, layer });
+          return;
+        }
+        return compat(element, layer, `text ${reason}`, out);
       }
       return compat(element, layer, "text", out);
     }

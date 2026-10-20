@@ -31,7 +31,16 @@ const INHERITED = new Set([
   "stroke-linecap",
   "visibility",
   "pointer-events",
-  "text-shadow"
+  "text-shadow",
+  "font-size",
+  "font-family",
+  "font-style",
+  "font-weight",
+  "text-anchor",
+  "dominant-baseline",
+  "letter-spacing",
+  "text-rendering",
+  "paint-order"
 ]);
 const INITIAL: Record<string, string> = {
   display: "inline",
@@ -52,7 +61,16 @@ const INITIAL: Record<string, string> = {
   mask: "none",
   "vector-effect": "none",
   "pointer-events": "auto",
-  "text-shadow": "none"
+  "text-shadow": "none",
+  "font-size": "16px",
+  "font-family": "serif",
+  "font-style": "normal",
+  "font-weight": "400",
+  "text-anchor": "start",
+  "dominant-baseline": "auto",
+  "letter-spacing": "normal",
+  "text-rendering": "auto",
+  "paint-order": "normal"
 };
 const camel = (name: string) => name.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
 

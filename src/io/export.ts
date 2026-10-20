@@ -608,7 +608,9 @@ function inlineStyle(clone: MapSelection): void {
     return defaults.get(key)!;
   };
 
-  clone.selectAll<SVGElement, unknown>("g, #ruler *, #scaleBar > text").each(function () {
+  // #prec text: the wind arrows' size and shadow come from an index.css rule on the text itself (#prec text), which a
+  // detached clone (export, GPU compat raster) would otherwise lose: they came out at the default font size
+  clone.selectAll<SVGElement, unknown>("g, #ruler *, #scaleBar > text, #prec text").each(function () {
     const compStyle = window.getComputedStyle(this);
     let style = "";
 

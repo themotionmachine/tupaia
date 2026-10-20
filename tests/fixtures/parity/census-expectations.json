@@ -2,9 +2,9 @@
  "schema": 1,
  "fixtureSha256": "fd1dd2f3508fbbd7ea325133b2937a328909a84cc38e81c6afc95eef640ba119",
  "notes": [
-  "Routing snapshot of the GPU scene classifier per golden cell on the parity fixture (default preset, dpr 2, k 1/2/4/8 plus the coastline switch frames). A cell fails when native/compat/skipped drift, so a routing change (new native primitive, a layer sliding to compat) must update this file in the same commit.",
-  "Regenerated at gpu/w2-cover (2026-10-20) from golden-20261020T005810-298Z (k 1,4) and golden-20261020T012827-377Z (k 2,8 + coast). Changes: military k1/2/4/8 compat 234->159, skipped 0->75 (PRIM skips empty-href <image>s; pixels unchanged); emblems k2 compat 8/skipped 2 -> compat 133 (each cell now re-runs zoom styling with its family shown, so the burg and province emblem groups are in their k 2 state); emblems k8 compat 133 -> 125, skipped 0 -> 1 (the state emblem group is hidden by the app's own >300 px rule at k 8).",
-  "Regenerate: node bench/gate/gate.ts golden fixture=parity k=1,2,4,8 coastk=1.4,1.6,2.5,2.7, then keep the census.json of that run without the kinds field."
+  "Routing snapshot of the GPU scene classifier per golden cell on the parity fixture (default preset, dpr 2, k 1/2/4/8 plus the coastline switch frames), taken at gpu/w1-glue after the camera fixes and re-taken at gpu/w2-text (straight non-label text as native glyphs; military also picks up the empty-image skip). A cell fails when native/compat/skipped drift, so a routing change (new native primitive, a layer sliding to compat) must update this file in the same commit.",
+  "Regenerate: node bench/gate/gate.ts golden fixture=parity k=1,2,4,8 coastk=1.4,1.6,2.5,2.7, then keep the census.json of that run without the kinds field.",
+  "Lake k 2/4/8 cells use the k*-lake cameras added after this snapshot; their counts are identical to the k 1 cell."
  ],
  "cells": {
   "default/d2/biomes/k1": {
@@ -148,23 +148,23 @@
    "skipped": 0
   },
   "default/d2/coordinates/k1": {
-   "native": 0,
-   "compat": 18,
+   "native": 17,
+   "compat": 1,
    "skipped": 0
   },
   "default/d2/coordinates/k2": {
-   "native": 0,
-   "compat": 27,
+   "native": 26,
+   "compat": 1,
    "skipped": 0
   },
   "default/d2/coordinates/k4": {
-   "native": 0,
-   "compat": 52,
+   "native": 51,
+   "compat": 1,
    "skipped": 0
   },
   "default/d2/coordinates/k8": {
-   "native": 0,
-   "compat": 127,
+   "native": 126,
+   "compat": 1,
    "skipped": 0
   },
   "default/d2/cultures/k1": {
@@ -194,8 +194,8 @@
   },
   "default/d2/emblems/k2": {
    "native": 0,
-   "compat": 133,
-   "skipped": 0
+   "compat": 8,
+   "skipped": 2
   },
   "default/d2/emblems/k4": {
    "native": 0,
@@ -204,8 +204,8 @@
   },
   "default/d2/emblems/k8": {
    "native": 0,
-   "compat": 125,
-   "skipped": 1
+   "compat": 133,
+   "skipped": 0
   },
   "default/d2/fog/k1": {
    "native": 0,
@@ -228,23 +228,23 @@
    "skipped": 0
   },
   "default/d2/goods/k1": {
-   "native": 2421,
-   "compat": 17,
+   "native": 2425,
+   "compat": 13,
    "skipped": 0
   },
   "default/d2/goods/k2": {
-   "native": 2421,
-   "compat": 17,
+   "native": 2425,
+   "compat": 13,
    "skipped": 0
   },
   "default/d2/goods/k4": {
-   "native": 2421,
-   "compat": 17,
+   "native": 2425,
+   "compat": 13,
    "skipped": 0
   },
   "default/d2/goods/k8": {
-   "native": 2421,
-   "compat": 17,
+   "native": 2425,
+   "compat": 13,
    "skipped": 0
   },
   "default/d2/grid/k1": {
@@ -448,24 +448,24 @@
    "skipped": 7
   },
   "default/d2/military/k1": {
-   "native": 152,
-   "compat": 159,
-   "skipped": 75
+   "native": 228,
+   "compat": 82,
+   "skipped": 76
   },
   "default/d2/military/k2": {
-   "native": 152,
-   "compat": 159,
-   "skipped": 75
+   "native": 228,
+   "compat": 82,
+   "skipped": 76
   },
   "default/d2/military/k4": {
-   "native": 152,
-   "compat": 159,
-   "skipped": 75
+   "native": 228,
+   "compat": 82,
+   "skipped": 76
   },
   "default/d2/military/k8": {
-   "native": 152,
-   "compat": 159,
-   "skipped": 75
+   "native": 228,
+   "compat": 82,
+   "skipped": 76
   },
   "default/d2/ocean/k1": {
    "native": 4,
@@ -508,23 +508,23 @@
    "skipped": 0
   },
   "default/d2/precipitation/k1": {
-   "native": 0,
-   "compat": 2127,
+   "native": 5,
+   "compat": 2122,
    "skipped": 0
   },
   "default/d2/precipitation/k2": {
-   "native": 0,
-   "compat": 2127,
+   "native": 5,
+   "compat": 2122,
    "skipped": 0
   },
   "default/d2/precipitation/k4": {
-   "native": 0,
-   "compat": 2127,
+   "native": 5,
+   "compat": 2122,
    "skipped": 0
   },
   "default/d2/precipitation/k8": {
-   "native": 0,
-   "compat": 2127,
+   "native": 5,
+   "compat": 2122,
    "skipped": 0
   },
   "default/d2/provinces/k1": {
@@ -628,23 +628,23 @@
    "skipped": 0
   },
   "default/d2/rulers/k1": {
-   "native": 9,
-   "compat": 14,
+   "native": 14,
+   "compat": 9,
    "skipped": 0
   },
   "default/d2/rulers/k2": {
-   "native": 9,
-   "compat": 14,
+   "native": 14,
+   "compat": 9,
    "skipped": 0
   },
   "default/d2/rulers/k4": {
-   "native": 9,
-   "compat": 14,
+   "native": 14,
+   "compat": 9,
    "skipped": 0
   },
   "default/d2/rulers/k8": {
-   "native": 9,
-   "compat": 14,
+   "native": 14,
+   "compat": 9,
    "skipped": 0
   },
   "default/d2/scaleBar/k1": {
@@ -688,23 +688,23 @@
    "skipped": 0
   },
   "default/d2/temperature/k1": {
-   "native": 6,
-   "compat": 16,
+   "native": 22,
+   "compat": 0,
    "skipped": 0
   },
   "default/d2/temperature/k2": {
-   "native": 6,
-   "compat": 16,
+   "native": 22,
+   "compat": 0,
    "skipped": 0
   },
   "default/d2/temperature/k4": {
-   "native": 6,
-   "compat": 16,
+   "native": 22,
+   "compat": 0,
    "skipped": 0
   },
   "default/d2/temperature/k8": {
-   "native": 6,
-   "compat": 16,
+   "native": 22,
+   "compat": 0,
    "skipped": 0
   },
   "default/d2/terrs/k1": {
