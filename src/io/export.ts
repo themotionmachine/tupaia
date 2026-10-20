@@ -9,6 +9,7 @@ import { materializeRelief } from "@/renderers/relief-canvas";
 import { normalizeZoneHatching } from "@/renderers/zone-hatching";
 import { connectVertices, ensureEl, getBase64, getCoordinates, getGridPolygon, rn, unique } from "@/utils";
 import { compactEmblemCloneStyles } from "../renderers/emblems/styles";
+import { cloneFonts, fontFace } from "./export-fonts";
 
 type MapSelection = Selection<SVGSVGElement, unknown, null, undefined>;
 
@@ -515,16 +516,11 @@ export async function prepareMapClone(type: string, options: GetMapURLOptions = 
     }
 
     // load fonts
-    const usedFonts = getUsedFonts(cloneEl);
+    const usedFonts = cloneFonts(cloneEl);
     const fontsToLoad = usedFonts.filter(font => font.src);
     if (fontsToLoad.length) {
       const dataURLfonts = await loadFontsAsDataURI(fontsToLoad);
-
-      const fontFaces = dataURLfonts
-        .map(({ family, src, unicodeRange = "", variant = "normal" }) => {
-          return `@font-face {font-family: "${family}"; src: ${src}; unicode-range: ${unicodeRange}; font-variant: ${variant};}`;
-        })
-        .join("\n");
+      const fontFaces = dataURLfonts.map(fontFace).join("\n");
 
       const style = document.createElement("style");
       style.setAttribute("type", "text/css");
