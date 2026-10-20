@@ -34,6 +34,7 @@ vi.mock("./clone-map", () => ({ resolveManyInClone: (elements: unknown[]) => ele
 
 import { DETAIL_RESERVE, FIRST_DETAIL_MS, GPU_BUDGET } from "./budget";
 import {
+  detailFootprint,
   detailShare,
   firstDetails,
   frameBytes,
@@ -150,6 +151,48 @@ describe("first-frame details (refineCompat options)", () => {
     expect(await run(false)).toEqual([22, 15, 0]);
     // sharp runs: all three at sqrt(1/2) of the density (15 px), within the room
     expect(await run(true)).toEqual([15, 15, 15]);
+  });
+
+  // [LABFIX] The share was sized from each sharp run's base raster rect clipped to the view. A run of labels spread over
+  // the world has a world-wide base rect, so in a zoomed view every label run looked view-sized: six of them (115 MB)
+  // against ~106 MB of room shared out a 0.96 density and every label detail was resampled (shared fixture labels k4,
+  // ink 31585 GPU vs 22364 SVG px). What the run's elements reach in the view (their boxes) sizes it instead.
+  it("sizes the sharp share from what the runs' elements reach in the view, not their world-wide base rects", async () => {
+    const gpu = device(0);
+    const { prepared, runs } = frame([22, 22, 22]);
+    (prepared.compat as { resolution: number }).resolution = 1;
+    for (const [i, run] of runs.entries()) {
+      run.sharp = true;
+      run.slot.rect = [-1000, -1000, 3000, 3000]; // labels all over the world
+      // one 10-unit label in the view (the others outside it)
+      (run as { boxes?: unknown }).boxes = [
+        { x0: i * 30, y0: 0, x1: i * 30 + 10, y1: 10 },
+        { x0: 500, y0: 500, x1: 520, y1: 510 }
+      ];
+    }
+    // three 22 px details fit at full density; three view-sized ones (202 px square) would not
+    await refineCompat(prepared, ctx(gpu), visible, pixels, 64 << 10);
+    expect(runs.map(run => run.slot.detail?.texture?.width ?? 0)).toEqual([22, 22, 22]);
+    expect(runs.map(run => run.detailMeta?.fit)).toEqual([1, 1, 1]);
+  });
+
+  it("detailFootprint: a kept detail's own size, else the smaller of the base rect and the element boxes in view", () => {
+    const { runs } = frame([10]);
+    const run = runs[0] as unknown as Parameters<typeof detailFootprint>[0];
+    const density = 2;
+    run.slot.rect = [0, 0, 100, 100];
+    expect(detailFootprint(run, visible, density)).toBe(202 * 202 * 4); // no boxes: the base rect in view
+    run.boxes = [{ x0: 10, y0: 10, x1: 20, y1: 15 }];
+    // the box padded by 2 units each side (14 x 9 units = 28 x 18 px), plus 12 px window padding and the 1 px crop
+    expect(detailFootprint(run, visible, density)).toBe((28 + 26) * (18 + 26) * 4);
+    run.boxes = [{ x0: 300, y0: 300, x1: 310, y1: 310 }]; // nothing in view
+    expect(detailFootprint(run, visible, density)).toBe(0);
+    run.boxes = null; // unmeasurable: the base rect
+    expect(detailFootprint(run, visible, density)).toBe(202 * 202 * 4);
+    run.detailMeta = { request: "r", size: [30, 40], fit: 0.5 };
+    expect(detailFootprint(run, visible, density, true)).toBe(30 * 40 * 4);
+    run.detailMeta = { request: "r", size: null, fit: 1 };
+    expect(detailFootprint(run, visible, density, true)).toBe(0);
   });
 
   it("skips runs whose base raster is already about as dense as the detail (minGain)", async () => {

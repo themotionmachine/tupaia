@@ -42,9 +42,11 @@ import {
 import {
   type BatchMember,
   type Box,
+  boundsWithin,
   measureBounds,
   newWindowStats,
   rasterizeWindowed,
+  WINDOW_PAD_PX,
   WindowBatches,
   type WindowStats
 } from "./compat-bounds";
@@ -168,6 +170,8 @@ interface CompatRun {
   // world run: the world box its live geometry reaches (compat-bounds.ts measureBounds; null: unbounded), measured once
   // per frame at the frame's revision
   bounds?: Box | null;
+  // world run: its elements' own world boxes (measured with `bounds`; null: unknown), what the run reaches in a view
+  boxes?: Box[] | null;
   // live elements outside the definitions its raster paints through, by id (compat-reuse.ts referenceClosure), as of
   // the prepare that cut or reused it
   externals?: Map<string, ReuseNode>;
@@ -1647,7 +1651,10 @@ function adoptRuns(device: GpuDevice, svg: SVGSVGElement, runs: CompatRun[], pre
       run.slot.rect = [...old.slot.rect];
       run.stamp = now; // verified clean up to now
       // the same geometry: measuring it again would restyle the map (compat-bounds.ts measureBounds)
-      if (old.bounds !== undefined) run.bounds = old.bounds;
+      if (old.bounds !== undefined) {
+        run.bounds = old.bounds;
+        run.boxes = old.boxes;
+      }
       reusedBytes += texture ? texture.width * texture.height * 4 : 0;
     }
     for (const [run, old] of adopted) {
@@ -1807,17 +1814,21 @@ export async function refineCompat(
   const stats = { kept: 0, rasterized: 0, cloned: false };
   let clone: SVGSVGElement | null = null;
   const density = pixels.width / visible.width;
+  // every run this pass may cut, measured in one batch: one restyle at most (measureBounds)
+  const viewbox = runs[0]?.elements[0]?.closest?.("#viewbox"); // absent on partial test elements
+  if (viewbox)
+    measureBounds(
+      runs.filter(run => !kept.has(run)),
+      viewbox
+    );
   // Sharp runs share the room at one density instead of first come, first served: in a dense scene the runs refined
   // first took it all at full density and a view-wide one refined later (the rain at k 8) kept the 1 px-per-unit base.
-  // Each sharp run's detail is at most `share` of the device density, sized from its base raster's footprint in the
-  // view (an upper bound of the detail it cuts), against the room a full re-refine starts with (kept details freed).
-  const footprint = (run: CompatRun) => {
-    const [x, y, w, h] = run.slot.rect;
-    const iw = Math.min(x + w, visible.x + visible.width) - Math.max(x, visible.x);
-    const ih = Math.min(y + h, visible.y + visible.height) - Math.max(y, visible.y);
-    return iw > 0 && ih > 0 ? Math.ceil(iw * density + 2) * Math.ceil(ih * density + 2) * 4 : 0;
-  };
-  const sharpBytes = runs.reduce((n, run) => (run.sharp ? n + footprint(run) : n), 0);
+  // Each sharp run's detail is at most `share` of the device density, sized from an estimate of the detail it cuts
+  // (detailFootprint), against the room a full re-refine starts with (kept details freed).
+  const sharpBytes = runs.reduce(
+    (n, run) => (run.sharp ? n + detailFootprint(run, visible, density, kept.has(run)) : n),
+    0
+  );
   const startRoom = roomNow() + keptAfter;
   const share = sharpBytes > startRoom ? Math.sqrt(Math.max(0, startRoom) / sharpBytes) : 1;
   // The detail a raster alpha-cropped to `size` (null: fully transparent) becomes with `room` left: full (fit 1),
@@ -1838,13 +1849,6 @@ export async function refineCompat(
   prepared.compat.refineWindows = windowStats;
   let refined = false;
   let shared: WindowBatches<CompatRun> | null = null;
-  // every run this pass may cut, measured in one batch: one restyle at most (measureBounds)
-  const viewbox = runs[0]?.elements[0]?.closest?.("#viewbox"); // absent on partial test elements
-  if (viewbox)
-    measureBounds(
-      runs.filter(run => !kept.has(run)),
-      viewbox
-    );
   for (const run of runs) {
     const element = run.elements[0];
     const entry = {
@@ -1974,6 +1978,34 @@ function refineBatches(
     { clone, full: visible, width: pixels.width, height: pixels.height, cssScale, stats },
     members
   );
+}
+
+// Bytes of the detail a settle refinement cuts for `run` over `visible` at `density` px per unit, at full density: a
+// kept detail's own cut size (exact); else the smaller of two upper bounds, the run's base raster rect and the union of
+// its element boxes (measureBounds), each clipped to the view, plus the crop's 1 px (and the window's padding). The base
+// rect alone spans the world for a run of labels spread over it, so in a zoomed view with a few small labels every
+// sharp run looked view-sized: six label runs (115 MB) against ~106 MB of room shared out a 0.96 density, and every
+// label detail was resampled (shared fixture labels k4: ink 31585 GPU vs 22364 SVG px, coverage failed).
+export function detailFootprint(run: CompatRun, visible: Region, density: number, kept = false): number {
+  if (kept && run.detailMeta) {
+    const size = run.detailMeta.size;
+    return size ? size[0] * size[1] * 4 : 0;
+  }
+  // `pad` px on each side, plus the crop's 1 px
+  const bytes = (box: Box | null, pad: number) =>
+    box && box.x1 > box.x0 && box.y1 > box.y0
+      ? Math.ceil((box.x1 - box.x0) * density + 2 * pad + 2) * Math.ceil((box.y1 - box.y0) * density + 2 * pad + 2) * 4
+      : 0;
+  const [x, y, w, h] = run.slot.rect;
+  const rect = {
+    x0: Math.max(x, visible.x),
+    y0: Math.max(y, visible.y),
+    x1: Math.min(x + w, visible.x + visible.width),
+    y1: Math.min(y + h, visible.y + visible.height)
+  };
+  // the base rect is already the ink (alpha-cropped); geometric boxes miss what screen px add (text-shadow)
+  const byRect = bytes(rect, 0);
+  return run.boxes ? Math.min(byRect, bytes(boundsWithin(run.boxes, visible), WINDOW_PAD_PX)) : byRect;
 }
 
 // Floors both sides so the scaled bytes never exceed `fit²` of the source; null when nothing would remain.

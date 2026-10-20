@@ -86,16 +86,15 @@ const paintsPoint = (element: Element) => {
   }
 };
 
-// World bounds of the live elements (union of their bounding boxes through their screen CTM relative to #viewbox's),
-// padded by WINDOW_PAD_UNITS; null when unknown (a measurement failed or the matrix is singular). Empty elements
-// (nothing rendered) add nothing; a zero-size box of an element that can paint a point (paintsPoint) adds that point;
-// a run with no extent at all gives an empty box, never a guess.
-export function liveBounds(lives: readonly Element[], viewbox: Element): Box | null {
+// World boxes of the live elements (each bounding box through its screen CTM relative to #viewbox's), unpadded. Empty
+// elements (nothing rendered) give none; a zero-size box of an element that can paint a point (paintsPoint) is that
+// point. null when unknown (a measurement failed or the matrix is singular).
+export function elementBoxes(lives: readonly Element[], viewbox: Element): Box[] | null {
   try {
     const root = (viewbox as SVGGraphicsElement).getScreenCTM();
     if (!root) return null;
     const inverse = root.inverse();
-    let box: Box | null = null;
+    const boxes: Box[] = [];
     for (const element of lives) {
       const graphics = element as SVGGraphicsElement;
       if (typeof graphics.getBBox !== "function") return null;
@@ -105,14 +104,55 @@ export function liveBounds(lives: readonly Element[], viewbox: Element): Box | n
       if (!(bbox.width > 0 || bbox.height > 0) && !paintsPoint(element)) continue;
       const m = inverse.multiply(ctm);
       if (![m.a, m.b, m.c, m.d, m.e, m.f].every(Number.isFinite)) return null;
-      box = union(box, transformBox(bbox, m));
+      boxes.push(transformBox(bbox, m));
     }
-    if (!box) return { x0: 0, y0: 0, x1: 0, y1: 0 };
-    const pad = WINDOW_PAD_UNITS;
-    return { x0: box.x0 - pad, y0: box.y0 - pad, x1: box.x1 + pad, y1: box.y1 + pad };
+    return boxes;
   } catch {
     return null;
   }
+}
+
+const padBox = (box: Box, pad: number): Box => ({
+  x0: box.x0 - pad,
+  y0: box.y0 - pad,
+  x1: box.x1 + pad,
+  y1: box.y1 + pad
+});
+
+// The run box of element boxes (elementBoxes): their union padded by WINDOW_PAD_UNITS; an empty box for none.
+export function boundsOf(boxes: readonly Box[] | null): Box | null {
+  if (!boxes) return null;
+  const box = boxes.reduce<Box | null>(union, null);
+  return box ? padBox(box, WINDOW_PAD_UNITS) : { x0: 0, y0: 0, x1: 0, y1: 0 };
+}
+
+// World bounds of the live elements (union of their bounding boxes through their screen CTM relative to #viewbox's),
+// padded by WINDOW_PAD_UNITS; null when unknown (a measurement failed or the matrix is singular). Empty elements
+// (nothing rendered) add nothing; a zero-size box of an element that can paint a point (paintsPoint) adds that point;
+// a run with no extent at all gives an empty box, never a guess.
+export const liveBounds = (lives: readonly Element[], viewbox: Element): Box | null =>
+  boundsOf(elementBoxes(lives, viewbox));
+
+// What of a run reaches `region`: the union of its element boxes (each padded by WINDOW_PAD_UNITS) clipped to the
+// region, null when none reaches it. The run box (boundsOf) of labels spread over the world spans the world, where the
+// few labels in a zoomed view reach a small part of it.
+export function boundsWithin(
+  boxes: readonly Box[],
+  region: { x: number; y: number; width: number; height: number }
+): Box | null {
+  const [rx1, ry1] = [region.x + region.width, region.y + region.height];
+  let reach: Box | null = null;
+  for (const box of boxes) {
+    const padded = padBox(box, WINDOW_PAD_UNITS);
+    const clipped = {
+      x0: Math.max(padded.x0, region.x),
+      y0: Math.max(padded.y0, region.y),
+      x1: Math.min(padded.x1, rx1),
+      y1: Math.min(padded.y1, ry1)
+    };
+    if (clipped.x1 > clipped.x0 && clipped.y1 > clipped.y0) reach = union(reach, clipped);
+  }
+  return reach;
 }
 
 // Label culling hides off-screen labels and emblems with `.viewport-culled{display:none!important}` (label-culling.ts),
@@ -125,9 +165,11 @@ export interface Measured {
   elements: readonly Element[];
   screen: boolean;
   bounds?: Box | null;
+  boxes?: Box[] | null; // its elements' own boxes (elementBoxes), measured with `bounds`
 }
 
-// Sets `bounds` (liveBounds) on every world item that has none yet, in one pass with label culling off.
+// Sets `bounds` (liveBounds) and `boxes` (elementBoxes) on every world item that has no bounds yet, in one pass with
+// label culling off.
 export function measureBounds(items: readonly Measured[], viewbox: Element): void {
   const todo = items.filter(item => !item.screen && item.bounds === undefined);
   if (!todo.length) return;
@@ -148,7 +190,10 @@ export function measureBounds(items: readonly Measured[], viewbox: Element): voi
     }
   }
   try {
-    for (const item of todo) item.bounds = liveBounds(item.elements, viewbox);
+    for (const item of todo) {
+      item.boxes = elementBoxes(item.elements, viewbox);
+      item.bounds = boundsOf(item.boxes);
+    }
   } finally {
     for (const sheet of sheets) sheet.disabled = false;
   }
