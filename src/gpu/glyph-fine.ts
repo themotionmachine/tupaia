@@ -23,6 +23,8 @@ import { GLYPH_ATLAS, GLYPH_FLOATS, GlyphAtlas, glyphAtlasRows, layoutLabels } f
 const SCALE_MATCH = 1e-4;
 // extra fine-atlas rows over the bucket set's (the fine cells are smaller; a shelf can still break differently)
 const ROW_SLACK = 64;
+// main-thread slice between yields while laying out (ms)
+const SLICE_MS = 8;
 
 const same = (a: number, b: number) => Math.abs(a / b - 1) < SCALE_MATCH;
 
@@ -103,7 +105,15 @@ async function cut(prepared: Prepared, device: GpuDevice, scale: number, stale: 
     atlas = new GlyphAtlas(rows);
     data = new Float32Array(glyphCount * GLYPH_FLOATS);
     let full = false;
+    let slice = performance.now();
     for (const label of labels) {
+      // a re-cut lays out every label (35-40 ms on the shared map): yield between slices so a gesture that starts
+      // meanwhile gets the main thread (and supersedes the cut through stale())
+      if (performance.now() - slice > SLICE_MS) {
+        await new Promise(resolve => setTimeout(resolve, 0));
+        if (stale()) return "stale";
+        slice = performance.now();
+      }
       const batch = await layoutLabels([label.element], scale, atlas);
       if (stale()) return "stale";
       const reason = batch.failed[0]?.reason;
