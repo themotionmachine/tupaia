@@ -53,7 +53,7 @@ export function editDefinitions(args: { id: string; set: boolean }): DefinitionE
   for (const id of referenced) {
     const target = document.getElementById(id);
     if (target && (DEFINITION_TAGS.has(target.localName.toLowerCase()) || target.closest("#coas, #defElements")) && !root.contains(target)) targets.push(target);
-    if (targets.length >= 6) break;
+    if (targets.length >= 60) break; // a layer of coats of arms names dozens; the first few may be off screen
   }
   const recorded: typeof saved = [];
   const names: string[] = [];
@@ -64,7 +64,7 @@ export function editDefinitions(args: { id: string; set: boolean }): DefinitionE
   for (const target of targets) {
     names.push(`${target.localName}#${target.id}`);
     const kind = target.localName.toLowerCase();
-    for (const shape of Array.from(target.querySelectorAll("*")).slice(0, 200)) {
+    for (const shape of Array.from(target.querySelectorAll("*")).slice(0, 120)) {
       const el = shape as HTMLElement;
       const tag = shape.localName.toLowerCase();
       if (kind === "filter") set(el, "flood-color", "#ff00ff"); // feFlood / feDropShadow; other primitives ignore it

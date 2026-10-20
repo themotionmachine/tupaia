@@ -1978,8 +1978,12 @@ const TIERS: Record<string, Array<[string, Args]>> = {
     ["golden-selftest", {}],
     // D5 gate scale: default preset, k {1,4}, dpr 2, every layer family, on the parity fixture (FIX packet)
     ["golden", { layers: "all", k: "1,4", dpr: "2", preset: "default", fixture: "parity", census: "tests/fixtures/parity/census-expectations.json" }],
-    // the lazy-COA race (emblems follow symbols that arrive after the GPU prepared); fails until the renderer observes #coas
+    // the lazy-COA race (emblems follow symbols that arrive after the GPU prepared; the renderer observes #coas since W3 LIFE3)
     ["coa-race", {}],
+    // W3 COST: compat raster reuse against the SVG across a zoom, a move, a toggle and a definition edit, and the self-test that
+    // it can still fail (a blind tracker, a tracker blind to definitions only). Together ~11 min measured, under the 25 min bar
+    ["reuse-fidelity-selftest", {}],
+    ["reuse-fidelity", {}],
     // G-E editor replay (svg recorded, gpu and gpu-select replayed) and the document consumers (rows 31-38, 40)
     ["replay-selftest", {}],
     ["replay", {}],
