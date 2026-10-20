@@ -283,29 +283,64 @@ function decode(markup: string, width: number, height: number): Promise<HTMLCanv
   });
 }
 
-// Mask and clip rects sized in viewport percentages (#water and #fog: x 0, y 0, width and height 100%) resolve against
-// the live svg#map viewport (the window, svgWidth x svgHeight) in the masked element's user space, so on a map larger
-// than the window the live SVG masks everything past world x svgWidth / y svgHeight. A raster's document has its own
-// size and viewBox (the run's region), where they resolved against the region instead: the GPU drew the water-masked
-// texture over the whole 1680x849 demo map where SVG stops at 1280x720 (corpus demo-v1.112 texture over16 9.3%), and a
-// settle detail (region = the view) would mask differently again. Pins them to the live viewport for serialization.
-// Returns an undo function.
+// Lengths in viewport percentages (the #water and #fog mask rects, the #fogging-cont rects, #vignette-rect: x 0, y 0,
+// width and height 100%) resolve against the nearest viewport, which for content of svg#map is the live svg#map (the
+// window, svgWidth x svgHeight), in the element's own user space: on a map larger than the window the live SVG masks
+// everything past world x svgWidth / y svgHeight. A raster's document has its own size and viewBox (the run's region),
+// where they resolved against the region instead: the GPU drew the water-masked texture over the whole 1680x849 demo
+// map where SVG stops at 1280x720 (corpus demo-v1.112 texture over16 9.3%), and in a settle detail (region = the view)
+// a fog rect spanning x 0..region.width could miss the view entirely. Pins them to the live viewport for
+// serialization. Scoped to what really resolves against svg#map: an element under a nested viewport (an emblem's or
+// marker's <svg>, a <symbol>) or inside a pattern, marker or filter keeps its percentages, as does mask or clip content
+// in objectBoundingBox units (fractions of the referencing element's box) and a mask's own region unless it is in
+// userSpaceOnUse. `r` resolves against the normalized diagonal. Returns an undo function.
+const PERCENT = /^\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?)%\s*$/i;
+const BOX = ["x", "y", "width", "height"];
+const VIEWPORT_LENGTHS: Record<string, readonly string[]> = {
+  rect: [...BOX, "rx", "ry"],
+  image: BOX,
+  use: BOX,
+  foreignObject: BOX,
+  svg: BOX,
+  mask: BOX,
+  circle: ["cx", "cy", "r"],
+  ellipse: ["cx", "cy", "rx", "ry"],
+  line: ["x1", "y1", "x2", "y2"]
+};
+const HORIZONTAL = new Set(["x", "width", "rx", "cx", "x1", "x2"]);
+const VERTICAL = new Set(["y", "height", "ry", "cy", "y1", "y2"]);
+// ancestors under which a percentage no longer resolves against svg#map's viewport
+const OWN_VIEWPORT = new Set(["svg", "symbol", "pattern", "marker", "filter"]);
+const SELECTOR = [...new Set(Object.values(VIEWPORT_LENGTHS).flat())].map(name => `[${name}*="%"]`).join(",");
+
+function againstRootViewport(element: Element, root: Element): boolean {
+  const tag = element.tagName;
+  if (tag === "mask" && element.getAttribute("maskUnits") !== "userSpaceOnUse") return false;
+  for (let node = element.parentElement; node && node !== root; node = node.parentElement) {
+    const name = node.tagName;
+    if (OWN_VIEWPORT.has(name)) return false;
+    if (name === "mask" && node.getAttribute("maskContentUnits") === "objectBoundingBox") return false;
+    if (name === "clipPath" && node.getAttribute("clipPathUnits") === "objectBoundingBox") return false;
+  }
+  return true;
+}
+
 export function pinViewportPercentages(clone: Element, width: number, height: number): () => void {
   const changed: [Element, string, string][] = [];
   if (!(width > 0) || !(height > 0)) return () => {};
-  for (const rect of clone.querySelectorAll("mask rect, clipPath rect"))
-    for (const [name, size] of [
-      ["x", width],
-      ["y", height],
-      ["width", width],
-      ["height", height]
-    ] as const) {
-      const value = rect.getAttribute(name);
-      const match = value?.trim().match(/^([-+]?(?:\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?)%$/i);
+  const diagonal = Math.sqrt((width * width + height * height) / 2);
+  for (const element of clone.querySelectorAll(SELECTOR)) {
+    const names = VIEWPORT_LENGTHS[element.tagName];
+    if (!names || !againstRootViewport(element, clone)) continue;
+    for (const name of names) {
+      const value = element.getAttribute(name);
+      const match = value?.match(PERCENT);
       if (!value || !match) continue;
-      changed.push([rect, name, value]);
-      rect.setAttribute(name, String((Number(match[1]) / 100) * size));
+      const size = HORIZONTAL.has(name) ? width : VERTICAL.has(name) ? height : diagonal;
+      changed.push([element, name, value]);
+      element.setAttribute(name, String((Number(match[1]) / 100) * size));
     }
+  }
   return () => {
     for (let i = changed.length - 1; i >= 0; i--) changed[i][0].setAttribute(changed[i][1], changed[i][2]);
   };
