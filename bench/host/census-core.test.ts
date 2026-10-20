@@ -11,6 +11,7 @@ import {
   judgeGeometry,
   judgeGrowth,
   judgeMemory,
+  judgeOnStateFidelity,
   judgePrepares,
   judgePresets,
   judgeReorder,
@@ -94,7 +95,30 @@ test("prepares per toggle are a budget", () => {
   const cost = { prepares: 1, invalidations: 50, lastPrepareMs: 20, currentMs: 100 };
   assert.deepEqual(judgePrepares(cost), []);
   assert.deepEqual(judgePrepares({ ...cost, prepares: TOGGLE_BUDGET.maxPreparesPerToggle }), []);
-  assert.match(judgePrepares({ ...cost, prepares: TOGGLE_BUDGET.maxPreparesPerToggle + 1 }).join(), /3 committed prepares/);
+  assert.match(judgePrepares({ ...cost, prepares: TOGGLE_BUDGET.maxPreparesPerToggle + 1 }).join(), /2 committed prepares/);
+});
+
+test("on-state fidelity: the round trip must leave the layer looking as it did, GPU against SVG", () => {
+  const before = { ssim: 0.9894, over16Fraction: 0.0065, over16OfInk: 0.08, inkRatio: 0.657 };
+  const args = { label: "rivers", before, after: { ...before }, gpu };
+  assert.deepEqual(judgeOnStateFidelity(args), [], "identical metrics pass");
+  assert.deepEqual(judgeOnStateFidelity({ ...args, after: { ...before, ssim: 0.9885, over16Fraction: 0.0066 } }), [], "sub-margin noise passes");
+  // a GPU frame left at 50 % opacity or redrawn with the wrong fills: right footprint, wrong pixels
+  const faded = { ssim: 0.97, over16Fraction: 0.019, over16OfInk: 0.55, inkRatio: 0.657 };
+  const problems = judgeOnStateFidelity({ ...args, after: faded }).join(" | ");
+  assert.match(problems, /SSIM fell from 0.9894 to 0.9700/);
+  assert.match(problems, /over16 rose from 0.650% to 1.900%/);
+  assert.match(problems, /over16 of the layer's ink rose/);
+  // sparse layer: whole-frame over16 and SSIM barely move, the layer-scoped view still catches it
+  const sparse = { ssim: 0.9999, over16Fraction: 0.0001, over16OfInk: 0.0, inkRatio: 0.98 };
+  assert.match(judgeOnStateFidelity({ label: "compass", before: sparse, after: { ...sparse, over16OfInk: 0.6 }, gpu }).join(), /over16 of the layer's ink rose from 0.0% to 60.0%/);
+  assert.match(judgeOnStateFidelity({ ...args, after: { ...before, inkRatio: 0.3 } }).join(), /ink ratio fell/);
+  assert.match(judgeOnStateFidelity({ ...args, gpu: { active: "svg", fallbackReason: "lost" } }).join(), /GPU not active/);
+  assert.match(judgeOnStateFidelity({ ...args, gpu: { active: "gpu", timedOut: true } }).join(), /did not become current/);
+  // a baseline already outside D1 (a golden gap) is not blamed on the toggle, but may not get worse
+  const gap = { ssim: 0.91, over16Fraction: 0.42 };
+  assert.deepEqual(judgeOnStateFidelity({ label: "provinces", before: gap, after: { ...gap }, gpu }), []);
+  assert.match(judgeOnStateFidelity({ label: "provinces", before: gap, after: { ssim: 0.91, over16Fraction: 0.6 }, gpu }).join(), /over16 .* worse than the baseline|over16 rose/);
 });
 
 test("reorder: the move must be visible in the SVG, followed by the GPU, and within D1", () => {
@@ -142,12 +166,57 @@ test("preset summary: compat share, induced failures and the worst cell", () => 
   assert.equal(ancient.worst?.over16, 0.05);
 });
 
+const gated = (preset: string, family: string, gates: Record<string, boolean>): GoldenCellLike => {
+  const ok = Object.values(gates).every(Boolean);
+  return cell(preset, family, 1, ok, { gates, failures: ok ? [] : ["conservative: changed 0.9% (max 0.5%)"] });
+};
+const allGates = { ssim: true, over16: true, over44: true, conservative: true, populated: true };
+
+test("preset induced is counted per gate: a cell that already fails one gate cannot hide a regression of another", () => {
+  const cells = [
+    // texture fails the conservative gate under the baseline, but passes ssim and over16 there
+    gated("default", "texture", { ...allGates, conservative: false }),
+    gated("ancient", "texture", { ...allGates, conservative: false, ssim: false, over16: false }),
+    // a cell that fails only a gate that also fails under the baseline is not induced
+    gated("ancient", "ocean", { ...allGates, conservative: false }),
+    gated("default", "ocean", { ...allGates, conservative: false }),
+    gated("light", "texture", { ...allGates, conservative: false }),
+    gated("light", "ocean", { ...allGates, conservative: false })
+  ];
+  const { rows } = summarizePresets(cells);
+  const ancient = rows.find(r => r.preset === "ancient")!;
+  assert.equal(ancient.induced, 1);
+  assert.deepEqual(ancient.inducedCells, ["texture/k1"]);
+  assert.deepEqual(ancient.inducedGates, { ssim: 1, over16: 1 });
+  assert.equal(rows.find(r => r.preset === "light")!.induced, 0);
+  assert.match(judgePresets(rows).join(), /ancient: 1 cell\(s\) fail a gate under this preset that passes under the baseline \(ssim 1, over16 1;/);
+});
+
+test("preset induced follows the reading: over44 gate under the over44 reading, conservative otherwise", () => {
+  const cells = [gated("default", "ocean", allGates), gated("gloom", "ocean", { ...allGates, over44: false })];
+  assert.equal(summarizePresets(cells).rows.find(r => r.preset === "gloom")!.induced, 0, "over44 is not gated under the conservative reading");
+  assert.equal(summarizePresets(cells, "default", "over44").rows.find(r => r.preset === "gloom")!.induced, 1);
+});
+
+test("preset hard failures are anchored on the golden's own phrases, not any mention of a fallback", () => {
+  const cells = [
+    cell("default", "ocean", 1, true),
+    cell("night", "ocean", 1, false, { failures: ["ink footprint note: compat fallback took 40% of the elements"] }),
+    cell("pale", "ocean", 1, false, { failures: ["GPU not active: webgl2 lost"] }),
+    cell("gloom", "ocean", 1, false, { failures: ["GPU frame did not settle within 60 s"] }),
+    cell("light", "ocean", 1, false, { failures: ["harness: boom"] })
+  ];
+  const { rows } = summarizePresets(cells);
+  assert.equal(rows.find(r => r.preset === "night")!.hard.length, 0);
+  for (const p of ["pale", "gloom", "light"]) assert.equal(rows.find(r => r.preset === p)!.hard.length, 1, p);
+});
+
 test("preset verdict: hard failures always fail, metric failures only past the allowance", () => {
   const cells = [cell("default", "ocean", 1, true), cell("gloom", "ocean", 1, false), cell("night", "ocean", 1, false, { failures: ["GPU not active: boom"] })];
   const { rows } = summarizePresets(cells);
   const problems = judgePresets(rows);
   assert.equal(problems.length, 2);
-  assert.match(problems.join(" | "), /gloom: 1 cell\(s\) fail only under this preset/);
+  assert.match(problems.join(" | "), /gloom: 1 cell\(s\) fail a gate under this preset/);
   assert.match(problems.join(" | "), /night: 1 hard failure/);
   assert.deepEqual(judgePresets(rows, 1).filter(p => /gloom/.test(p)), [], "an allowance of 1 forgives gloom");
   assert.equal(judgePresets(rows, 1).filter(p => /night/.test(p)).length, 1, "but never a hard failure");

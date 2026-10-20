@@ -9,8 +9,11 @@
 //                  committed prepares and invalidations the click caused (a budget, TOGGLE_BUDGET). After each
 //                  click the GPU arm and the SVG arm are captured from the same DOM state. Off: neither paints the layer.
 //                  On: both paint it, the GPU with at least TOGGLE_BUDGET.onInkRatioMin of the SVG's ink (a coherence
-//                  floor, not a fidelity gate), and the full golden verdict of that cell is reported alongside
-//                  (TOGGLE_STRICT=1 gates on it too). The per-layer fidelity verdicts are the golden's job.
+//                  floor), and the full golden verdict of that cell is reported alongside (TOGGLE_STRICT=1 gates on it
+//                  too). The on-state is also gated on fidelity (toggle.<layer>.on-fidelity): the GPU against the SVG
+//                  for the isolated layer is captured BEFORE the off click, and after the round trip it must look the
+//                  same (judgeOnStateFidelity: D1 when the baseline is inside it, otherwise no worse, plus a tight
+//                  layer-scoped margin). Both comparisons are GPU against SVG, never GPU against GPU.
 //   cost pass      opt-in (TOGGLE_PASSES=cost): the whole scene, every layer on, off then on per toggle: prepares and the
 //                  click-to-current-frame time in the real scene (a timing, so run it under the exclusive lock).
 //   trade          Trade off -> save -> `data-layer-off` in the saved SVG -> load -> still off, no markers, no animation;
@@ -28,7 +31,11 @@
 //                     belongs under the exclusive lock; the prepares per toggle are also recorded by the isolated pass)
 //   TOGGLE_READING    conservative | over44: the golden reading reported / gated with TOGGLE_STRICT
 //   TOGGLE_STRICT     1: a failing golden verdict of an on-state cell fails the check (default: reported only)
-//   TOGGLE_BREAK      none | freeze-gpu: self-test, the GPU stops following DOM mutations; the run must FAIL
+//   TOGGLE_BREAK      none | freeze-gpu | perturb-on: self-test, the run must FAIL.
+//                     freeze-gpu: the GPU stops following DOM mutations (the off/on state checks fail).
+//                     perturb-on: after the layer is turned back on, the GPU canvas alone is drawn hue-rotated (a layer
+//                     redrawn with wrong fills; white and grey are untouched, so the backdrop and every stroke stay in place): the footprint is right, the pixels are wrong, only toggle.<layer>.on-fidelity
+//                     can see it. (Not an opacity change: the SVG shows through a translucent canvas, which would improve the match.)
 // Output in GATE_OUT_DIR: toggles.json (report; `failure` null on a pass) and PNGs of failing cells.
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -44,6 +51,7 @@ import {
   info,
   gpuCount,
   judgePrepares,
+  judgeOnStateFidelity,
   judgeReorder,
   judgeToggleOff,
   judgeToggleOn,
@@ -59,7 +67,7 @@ if (dpr !== 1 && dpr !== 2) throw Error("TOGGLE_DPR must be 1 or 2");
 const reading = (env.TOGGLE_READING || "conservative") as Reading;
 const strict = env.TOGGLE_STRICT === "1";
 const breakMode = env.TOGGLE_BREAK || "none";
-if (!["none", "freeze-gpu"].includes(breakMode)) throw Error("TOGGLE_BREAK must be none|freeze-gpu");
+if (!["none", "freeze-gpu", "perturb-on"].includes(breakMode)) throw Error("TOGGLE_BREAK must be none|freeze-gpu|perturb-on");
 const passes = (env.TOGGLE_PASSES || "isolated,trade,reorder").split(",").map(s => s.trim()).filter(Boolean);
 for (const p of passes) if (!["cost", "isolated", "trade", "reorder"].includes(p)) throw Error(`TOGGLE_PASSES: unknown pass ${p}`);
 
@@ -227,6 +235,10 @@ try {
       await settleApp(page);
       await page.evaluate(isolateLayers, { ids: [t.layerId], bg: "#ffffff" });
       await waitCurrent(page);
+      // the pre-toggle on-state, GPU against SVG: what the layer must look like again after the round trip
+      const preShots = await captureArms(page);
+      const preMetrics = measureCell(decode(preShots.svg), decode(preShots.gpu), blankSvg, blankGpu);
+      rows.before = { ssim: preMetrics.ssim, over16: preMetrics.over16Fraction, over16OfInk: preMetrics.over16OfInk, inkRatio: preMetrics.inkRatio };
       for (const step of ["off", "on"] as const) {
         const before = await page.evaluate(gpuProbe);
         const factsBefore = await page.evaluate(layerFacts, { id: t.layerId, root: t.root });
@@ -236,7 +248,9 @@ try {
         const after = await page.evaluate(gpuProbe);
         const facts = await page.evaluate(layerFacts, { id: t.layerId, root: t.root });
         const off = await buttonOff(t);
+        if (breakMode === "perturb-on" && step === "on") await page.evaluate(() => ((document.querySelector("canvas[data-gpu-renderer]") as HTMLElement).style.filter = "hue-rotate(150deg)"));
         const shots = await captureArms(page);
+        if (breakMode === "perturb-on" && step === "on") await page.evaluate(() => ((document.querySelector("canvas[data-gpu-renderer]") as HTMLElement).style.filter = ""));
         const svg = decode(shots.svg);
         const gpu = decode(shots.gpu);
         const metrics = measureCell(svg, gpu, blankSvg, blankGpu);
@@ -268,6 +282,26 @@ try {
         }
         rows[step] = { obs, ssim: metrics.ssim, over16: metrics.over16Fraction, over44: metrics.over44Fraction, inkRatio: metrics.inkRatio, golden: step === "on" ? { pass: goldenOk, reading, failures: verdict.failures.slice(0, 3), gates: verdict.gates } : undefined, ...cost };
         add(judged(`toggle.${t.name}.${step}`, "26", problems, step === "off" ? `class, display, layer report, GPU and both arms agree the layer is gone; ${cost.prepares} prepare(s)` : `class, display, layer report, GPU and both arms agree; ink ratio ${metrics.inkRatio.toFixed(2)}, ssim ${metrics.ssim.toFixed(3)}, golden ${goldenOk ? "pass" : `fail (${verdict.failures[0] ?? "?"})`}; ${cost.prepares} prepare(s)`, images ? images.diff : undefined));
+        if (step === "on") {
+          // fidelity of the on-state after the round trip: GPU against SVG now vs before the first click (row 26)
+          const fidelity = judgeOnStateFidelity({
+            label: t.name,
+            before: { ssim: preMetrics.ssim, over16Fraction: preMetrics.over16Fraction, over16OfInk: preMetrics.over16OfInk, inkRatio: preMetrics.inkRatio },
+            after: { ssim: metrics.ssim, over16Fraction: metrics.over16Fraction, over16OfInk: metrics.over16OfInk, inkRatio: metrics.inkRatio },
+            gpu: { active: wait.active, timedOut: wait.timedOut, fallbackReason: wait.fallbackReason }
+          });
+          rows.on.fidelity = fidelity;
+          let evidence: string | undefined;
+          if (fidelity.length) {
+            const base = join(cellDir, `${t.name}-on-fidelity`);
+            writeFileSync(`${base}-before-gpu.png`, preShots.gpu);
+            writeFileSync(`${base}-after-gpu.png`, shots.gpu);
+            writeFileSync(`${base}-svg.png`, shots.svg);
+            writeFileSync(`${base}-diff.png`, encodePng(heatmap(svg, gpu)));
+            evidence = `cells/${t.name}-on-fidelity-diff.png`;
+          }
+          add(judged(`toggle.${t.name}.on-fidelity`, "26", fidelity, `GPU against SVG after the round trip matches before it: ssim ${preMetrics.ssim.toFixed(4)} -> ${metrics.ssim.toFixed(4)}, over16 ${(preMetrics.over16Fraction * 100).toFixed(3)}% -> ${(metrics.over16Fraction * 100).toFixed(3)}%`, evidence));
+        }
       }
       report.rows.isolated.push(rows);
       write();

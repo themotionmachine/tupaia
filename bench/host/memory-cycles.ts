@@ -24,6 +24,8 @@
 //   MEMORY_RESIZES    resizes                                                            default 12
 //   MEMORY_WARMUP     cycles discarded as warm-up before the baseline                    default 3
 //   MEMORY_STEPS     world,resize                                                        default world,resize
+//   MEMORY_RENDERER   gpu | svg: svg runs the same cycles on the SVG-only page (no renderer to judge), to attribute growth
+//                     in DOM nodes or heap to the app itself rather than the GPU renderer   default gpu
 //   MEMORY_BREAK      none | leak: self-test, every cycle retains about 20 MB of heap objects and 800 DOM nodes; the run must FAIL
 // Output in GATE_OUT_DIR: memory.json (report; `failure` null on a pass).
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -40,6 +42,8 @@ const resizes = Number(env.MEMORY_RESIZES || 12);
 const warmup = Number(env.MEMORY_WARMUP || 3);
 const steps = (env.MEMORY_STEPS || "world,resize").split(",").map(x => x.trim());
 for (const step of steps) if (!["world", "resize"].includes(step)) throw Error(`MEMORY_STEPS: unknown step ${step}`);
+const rendererArm = env.MEMORY_RENDERER || "gpu";
+if (rendererArm !== "gpu" && rendererArm !== "svg") throw Error("MEMORY_RENDERER must be gpu|svg");
 const breakMode = env.MEMORY_BREAK || "none";
 if (!["none", "leak"].includes(breakMode)) throw Error("MEMORY_BREAK must be none|leak");
 if (steps.includes("world") && (!Number.isInteger(cycles) || cycles < warmup + 3)) throw Error(`MEMORY_CYCLES must be an integer >= ${warmup + 3}`);
@@ -52,7 +56,7 @@ const checks: Check[] = [];
 const report: any = {
   schema: 1,
   check: "memory-cycles",
-  config: { dpr, cycles, resizes, warmup, steps, break: breakMode, limits: MEMORY_LIMITS },
+  config: { dpr, cycles, resizes, warmup, steps, renderer: rendererArm, break: breakMode, limits: MEMORY_LIMITS },
   worldReplace: [] as MemorySnapshot[],
   resize: [] as MemorySnapshot[],
   growth: {} as Record<string, unknown>,
@@ -74,7 +78,7 @@ try {
   mkdirSync(outDir, { recursive: true });
   const fixture = parityFixture(env.MEMORY_MAP);
   report.config.fixture = { path: fixture.path, sha256: fixture.sha256 };
-  const opened = await openPage(browser, served.origin, { dpr, renderer: "gpu", launcher, sink, label: "gpu" });
+  const opened = await openPage(browser, served.origin, { dpr, renderer: rendererArm, launcher, sink, label: rendererArm });
   const { page, context } = opened;
   report.adapter = opened.adapter;
   const cdp = await context.newCDPSession(page);
@@ -85,7 +89,8 @@ try {
   });
 
   const snapshot = async (cycle: number): Promise<MemorySnapshot & { sameRenderer: boolean; wait: unknown }> => {
-    const wait = await waitCurrent(page); // current and refined: the allocations are at rest
+    // current and refined: the allocations are at rest (the svg arm has no renderer: it only settles)
+    const wait = rendererArm === "gpu" ? await waitCurrent(page) : { active: "gpu", timedOut: false };
     await settleApp(page);
     await cdp.send("HeapProfiler.collectGarbage");
     await cdp.send("HeapProfiler.collectGarbage");

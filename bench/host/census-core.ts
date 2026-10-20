@@ -33,8 +33,9 @@ export function failureSummary(checks: Check[], limit = 6): string | null {
 
 /** Budgets a toggle must keep. Tighten them as the renderer learns to flip a visibility flag instead of re-preparing. */
 export const TOGGLE_BUDGET = {
-  /** committed full prepares one toggle click may cause (the DOM change, plus one for a fade or a font arriving) */
-  maxPreparesPerToggle: 2,
+  /** committed full prepares one toggle click may cause. Measured: exactly 1 (31 layers, off and on); a second prepare
+   *  would be a regression (a fade or a font arriving mid-toggle re-prepares), so the budget is locked at the measured cost. */
+  maxPreparesPerToggle: 1,
   /** toggle-coherence floor: the GPU's ink as a share of the SVG's after a layer is turned back on. NOT a fidelity gate. */
   onInkRatioMin: 0.3
 } as const;
@@ -111,6 +112,37 @@ export function judgeToggleOn(o: ToggleObservation, floor: number = TOGGLE_BUDGE
   return problems;
 }
 
+/** GPU against SVG for one frame; the extra fields are the layer-scoped views that a sparse layer cannot hide behind. */
+export interface OnStateMetrics extends FrameMetrics {
+  /** over16 pixels as a share of the layer's ink (union of both arms): a thin layer cannot hide in the whole frame */
+  over16OfInk?: number;
+  inkRatio?: number;
+}
+/** Margins for "the layer looks the same after a toggle round trip as before it". The render is deterministic, so a
+ *  healthy round trip moves these by ~0; the margins only absorb sub-pixel noise. */
+export const ONSTATE_MARGIN = { ssim: 0.01, over16Fraction: 0.002, over16OfInk: 0.03, inkRatio: 0.05 } as const;
+
+/**
+ * Fidelity of the on-state after a toggle round trip (off, then on). `before` is GPU against SVG for the same isolated
+ * layer, same camera, before the first click; `after` the same after turning it back on. Both are GPU against the SVG
+ * arm (D1), never GPU against GPU. Catches what the ink-coherence floor cannot: a frame left at a mid-fade opacity, or
+ * redrawn with stale or wrong fills, has the right footprint and the wrong pixels.
+ */
+export function judgeOnStateFidelity(args: { label: string; before: OnStateMetrics; after: OnStateMetrics; gpu: { active: string | null; timedOut?: boolean; fallbackReason?: string } }): string[] {
+  const problems = judgeFrameAfter(args);
+  const { before, after } = args;
+  const m = ONSTATE_MARGIN;
+  // judgeFrameAfter already compares SSIM within 0.02 and over16 within 0.5 points when the baseline is outside D1; the
+  // round trip is stricter: the same layer in the same state must look as it did, whatever the baseline
+  if (args.gpu.active === "gpu") {
+    if (after.ssim < before.ssim - m.ssim && !problems.some(p => /SSIM fell/.test(p))) problems.push(`${args.label}: SSIM fell from ${before.ssim.toFixed(4)} to ${after.ssim.toFixed(4)} across the round trip`);
+    if (after.over16Fraction > before.over16Fraction + m.over16Fraction) problems.push(`${args.label}: over16 rose from ${(before.over16Fraction * 100).toFixed(3)}% to ${(after.over16Fraction * 100).toFixed(3)}% across the round trip`);
+    if (before.over16OfInk != null && after.over16OfInk != null && after.over16OfInk > before.over16OfInk + m.over16OfInk) problems.push(`${args.label}: over16 of the layer's ink rose from ${(before.over16OfInk * 100).toFixed(1)}% to ${(after.over16OfInk * 100).toFixed(1)}% across the round trip`);
+    if (before.inkRatio != null && after.inkRatio != null && after.inkRatio < before.inkRatio - m.inkRatio) problems.push(`${args.label}: ink ratio fell from ${before.inkRatio.toFixed(3)} to ${after.inkRatio.toFixed(3)} across the round trip`);
+  }
+  return [...new Set(problems)];
+}
+
 export interface PrepareCost {
   prepares: number;
   invalidations: number;
@@ -165,15 +197,23 @@ export interface GoldenCellLike {
   failures?: string[];
   census?: { native: number; compat: number; skipped: number } | null;
   metrics?: { ssim?: number; over16Fraction?: number; over44Fraction?: number } | null;
+  /** the golden's per-gate verdicts of the cell (golden-metrics judgeCell) */
+  gates?: Partial<Record<"ssim" | "over16" | "over44" | "conservative" | "populated", boolean>>;
   renderer?: { active?: string; fallbackReason?: string };
 }
+/** The D1 gates a preset can induce a failure of (the reading's own changed-pixel gate is added by summarizePresets). */
+export const INDUCIBLE_GATES = ["ssim", "over16", "populated"] as const;
 export interface PresetRow {
   preset: string;
   cells: number;
   pass: number;
   fail: number;
-  /** failing here but passing under the baseline preset for the same (family, k): the preset caused it */
+  /** cells where at least one gate (ssim, over16, populated, the reading's changed-pixel gate) passes under the baseline
+   *  preset for the same (family, k) and fails under this one: the preset caused it. Counted per gate, not per cell, so a
+   *  layer that already fails some other gate under the baseline cannot hide a regression of a gate it used to pass. */
   induced: number;
+  /** induced cells per gate */
+  inducedGates: Record<string, number>;
   /** native / compat / skipped element counts summed over the preset's cells */
   native: number;
   compat: number;
@@ -186,17 +226,28 @@ export interface PresetRow {
   worst: { cell: string; ssim: number | null; over16: number | null } | null;
 }
 
-const HARD = /GPU not active|did not settle|harness:|fallback/i;
+// the exact hard-failure phrases layer-golden.ts emits: a GPU that is not drawing, a prepare that never settled, a harness error
+const HARD = /^(GPU not active|GPU frame did not settle|harness:)/;
 const cellId = (c: GoldenCellLike) => `${c.family}/k${c.k}${/@/.test(c.key) ? c.key.slice(c.key.indexOf("@")) : ""}`;
 
 /** Aggregates one golden report (cells of several presets) by preset. `baseline` is the preset the induced count is relative to. */
-export function summarizePresets(cells: GoldenCellLike[], baseline = "default"): { rows: PresetRow[]; byFamily: Record<string, Record<string, number | null>> } {
+export function summarizePresets(cells: GoldenCellLike[], baseline = "default", reading: "conservative" | "over44" = "conservative"): { rows: PresetRow[]; byFamily: Record<string, Record<string, number | null>> } {
   const presets = [...new Set(cells.map(c => c.preset))];
   const base = new Map(cells.filter(c => c.preset === baseline).map(c => [cellId(c), c]));
   const rows = presets.map<PresetRow>(preset => {
     const mine = cells.filter(c => c.preset === preset);
     const failed = mine.filter(c => !c.pass);
-    const induced = preset === baseline ? [] : failed.filter(c => base.get(cellId(c))?.pass);
+    const gates = [...INDUCIBLE_GATES, reading] as const;
+    const inducedGates: Record<string, number> = {};
+    const inducedBy = (c: GoldenCellLike): string[] => {
+      const was = base.get(cellId(c));
+      if (!was) return [];
+      // cells without per-gate verdicts fall back to the cell verdict
+      if (!c.gates || !was.gates) return !c.pass && was.pass ? ["verdict"] : [];
+      return gates.filter(g => was.gates![g] === true && c.gates![g] === false);
+    };
+    const induced = preset === baseline ? [] : mine.filter(c => inducedBy(c).length);
+    for (const c of induced) for (const g of inducedBy(c)) inducedGates[g] = (inducedGates[g] ?? 0) + 1;
     const sum = (key: "native" | "compat" | "skipped") => mine.reduce((n, c) => n + (c.census?.[key] ?? 0), 0);
     const native = sum("native");
     const compat = sum("compat");
@@ -207,6 +258,7 @@ export function summarizePresets(cells: GoldenCellLike[], baseline = "default"):
       pass: mine.length - failed.length,
       fail: failed.length,
       induced: induced.length,
+      inducedGates,
       native,
       compat,
       skipped: sum("skipped"),
@@ -236,7 +288,7 @@ export function judgePresets(rows: PresetRow[], allowInduced = 0): string[] {
   const problems: string[] = [];
   for (const r of rows) {
     if (r.hard.length) problems.push(`${r.preset}: ${r.hard.length} hard failure(s), first ${r.hard[0]}`);
-    else if (r.induced > allowInduced) problems.push(`${r.preset}: ${r.induced} cell(s) fail only under this preset (${r.inducedCells.slice(0, 5).join(", ")}${r.induced > 5 ? ", ..." : ""})`);
+    else if (r.induced > allowInduced) problems.push(`${r.preset}: ${r.induced} cell(s) fail a gate under this preset that passes under the baseline (${Object.entries(r.inducedGates).map(([g, n]) => `${g} ${n}`).join(", ")}; ${r.inducedCells.slice(0, 5).join(", ")}${r.induced > 5 ? ", ..." : ""})`);
   }
   return problems;
 }
@@ -259,13 +311,17 @@ export interface MemorySnapshot {
 }
 
 export const MEMORY_LIMITS = {
-  /** heap after the last cycle may exceed the heap after the warm-up cycle by this many bytes (JIT, caches settle) */
-  heapSlackBytes: 6 * 1024 * 1024,
+  /** heap after the last cycle may exceed the heap after the warm-up cycle by this many bytes (JIT, caches settle).
+   *  Measured: +0.5 MB over 17 judged cycles on a 28 MB base, about 0.05 MB a cycle (the SVG-only page grows the same).
+   *  A leak of 0.15 MB per cycle (2.5 MB over the 17 judged) therefore fails. */
+  heapSlackBytes: 2 * 1024 * 1024,
   /** ... and by this fraction of it */
   heapSlackFraction: 0.05,
-  /** DOM nodes and listeners after the last cycle vs the warm-up cycle */
-  nodeSlackFraction: 0.005,
-  nodeSlackAbs: 400,
+  /** DOM nodes and listeners after the last cycle vs the warm-up cycle. Measured: +204 nodes over 17 judged cycles with the
+   *  renderer, +217 on the SVG-only page: the app appends two duplicate options to #styleSelectFont per world load
+   *  (src/services/fonts.ts addFontOption), about 12 nodes a cycle, which is not the renderer's. */
+  nodeSlackFraction: 0.003,
+  nodeSlackAbs: 300,
   listenerSlackAbs: 60,
   /** tracked GPU bytes are deterministic for one world: allow this much drift */
   gpuSlackFraction: 0.02

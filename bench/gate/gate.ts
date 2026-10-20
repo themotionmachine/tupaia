@@ -887,7 +887,7 @@ async function presetsCheck(ctx: Ctx): Promise<Partial<Result>> {
   const data = readJson(report);
   if (!data) return { exit_code: code || 1, failure: code === 124 ? `timed out after ${DEFS.presets.timeout}s` : `no golden report (exit ${code})`, metrics: {}, report: null };
   const cells: Json[] = data.cells ?? [];
-  const { rows, byFamily } = summarizePresets(cells as never, "default");
+  const { rows, byFamily } = summarizePresets(cells as never, "default", ctx.args.reading as "conservative" | "over44");
   const shown = rows.filter(r => presets.includes(r.preset));
   const problems = judgePresets(shown, Number(ctx.args.allow));
   for (const preset of presets) if (!shown.some(r => r.preset === preset)) problems.push(`${preset}: the golden produced no cells`);
@@ -906,6 +906,7 @@ async function presetsCheck(ctx: Ctx): Promise<Partial<Result>> {
         cells: r.cells,
         fail: r.fail,
         induced: r.induced,
+        inducedGates: r.inducedGates,
         compatShare: round(r.compatShare, 4),
         hard: r.hard.length,
         worst: r.worst && `${r.worst.cell} ssim ${round(r.worst.ssim, 4)} over16 ${round(r.worst.over16, 4)}`,
@@ -927,7 +928,8 @@ async function censusSelftestCheck(ctx: Ctx): Promise<Partial<Result>> {
     env: Record<string, string>;
     broken: Record<string, string>;
     fails: RegExp; // the check ids the broken arm must fail
-    clean?: boolean;
+    /** true: the clean arm of this script already ran under another arm; run only the broken one */
+    skipClean?: boolean;
     timeout: number;
   }
   const parity = resolveNamedFixture("parity");
@@ -940,6 +942,18 @@ async function censusSelftestCheck(ctx: Ctx): Promise<Partial<Result>> {
       env: { TOGGLE_MAP: parity, TOGGLE_DPR: common.DPR, TOGGLE_LAUNCHER: common.LAUNCHER, TOGGLE_ONLY: "rivers,borders", TOGGLE_PASSES: "isolated" },
       broken: { TOGGLE_BREAK: "freeze-gpu" },
       fails: /^toggle\./,
+      timeout: 1200
+    },
+    {
+      // the on-state fidelity gate of the toggles check: the GPU canvas alone is drawn hue-rotated after the layer
+      // is turned back on (footprint intact, pixels wrong); only toggle.<layer>.on-fidelity can see that
+      name: "toggles-on-state",
+      script: "toggle-census.ts",
+      report: "toggles.json",
+      env: { TOGGLE_MAP: parity, TOGGLE_DPR: common.DPR, TOGGLE_LAUNCHER: common.LAUNCHER, TOGGLE_ONLY: "rivers,borders", TOGGLE_PASSES: "isolated" },
+      broken: { TOGGLE_BREAK: "perturb-on" },
+      fails: /^toggle\.\w+\.on-fidelity$/,
+      skipClean: true,
       timeout: 1200
     },
     {
@@ -978,6 +992,7 @@ async function censusSelftestCheck(ctx: Ctx): Promise<Partial<Result>> {
     if (only.length && !only.includes(arm.name)) continue;
     summary[arm.name] = {};
     for (const mode of ["clean", "broken"] as const) {
+      if (mode === "clean" && arm.skipClean) continue;
       const dir = join(ctx.dir, arm.name, mode);
       mkdirSync(dir, { recursive: true });
       const env = { ...arm.env, ...(mode === "broken" ? arm.broken : {}), GATE_OUT_DIR: dir };
@@ -1306,7 +1321,7 @@ const DEFS: Record<string, CheckDef> = {
   toggles: {
     lock: "shared",
     keys: ["dpr", "launcher", "only", "passes", "reading", "strict", "break"],
-    spec: { break: { type: "enum", values: ["none", "freeze-gpu"], default: "none" } },
+    spec: { break: { type: "enum", values: ["none", "freeze-gpu", "perturb-on"], default: "none" } },
     timeout: 3600,
     run: ctx => censusRun(ctx, "toggle-census.ts", "toggles.json", togglesEnv(ctx))
   },
@@ -1452,7 +1467,9 @@ async function runCheck(check: string, args: Args, mode: LockMode | null = null,
     if (def.lock && !existsSync(join(REPO, "dist/index.html"))) throw new EnvError("dist/ is missing: run `gate build` first");
     if (def.lock) ctx.map(); // a missing fixture is a usage error before any lock wait
     if (def.lock && !lock.held) {
-      await lock.acquire(mode ?? def.lock);
+      // `toggles passes=...cost` records click-to-frame timings: those need the exclusive lock, not a shared slot
+      const timed = check === "toggles" && String(args.passes).split(",").includes("cost");
+      await lock.acquire(timed ? "exclusive" : (mode ?? def.lock));
       lockWait = lock.waitSeconds;
       started = Date.now(); // runtime excludes the wait for the host lock
     }

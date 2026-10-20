@@ -2,8 +2,8 @@
 // this existed; PROOF-PLAN §4 "DPR change and window resize"). Run it through bench/gate/gate.ts (`gate resize-print`),
 // which takes a shared host-lock slot and sets GATE_OUT_DIR.
 //
-// Fullscreen is a window resize (no requestFullscreen anywhere in the app), print is the canonical SVG (index.css hides
-// canvases), and the layers presets drive the same toggles as the census; so this is one page driven through viewport
+// Fullscreen is a window resize (no requestFullscreen anywhere in the app), print is the canonical SVG (the renderer's
+// beforeprint hook hides the canvas), and the layers presets drive the same toggles as the census; so this is one page driven through viewport
 // changes, a DPR change, a gesture in flight, the print events and the 12 layers presets, judged against the SVG arm of
 // the same page and against the DOM:
 //
@@ -17,7 +17,9 @@
 //                    camera ends where d3 says it is (the svg transform), and the frame is current and within D1.
 //   print.*          beforeprint with the GPU camera ahead of the SVG (a wheel zoom just ended): the svg transform is synced to
 //                    the camera and the canvas is hidden (hiddenReason "printing"); afterprint brings the frame back. The
-//                    print media rule hides the canvas. A real page.pdf() is taken and must have run beforeprint/afterprint.
+//                    `@media print` rule alone does NOT hide the canvas (its inline display wins), so print.media is INFO
+//                    and the beforeprint hook is what is asserted. A real page.pdf() is taken and must have run
+//                    beforeprint/afterprint.
 //   preset.*         row 39 "presets": every built-in layers preset applied through #layersPreset (handleLayersPresetChange):
 //                    the buttons match the preset, every layer's five views agree (class, display, GPU layer report, GPU state),
 //                    the GPU is current, and for a few presets the refined frame is within the smoke floor of the SVG.
