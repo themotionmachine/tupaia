@@ -176,3 +176,31 @@ it("screen-scaled tolerance keeps local cubic boundaries accurate across raster 
     expect(worst).toBeLessThanOrEqual(0.101);
   }
 });
+
+describe("flattenPath with Skia's chord counts", () => {
+  const count = (d: string, scale: number, fill: boolean) =>
+    flattenPath(d, 0.2, { scale, fill })[0].points.length / 2 - 1;
+  // Wang's formula at precision 4: n = ceil(sqrt(3/4 * 4 * M)) for a cubic with M the larger second difference in px
+  it("splits a cubic into ceil(sqrt(3M)) chords for a stroke", () => {
+    // second differences (0,30) and (0,-30): M = 30
+    expect(count("M0 0C10 30 20 30 30 0", 1, false)).toBe(Math.ceil(Math.sqrt(3 * 30)));
+    expect(count("M0 0C10 30 20 30 30 0", 4, false)).toBe(Math.ceil(Math.sqrt(3 * 120)));
+  });
+
+  it("rounds a fill's count up to a power of two", () => {
+    expect(count("M0 0C10 30 20 30 30 0", 1, true)).toBe(16); // ceil(sqrt(90)) = 10
+    expect(count("M0 0C10 30 20 30 30 0", 4, true)).toBe(32); // ceil(sqrt(360)) = 19
+  });
+
+  it("splits a quadratic into ceil(sqrt(M)) chords and keeps a straight curve in one", () => {
+    // second difference (0,-40): n = ceil(sqrt(1/4 * 4 * 40))
+    expect(count("M0 0Q10 20 20 0", 1, false)).toBe(Math.ceil(Math.sqrt(40)));
+    expect(count("M0 0C10 0 20 0 30 0", 8, false)).toBe(1);
+  });
+
+  it("caps the count and keeps the end points", () => {
+    expect(count("M0 0C0 1e6 1 1e6 1 0", 16, false)).toBe(256);
+    const points = flattenPath("M0 0C10 30 20 30 30 0", 0.2, { scale: 2, fill: false })[0].points;
+    expect([points[0], points[1], points[points.length - 2], points[points.length - 1]]).toEqual([0, 0, 30, 0]);
+  });
+});

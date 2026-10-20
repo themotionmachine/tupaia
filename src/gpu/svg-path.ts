@@ -6,6 +6,24 @@ export interface Subpath {
 const EPS = 1e-9;
 const MAX_CURVE_SEGMENTS = 64;
 const MAX_ARC_SEGMENTS = 128;
+const MAX_SKIA_SEGMENTS = 256;
+
+// Chrome's own curve flattening (flattenPath `skia`), for native geometry that must land on SVG's samples. Skia's GPU
+// tessellation cuts a cubic into n chords uniform in t, n from Wang's formula at its precision 4 (1/4 device px):
+// n = ceil(sqrt(3 M)), M the larger second difference of the control points in device px (a quadratic: sqrt(M)).
+// A fill's curve patch rounds n up to a power of two (fixed-count tessellation). Fitted on Chrome's 4x MSAA samples
+// (~/.tupaia-gates/w3b-stroke3/exp/wang.mjs, wangstroke.mjs): curved fill edges 99.6 % of pixels exact with the power
+// of two, 86 % at a 0.3 px tolerance, 85-88 % for the true curve; curved strokes 88-92 % with ceil(sqrt(3 M)), 86-87 %
+// at 0.3 px, 72-74 % for the true curve (the rest is the stroke tessellator's radial edges and true-normal offsets).
+export interface SkiaFlattening {
+  scale: number; // device px per world unit
+  fill: boolean; // power-of-two segment counts (a fill), else plain (a stroke)
+}
+function skiaSegments(secondDifference: number, degreeTerm: number, rule: SkiaFlattening): number {
+  let n = Math.max(1, Math.ceil(Math.sqrt(degreeTerm * 4 * secondDifference * rule.scale) - 1e-9));
+  if (rule.fill) n = 2 ** Math.ceil(Math.log2(n));
+  return Math.min(n, MAX_SKIA_SEGMENTS);
+}
 
 class Scanner {
   i = 0;
@@ -176,16 +194,33 @@ function cubicSegments(
   y2: number,
   x3: number,
   y3: number,
-  tol: number
+  tol: number,
+  skia?: SkiaFlattening
 ) {
+  if (skia)
+    return skiaSegments(
+      Math.max(Math.hypot(x0 - 2 * x1 + x2, y0 - 2 * y1 + y2), Math.hypot(x1 - 2 * x2 + x3, y1 - 2 * y2 + y3)),
+      0.75,
+      skia
+    );
   const ddx = Math.max(Math.abs(x0 - 2 * x1 + x2), Math.abs(x1 - 2 * x2 + x3));
   const ddy = Math.max(Math.abs(y0 - 2 * y1 + y2), Math.abs(y1 - 2 * y2 + y3));
   const dev = Math.sqrt(ddx * ddx + ddy * ddy);
   return clampInt(Math.ceil(Math.sqrt((dev * 0.75) / tol)), 1, MAX_CURVE_SEGMENTS);
 }
 
-function quadSegments(x0: number, y0: number, x1: number, y1: number, x2: number, y2: number, tol: number) {
+function quadSegments(
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  tol: number,
+  skia?: SkiaFlattening
+) {
   const dev = Math.hypot(x0 - 2 * x1 + x2, y0 - 2 * y1 + y2);
+  if (skia) return skiaSegments(dev, 0.25, skia);
   return clampInt(Math.ceil(Math.sqrt((dev * 0.25) / tol)), 1, MAX_CURVE_SEGMENTS);
 }
 
@@ -194,10 +229,20 @@ function clampInt(v: number, lo: number, hi: number) {
   return v > hi ? hi : v;
 }
 
-function cubicTo(b: Builder, x1: number, y1: number, x2: number, y2: number, x3: number, y3: number, tol: number) {
+function cubicTo(
+  b: Builder,
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  x3: number,
+  y3: number,
+  tol: number,
+  skia?: SkiaFlattening
+) {
   const x0 = b.x;
   const y0 = b.y;
-  const n = cubicSegments(x0, y0, x1, y1, x2, y2, x3, y3, tol);
+  const n = cubicSegments(x0, y0, x1, y1, x2, y2, x3, y3, tol, skia);
   for (let k = 1; k <= n; k++) {
     const t = k / n;
     const u = 1 - t;
@@ -209,10 +254,10 @@ function cubicTo(b: Builder, x1: number, y1: number, x2: number, y2: number, x3:
   }
 }
 
-function quadTo(b: Builder, x1: number, y1: number, x2: number, y2: number, tol: number) {
+function quadTo(b: Builder, x1: number, y1: number, x2: number, y2: number, tol: number, skia?: SkiaFlattening) {
   const x0 = b.x;
   const y0 = b.y;
-  const n = quadSegments(x0, y0, x1, y1, x2, y2, tol);
+  const n = quadSegments(x0, y0, x1, y1, x2, y2, tol, skia);
   for (let k = 1; k <= n; k++) {
     const t = k / n;
     const u = 1 - t;
@@ -288,8 +333,11 @@ function arcTo(
   }
 }
 
-/** Flattens an SVG path `d` string into polylines. Never throws; stops at the first malformed token. */
-export function flattenPath(d: string, tolerance = 0.2): Subpath[] {
+/**
+ * Flattens an SVG path `d` string into polylines. Never throws; stops at the first malformed token. `skia`: cut cubic
+ * and quadratic curves into Chrome's own chords (SkiaFlattening) instead of to `tolerance` (arcs keep the tolerance).
+ */
+export function flattenPath(d: string, tolerance = 0.2, skia?: SkiaFlattening): Subpath[] {
   const sc = new Scanner(d);
   const b = new Builder();
   const tol = tolerance > 0 ? tolerance : 0.2;
@@ -352,7 +400,7 @@ export function flattenPath(d: string, tolerance = 0.2): Subpath[] {
           y1 = a[1] + oy,
           x2 = a[2] + ox,
           y2 = a[3] + oy;
-        cubicTo(b, x1, y1, x2, y2, a[4] + ox, a[5] + oy, tol);
+        cubicTo(b, x1, y1, x2, y2, a[4] + ox, a[5] + oy, tol, skia);
         lastCtrlX = x2;
         lastCtrlY = y2;
       } else if (upper === "S") {
@@ -360,19 +408,19 @@ export function flattenPath(d: string, tolerance = 0.2): Subpath[] {
         const y1 = lastCmd === "C" || lastCmd === "S" ? 2 * b.y - lastCtrlY : b.y;
         const x2 = a[0] + ox,
           y2 = a[1] + oy;
-        cubicTo(b, x1, y1, x2, y2, a[2] + ox, a[3] + oy, tol);
+        cubicTo(b, x1, y1, x2, y2, a[2] + ox, a[3] + oy, tol, skia);
         lastCtrlX = x2;
         lastCtrlY = y2;
       } else if (upper === "Q") {
         const x1 = a[0] + ox,
           y1 = a[1] + oy;
-        quadTo(b, x1, y1, a[2] + ox, a[3] + oy, tol);
+        quadTo(b, x1, y1, a[2] + ox, a[3] + oy, tol, skia);
         lastCtrlX = x1;
         lastCtrlY = y1;
       } else if (upper === "T") {
         const x1 = lastCmd === "Q" || lastCmd === "T" ? 2 * b.x - lastCtrlX : b.x;
         const y1 = lastCmd === "Q" || lastCmd === "T" ? 2 * b.y - lastCtrlY : b.y;
-        quadTo(b, x1, y1, a[0] + ox, a[1] + oy, tol);
+        quadTo(b, x1, y1, a[0] + ox, a[1] + oy, tol, skia);
         lastCtrlX = x1;
         lastCtrlY = y1;
       } else if (upper === "A") {

@@ -30,10 +30,14 @@ void main() {
 // (~/.tupaia-gates/w3-stroke2/exp: 284/287 edge pixels of a concave fill match the 4-sample model exactly, 51/287 the
 // box filter). Native strokes and fill edges follow suit: u_samples 4 counts the samples (u_sampleOffsets, window
 // px from the pixel centre, GL y up) inside the exact shape, u_samples 0 is the analytic box filter, for the batches
-// SVG draws analytically (geometry.ts analyticShape). A box filter instead of the samples adds faint fringe pixels SVG
-// never paints and spreads the rest over the quarter steps: the D11 coverage gate read that as 13-48 % extra ink.
+// SVG draws analytically (geometry.ts analyticShape), and u_samples 1 tests the pixel centre alone, for the shapes SVG
+// draws without anti-aliasing (geometry.ts aliasedShape: a rect under shape-rendering optimizeSpeed). A box filter
+// instead of the samples adds faint fringe pixels SVG never paints and spreads the rest over the quarter steps: the
+// D11 coverage gate read that as 13-48 % extra ink. Thin hairline strokes need no program change: framegraph.ts
+// draws them 1 device px wide at a fraction of their colour (geometry.ts thinHairline).
 const coverageUniforms = `uniform int u_samples;
-uniform vec2 u_sampleOffsets[4];`;
+uniform vec2 u_sampleOffsets[4];
+vec2 sampleOffset(int i) { return u_samples == 1 ? vec2(0.0) : u_sampleOffsets[i]; }`;
 
 // One instance per segment (x0 y0 x1 y1 startDistance) plus its two packed end codes (geometry.ts appendStrokeCaps).
 // A join is split between its two segments at the bisector through the vertex (normal dIn + dOut): each pixel centre
@@ -194,6 +198,32 @@ float dashGap(float t) {
   }
   return 0.0;
 }
+// A dot pattern (round caps, every on-dash of zero length: province borders "0 2"): Skia strokes a zero-length segment
+// at a fixed orientation, as if it ran along the screen's x axis, so each dot is the round fan with vertices straight
+// up and down on screen, whatever the path's direction (~/.tupaia-gates/w3b-stroke3/exp/dotfit.mjs: 97.8-99.7 % of the
+// pixels of dots of 0.5-2.5 px radius, along eight directions, against 93.5-97 % for the fan turned with the path).
+// The sample at q (path distance t) is tested against the nearest dot, in screen axes (ex, ey: window x and y in the
+// segment's frame). No dot lies before an open start or past an open end.
+bool dotCovers(vec2 q, float t, float len, float c0, float c1, float h, float px, vec2 ex, vec2 ey) {
+  float r = mod(t, u_dashPeriod);
+  float best = 1e9;
+  float pos = 0.0;
+  for (int i = 0; i < 8; i++) {
+    if (i >= u_dashCount) break;
+    if ((i & 1) == 0) {
+      float d = r - pos; // world, the sample's along offset from this dot
+      if (abs(d - u_dashPeriod) < abs(d)) d -= u_dashPeriod;
+      if (abs(d + u_dashPeriod) < abs(d)) d += u_dashPeriod;
+      if (abs(d) < abs(best)) best = d;
+    }
+    pos += u_dashes[i];
+  }
+  vec2 rel = vec2(best * px, q.y);
+  float centre = q.x - rel.x;
+  if ((c0 <= 2.0 && centre < -0.01) || (c1 <= 2.0 && centre > len + 0.01)) return false;
+  vec2 screen = vec2(dot(rel, ex), dot(rel, ey));
+  return capHas(screen.x >= 0.0 ? screen : -screen, h);
+}
 // Whether the sample at q (segment-local device px) and path distance t (world) lies in the stroke (geometry.ts
 // strokeCovers mirrors it).
 bool strokeCovers(vec2 q, float t, float len, float c0, float c1, float h, float px) {
@@ -235,15 +265,21 @@ void main() {
   if (min(s0, s1) < -BISECTOR_SLACK) discard;
   bool shared = abs(s0) <= BISECTOR_SLACK || abs(s1) <= BISECTOR_SLACK;
   float cov;
-  if (u_samples == 4) {
+  if (u_samples > 0) {
     float t = v_distance + u_dashOffset;
+    bool dots = u_dashCount > 0 && u_dashCap == 2.0 && u_dashOn <= 0.0;
+    vec2 ex = normalize(stepX);
+    vec2 ey = normalize(stepY);
     int n = 0;
     for (int i = 0; i < 4; i++) {
-      vec2 o = u_sampleOffsets[i];
+      if (i >= u_samples) break;
+      vec2 o = sampleOffset(i);
       vec2 dq = stepX * o.x + stepY * o.y;
-      if (strokeCovers(vec2(x, y) + dq, t + dq.x / px, len, c0, c1, h, px)) n++;
+      vec2 sq = vec2(x, y) + dq;
+      float st = t + dq.x / px;
+      if (dots ? dotCovers(sq, st, len, c0, c1, h, px, ex, ey) : strokeCovers(sq, st, len, c0, c1, h, px)) n++;
     }
-    cov = float(n) * 0.25;
+    cov = float(n) / float(u_samples);
   } else {
     if (x < 0.0 && c0 >= 2.0) {
       vec2 q = vec2(x, y);
@@ -329,6 +365,8 @@ flat out float v_length;
 // vertex is convex (1) or reflex (0) for the filled (left) side
 flat out vec4 v_neighbours;
 flat out vec2 v_convex;
+// the neighbouring edges' lengths (world): their half-planes hold only beside them
+flat out vec2 v_neighbourLengths;
 void main() {
   vec2 p0 = a_edge.xy;
   vec2 p1 = a_edge.zw;
@@ -341,6 +379,7 @@ void main() {
   vec2 normal = vec2(-dir.y, dir.x);
   vec2 before = p0 - a_prev;
   vec2 after = a_next - p1;
+  v_neighbourLengths = vec2(length(before), length(after));
   before = dot(before, before) > 0.0 ? normalize(before) : dir;
   after = dot(after, after) > 0.0 ? normalize(after) : dir;
   v_neighbours = vec4(dot(before, dir), dot(before, normal), dot(after, dir), dot(after, normal));
@@ -359,6 +398,7 @@ in vec2 v_world;
 flat in float v_length;
 flat in vec4 v_neighbours;
 flat in vec2 v_convex;
+flat in vec2 v_neighbourLengths;
 uniform vec4 u_color;
 uniform int u_patterned;
 uniform mat3 u_worldToUv;
@@ -367,15 +407,23 @@ uniform int u_inside;
 uniform float u_pxPerWorld;
 ${coverageUniforms}
 out vec4 color;
-// whether q (edge-local device px: along, signed distance to the filled side) is inside the fill near this edge
-bool fillCovers(vec2 q, float len) {
+// whether q (edge-local device px: along, signed distance to the filled side) is inside the fill near this edge.
+// A neighbour's half-plane counts only beside that neighbour (q projects onto it, within half a pixel): past its far
+// end the line through it is no boundary, and a short neighbour nearly reversing this edge (a spike, an acute tip)
+// would otherwise cut samples all along this edge (an unpainted sliver inside the fill). px: device px per world unit.
+bool fillCovers(vec2 q, float len, float px) {
   bool inside = q.y > 0.0;
   // previous edge's half-plane through p0: its left normal is (-d.y, d.x) for its direction d
   vec2 d = v_neighbours.xy;
-  bool prev = d.x * q.y - d.y * q.x > 0.0;
-  inside = v_convex.x > 0.5 ? inside && prev : inside || prev;
+  float back = -dot(q, d); // distance back along the previous edge from p0
+  if (back >= -0.5 && back <= v_neighbourLengths.x * px + 0.5) {
+    bool prev = d.x * q.y - d.y * q.x > 0.0;
+    inside = v_convex.x > 0.5 ? inside && prev : inside || prev;
+  }
   vec2 e = q - vec2(len, 0.0);
   d = v_neighbours.zw;
+  float ahead = dot(e, d); // distance along the next edge from p1
+  if (ahead < -0.5 || ahead > v_neighbourLengths.y * px + 0.5) return inside;
   bool next = d.x * e.y - d.y * e.x > 0.0;
   return v_convex.y > 0.5 ? inside && next : inside || next;
 }
@@ -389,13 +437,14 @@ void main() {
   if (x < -0.5 || x > len + 0.5) discard;
   if (u_inside == 1 ? s <= 0.0 : s >= 0.0) discard;
   float cov;
-  if (u_samples == 4) {
+  if (u_samples > 0) {
     int n = 0;
     for (int i = 0; i < 4; i++) {
-      vec2 o = u_sampleOffsets[i];
-      if (fillCovers(vec2(x, s) + stepX * o.x + stepY * o.y, len)) n++;
+      if (i >= u_samples) break;
+      vec2 o = sampleOffset(i);
+      if (fillCovers(vec2(x, s) + stepX * o.x + stepY * o.y, len, px)) n++;
     }
-    cov = float(n) * 0.25;
+    cov = float(n) / float(u_samples);
   } else cov = clamp(0.5 + s, 0.0, 1.0);
   // an inside centre whose samples all miss still marks the pixel (drawn at 0), so the cover does not fill it
   if (u_inside == 1 ? cov >= 1.0 : cov <= 0.0) discard;
@@ -542,7 +591,10 @@ void main() {
   fs: `${header}
 in vec2 v_uv;
 uniform sampler2D u_texture;
+uniform sampler2D u_mask;
+uniform bool u_masked;
 uniform float u_opacity;
 out vec4 color;
-void main() { color = texture(u_texture, v_uv) * u_opacity; }`
+// u_masked: a group composite times its mask coverage (framegraph.ts maskCoverage; red = luminance)
+void main() { color = texture(u_texture, v_uv) * u_opacity * (u_masked ? texture(u_mask, v_uv).r : 1.0); }`
 };

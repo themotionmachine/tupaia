@@ -62,6 +62,7 @@ import {
 import type { GpuDevice, TextureSource, TrackedBuffer, TrackedTexture } from "./device";
 import type { Batch, FillBatch, Frame, ImageBatch, StrokeBatch } from "./framegraph";
 import {
+  aliasedShape,
   analyticShape,
   appendFillEdges,
   appendSegments,
@@ -75,7 +76,8 @@ import {
   measuredSubpaths,
   normalizeDashes,
   pathBounds,
-  thinFill
+  thinFill,
+  thinHairline
 } from "./geometry";
 import { appendStencilMeshes, type MeshStats, newMeshStats } from "./mesh";
 import { indexOverlays, releaseRuns, swapOverlays, uploadAll } from "./overlays";
@@ -605,7 +607,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
 
   const stroke = (
     subpaths: Subpath[],
-    style: Pick<ShapeStyle, "stroke" | "width" | "dashes" | "dashOffset" | "lineJoin" | "lineCap">,
+    style: Pick<ShapeStyle, "stroke" | "width" | "dashes" | "dashOffset" | "lineJoin" | "lineCap" | "crisp">,
     distances?: ArrayLike<number>[]
   ) => {
     const dashes = normalizeDashes(style.dashes);
@@ -625,7 +627,8 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
       dashOffset: style.dashOffset,
       dashCap: capCode(style.lineCap),
       bounds: pathBounds(subpaths, Math.max(0, style.width) * 2),
-      sharedSegments: hasSharedSegments(subpaths)
+      sharedSegments: hasSharedSegments(subpaths),
+      hairline: thinHairline(style)
     };
     batch.dashes.set(dashes);
     return batch;
@@ -657,6 +660,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
       const path = depth ? leafPath(draw.element, depth, positions) : null;
       if (draw.kind === "shape") {
         const { style, subpaths } = draw;
+        const tag = draw.sourceTag ?? draw.element.tagName; // a <use> draws its referenced shape
         const pending: Batch[] = [];
         // Hit areas follow the element's computed pointer-events (stylesheet rules such as #regions { none }), read
         // once at prepare time; the painted style alone would index click-through layers above selectable ones.
@@ -674,14 +678,19 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
         const dashed = normalizeDashes(style.dashes).length > 0;
         const dashRings = () => dashHitRings(draw.d, style.dashes, style.dashOffset, viewScale);
         const strokeRings = () => strokeHitRings(dashed ? dashRings : null, hitRings);
-        // strokes and thin fills are flattened again for the raster bucket, dashed curves on SVG's dash measure
-        // (geometry.ts curveTolerance, measuredSubpaths)
+        // strokes and thin fills are flattened again for the raster bucket into Chrome's own chords (svg-path.ts
+        // SkiaFlattening), dashed curves on SVG's dash measure (geometry.ts curveTolerance, measuredSubpaths)
         const curved = hasCurves(draw.d);
         const fine = curved ? curveTolerance(ctx.bucket, SCENE_CURVE_TOLERANCE) : SCENE_CURVE_TOLERANCE;
-        const refine = fine < SCENE_CURVE_TOLERANCE;
+        const refine = curved;
         if (style.fill || style.pattern) {
-          const batch = fill(refine && thinFill(subpaths) ? flattenPath(draw.d, fine) : subpaths, style.evenOdd);
-          batch.analytic = analyticShape(draw.element.tagName, subpaths); // SVG draws it analytically or with 4x MSAA
+          const thin = refine && thinFill(subpaths);
+          const batch = fill(
+            thin ? flattenPath(draw.d, fine, { scale: ctx.bucket, fill: true }) : subpaths,
+            style.evenOdd
+          );
+          batch.analytic = analyticShape(tag, subpaths); // SVG draws it analytically or with 4x MSAA
+          batch.aliased = aliasedShape(tag, style);
           if (style.pattern) {
             const result = await tile(style.pattern);
             if (typeof result === "string") {
@@ -709,7 +718,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
           // parity world: +4.9k-14k points by bucket, under 0.4 MiB
           const measured = dashed && curved ? measuredSubpaths(draw.d, fine / 4, ctx.bucket) : null;
           const batch = stroke(
-            measured?.subpaths ?? (refine ? flattenPath(draw.d, fine) : subpaths),
+            measured?.subpaths ?? (refine ? flattenPath(draw.d, fine, { scale: ctx.bucket, fill: false }) : subpaths),
             style,
             measured?.distances
           );
@@ -717,7 +726,10 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
             nativeFallback(draw, "dash pattern > 8", out);
             continue;
           }
-          batch.analytic = analyticShape(draw.element.tagName, subpaths, batch.dashCount > 0);
+          batch.analytic = analyticShape(tag, subpaths, batch.dashCount > 0);
+          batch.aliased = aliasedShape(tag, style);
+          // a thin analytic stroke is the 1 device px line's profile times the width in either mode (geometry.ts)
+          if (batch.analytic) batch.hairline = true;
           pending.push(batch);
           if (hits?.stroke) {
             const rings = strokeRings();

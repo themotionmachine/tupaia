@@ -145,11 +145,23 @@ export function targetSamples(
   return 0;
 }
 
-// The canvas's own (default) framebuffer follows the same rule. A 4× multisampled 2560×1440 drawing buffer is ~118 MB
-// outside the tracked budget, and its per-frame GPU cost delayed compositor-frame acks to ~13 ms on M1 Max/Metal,
-// halving navigation cadence to 60 Hz (P2-TIMING-DIAGNOSIS.md). Fixed at context creation.
-export function canvasAntialias(dpr = 1): boolean {
-  return dpr < 2;
+// The canvas's own (default) framebuffer: no MSAA at any DPR (W3b STROKE3). Hardware MSAA edges are a sample off SVG's:
+// ANGLE's Metal backend samples a multisampled WebGL target at the standard 4x pattern mirrored in y (a slanted fill
+// edge: 1253 of 1258 edge pixels match the mirrored pattern, SVG's 1249 the standard one;
+// ~/.tupaia-gates/w3b-stroke3/exp/msaa.mjs), so at DPR 1 every MSAA fill edge differed from SVG by a sample (shared
+// rivers k 1: 31.6 % of the ink over Δ16). Without it, fills take the fringe pass with SVG's own sample positions
+// (shaders.ts coverage models), as at DPR 2. A 4× multisampled 2560×1440 drawing buffer was also ~118 MB outside the
+// tracked budget, and its per-frame GPU cost delayed compositor-frame acks to ~13 ms on M1 Max/Metal
+// (P2-TIMING-DIAGNOSIS.md). Fixed at context creation; ?gpu-msaa=1 restores 4× at DPR 1 (and on group targets) for A/B.
+export function canvasAntialias(dpr = 1, msaa = msaaFlag()): boolean {
+  return msaa && dpr < 2;
+}
+export function msaaFlag(): boolean {
+  try {
+    return new URLSearchParams(globalThis.location?.search ?? "").get("gpu-msaa") === "1";
+  } catch {
+    return false;
+  }
 }
 
 // Relief atlas cell edge: the largest icon's on-screen size at this raster bucket (power of two, 16..256), so sprites

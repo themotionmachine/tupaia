@@ -30,6 +30,7 @@ const INHERITED = new Set([
   "stroke-linejoin",
   "stroke-linecap",
   "stroke-miterlimit",
+  "shape-rendering",
   "visibility",
   "pointer-events",
   "text-shadow",
@@ -72,6 +73,7 @@ const INITIAL: Record<string, string> = {
   "dominant-baseline": "auto",
   "letter-spacing": "normal",
   "text-rendering": "auto",
+  "shape-rendering": "auto",
   "paint-order": "normal"
 };
 const camel = (name: string) => name.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
