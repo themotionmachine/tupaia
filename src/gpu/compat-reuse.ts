@@ -9,8 +9,10 @@
 // The tracker records every pixel-relevant change with an epoch. A raster is stamped with the epoch of the DOM state
 // it was cut from. A run is clean when nothing that can reach its pixels changed after its stamp.
 //
-// It fails closed. A change to a definition, a stylesheet, a font or a source outside #map that the clone reads dirties
-// every run; an ancestor attribute dirties the runs under that ancestor. When a stylesheet rule can make a map element
+// It fails closed. A change to a stylesheet or a font dirties every run. A change to a definition dirties the runs that
+// paint through it: the ids its change can reach are matched against each run's reference closure (the ids its subtree,
+// its ancestors and the definitions they reach name), and every run when a stylesheet names one of them. An ancestor
+// attribute dirties the runs under that ancestor. When a stylesheet rule can make a map element
 // depend on its siblings (structural pseudo-classes, sibling combinators, :has), any change outside the runs, ancestor
 // attributes included, dirties every run.
 
@@ -58,6 +60,48 @@ export function inDefinitions(node: ReuseNode | null): boolean {
 const holdsDefinitions = (node: ReuseNode) =>
   definitionTags.has(tagOf(node)) || SOURCE_IDS.has(node.id ?? "") || !!node.querySelector?.(SOURCES);
 
+// Definitions that act on the whole document rather than by id: a change to one dirties every run. A <style> added or
+// removed with a definition (each generated COA carries one) is keyed by the stylesheet state instead (styleState).
+const DOCUMENT_TAGS = new Set(["style", "link", "font", "font-face"]);
+const DOCUMENT_SOURCES = "link,font,font-face";
+const DEFINITION_ID_LIMIT = 20_000;
+
+interface IdNode extends ReuseNode {
+  querySelectorAll?(selectors: string): ArrayLike<ReuseNode>;
+}
+
+// The ids a definition change can reach, or null when it can reach every run: the ids on the target and its
+// ancestors (a referenced element's content changed), on the subtree of a changed element, on the nodes added or
+// removed and their subtrees, and the previous id of a renamed element.
+export function definitionIds(record: ReuseRecord): Set<string> | null {
+  const ids = new Set<string>();
+  for (let node: ReuseNode | null = record.target; node; node = node.parentElement) {
+    if (DOCUMENT_TAGS.has(tagOf(node))) return null;
+    if (node.id) ids.add(node.id);
+  }
+  const subtree = (node: IdNode): boolean => {
+    if ((node.nodeName ?? "").startsWith("#")) return true; // text, comment
+    if (DOCUMENT_TAGS.has(tagOf(node)) && tagOf(node) !== "style") return false;
+    if (node.id) ids.add(node.id);
+    if (!node.querySelectorAll) return false;
+    if (node.querySelector?.(DOCUMENT_SOURCES)) return false;
+    const descendants = node.querySelectorAll("[id]");
+    for (let i = 0; i < descendants.length; i++) if (descendants[i].id) ids.add(descendants[i].id as string);
+    return true;
+  };
+  if (record.type === "childList") {
+    for (const node of [...Array.from(record.addedNodes), ...Array.from(record.removedNodes)])
+      if (!subtree(node as IdNode)) return null;
+  } else if (record.type === "attributes") {
+    if (!subtree(record.target as IdNode)) return null;
+    if ((record.attributeName ?? "").toLowerCase() === "id") {
+      if (record.oldValue === undefined) return null;
+      if (record.oldValue) ids.add(record.oldValue);
+    }
+  }
+  return ids.size > DEFINITION_ID_LIMIT ? null : ids;
+}
+
 // Presentation that never reaches a raster: editors toggle the cursor and hit-testing on map groups.
 const NEUTRAL = new Set(["cursor", "pointer-events"]);
 
@@ -92,6 +136,8 @@ export class CompatDirt {
   private globalAt = 0;
   private globalWhy = "";
   private touched = new Map<ReuseNode, { at: number; kinds: number }>();
+  // definition ids a change reached, with its epoch and why (definitionIds)
+  private defined = new Map<string, { at: number; why: string }>();
 
   constructor(private readonly limit = 100_000) {}
 
@@ -111,6 +157,31 @@ export class CompatDirt {
     this.globalWhy = reason;
     // older entries can only dirty runs stamped before `at`, which are dirty anyway
     this.touched.clear();
+    this.defined.clear();
+  }
+
+  private define(at: number, record: ReuseRecord, reason: string): void {
+    const ids = definitionIds(record);
+    if (!ids) {
+      this.mark(at, reason);
+      return;
+    }
+    for (const id of ids) this.defined.set(id, { at, why: reason });
+  }
+
+  // Changes to the definitions the clone copies from outside svg#map (watchCompatInputs), one epoch per batch.
+  noteDefinitions(records: Iterable<ReuseRecord>, reason: string): void {
+    if (blindTracker()) return;
+    let at = 0;
+    for (const record of records) {
+      if (!at) at = ++this.epoch;
+      this.define(at, record, `${reason} ${describeNode(record.target)}`);
+    }
+    this.overflow();
+  }
+
+  private overflow(): void {
+    if (this.touched.size + this.defined.size > this.limit) this.all("tracker overflow");
   }
 
   private touch(node: ReuseNode, kind: number, at: number): void {
@@ -123,45 +194,84 @@ export class CompatDirt {
 
   // Records that classify() counts as pixel changes (markers.ts pixelRecords), one epoch per batch.
   note(records: Iterable<ReuseRecord>): void {
+    if (blindTracker()) return;
     let at = 0;
     for (const record of records) {
       if (!at) at = ++this.epoch;
       const { target } = record;
       if (inDefinitions(target)) {
-        this.mark(at, `definition ${describeNode(target)}`);
+        this.define(at, record, `definition ${describeNode(target)}`);
         continue;
       }
       if (record.type === "childList") {
         const nodes = [...Array.from(record.addedNodes), ...Array.from(record.removedNodes)];
         const definition = nodes.find(holdsDefinitions);
-        if (definition) {
-          this.mark(at, `definition ${describeNode(definition)} moved`);
-          continue;
-        }
+        // a definition moved with a map group: the runs that paint through it, and the group's own change below
+        if (definition) this.define(at, record, `definition ${describeNode(definition)} moved`);
         this.touch(target, CHILDREN, at);
         for (const node of Array.from(record.addedNodes)) this.touch(node, ADDED, at);
       } else if (record.type === "characterData") this.touch(target, TEXT, at);
       else if (!neutralAttribute(record)) this.touch(target, ATTR, at);
     }
-    if (this.touched.size > this.limit) this.all("tracker overflow");
+    this.overflow();
   }
 
   // Forgets entries no live raster can need: every stamp still in use is at least `floor`.
   prune(floor: number): void {
     for (const [node, entry] of this.touched) if (entry.at <= floor) this.touched.delete(node);
+    for (const [id, entry] of this.defined) if (entry.at <= floor) this.defined.delete(id);
   }
 
   get size(): number {
-    return this.touched.size;
+    return this.touched.size + this.defined.size;
   }
 
   // Why each run is dirty ("" when clean). `structural`: a stylesheet rule can make a map element depend on its
-  // siblings, so a change outside the runs can still reach them.
-  evaluate(runs: readonly Stamped[], structural: boolean): string[] {
+  // siblings, so a change outside the runs can still reach them. `references[i]`: the ids run i paints through
+  // (referenceClosure); a run without one is dirtied by any definition change. `styleReferences`: the ids the
+  // stylesheets name (StyleState.references); a change to one of them dirties every run.
+  evaluate(
+    runs: readonly Stamped[],
+    structural: boolean,
+    references?: readonly (ReadonlySet<string> | null | undefined)[],
+    styleReferences?: ReadonlySet<string>
+  ): string[] {
     const why = runs.map(run => (run.stamp < this.globalAt ? `global: ${this.globalWhy}` : ""));
     const live = runs.flatMap((_, i) => (why[i] ? [] : [i]));
     if (!live.length) return why;
     const floor = Math.min(...live.map(i => runs[i].stamp));
+    if (this.defined.size) {
+      let everyAt = 0;
+      let everyWhy = "";
+      for (const [id, { at, why: reason }] of this.defined)
+        if (at > floor && at > everyAt && styleReferences?.has(id)) {
+          everyAt = at;
+          everyWhy = `${reason} (#${id} named by a stylesheet)`;
+        }
+      for (const i of live) {
+        if (everyAt > runs[i].stamp) {
+          why[i] = everyWhy;
+          continue;
+        }
+        const named = references?.[i];
+        if (!named) {
+          for (const { at, why: reason } of this.defined.values())
+            if (at > runs[i].stamp) {
+              why[i] = reason;
+              break;
+            }
+          continue;
+        }
+        const [small, large] = named.size < this.defined.size ? [named, this.defined] : [this.defined, named];
+        for (const id of small.keys()) {
+          const entry = this.defined.get(id);
+          if (large.has(id) && entry && entry.at > runs[i].stamp) {
+            why[i] = `${entry.why} (#${id})`;
+            break;
+          }
+        }
+      }
+    }
     const owner = new Map<ReuseNode, number>();
     runs.forEach((run, i) => {
       for (const element of run.elements) owner.set(element, i);
@@ -221,6 +331,19 @@ export class CompatDirt {
   }
 }
 
+// Self-test of the reuse fidelity check (bench/host/reuse-fidelity.ts, REUSE_BREAK=stale): ?gpu-compat-reuse-break=stale
+// makes the tracker ignore every DOM edit, so a reused raster can be stale; the check must catch it.
+let blind: boolean | null = null;
+function blindTracker(): boolean {
+  if (blind === null)
+    try {
+      blind = new URLSearchParams(globalThis.location?.search ?? "").get("gpu-compat-reuse-break") === "stale";
+    } catch {
+      blind = false;
+    }
+  return blind;
+}
+
 export const compatDirt = new CompatDirt();
 
 // ---- references -------------------------------------------------------------------------------------------------
@@ -247,6 +370,17 @@ export function externalReference(
   elements: readonly ReferenceElement[],
   resolve: (id: string) => ReuseNode | null
 ): string | null {
+  return referenceClosure(elements, resolve).external;
+}
+
+// Every id the run paints through: named by its subtrees or its ancestors, and by the definitions those reach,
+// followed transitively (unresolved ids included: a definition added under one changes the run). `external`: the
+// first that resolves outside the definitions (externalReference).
+export function referenceClosure(
+  elements: readonly ReferenceElement[],
+  resolve: (id: string) => ReuseNode | null
+): { ids: Set<string>; external: string | null } {
+  let external: string | null = null;
   const ids = new Set<string>();
   const ancestors = new Set<ReuseNode>();
   for (const element of elements) {
@@ -266,14 +400,17 @@ export function externalReference(
     seen.add(id);
     const target = resolve(id);
     if (!target) continue;
-    if (!inDefinitions(target)) return `#${id}`;
+    if (!inDefinitions(target)) {
+      external ??= `#${id}`;
+      continue;
+    }
     const definition = target as unknown as Partial<ReferenceElement>;
     if (!definition.getAttributeNames || !definition.querySelectorAll) continue;
     references(definition as ReferenceElement, ids);
     const descendants = definition.querySelectorAll("*");
     for (let i = 0; i < descendants.length; i++) references(descendants[i], ids);
   }
-  return null;
+  return { ids: seen, external };
 }
 
 // ---- stylesheets ------------------------------------------------------------------------------------------------
@@ -291,6 +428,7 @@ export interface SheetLike {
   href: string | null;
   media?: { mediaText: string } | null;
   readonly cssRules: ArrayLike<RuleLike>;
+  ownerNode?: { namespaceURI?: string | null; textContent?: string | null } | null;
 }
 
 // Splits at top-level occurrences of `separators` (outside brackets, parentheses and quotes).
@@ -352,7 +490,10 @@ const FONT_SHEET = /^https:\/\/fonts\.googleapis\.com\//;
 export interface StyleState {
   key: string; // everything the rules can contribute to a clone raster
   structural: string; // a sibling-dependent selector that can match a map element ("" when none)
+  references: Set<string>; // the ids the rules name (url(#id)): a change to one can reach any run
 }
+
+const SVG_NS = "http://www.w3.org/2000/svg";
 
 // `applies(subject)`: whether a compound selector matches an element of the map (true when unsure). `matches(media)`:
 // whether a media query holds now; the key records it, since a viewport resize or a color-scheme flip can switch the
@@ -392,6 +533,9 @@ export function styleState(
   };
   const sheet = (item: SheetLike) => {
     key += `@sheet ${item.href ?? ""} ${item.disabled} ${item.media?.mediaText ?? ""}${holds(item.media)}{`;
+    // a disabled <style> in an svg still styles a serialized clone of it: an emblem keeps its COA rules in its markup
+    // and disables the live sheet (renderers/emblems/styles.ts)
+    if (item.disabled && item.ownerNode?.namespaceURI === SVG_NS) key += `@text ${item.ownerNode.textContent ?? ""}`;
     if (!item.disabled) {
       let rules: ArrayLike<RuleLike> | null = null;
       try {
@@ -404,8 +548,20 @@ export function styleState(
     }
     key += "}";
   };
-  for (const item of sheets) sheet(item);
-  return { key, structural };
+  // Consecutive identical sheets cascade as one: each generated COA adds a disabled copy of the emblem rules, and the
+  // one enabled shared copy moves after the latest (renderers/emblems/styles.ts); new emblems must not change the key.
+  let last = "";
+  let out = "";
+  for (const item of sheets) {
+    key = "";
+    sheet(item);
+    if (key !== last) out += key;
+    last = key;
+  }
+  key = out;
+  const references = new Set<string>();
+  for (const match of key.matchAll(URL_REFERENCE)) references.add(match[1]);
+  return { key, structural, references };
 }
 
 // services/fonts.ts `fonts`: the families the export clone may embed (null when unavailable).
@@ -451,25 +607,42 @@ export function watchCompatInputs(dirt = compatDirt): () => void {
     return !element?.closest("svg#map, #fantasyMap");
   };
   const observer = new MutationObserver(records => {
+    const definitions: ReuseRecord[] = [];
     for (const record of records) {
       if (!outside(record.target)) continue;
       const target = record.target as Element;
       const map = document.getElementById("map");
       const root = target === document.documentElement || target === document.body || (!!map && target.contains?.(map));
-      const nodes = [...record.addedNodes, ...record.removedNodes].filter(
-        node => !(node instanceof Element && node.id === "fantasyMap")
-      );
-      const node =
-        inDefinitions(target as unknown as ReuseNode) || (root && record.type === "attributes")
-          ? target
-          : nodes.find(item => holdsDefinitions(item as unknown as ReuseNode));
-      if (node) {
-        dirt.all(`outside #map ${record.type} ${describeNode(node as unknown as ReuseNode)}`);
+      if (root && record.type === "attributes") {
+        dirt.all(`outside #map ${record.type} ${describeNode(target as unknown as ReuseNode)}`);
         return;
       }
+      const keep = (list: NodeList) =>
+        [...list].filter(node => !(node instanceof Element && node.id === "fantasyMap")) as unknown as ReuseNode[];
+      const [addedNodes, removedNodes] = [keep(record.addedNodes), keep(record.removedNodes)];
+      if (
+        inDefinitions(target as unknown as ReuseNode) ||
+        [...addedNodes, ...removedNodes].some(item => holdsDefinitions(item))
+      )
+        definitions.push({
+          type: record.type,
+          target: target as unknown as ReuseNode,
+          attributeName: record.attributeName,
+          oldValue: record.oldValue,
+          addedNodes,
+          removedNodes
+        });
     }
+    // an emblem generated on zoom adds its COA to #coas: the runs that paint through it, not every run
+    if (definitions.length) dirt.noteDefinitions(definitions, "outside #map");
   });
-  observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
+  observer.observe(document.documentElement, {
+    subtree: true,
+    childList: true,
+    attributes: true,
+    attributeOldValue: true, // an id renamed: the runs that named the old id
+    characterData: true
+  });
   // A raster embeds its fonts as data URIs from the map font list; a font outside it (an editor's icon font) cannot
   // reach one. Without the list every load counts.
   const fonts = (event: Event) => {

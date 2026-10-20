@@ -45,7 +45,13 @@ function el(tagName: string, id = "", parent: Fake | null = null, attrs: Record<
         for (const child of item.children) {
           if (
             parts.some(part =>
-              part === "*" ? true : part.startsWith("#") ? child.id === part.slice(1) : child.tagName === part
+              part === "*"
+                ? true
+                : part === "[id]"
+                  ? !!child.id
+                  : part.startsWith("#")
+                    ? child.id === part.slice(1)
+                    : child.tagName === part
             )
           )
             out.push(child);
@@ -184,7 +190,7 @@ describe("compat reuse tracker: what a change dirties", () => {
     expect(dirt.evaluate(runs, false).every(Boolean)).toBe(true);
   });
 
-  it("dirties every run on any definition change", () => {
+  it("without reference closures, dirties every run on any definition change", () => {
     const cases: ((w: ReturnType<typeof world>) => ReuseRecord)[] = [
       w => attr(w.hatch, "patternTransform"),
       w => children(w.defs, [el("filter", "glow")]),
@@ -200,8 +206,89 @@ describe("compat reuse tracker: what a change dirties", () => {
     for (const make of cases) {
       const { dirt, w, runs } = setup();
       dirt.note([make(w)]);
-      expect(dirt.evaluate(runs, false).every(why => why.startsWith("global: definition"))).toBe(true);
+      expect(dirt.evaluate(runs, false).every(why => /definition/.test(why))).toBe(true);
     }
+  });
+
+  // run 0 (labels) paints through nothing; run 1 (the emblem) names #hatch, #burgCOA1 and #c
+  const named = [new Set<string>(), new Set(["hatch", "burgCOA1", "c"])];
+
+  it("dirties only the runs that paint through a changed definition (emblems generated on zoom)", () => {
+    const cases: [string, (w: ReturnType<typeof world>) => ReuseRecord][] = [
+      ["pattern attribute", w => attr(w.hatch, "patternTransform")],
+      ["inside a referenced definition", w => attr(el("path", "", w.hatch), "d")],
+      ["COA added", () => children(el("g", "coas"), [el("svg", "burgCOA1")])],
+      [
+        "COA with its <style> added",
+        () => {
+          const coa = el("svg", "burgCOA1");
+          el("style", "", el("defs", "", coa));
+          return children(el("g", "coas"), [coa]);
+        }
+      ],
+      [
+        "clip path removed with a group",
+        w => {
+          const group = el("g", "ruler");
+          el("clipPath", "c", group);
+          return children(w.viewbox, [], [group]);
+        }
+      ],
+      ["renamed to a referenced id", w => attr(el("pattern", "hatch2", w.defs), "id", "hatch")]
+    ];
+    for (const [label, make] of cases) {
+      const { dirt, w, runs } = setup();
+      dirt.note([make(w)]);
+      const why = dirt.evaluate(runs, false, named);
+      expect(why[0], label).toBe("");
+      expect(why[1], label).toMatch(/definition/);
+    }
+    // a definition no run names dirties nothing
+    const { dirt, w, runs } = setup();
+    dirt.note([children(w.defs, [el("filter", "glow")])]);
+    expect(dirt.evaluate(runs, false, named)).toEqual(["", ""]);
+  });
+
+  it("dirties every run when the change acts on the whole document or a stylesheet names the definition", () => {
+    const cases: [string, (w: ReturnType<typeof world>) => ReuseRecord][] = [
+      ["style text", w => text(el("style", "", w.defs))],
+      ["link added", w => children(w.defs, [el("link")])],
+      [
+        "font inside an added group",
+        w => {
+          const group = el("g", "fonts");
+          el("font-face", "", group);
+          return children(w.defs, [group]);
+        }
+      ],
+      ["id renamed, old value unknown", w => ({ ...attr(el("pattern", "x", w.defs), "id"), oldValue: undefined })]
+    ];
+    for (const [label, make] of cases) {
+      const { dirt, w, runs } = setup();
+      dirt.note([make(w)]);
+      expect(dirt.evaluate(runs, false, named), label).toEqual(
+        expect.arrayContaining([expect.stringMatching(/^global: definition/)])
+      );
+      expect(dirt.evaluate(runs, false, named).every(Boolean), label).toBe(true);
+    }
+    const { dirt, w, runs } = setup();
+    dirt.note([children(w.defs, [el("filter", "glow")])]);
+    expect(dirt.evaluate(runs, false, named, new Set(["glow"])).every(why => /named by a stylesheet/.test(why))).toBe(
+      true
+    );
+  });
+
+  it("notes definitions outside #map in one epoch, and prunes them", () => {
+    const dirt = new CompatDirt();
+    const stamp = dirt.now();
+    const coas = el("g", "coas");
+    dirt.noteDefinitions([children(coas, [el("svg", "burgCOA1")]), children(coas, [el("svg", "burgCOA2")])], "outside");
+    expect(dirt.now()).toBe(stamp + 1);
+    const runs = [{ elements: [el("use", "u")], stamp }];
+    expect(dirt.evaluate(runs, false, [new Set(["burgCOA2"])])[0]).toMatch(/outside <g#coas> \(#burgCOA2\)/);
+    expect(dirt.evaluate(runs, false, [new Set(["stateCOA1"])])).toEqual([""]);
+    dirt.prune(dirt.now());
+    expect(dirt.size).toBe(0);
   });
 
   it("dirties a run that moved under a new parent (inherits differently)", () => {
@@ -337,6 +424,30 @@ describe("compat reuse: stylesheets", () => {
       styleState([sheet([rule("#labels text"), rule("svg#map #emblems", "visibility: hidden")])], applies).key
     ).toBe(base);
     expect(styleState([sheet([rule("#labels text")], { disabled: true })], applies).key).not.toBe(base);
+  });
+
+  it("keys consecutive identical sheets as one (an emblem generated on zoom), and nothing else", () => {
+    const applies = () => false;
+    const svgStyle = { namespaceURI: "http://www.w3.org/2000/svg", textContent: "g.secondary{fill:var(--secondary)}" };
+    const coa = () => sheet([], { disabled: true, ownerNode: svgStyle });
+    const shared = sheet([rule("g.secondary", "fill: var(--secondary)")]);
+    const app = sheet([rule("#labels text")]);
+    const key = (sheets: SheetLike[]) => styleState(sheets, applies).key;
+    expect(key([app, coa(), coa(), shared])).toBe(key([app, coa(), shared]));
+    expect(key([app, coa(), coa(), coa(), coa(), shared])).toBe(key([app, coa(), shared]));
+    // not consecutive: a sheet between the copies can lose to the later one
+    expect(key([app, coa(), app, coa(), shared])).not.toBe(key([app, coa(), shared]));
+    // a disabled svg <style> still styles the serialized clone: its text is keyed
+    const edited = sheet([], { disabled: true, ownerNode: { ...svgStyle, textContent: "g.secondary{fill:red}" } });
+    expect(key([app, edited, shared])).not.toBe(key([app, coa(), shared]));
+  });
+
+  it("collects the ids the rules name", () => {
+    const state = styleState(
+      [sheet([rule("#ocean", "fill: url(#oceanPattern)"), rule("path", 'filter: url("#blur")')])],
+      () => false
+    );
+    expect([...state.references].sort()).toEqual(["blur", "oceanPattern"]);
   });
 
   it("keys whether each media query holds, not only its text (resize, color-scheme flip)", () => {
