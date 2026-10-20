@@ -956,7 +956,9 @@ function toggleBurgIcons(event) {
   } else {
     if (event && isCtrlClick(event)) return editStyle("burgIcons");
     turnButtonOff("toggleBurgIcons");
-    icons.selectAll("circle, use").remove();
+    // burg-canvas.ts replaces each group's <use> icons with one rasterized <image data-burg-vectors>; remove that too,
+    // or the icons stay on the map after the layer is switched off (found by the toggle census, bench/host/toggle-census.ts)
+    icons.selectAll("circle, use, image").remove();
   }
 }
 

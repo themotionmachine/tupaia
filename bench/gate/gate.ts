@@ -19,6 +19,7 @@ import { HostLock, type LockMode, slotCount } from "./host-lock.ts";
 import { nonPassing } from "../integration-fixture.ts";
 import { parseArms } from "../host/editor-replay-core.ts";
 import { LAUNCHERS } from "../host/launcher.ts";
+import { judgePresets, summarizePresets } from "../host/census-core.ts";
 
 const REPO = resolve(import.meta.dirname, "../..");
 const NODE = process.execPath;
@@ -145,7 +146,16 @@ const ARG_SPEC: Record<string, Spec> = {
   // how the golden captures its GPU arm: canvas alone over an opaque cover (default), composite, or probe (both)
   gpu_arm: { type: "enum", values: ["canvas", "composite", "probe"], default: "canvas" },
   // extra page URL flags for the GPU arm, e.g. params=gpu-native-shapes=1 (gpu-* keys only, "+"-joined for several)
-  params: { type: "string", default: "", check: text => { for (const kv of text.split("+").filter(Boolean)) if (!/^gpu-[a-z0-9-]+=[\w.-]*$/.test(kv)) throw new UsageError(`params entry ${kv} must be gpu-<flag>=<value>`); } }
+  params: { type: "string", default: "", check: text => { for (const kv of text.split("+").filter(Boolean)) if (!/^gpu-[a-z0-9-]+=[\w.-]*$/.test(kv)) throw new UsageError(`params entry ${kv} must be gpu-<flag>=<value>`); } },
+  // census checks (bench/host/{toggle-census,resize-print,customization,memory-cycles}.ts); `break` is overridden per check
+  only: { type: "string", default: "" },
+  passes: { type: "string", default: "isolated,trade,reorder" },
+  steps: { type: "string", default: "" },
+  modes: { type: "string", default: "states,heightmap-keep,heightmap-image" },
+  strict: { type: "bool", default: false },
+  cycles: { type: "int", default: 20 },
+  resizes: { type: "int", default: 12 },
+  allow: { type: "int", default: 0 }
 };
 // golden takes a list of device pixel ratios (D5 nightly runs 1,2)
 const DPR_LIST: Spec = {
@@ -841,6 +851,211 @@ async function consumersSelftestCheck(ctx: Ctx): Promise<Partial<Result>> {
   };
 }
 
+
+// ---------------------------------------------------------------- census checks (wave 2, CENSUS packet)
+
+// The toggle census (rows 26, 27), resize / DPR / print / layers presets (row 39), customization (row 25) and memory
+// cycles (gate gap 16) are one script each under bench/host/; they share the report shape: `checks` with PASS / FAIL /
+// INFO and a `failure` that is null on a pass.
+function censusMetrics(data: Json): Json {
+  if (!data) return {};
+  const checks: Json[] = data.checks ?? [];
+  const brief = (c: Json) => `${c.id}: ${String(c.detail).slice(0, 180)}`;
+  return {
+    summary: data.summary,
+    adapter: data.adapter?.renderer ?? data.adapter?.description ?? data.adapter ?? undefined,
+    failing: checks.filter(c => c.status === "FAIL").slice(0, 12).map(brief),
+    info: checks.filter(c => c.status === "INFO").slice(0, 8).map(brief),
+    knownGaps: data.knownGaps ?? data.summary?.knownGaps,
+    growth: data.growth
+  };
+}
+const censusRun = (ctx: Ctx, script: string, reportName: string, env: Record<string, string>) =>
+  runScript(ctx, nodeScript(`bench/host/${script}`), env, join(ctx.dir, reportName), DEFS[ctx.check].timeout, data => ({ failure: reportFailure(data), metrics: censusMetrics(data) }));
+
+const togglesEnv = (ctx: Ctx): Record<string, string> => ({
+  TOGGLE_MAP: resolveNamedFixture("parity"),
+  TOGGLE_DPR: String(ctx.args.dpr),
+  TOGGLE_LAUNCHER: String(ctx.args.launcher),
+  TOGGLE_ONLY: String(ctx.args.only),
+  TOGGLE_PASSES: String(ctx.args.passes),
+  TOGGLE_READING: String(ctx.args.reading),
+  TOGGLE_STRICT: ctx.args.strict ? "1" : "0",
+  TOGGLE_BREAK: String(ctx.args.break)
+});
+const resizeEnv = (ctx: Ctx): Record<string, string> => ({
+  RESIZE_MAP: resolveNamedFixture("parity"),
+  RESIZE_DPR: String(ctx.args.dpr),
+  RESIZE_LAUNCHER: String(ctx.args.launcher),
+  ...(ctx.args.steps ? { RESIZE_STEPS: String(ctx.args.steps) } : {}),
+  RESIZE_STRICT: ctx.args.strict ? "1" : "0",
+  RESIZE_BREAK: String(ctx.args.break)
+});
+const customizationEnv = (ctx: Ctx): Record<string, string> => ({
+  CUSTOM_MAP: resolveNamedFixture("parity"),
+  CUSTOM_DPR: String(ctx.args.dpr),
+  CUSTOM_LAUNCHER: String(ctx.args.launcher),
+  CUSTOM_MODES: String(ctx.args.modes),
+  CUSTOM_BREAK: String(ctx.args.break)
+});
+const memoryEnv = (ctx: Ctx): Record<string, string> => ({
+  MEMORY_MAP: resolveNamedFixture("parity"),
+  MEMORY_DPR: String(ctx.args.dpr),
+  MEMORY_LAUNCHER: String(ctx.args.launcher),
+  MEMORY_CYCLES: String(ctx.args.cycles),
+  MEMORY_RESIZES: String(ctx.args.resizes),
+  ...(ctx.args.steps ? { MEMORY_STEPS: String(ctx.args.steps) } : {}),
+  MEMORY_BREAK: String(ctx.args.break)
+});
+
+// REWRITE-PLAN row 28: the layer golden per built-in style preset at gate scale, summarised by preset. A preset's
+// failing cells are compared with the same cell under the baseline `default` preset: a cell that passes under `default`
+// and fails under the preset is INDUCED by the preset. Hard failures (GPU fallback, a prepare that never settled, a
+// harness error) fail under any preset; induced metric failures fail past `allow=` per preset. Baseline failures are the
+// golden's own open gaps (checked by `golden`), reported here but not charged to the preset.
+async function presetsCheck(ctx: Ctx): Promise<Partial<Result>> {
+  const presets = parsePresets(String(ctx.args.preset));
+  const withBaseline = presets.includes("default") ? presets : ["default", ...presets];
+  const env: Record<string, string> = {
+    GOLDEN_MAP: ctx.map(),
+    GOLDEN_LAYERS: "all",
+    GOLDEN_K: String(ctx.args.k),
+    GOLDEN_DPR: String(ctx.args.dpr),
+    GOLDEN_PRESET: withBaseline.join(","),
+    GOLDEN_BG: "#ffffff",
+    GOLDEN_READING: String(ctx.args.reading),
+    GOLDEN_KEEP: "fail",
+    GOLDEN_BREAK: "none"
+  };
+  const report = join(ctx.dir, "golden.json");
+  const code = await exec(nodeScript("bench/host/layer-golden.ts"), ctx.env(env), ctx.log, DEFS.presets.timeout, true);
+  const data = readJson(report);
+  if (!data) return { exit_code: code || 1, failure: code === 124 ? `timed out after ${DEFS.presets.timeout}s` : `no golden report (exit ${code})`, metrics: {}, report: null };
+  const cells: Json[] = data.cells ?? [];
+  const { rows, byFamily } = summarizePresets(cells as never, "default", ctx.args.reading as "conservative" | "over44");
+  const shown = rows.filter(r => presets.includes(r.preset));
+  const problems = judgePresets(shown, Number(ctx.args.allow));
+  for (const preset of presets) if (!shown.some(r => r.preset === preset)) problems.push(`${preset}: the golden produced no cells`);
+  if ((data.errors ?? []).length) problems.push(`golden reported ${(data.errors as string[]).length} page/harness error(s): ${String(data.errors[0]).split("\n")[0].slice(0, 160)}`);
+  writeFileSync(join(ctx.dir, "presets.json"), JSON.stringify({ schema: 1, allow: ctx.args.allow, k: ctx.args.k, dpr: ctx.args.dpr, fixture: data.fixture, rows, byFamily, problems }, null, 2) + "\n");
+  const images: Record<string, string> = {};
+  for (const cell of cells) if (!cell.pass && cell.images && shown.some(r => r.preset === cell.preset) && Object.keys(images).length < 60) for (const [kind, path] of Object.entries(cell.images)) images[`${cell.key}/${kind}`] = join(ctx.dir, String(path));
+  return {
+    exit_code: problems.length ? 1 : 0,
+    failure: problems.length ? problems.join(" | ").slice(0, 2000) : null,
+    metrics: {
+      fixture: data.fixture?.sha256?.slice(0, 12),
+      golden_exit: code,
+      presets: shown.map(r => ({
+        preset: r.preset,
+        cells: r.cells,
+        fail: r.fail,
+        induced: r.induced,
+        inducedGates: r.inducedGates,
+        compatShare: round(r.compatShare, 4),
+        hard: r.hard.length,
+        worst: r.worst && `${r.worst.cell} ssim ${round(r.worst.ssim, 4)} over16 ${round(r.worst.over16, 4)}`,
+        failing: r.failing.slice(0, 12)
+      }))
+    },
+    report: join(ctx.dir, "presets.json"),
+    images
+  };
+}
+
+// Re-proves that each census check can still tell pass from fail. For every script a small clean arm must pass, and the
+// same arm with its `break` switch must fail on a real check (a check id of the expected family, not a harness error).
+async function censusSelftestCheck(ctx: Ctx): Promise<Partial<Result>> {
+  interface Arm {
+    name: string;
+    script: string;
+    report: string;
+    env: Record<string, string>;
+    broken: Record<string, string>;
+    fails: RegExp; // the check ids the broken arm must fail
+    /** true: the clean arm of this script already ran under another arm; run only the broken one */
+    skipClean?: boolean;
+    timeout: number;
+  }
+  const parity = resolveNamedFixture("parity");
+  const common = { DPR: "2", LAUNCHER: String(ctx.args.launcher) };
+  const arms: Arm[] = [
+    {
+      name: "toggles",
+      script: "toggle-census.ts",
+      report: "toggles.json",
+      env: { TOGGLE_MAP: parity, TOGGLE_DPR: common.DPR, TOGGLE_LAUNCHER: common.LAUNCHER, TOGGLE_ONLY: "rivers,borders", TOGGLE_PASSES: "isolated" },
+      broken: { TOGGLE_BREAK: "freeze-gpu" },
+      fails: /^toggle\./,
+      timeout: 1200
+    },
+    {
+      // the on-state fidelity gate of the toggles check: the GPU canvas alone is drawn hue-rotated after the layer
+      // is turned back on (footprint intact, pixels wrong); only toggle.<layer>.on-fidelity can see that
+      name: "toggles-on-state",
+      script: "toggle-census.ts",
+      report: "toggles.json",
+      env: { TOGGLE_MAP: parity, TOGGLE_DPR: common.DPR, TOGGLE_LAUNCHER: common.LAUNCHER, TOGGLE_ONLY: "rivers,borders", TOGGLE_PASSES: "isolated" },
+      broken: { TOGGLE_BREAK: "perturb-on" },
+      fails: /^toggle\.\w+\.on-fidelity$/,
+      skipClean: true,
+      timeout: 1200
+    },
+    {
+      name: "customization",
+      script: "customization.ts",
+      report: "customization.json",
+      env: { CUSTOM_MAP: parity, CUSTOM_DPR: common.DPR, CUSTOM_LAUNCHER: common.LAUNCHER, CUSTOM_MODES: "states" },
+      broken: { CUSTOM_BREAK: "no-watch" },
+      fails: /\.(enter|camera)$/,
+      timeout: 900
+    },
+    {
+      name: "resize-print",
+      script: "resize-print.ts",
+      report: "resize-print.json",
+      env: { RESIZE_MAP: parity, RESIZE_DPR: common.DPR, RESIZE_LAUNCHER: common.LAUNCHER, RESIZE_STEPS: "resize,print" },
+      broken: { RESIZE_BREAK: "all" },
+      fails: /^(resize|print)\./,
+      timeout: 900
+    },
+    {
+      name: "memory-cycles",
+      script: "memory-cycles.ts",
+      report: "memory.json",
+      env: { MEMORY_MAP: parity, MEMORY_DPR: common.DPR, MEMORY_LAUNCHER: common.LAUNCHER, MEMORY_STEPS: "world", MEMORY_CYCLES: "5", MEMORY_WARMUP: "1" },
+      broken: { MEMORY_BREAK: "leak" },
+      fails: /^memory\.world-replace$/,
+      timeout: 1500
+    }
+  ];
+  const problems: string[] = [];
+  const summary: Json = {};
+  const only = String(ctx.args.only).split(",").filter(Boolean);
+  for (const name of only) if (!arms.some(a => a.name === name)) throw new UsageError(`only=${name}: one of ${arms.map(a => a.name).join(", ")}`);
+  for (const arm of arms) {
+    if (only.length && !only.includes(arm.name)) continue;
+    summary[arm.name] = {};
+    for (const mode of ["clean", "broken"] as const) {
+      if (mode === "clean" && arm.skipClean) continue;
+      const dir = join(ctx.dir, arm.name, mode);
+      mkdirSync(dir, { recursive: true });
+      const env = { ...arm.env, ...(mode === "broken" ? arm.broken : {}), GATE_OUT_DIR: dir };
+      const code = await exec(nodeScript(`bench/host/${arm.script}`), ctx.env(env), ctx.log, arm.timeout, true);
+      const data = readJson(join(dir, arm.report));
+      const failing: string[] = (data?.checks ?? []).filter((c: Json) => c.status === "FAIL").map((c: Json) => String(c.id));
+      summary[arm.name][mode] = { code, failing: failing.slice(0, 6), failure: data?.failure ? String(data.failure).slice(0, 160) : null };
+      if (!data) problems.push(`${arm.name} ${mode}: no report (exit ${code})`);
+      else if (mode === "clean") {
+        if (code !== 0 || data.failure) problems.push(`${arm.name} clean arm failed: ${String(data.failure ?? `exit ${code}`).slice(0, 200)}`);
+      } else if (code === 0 && !data.failure) problems.push(`${arm.name}: the broken arm PASSED, the check can no longer see its break`);
+      else if (String(data.failure).startsWith("harness:")) problems.push(`${arm.name}: the broken arm died on a harness error, not a check: ${String(data.failure).slice(0, 160)}`);
+      else if (!failing.some(id => arm.fails.test(id))) problems.push(`${arm.name}: the broken arm failed, but not on ${arm.fails} (failing: ${failing.join(", ") || "none"})`);
+    }
+  }
+  return { exit_code: problems.length ? 1 : 0, failure: problems.length ? problems.join(" | ") : null, metrics: summary };
+}
+
 // ---------------------------------------------------------------- check table
 
 const CAMERA = ["dpr", "zoom"];
@@ -895,7 +1110,8 @@ const DEFS: Record<string, CheckDef> = {
           "bench/host/fixtures/fixtures.test.ts",
           "bench/host/consumers-lib.test.ts",
           "bench/integration-fixture.test.ts",
-          "bench/host/editor-replay-core.test.ts"
+          "bench/host/editor-replay-core.test.ts",
+          "bench/host/census-core.test.ts"
         ],
         {},
         null,
@@ -1169,6 +1385,43 @@ const DEFS: Record<string, CheckDef> = {
     timeout: 3600,
     run: consumersCheck
   },
+  // census (wave 2): toggles + reorder + trade, resize/dpr/print/layers presets, customization, memory, preset golden
+  toggles: {
+    lock: "shared",
+    keys: ["dpr", "launcher", "only", "passes", "reading", "strict", "break"],
+    spec: { break: { type: "enum", values: ["none", "freeze-gpu", "perturb-on"], default: "none" } },
+    timeout: 3600,
+    run: ctx => censusRun(ctx, "toggle-census.ts", "toggles.json", togglesEnv(ctx))
+  },
+  "resize-print": {
+    lock: "shared",
+    keys: ["dpr", "launcher", "steps", "strict", "break"],
+    spec: { break: { type: "enum", values: ["none", "no-resize", "no-print", "all"], default: "none" } },
+    timeout: 1800,
+    run: ctx => censusRun(ctx, "resize-print.ts", "resize-print.json", resizeEnv(ctx))
+  },
+  customization: {
+    lock: "shared",
+    keys: ["dpr", "launcher", "modes", "break"],
+    spec: { break: { type: "enum", values: ["none", "no-watch"], default: "none" } },
+    timeout: 1800,
+    run: ctx => censusRun(ctx, "customization.ts", "customization.json", customizationEnv(ctx))
+  },
+  "memory-cycles": {
+    lock: "shared",
+    keys: ["dpr", "launcher", "cycles", "resizes", "steps", "break"],
+    spec: { break: { type: "enum", values: ["none", "leak"], default: "none" } },
+    timeout: 3600,
+    run: ctx => censusRun(ctx, "memory-cycles.ts", "memory.json", memoryEnv(ctx))
+  },
+  presets: {
+    lock: "shared",
+    keys: ["preset", "k", "dpr", "fixture", "reading", "allow"],
+    spec: { preset: { type: "string", default: "all", check: listOf(parsePresets) }, fixture: { type: "string", default: "parity" } },
+    timeout: 14400,
+    run: presetsCheck
+  },
+  "census-selftest": { lock: "shared", keys: ["launcher", "only"], timeout: 7200, run: censusSelftestCheck },
   "consumers-selftest": { lock: "shared", keys: [], timeout: 1200, run: consumersSelftestCheck },
   "golden-selftest": { lock: "shared", keys: ["reading"], timeout: 900, run: goldenSelftestCheck },
   golden: {
@@ -1282,7 +1535,9 @@ async function runCheck(check: string, args: Args, mode: LockMode | null = null,
     if (def.lock && !existsSync(join(REPO, "dist/index.html"))) throw new EnvError("dist/ is missing: run `gate build` first");
     if (def.lock) ctx.map(); // a missing fixture is a usage error before any lock wait
     if (def.lock && !lock.held) {
-      await lock.acquire(mode ?? def.lock);
+      // `toggles passes=...cost` records click-to-frame timings: those need the exclusive lock, not a shared slot
+      const timed = check === "toggles" && String(args.passes).split(",").includes("cost");
+      await lock.acquire(timed ? "exclusive" : (mode ?? def.lock));
       lockWait = lock.waitSeconds;
       started = Date.now(); // runtime excludes the wait for the host lock
     }
@@ -1349,7 +1604,12 @@ const TIERS: Record<string, Array<[string, Args]>> = {
     ["replay-selftest", {}],
     ["replay", {}],
     ["consumers-selftest", {}],
-    ["consumers", {}]
+    ["consumers", {}],
+    // wave 2 census: layer toggles + reorder + trade (rows 26, 27), customization (row 25), resize / dpr / print / the
+    // 12 layers presets (row 39). About 16 minutes together; memory-cycles and census-selftest are nightly (~35 minutes)
+    ["toggles", {}],
+    ["customization", {}],
+    ["resize-print", {}]
   ],
   // D5 nightly matrix: k {1,2,4,8} plus the coastline switch points, dpr {1,2}, the 12 built-in presets. One golden
   // step per (dpr, preset) so a failure names its cell and the rest keep going (keep_going is implied). PNGs are kept
@@ -1362,7 +1622,11 @@ const TIERS: Record<string, Array<[string, Args]>> = {
           { layers: "all", k: "1,2,4,8", coastk: "1.4,1.6,2.5,2.7", dpr: String(dpr), preset, fixture: "parity", keep: "fail" }
         ] as [string, Args]
     )
-  )
+  ).concat([
+    // gate gap 16: 20 world-replace cycles + resizes with no growth (~20 min); and the census checks' own self-tests (~20 min)
+    ["memory-cycles", {}],
+    ["census-selftest", {}]
+  ] as Array<[string, Args]>)
 };
 TIERS.full = [
   ...TIERS.browser,
