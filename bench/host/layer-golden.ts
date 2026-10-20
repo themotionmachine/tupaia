@@ -100,6 +100,8 @@ const preCoa = (env.GOLDEN_PRECOA ?? "1") !== "0" && !coaLate;
 if (!["auto", "vector", "seen"].includes(svgRefArg)) throw Error("GOLDEN_SVG_REF must be auto|vector|seen");
 if (!Number.isFinite(settleMs) || settleMs < 0) throw Error("GOLDEN_SETTLE_MS must be a number of ms >= 0");
 const urlParams = (env.GOLDEN_PARAMS || "").split("+").filter(Boolean);
+// the settle refinement is off: the cell judges a first frame (see the camera bounce in the cell loop)
+const firstFrameOnly = urlParams.includes("gpu-refine=0");
 if (urlParams.some(kv => !/^gpu-[a-z0-9-]+=[\w.-]*$/.test(kv))) throw Error("GOLDEN_PARAMS entries must be gpu-<flag>=<value>");
 if (!/^#[\da-f]{6}$/i.test(bg)) throw Error(`GOLDEN_BG must be #rrggbb, got ${bg}`);
 if (!["over44", "conservative"].includes(reading)) throw Error(`GOLDEN_READING must be conservative|over44`);
@@ -834,6 +836,16 @@ try {
               if (cell.pendingCoas) cell.failures.push(`harness: ${cell.pendingCoas} visible emblem(s) still without a COA symbol after 20 s`);
               await settleApp(page);
               await page.evaluate(isolateLayer, { id: family.id, root: family.root, bg });
+              // params=gpu-refine=0 measures the first frame a camera change commits (prepare.ts firstDetails). Isolation
+              // is a DOM revision at the cell's camera, and since W3b RES2 a revision-only prepare (an edit, a toggle)
+              // commits on its base rasters without first-frame details: leave the cell's raster bucket and come back,
+              // so the frame judged is a camera one.
+              if (firstFrameOnly) {
+                await waitGpu(page);
+                await zoomTo(page, { ...camera, k: camera.k / 2, x: undefined, y: undefined });
+                await waitGpu(page);
+                await zoomTo(page, camera);
+              }
               const status = await waitGpu(page);
               cell.renderer = status;
               if (status.active !== "gpu") cell.failures.push(`GPU not active: ${status.fallbackReason ?? "no frame"}`);

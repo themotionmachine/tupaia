@@ -11,6 +11,7 @@ import {
   compareStep,
   type EditorScript,
   judgeArm,
+  maxSteadyBytes,
   parseArms,
   type StepObservation,
   validateScript
@@ -170,6 +171,25 @@ describe("checkGpuStep", () => {
     assert.match(checkGpuStep(closed(undefined), "gpu", 60000).join(), /no resume measured/);
     assert.match(checkGpuStep(closed({ currentMs: null, refinedMs: null, timedOut: true, prepares: 0, lastPrepareMs: null }), "gpu", 60000).join(), /did not resume/);
     assert.match(checkGpuStep(closed({ currentMs: 900, refinedMs: null, timedOut: true, prepares: 1, lastPrepareMs: 1 }), "gpu", 60000).join(), /did not refine/);
+  });
+  // RES2: the dense parity world held 160.64 MiB against the 160 MiB steady budget at W3 and no check saw it
+  it("fails a settled step or a refined resume over the steady GPU budget, and reports the arm's maximum", () => {
+    const budget = 160 * 2 ** 20;
+    const idle = (total: number, settledMs: number | null = 100) =>
+      step({ op: "camera", dialogs: [], gpu: gpu({ state: "active", suspendedReason: null, canvasVisible: true, settledMs, memory: { total, budget } }) });
+    assert.deepEqual(checkGpuStep(idle(budget), "gpu", 1000), []);
+    assert.match(checkGpuStep(idle(budget + 671089), "gpu", 1000).join(), /steady GPU memory 160\.64 MiB over the 160\.00 MiB budget/);
+    // not settled (a prepare may be in flight: old and new frames coexist up to PEAK_LIMIT): not a steady reading
+    assert.deepEqual(checkGpuStep(idle(budget + 1, null), "gpu", 1000).filter(f => /steady/.test(f)), []);
+    const closed = step({
+      op: "close",
+      dialogs: [],
+      gpu: gpu({ state: "active", suspendedReason: null, canvasVisible: true }),
+      resume: { currentMs: 900, refinedMs: 1500, timedOut: false, prepares: 1, lastPrepareMs: 800, steadyBytes: budget + 1, budget }
+    });
+    assert.match(checkGpuStep(closed, "gpu", 60000).join(), /at the refined frame over the 160\.00 MiB budget/);
+    assert.equal(maxSteadyBytes([idle(10), closed, idle(20, null)]), budget + 1);
+    assert.equal(maxSteadyBytes([step()]), null);
   });
   it("allows at most one click-route outcome per action on gpu-select, never a drop", () => {
     assert.deepEqual(checkGpuStep(step({ gpu: gpu(), routes: { legacy: 1 } }), "gpu-select", 1000), []);

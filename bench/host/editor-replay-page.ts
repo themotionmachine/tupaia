@@ -561,7 +561,8 @@ export function installReplay(config: { arm: string; editors: string[] }) {
       canvasVisible: g?.canvasVisible ?? null,
       pending: g?.pending ?? null,
       // ms the post-action settle waited for the GPU (suspended+hidden, or a current frame); null = not reached
-      settledMs: w.__rp.settledMs ?? null
+      settledMs: w.__rp.settledMs ?? null,
+      memory: g?.memory?.gpu ? { total: g.memory.gpu.total, budget: g.memory.budget } : null
     };
   };
   const status = () => w.rendererStatus?.()?.gpu;
@@ -610,7 +611,9 @@ export function installReplay(config: { arm: string; editors: string[] }) {
       timedOut: refinedAt == null,
       prepares: prepares0 == null || g?.prepares == null ? null : g.prepares - prepares0,
       lastPrepareMs: g?.lastPrepareMs ?? null,
-      lastPrepare: g?.lastPrepare ? { ...g.lastPrepare, reuse: g.lastPrepare.reuse ?? undefined } : null
+      lastPrepare: g?.lastPrepare ? { ...g.lastPrepare, reuse: g.lastPrepare.reuse ?? undefined } : null,
+      steadyBytes: refinedAt != null && g?.memory?.gpu ? g.memory.gpu.total : null,
+      budget: g?.memory?.budget ?? null
     };
   };
   // DOM quiet for `ms` (editors finish async work), bounded

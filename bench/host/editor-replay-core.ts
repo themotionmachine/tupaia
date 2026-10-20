@@ -136,6 +136,8 @@ export interface GpuState {
   canvasVisible: boolean | null;
   pending: boolean | null;
   settledMs?: number | null;
+  /** RES2: tracked GPU bytes after the step settled and the renderer's steady budget (rendererStatus().gpu.memory). */
+  memory?: { total: number; budget: number } | null;
 }
 
 export interface Resume {
@@ -150,6 +152,26 @@ export interface Resume {
   /** D13: polls/reveals after the close input that saw the GPU canvas on screen with a frame older than the DOM revision. */
   staleShown?: number;
   staleFirst?: { at: number; frameRevision: number; revision: number; via: string } | null;
+  /** RES2: tracked GPU bytes at the refined frame, and the steady budget they must stay within. */
+  steadyBytes?: number | null;
+  budget?: number | null;
+}
+
+const MIB = 1 << 20;
+const mib = (bytes: number) => `${(bytes / MIB).toFixed(2)} MiB`;
+
+/**
+ * RES2: the steady GPU memory a replay arm saw, in bytes: the most tracked after any settled step (no prepare in flight
+ * once a current frame is on screen, so no old+new overlap) or at the close step's refined frame; null without data.
+ */
+export function maxSteadyBytes(steps: readonly StepObservation[]): number | null {
+  let max: number | null = null;
+  for (const step of steps) {
+    const settled = step.gpu?.memory && step.gpu.settledMs != null ? step.gpu.memory.total : null;
+    for (const value of [settled, step.resume?.steadyBytes ?? null])
+      if (value != null && (max == null || value > max)) max = value;
+  }
+  return max;
 }
 
 export interface StepObservation {
@@ -247,6 +269,12 @@ export function checkGpuStep(step: StepObservation, arm: Arm, resumeLimitMs: num
       out.push(`${tag}: editor open but the GPU canvas is still on screen${stale ? ` (${stale.over16} px differ from the SVG under it by >16)` : ""}`);
     }
   }
+  // RES2: the steady budget (src/gpu/budget.ts GPU_BUDGET) is a gate, not a report: a settled frame over it fails
+  const memory = gpu.memory;
+  if (memory && gpu.settledMs != null && memory.total > memory.budget)
+    out.push(`${tag}: steady GPU memory ${mib(memory.total)} over the ${mib(memory.budget)} budget`);
+  if (step.resume?.steadyBytes != null && step.resume.budget != null && step.resume.steadyBytes > step.resume.budget)
+    out.push(`${tag}: steady GPU memory ${mib(step.resume.steadyBytes)} at the refined frame over the ${mib(step.resume.budget)} budget`);
   if (step.op === "close" && !step.dialogs.length) {
     const resume = step.resume;
     if (!resume) out.push(`${tag}: no resume measured`);
@@ -344,6 +372,8 @@ export interface ArmVerdict {
   failures: string[];
   resume: Resume | null;
   steps: number;
+  /** RES2: maxSteadyBytes over the replayed steps (null on the svg arm). */
+  maxSteadyBytes: number | null;
 }
 
 export function judgeArm(script: EditorScript, arm: Arm, recorded: StepObservation[], replayed: StepObservation[], resumeLimitMs: number): ArmVerdict {
@@ -356,5 +386,13 @@ export function judgeArm(script: EditorScript, arm: Arm, recorded: StepObservati
     failures.push(...checkStaleResume(replayed));
   }
   const closing = [...replayed].reverse().find(s => s.op === "close" && s.resume);
-  return { script: script.name, arm, pass: failures.length === 0, failures, resume: closing?.resume ?? null, steps: replayed.length };
+  return {
+    script: script.name,
+    arm,
+    pass: failures.length === 0,
+    failures,
+    resume: closing?.resume ?? null,
+    steps: replayed.length,
+    maxSteadyBytes: arm === "svg" ? null : maxSteadyBytes(replayed)
+  };
 }

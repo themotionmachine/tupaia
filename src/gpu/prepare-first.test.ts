@@ -32,7 +32,19 @@ vi.mock("./compat", () => ({
 }));
 vi.mock("./clone-map", () => ({ resolveManyInClone: (elements: unknown[]) => elements }));
 
-import { detailShare, type Prepared, refineCompat, refineRequest, refineView, releaseDetail } from "./prepare";
+import { DETAIL_RESERVE, FIRST_DETAIL_MS, GPU_BUDGET } from "./budget";
+import {
+  detailShare,
+  firstDetails,
+  frameBytes,
+  type Prepared,
+  refineCompat,
+  refineRequest,
+  refineView,
+  releaseDetail,
+  residentBytes,
+  revisionOnly
+} from "./prepare";
 
 interface FakeTexture {
   width: number;
@@ -195,5 +207,172 @@ describe("first-frame details (refineCompat options)", () => {
     expect(detailShare(sharp, 2, { k: 4, x: -400, y: -200 }, screen, 24 * MiB)).toBe(8 * MiB);
     expect(detailShare(sharp, 2, { k: 4, x: -400, y: -200 }, screen, 10 * MiB)).toBe(0);
     expect(detailShare([run(false)], 2, { k: 4, x: -400, y: -200 }, screen, 120 * MiB)).toBe(0);
+  });
+});
+
+// [RES2] prepareFrame's own first-frame pass (firstDetails) and the steady-budget accounting around it.
+describe("first-frame details (prepareFrame level)", () => {
+  const camera = { k: 4, x: -400, y: -200 };
+  const screen = { width: 1280, height: 720, dpr: 2 };
+  const buffer = (bytes: number) => ({ kind: "buffer", bytes });
+  const texture = (bytes: number) => ({ kind: "texture", bytes, width: 1, height: 1 });
+
+  // a frame with sharp runs, its own bytes known: runs' base textures, a pattern recipe, windows, buffers, atlas
+  function sharpFrame(sizes: number[], elements: number[] = sizes.map(() => 1)) {
+    const built = frame(sizes);
+    built.runs.forEach((run, i) => {
+      run.sharp = true;
+      run.elements = Array.from({ length: elements[i] }, (_, j) => ({
+        id: j ? `run${i}.${j}` : `run${i}`,
+        tagName: "g",
+        parentElement: null,
+        size: sizes[i]
+      }));
+    });
+    const pattern = texture(1000);
+    Object.assign(built.prepared, {
+      windows: { bytes: 2000 },
+      payload: { recipes: new Map([[pattern, {}]]), key: {} },
+      frame: { batches: [], fans: buffer(300), segments: null, atlas: texture(700) },
+      compat: { resolution: 1 }
+    });
+    return built;
+  }
+  const firstCtx = (gpu: ReturnType<typeof device>, stale = () => false) =>
+    ({ device: gpu, revision: 1, stale, camera, screen }) as unknown as Parameters<typeof firstDetails>[1];
+
+  it("frameBytes counts every resource of the frame once, carried settle details included", () => {
+    const { prepared, runs } = sharpFrame([10, 10]);
+    const shared = runs[0].slot.texture as unknown as object;
+    (prepared.payload.recipes as Map<object, unknown>).set(shared, {}); // also a recipe: counted once
+    runs[1].slot.detail = { texture: { width: 5, height: 5, bytes: 100 }, rect: [], covers: [] };
+    // 2 run textures (4 B each) + detail 100 + pattern 1000 + windows 2000 + fans 300 + atlas 700
+    expect(frameBytes(prepared)).toBe(4 + 4 + 100 + 1000 + 2000 + 300 + 700);
+  });
+
+  it("residentBytes is what the device tracks beyond the group target and the frame on screen", () => {
+    const { prepared } = sharpFrame([10]);
+    const own = frameBytes(prepared);
+    // the trade-marker sprite textures (0.6 MiB at DPR 2) were the 0.64 MiB the dense parity world went over budget
+    const sprites = 629_000;
+    expect(residentBytes({ total: own + 30_000_000 + sprites, targets: 30_000_000 }, prepared)).toBe(sprites);
+    expect(residentBytes({ total: sprites + 5, targets: 5 }, null)).toBe(sprites);
+    expect(residentBytes({ total: 10, targets: 0 }, prepared)).toBe(0); // never negative
+  });
+
+  it("revisionOnly is an edit on the same world, bucket, viewport, picking mode and device, whatever the revision", () => {
+    const key = {
+      revision: 3,
+      worldEpoch: 1,
+      bucket: 8,
+      picking: true,
+      world: "0,0,1280,720",
+      screen: "1280x720@2",
+      scale: 4,
+      maxTexture: 16384
+    };
+    expect(revisionOnly(key, { ...key, revision: 4, scale: 4.5 })).toBe(true);
+    expect(revisionOnly(key, { ...key, revision: 4, bucket: 16 })).toBe(false); // a zoom into another bucket
+    expect(revisionOnly(key, { ...key, worldEpoch: 2 })).toBe(false); // a load
+    expect(revisionOnly(key, { ...key, screen: "1512x982@2" })).toBe(false); // a resize
+    expect(revisionOnly(null, key)).toBe(false); // no frame on screen: a load, restore or a dropped frame
+  });
+
+  it("skips a revision-only prepare, and cuts nothing then", async () => {
+    const gpu = device(0);
+    const { prepared } = sharpFrame([10]);
+    cuts.length = 0;
+    expect(await firstDetails(prepared, firstCtx(gpu), 0, true)).toBe("revision only");
+    expect(cuts).toEqual([]);
+    expect(await firstDetails(prepared, firstCtx(gpu), 0, false)).toBe("cut");
+    expect(cuts).toEqual(["run0"]);
+  });
+
+  it("stays within the steady room left once the frame (carried details included) and the reserve are counted", async () => {
+    const run = async (carried: number) => {
+      const gpu = device(5_000_000); // the previous frame, still tracked: only what this pass allocates is spent
+      const { prepared, runs } = sharpFrame([10, 10, 10]);
+      if (carried) runs[2].slot.detail = { texture: { width: 1, height: 1, bytes: carried }, rect: [], covers: [] };
+      runs[2].sharp = false; // not this pass's: its carried detail stays
+      // a reserve that leaves this frame 500 B of steady room beside its own bytes (frameBytes without the detail)
+      const reserve = GPU_BUDGET - DETAIL_RESERVE - (frameBytes(prepared) - carried) - 500;
+      const before = gpu.memory().total;
+      const outcome = await firstDetails(prepared, firstCtx(gpu), reserve);
+      return {
+        outcome,
+        spent: gpu.memory().total - before,
+        cut: runs.map(item => item.slot.detail?.texture?.width ?? 0)
+      };
+    };
+    // 500 B: run0's 10x10 (400 B) at full density, run1 downscaled into the 100 B left (5x5)
+    expect(await run(0)).toEqual({ outcome: "cut", spent: 500, cut: [10, 5, 0] });
+    // a carried 300 B detail counts against the same room: 200 B left for the pass
+    const carried = await run(300);
+    expect(carried.spent).toBeLessThanOrEqual(200);
+    expect(carried.cut[0]).toBe(7); // floor(10 * sqrt(200 / 400))
+    // a carried detail at least as large as the room: nothing to spend
+    expect((await run(500)).outcome).toBe("no room");
+  });
+
+  it("stops cutting at the FIRST_DETAIL_MS deadline: later runs wait for the settle refinement", async () => {
+    let clock = 0;
+    const now = vi.spyOn(performance, "now").mockImplementation(() => clock);
+    try {
+      const gpu = device(0);
+      const cut = gpu.texture;
+      gpu.texture = (label, canvas) => {
+        clock += FIRST_DETAIL_MS + 1; // the first cut takes the whole budget of wall time
+        return cut(label, canvas);
+      };
+      const { prepared, runs } = sharpFrame([10, 10]);
+      cuts.length = 0;
+      expect(await firstDetails(prepared, firstCtx(gpu), 0)).toBe("cut");
+      expect(cuts).toEqual(["run0"]);
+      expect(runs[1].slot.detail).toBeNull();
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("returns stale (prepareFrame then releases the frame) when the job goes stale during the pass", async () => {
+    const gpu = device(0);
+    let stale = false;
+    const cut = gpu.texture;
+    gpu.texture = (label, canvas) => {
+      stale = true;
+      return cut(label, canvas);
+    };
+    const { prepared } = sharpFrame([10, 10]);
+    expect(
+      await firstDetails(
+        prepared,
+        firstCtx(gpu, () => stale),
+        0
+      )
+    ).toBe("stale");
+  });
+
+  it("refineCompat's first pass cuts the runs with the most elements first and skips once out of room", async () => {
+    const gpu = device(0);
+    const { prepared, runs } = sharpFrame([10, 10, 10], [1, 3, 2]);
+    cuts.length = 0;
+    let room = 1000; // two 400 B details
+    const texture = gpu.texture;
+    gpu.texture = (label, canvas) => {
+      room -= canvas.width * canvas.height * 4;
+      return texture(label, canvas);
+    };
+    await refineCompat(prepared, firstCtx(gpu), visible, pixels, 1 << 30, {
+      only: run => run.sharp,
+      room: () => room,
+      first: true
+    });
+    // run1 (3 elements), run2 (2), then run0 is skipped (room 200 B is still > 0: downscaled; at 0 it is skipped)
+    expect(cuts.slice(0, 2)).toEqual(["run1", "run2"]);
+    cuts.length = 0;
+    room = 0;
+    for (const run of runs) run.slot.detail = null;
+    await refineCompat(prepared, firstCtx(gpu), visible, pixels, 1 << 30, { room: () => room, first: true });
+    expect(cuts).toEqual([]); // the settle refinement cuts them, not a first pass without room
   });
 });

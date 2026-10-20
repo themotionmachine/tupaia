@@ -424,7 +424,7 @@ for (const script of scripts) {
     row.verdicts[arm] = verdict;
     // the report keeps a bounded DOM delta per step; the comparison above used the whole list
     row.steps[arm] = steps.map(s => ({ ...s, domDelta: s.domDelta.slice(0, 60) }));
-    if (verdict.resume) report.resume.push({ script: script.name, arm, currentMs: verdict.resume.currentMs, refinedMs: verdict.resume.refinedMs, prepares: verdict.resume.prepares, lastPrepareMs: verdict.resume.lastPrepareMs });
+    if (verdict.resume) report.resume.push({ script: script.name, arm, currentMs: verdict.resume.currentMs, refinedMs: verdict.resume.refinedMs, prepares: verdict.resume.prepares, lastPrepareMs: verdict.resume.lastPrepareMs, maxSteadyMiB: verdict.maxSteadyBytes == null ? null : +(verdict.maxSteadyBytes / 2 ** 20).toFixed(2) });
     if (!breaks.length || arm === "svg") failures.push(...verdict.failures.map(f => `${arm} ${script.name}: ${f}`));
     else {
       const caught = (breakCaught[`${script.name}/${arm}`] = Object.fromEntries(breaks.map(b => [b, verdict.failures.some(f => expectedCatch[b].test(f))])));
@@ -442,10 +442,16 @@ const resumeSummary = (arm: Arm) => {
   const ref = pick(rows.map((r: any) => r.refinedMs));
   return rows.length ? { n: rows.length, currentMs: { min: cur[0], max: cur[cur.length - 1] }, refinedMs: { min: ref[0], max: ref[ref.length - 1] } } : null;
 };
+// RES2: the most steady GPU memory any script of the arm held (gated per step in checkGpuStep)
+const steadySummary = (arm: Arm) => {
+  const values = report.scripts.map((s: any) => s.verdicts[arm]?.maxSteadyBytes).filter((v: unknown): v is number => typeof v === "number");
+  return values.length ? +(Math.max(...values) / 2 ** 20).toFixed(2) : null;
+};
 report.summary = {
   pass: failures.length === 0,
   scripts: report.scripts.map((s: any) => [s.name, Object.fromEntries(Object.entries(s.verdicts).map(([arm, v]: [string, any]) => [arm, v.pass ? "PASS" : "FAIL"]))]),
   resume: Object.fromEntries(arms.filter(a => a !== "svg").map(arm => [arm, resumeSummary(arm)])),
+  maxSteadyMiB: Object.fromEntries(arms.filter(a => a !== "svg").map(arm => [arm, steadySummary(arm)])),
   seconds: Math.round((Date.now() - started) / 1000)
 };
 report.verdicts = Object.fromEntries(

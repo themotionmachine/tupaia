@@ -15,6 +15,27 @@ export const DETAIL_SHARE = 48 << 20;
 // settle refinement. A cap on time to the first current GPU frame (D12), not on legibility.
 export const FIRST_DETAIL_MS = 1500;
 
+// Explicit steady headroom a prepare leaves unspent (RES2). What it plans is exact (the pending vertex and glyph-atlas
+// estimates match the uploads byte for byte), but some steady allocations happen outside its accounting after it
+// commits: a screen overlay refreshed with a larger crop (the scale bar's text at another zoom), the trade-marker
+// instance buffer growing with the markers in flight, a bitmap window refresh beside a detail. Before, the steady
+// share ended exactly at GPU_BUDGET with the resident renderer textures uncounted, and the dense parity world at k 1
+// held 160.64 MiB.
+export const STEADY_SLACK = 2 << 20;
+
+// What a prepare sets aside from the steady budget before its own share: the group target this backing store gets
+// (targetReserve), the resident allocations no frame owns (trade-marker sprite textures, about 0.6 MiB at DPR 2, the
+// instance and unit-quad buffers: prepare.ts residentBytes) and STEADY_SLACK.
+export function steadyReserve(target: number, resident: number, slack = STEADY_SLACK): number {
+  return Math.max(0, target) + Math.max(0, resident) + Math.max(0, slack);
+}
+
+// Telemetry assertion: the tracked total once a frame is committed (no prepare in flight, so no old+new overlap) must
+// stay within the steady budget. Returns the overrun in bytes (0 when within budget).
+export function steadyOverrun(total: number, budget = GPU_BUDGET): number {
+  return Math.max(0, total - budget);
+}
+
 // Bytes a bitmap window refresh may commit. The new set is allocated before the old one (`windowBytes`) is released,
 // so it must fit the peak room now and, once the old set is gone, the steady budget.
 export function windowAllowance(total: number, windowBytes: number, budget = GPU_BUDGET, peak = PEAK_LIMIT): number {
@@ -23,8 +44,9 @@ export function windowAllowance(total: number, windowBytes: number, budget = GPU
 
 // Compat raster bytes a prepare may still allocate: its steady share (budget minus target reserve and what the new
 // frame already owns or will upload) and the peak room left beside the previous frame (`total` = tracked now).
-// `reserve` is what the offscreen group target takes (targetReserve: the target the framegraph allocates for this
-// backing store, never more than TARGET_BUDGET).
+// `reserve` is what the steady budget holds back before this frame's bytes: prepareFrame passes steadyReserve (the
+// group target the framegraph allocates for this backing store, the resident allocations and STEADY_SLACK); the
+// default is the flat TARGET_BUDGET of before.
 export function compatAllowance(
   total: number,
   own: number,
