@@ -19,13 +19,17 @@ export interface ShapeStyle {
   dashOffset: number;
   lineJoin?: string;
   lineCap?: string;
+  // the effective (inherited) shape-rendering is optimizeSpeed or crispEdges: Chrome paints the shape without
+  // anti-aliasing (framegraph.ts stroke: thin butt-capped miter-joined strokes become width-modulated hairlines)
+  crisp?: boolean;
 }
 interface Base {
   element: Element;
   layer: string;
 }
 export type Draw =
-  | (Base & { kind: "shape"; subpaths: Subpath[]; style: ShapeStyle; d: string })
+  // sourceTag: the referenced element's tag when `element` is a <use> (prepare.ts analyticShape decides by it)
+  | (Base & { kind: "shape"; subpaths: Subpath[]; style: ShapeStyle; d: string; sourceTag?: string })
   | (Base & { kind: "cells"; stroke: Rgba; width: number })
   | (Base & { kind: "relief"; icons: ReliefSprite[] })
   | (Base & { kind: "label"; element: SVGTextElement })
@@ -127,6 +131,7 @@ type Styles = Pick<
   strokeLinejoin?: string;
   strokeLinecap?: string;
   strokeMiterlimit?: string;
+  shapeRendering?: string;
   display?: string;
   visibility?: string;
 };
@@ -146,6 +151,7 @@ function attributeStyles(element: Element, parent: Styles): Styles {
     strokeLinejoin: own("stroke-linejoin", parent.strokeLinejoin || "miter"),
     strokeLinecap: own("stroke-linecap", parent.strokeLinecap || "butt"),
     strokeMiterlimit: own("stroke-miterlimit", parent.strokeMiterlimit || "4"),
+    shapeRendering: own("shape-rendering", parent.shapeRendering || "auto"),
     opacity: own("opacity", "1"),
     filter: own("filter", "none"),
     clipPath: own("clip-path", "none"),
@@ -182,8 +188,16 @@ function shapeStyle(cs: Styles, unfilled = false): ShapeStyle | string {
     dashes,
     dashOffset: number(cs.strokeDashoffset, 0),
     lineJoin: cs.strokeLinejoin || "miter",
-    lineCap: cs.strokeLinecap || "butt"
+    lineCap: cs.strokeLinecap || "butt",
+    crisp: crispRendering(cs.shapeRendering)
   };
+}
+
+// shape-rendering values for which Blink turns anti-aliasing off (optimizeSpeed, the app default on #viewbox, and
+// crispEdges; computed values may come back lower-cased)
+export function crispRendering(value: string | null | undefined): boolean {
+  const v = (value || "").toLowerCase();
+  return v === "optimizespeed" || v === "crispedges";
 }
 
 // Path data for a drawable element; null keeps it compat. `viewport` resolves percentage lengths (mask content only).
@@ -319,7 +333,9 @@ function canonicalBuildScene(
     if (typeof style === "string") return compat(element, layer, style, out);
     if (!style.fill && !style.pattern && !style.stroke) return census?.skip(layer, element, "no paint");
     report(layer, true);
-    out.push({ kind: "shape", element, layer, subpaths: flattenPath(d, curveTolerance), style, d });
+    const draw: Draw = { kind: "shape", element, layer, subpaths: flattenPath(d, curveTolerance), style, d };
+    if (source !== element) draw.sourceTag = source.tagName;
+    out.push(draw);
   };
 
   // Binary luminance masks (white/black fills of plain shapes) become stencil writes; anything else is unsupported.

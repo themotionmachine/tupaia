@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { measureContour, parseContours } from "./dash-measure";
 import {
+  aliasedShape,
   analyticShape,
   appendFan,
   appendFillEdges,
@@ -18,6 +19,7 @@ import {
   discCoverage,
   F32,
   fillEdgeList,
+  hairlineStroke,
   hasCurves,
   hasSharedSegments,
   JOIN,
@@ -38,6 +40,7 @@ import {
   strokeCovers,
   strokeEdgeCoverage,
   thinFill,
+  thinHairline,
   unpackEnd,
   windingNumber
 } from "./geometry";
@@ -807,5 +810,37 @@ describe("measuredSubpaths (dash distances on SVG's contour measure)", () => {
     expect(appendSegments(subpaths, out, distances)).toBe(5);
     // the closing segment starts at the last point's distance
     expect(Array.from(out.view().subarray(20, 25))).toEqual([23, 3, 20, 0, 6]);
+  });
+});
+
+describe("thin hairlines and aliased shapes (shape-rendering optimizeSpeed / crispEdges)", () => {
+  it("takes the hairline only for a crisp butt-capped, miter-joined stroke", () => {
+    expect(thinHairline({ crisp: true })).toBe(true);
+    expect(thinHairline({ crisp: true, lineCap: "butt", lineJoin: "miter" })).toBe(true);
+    expect(thinHairline({ crisp: false })).toBe(false);
+    expect(thinHairline({})).toBe(false);
+    expect(thinHairline({ crisp: true, lineCap: "round" })).toBe(false);
+    expect(thinHairline({ crisp: true, lineCap: "square" })).toBe(false);
+    expect(thinHairline({ crisp: true, lineJoin: "bevel" })).toBe(false);
+    expect(thinHairline({ crisp: true, lineJoin: "round" })).toBe(false);
+  });
+
+  it("draws a hairline under 1 device px as the 1 px stroke scaled by the width", () => {
+    expect(hairlineStroke(0.4, 1, true)).toEqual({ half: 0.5, scale: 0.4 });
+    expect(hairlineStroke(0.4, 2, true)).toEqual({ half: 0.25, scale: 0.8 });
+    // at 1 device px and wider, or not a hairline: the stroke as it is
+    expect(hairlineStroke(0.5, 2, true)).toEqual({ half: 0.25, scale: 1 });
+    expect(hairlineStroke(2, 1, true)).toEqual({ half: 1, scale: 1 });
+    expect(hairlineStroke(0.4, 1, false)).toEqual({ half: 0.2, scale: 1 });
+    expect(hairlineStroke(0.4, 0, true)).toEqual({ half: 0.2, scale: 1 });
+    expect(hairlineStroke(-1, 1, true)).toEqual({ half: 0.5, scale: 0 });
+  });
+
+  it("aliases only a crisp <rect>", () => {
+    expect(aliasedShape("rect", { crisp: true })).toBe(true);
+    expect(aliasedShape("RECT", { crisp: true })).toBe(true);
+    expect(aliasedShape("rect", { crisp: false })).toBe(false);
+    expect(aliasedShape("path", { crisp: true })).toBe(false);
+    expect(aliasedShape("circle", { crisp: true })).toBe(false);
   });
 });

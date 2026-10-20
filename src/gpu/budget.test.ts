@@ -232,13 +232,15 @@ describe("render target policy", () => {
     expect(TARGET_BUDGET).toBeLessThan(GPU_BUDGET);
   });
 
-  it("multisamples the canvas drawing buffer only below Retina density, like group targets", () => {
-    expect(canvasAntialias()).toBe(true);
-    expect(canvasAntialias(1.5)).toBe(true);
-    expect(canvasAntialias(2)).toBe(false);
-    expect(canvasAntialias(3)).toBe(false);
+  it("never multisamples the canvas drawing buffer unless ?gpu-msaa=1 asks for it below Retina density", () => {
+    expect(canvasAntialias()).toBe(false);
+    expect(canvasAntialias(1.5)).toBe(false);
+    expect(canvasAntialias(1, true)).toBe(true);
+    expect(canvasAntialias(1.5, true)).toBe(true);
+    expect(canvasAntialias(2, true)).toBe(false);
+    expect(canvasAntialias(3, true)).toBe(false);
     for (const dpr of [1, 1.5, 2, 3])
-      expect(canvasAntialias(dpr)).toBe(targetSamples(2560, 1440, 4, TARGET_BUDGET, dpr) > 0);
+      expect(canvasAntialias(dpr, true)).toBe(targetSamples(2560, 1440, 4, TARGET_BUDGET, dpr) > 0);
   });
 });
 

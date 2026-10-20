@@ -32,24 +32,30 @@
 // line probes agreed with a box-filtered GPU stroke that the map's routes, rivers, borders and coastline did not. Cubic
 // curves in the default style's route styles (roads "2" w0.7, searoutes "1 2" round w0.35, trails ".8 1.6" w0.25), a
 // solid curve, a province-border polyline of "0 2" dots, a tapered river-like fill and a slanted lone line (analytic in
-// SVG); judged like the joins, except that sub-pixel dots both arms drop are not comparable. At k 1 the route styles
-// are thinner than a device px, which the map's SVG draws butt-capped as width-modulated hairlines (geometry.ts
-// hairlineCoverage), not as the true outline.
-// Coverage (every probe, lines and joins included): the golden's D11 coverage gate (bench/golden-metrics.ts COVERAGE,
-// coverageOf) on the probe's own box, against a blank of each arm (the probe layer hidden): ink = pixels that differ
-// from the blank; the GPU's ink footprint must be within 10% of SVG's and at most 20% of the ink may differ by more
-// than 16. Mass and width (the W2 checks) passed a GPU stroke whose faint box-filter fringe made the golden fail on
-// 24-48% extra ink; this is what catches it.
+// SVG); a thin closed outline (coastline-like), a filled rect (a native rect) and a round-joined polyline; judged like
+// the joins, except that sub-pixel dots both arms drop are not comparable.
+// Shape-rendering: every probe is drawn twice per zoom, with the probe group's shape-rendering optimizeSpeed (the app's
+// default on #viewbox, which the live map and most saved maps keep) and geometricPrecision (parity-v1.map and maps from
+// v1.7). Chrome turns anti-aliasing off under optimizeSpeed: a butt-capped, miter-joined stroke under 1 device px is
+// then a hairline (the 1 device px stroke times the width) and a rect is aliased (geometry.ts thinHairline). At k 1 the
+// route styles are such strokes.
+// Coverage (every probe, lines and joins included): the golden's D11 coverage gate (bench/golden-metrics.ts COVERAGE)
+// on the probe's own box, against a blank of each arm (the probe layer hidden): ink = pixels that differ from the
+// blank; the GPU's ink footprint must be within 10% of SVG's and at most 20% of the ink may differ by more than 16.
+// The slack is the box's own: 2% of its ink, at least 2 px (the golden's 16 px suits a layer, not a 200 px box).
+// Mass and width (the W2 checks) passed a GPU stroke whose faint box-filter fringe made the golden fail on 24-48%
+// extra ink; this is what catches it.
 // A check never compares GPU with GPU.
 //
 // Environment: GATE_OUT_DIR (evidence), PROBE_DPR (comma list, default 1,2), PROBE_K (comma list, default 1,4),
-// PROBE_PARAMS (extra page query, e.g. gpu-coverage=area for the box-filter coverage model).
-// Output: stroke-probe.json (report; `failure` null on a pass) and probe-<dpr>-k<k>-{svg,gpu}.png.
+// PROBE_PARAMS (extra page query, e.g. gpu-coverage=area for the box-filter coverage model), PROBE_MODES (comma list
+// of shape-rendering values for the probe group, default optimizeSpeed,geometricPrecision).
+// Output: stroke-probe.json (report; `failure` null on a pass) and probe-d<dpr>-k<k>-<mode>-{svg,gpu}.png.
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { extname, join, resolve } from "node:path";
 import { chromium, type Page } from "playwright";
-import { COVERAGE, coverageOf } from "../golden-metrics.ts";
+import { COVERAGE } from "../golden-metrics.ts";
 import { decodePng, type DecodedPng } from "../png.ts";
 import { isolateLayer } from "./golden-isolation.ts";
 
@@ -63,6 +69,11 @@ const zooms = (env.PROBE_K || "1,4").split(",").map(Number);
 const params = env.PROBE_PARAMS ? `&${env.PROBE_PARAMS.split("+").join("&")}` : "";
 if (dprs.some(d => d !== 1 && d !== 2)) throw Error("PROBE_DPR must be 1 and/or 2");
 if (zooms.some(k => !(k > 0))) throw Error("PROBE_K must be positive zooms");
+const modes = (env.PROBE_MODES || "optimizeSpeed,geometricPrecision").split(",");
+if (modes.some(m => !["optimizeSpeed", "geometricPrecision", "crispEdges", "auto"].includes(m)))
+  throw Error("PROBE_MODES: optimizeSpeed, geometricPrecision, crispEdges or auto");
+// Chrome draws without anti-aliasing (geometry.ts thinHairline)
+const crispMode = (mode: string) => mode === "optimizeSpeed" || mode === "crispEdges";
 
 interface Probe {
   name: string;
@@ -94,6 +105,7 @@ interface JoinProbe {
   box: [number, number, number, number]; // world x0 y0 x1 y1 of the path's vertices
   cap?: "butt" | "round" | "square";
   fill?: boolean; // filled (black), no stroke
+  rect?: [number, number, number, number]; // a <rect> x y width height instead of the path
 }
 // A zigzag of `n` segments of length `len` going down from (x, y), each turn `turn` degrees (60: shallow, 135: sharp).
 function zigzag(x: number, y: number, turn: number, len: number, n: number): { d: string; box: JoinProbe["box"] } {
@@ -145,6 +157,7 @@ const JOINS: JoinProbe[] = [
   }
 ];
 
+const ROW_Y = 166.3;
 // Shape probes in the strip left of the probe lines (world x 4..56, y 62..178: below the page chrome at k 1, inside the
 // view at k 4), one per 14.5 units of height.
 const SHAPE_X0 = 4.3;
@@ -187,24 +200,57 @@ const SHAPES: JoinProbe[] = [
     d: `M${SHAPE_X0},${shapeY(7) + 1.2}L${SHAPE_X0 + 51},${shapeY(7) + 9.7}`,
     box: [SHAPE_X0, shapeY(7) + 1.2, SHAPE_X0 + 51, shapeY(7) + 9.7],
     width: 1.3
+  },
+  // the row below the probe lines (world y 166..176, x 62..300)
+  {
+    // a coastline-like closed outline of curves, default (butt, miter) stroke under a device px at k 1
+    name: "closed outline w0.4",
+    d: `M62.3,${ROW_Y + 5}C72.3,${ROW_Y - 1} 92.3,${ROW_Y + 1} 112.3,${ROW_Y + 4.2}L118.6,${ROW_Y + 9.4}C98.3,${ROW_Y + 10.6} 78.3,${ROW_Y + 7.3} 62.3,${ROW_Y + 5}Z`,
+    box: [62.3, ROW_Y, 118.6, ROW_Y + 10.6],
+    width: 0.4
+  },
+  {
+    // a native rect (analytic in SVG, aliased under optimizeSpeed: pixel centres), filled. Not stroked: Skia's aliased
+    // rect stroke rounds the stroke width and anchors the band at the outer edge (a 3.2 px stroke covers 3 rows), which
+    // the GPU's centre-sampled band misses by a row at some offsets; no map in the fixtures strokes a #viewbox rect.
+    name: "rect fill",
+    d: "",
+    rect: [130.33, ROW_Y + 0.77, 50.41, 8.31],
+    box: [130.33, ROW_Y + 0.77, 180.74, ROW_Y + 9.08],
+    width: 0,
+    fill: true
+  },
+  {
+    name: "polyline round join w0.4",
+    d: `M192.3,${ROW_Y + 8}L210.1,${ROW_Y + 1.2}L231.7,${ROW_Y + 9.1}L252.2,${ROW_Y + 0.9}`,
+    box: [192.3, ROW_Y + 0.9, 252.2, ROW_Y + 9.1],
+    width: 0.4,
+    join: "round"
   }
 ];
 
-const SPACING = 12; // world units between probe lines
-// clear of the page chrome (top-left menu button) at k 1, and inside the 1280x720 viewport at k 4
-const X0 = 60;
+const SPACING = 11; // world units between probe lines (the last at y 159, clear of the shape row at y 166)
+// clear of the page chrome (top-left menu button) at k 1, and inside the 1280x720 viewport at k 4. Off the sample
+// grid: on integer coordinates, band edges (y +- half the width or the 0.5 px hairline band) and dash ends and dot
+// centres (x) land exactly on sample positions at k 1-8, a tie Chrome and the GPU break differently (a whole extra row
+// of a 0.25 px line, every other dot), which map coordinates almost never hit. X0 and Y0 keep every such edge at least
+// 0.005 device px from an eighth of a pixel (more than the rasterizer's 1/256 px vertex snap).
+const X0 = 60.967;
 const X1 = 300;
-const Y0 = 60;
+const Y0 = 60.992;
 
 const report = {
   schema: 1,
   runStartedUtc: new Date().toISOString(),
-  args: { dpr: dprs, k: zooms, params },
+  args: { dpr: dprs, k: zooms, params, modes },
   errors: [] as string[],
   failure: null as string | null,
   cells: [] as {
     dpr: number;
     k: number;
+    mode: string; // the probe group's shape-rendering
+    crisp: boolean; // Chrome draws it without anti-aliasing
+    viewboxMode: string; // #viewbox's own computed shape-rendering
     images: { svg: string; gpu: string };
     renderer: string;
     lines: Json[];
@@ -255,8 +301,10 @@ async function setup(page: Page): Promise<void> {
         group.appendChild(path);
       });
       for (const probe of joins) {
-        const path = document.createElementNS(ns, "path");
-        path.setAttribute("d", probe.d);
+        const path = document.createElementNS(ns, probe.rect ? "rect" : "path");
+        if (probe.rect)
+          ["x", "y", "width", "height"].forEach((name, i) => path.setAttribute(name, String(probe.rect![i])));
+        else path.setAttribute("d", probe.d);
         if (probe.fill) {
           path.setAttribute("fill", "#000000");
           path.setAttribute("stroke", "none");
@@ -478,7 +526,7 @@ function measureLine(probe: Probe, arms: Arms, k: number, dpr: number, index: nu
   if (Math.abs(widthGpu - widthSvg) > 1) failures.push(`width off by ${round(widthGpu - widthSvg)} px`);
   // the line's band over the measured columns (sub-pixel dots SVG drops are judged by the rule above, not here)
   const band: [number, number, number, number] = [xa, Math.max(0, Math.round(yCentre) - radius), xb, Math.min(svg.height, Math.round(yCentre) + radius + 1)];
-  const cover = coverageIn(arms, band, line, !!probe.dash && thinButt(probe, scale)); // solid: a lone line, analytic
+  const cover = coverageIn(arms, band, line);
   if (!subPixelDots) failures.push(...cover.failures);
   notComparable.push(...cover.notComparable);
   return verdict(line, failures, notComparable);
@@ -573,7 +621,7 @@ function measureJoin(probe: JoinProbe, arms: Arms, k: number, dpr: number): Json
   if (notches) failures.push(`${notches} notch px (worst ${round(worstNotchDelta)} at ${worstNotch})`);
   if (spurs) failures.push(`${spurs} spur px (worst ${round(worstSpurDelta)} at ${worstSpur})`);
   if (Math.abs(massRatio - 1) > 0.1) failures.push(`ink mass ratio ${round(massRatio)}`);
-  const cover = coverageIn(arms, box, line, !probe.fill && thinButt(probe, scale));
+  const cover = coverageIn(arms, box, line);
   failures.push(...cover.failures);
   return verdict(line, failures, cover.notComparable);
 }
@@ -586,21 +634,29 @@ interface Arms {
   blankSvg: DecodedPng;
   blankGpu: DecodedPng;
 }
-// A butt-capped (or default) stroke thinner than a device px: what Chrome may draw as a width-modulated hairline.
-const thinButt = (probe: { width: number; cap?: string }, scale: number) =>
-  (probe.cap ?? "butt") === "butt" && probe.width * scale < 1;
-
 // The golden's D11 coverage gate on one device box: ink = pixels differing from the arm's own blank (Δ > 0), over16 =
 // ink pixels where the arms differ by more than 16 (max channel). Adds the numbers to `line` and returns the failures.
-// Not comparable: a thin butt stroke (`thin`) whose SVG ink is not in quarter steps of the black stroke, which is how
-// Chrome draws such a stroke in this sparse probe layer (a hairline of 1 device px, coverage times the width:
-// ~/.tupaia-gates/w3-stroke2/exp/inapp.mjs) but not in the map, where the golden's routes at k 1 (trails 0.5 device
-// px) are 4x MSAA strokes like everything else and the GPU follows the map.
+// The slack is the box's (boxSlack), not the golden's 16 px: on a box of a few hundred ink pixels 16 px let a GPU dot
+// row with 18 % more ink pass.
+export function boxSlack(inkSvg: number, inkGpu: number): number {
+  return Math.max(2, 0.02 * Math.max(inkSvg, inkGpu));
+}
+export function boxCoverage(m: { inkSvg: number; inkGpu: number; inkUnion: number; over16Px: number }): {
+  ink: boolean;
+  over16: boolean;
+} {
+  const slack = boxSlack(m.inkSvg, m.inkGpu);
+  const lo = Math.min(m.inkSvg, m.inkGpu);
+  const hi = Math.max(m.inkSvg, m.inkGpu);
+  return {
+    ink: lo >= COVERAGE.inkRatioMin * hi - slack,
+    over16: m.over16Px <= COVERAGE.over16OfInkMax * m.inkUnion + slack
+  };
+}
 function coverageIn(
   arms: Arms,
   box: [number, number, number, number],
-  line: Json,
-  thin = false
+  line: Json
 ): { failures: string[]; notComparable: string[] } {
   const [x0, y0, x1, y1] = box;
   const delta = (a: DecodedPng, b: DecodedPng, i: number) =>
@@ -624,14 +680,12 @@ function coverageIn(
         if (delta(arms.svg, arms.gpu, i) > 16) over16Px++;
       }
     }
-  const verdict = coverageOf({ inkSvg, inkGpu, inkUnion, over16Px });
+  const verdict = boxCoverage({ inkSvg, inkGpu, inkUnion, over16Px });
   line.inkSvg = inkSvg;
   line.inkGpu = inkGpu;
   line.inkRatio = round(Math.min(inkSvg, inkGpu) / Math.max(1, inkSvg, inkGpu));
   line.over16OfInk = round(over16Px / Math.max(1, inkUnion));
   line.svgQuarterSteps = round(quarterSvg / Math.max(1, inkSvg));
-  if (thin && inkSvg >= 8 && quarterSvg < inkSvg * 0.8)
-    return { failures: [], notComparable: ["coverage: SVG drew a width-modulated hairline (sparse layer), not 4x MSAA"] };
   const failures: string[] = [];
   if (!verdict.ink) failures.push(`ink footprint ${inkGpu} GPU vs ${inkSvg} SVG px (ratio ${line.inkRatio} < ${COVERAGE.inkRatioMin})`);
   if (!verdict.over16) failures.push(`over16 is ${round(Number(line.over16OfInk) * 100, 1)}% of the ink (max ${COVERAGE.over16OfInkMax * 100}%)`);
@@ -673,40 +727,46 @@ try {
     // shape probes at k 4: hidden as the golden hides it
     await page.addStyleTag({ content: "#loading { display: none !important; } #tooltip, #renderModeIndicator { visibility: hidden !important; }" });
     await setup(page);
+    // the generated map keeps the app's default on #viewbox (optimizeSpeed): recorded, each mode is set on the group
+    const viewboxMode = await page.evaluate(() => getComputedStyle(document.querySelector("svg#map > #viewbox")!).shapeRendering);
     for (const k of zooms) {
       await zoomTo(page, k);
       await page.evaluate(isolateLayer, { id: "strokeProbe", bg: "#ffffff" });
-      const renderer = await waitGpu(page);
-      const shots = await captureArms(page);
       // blanks: the same view with the probe layer hidden (the GPU arm re-prepares without it)
       await page.evaluate(() => document.getElementById("strokeProbe")!.setAttribute("display", "none"));
       await page.waitForTimeout(500); // let the renderer see the change before waitGpu reads "not pending"
       const blankRenderer = await waitGpu(page);
       const blanks = await captureArms(page);
       await page.evaluate(() => document.getElementById("strokeProbe")!.removeAttribute("display"));
-      await page.waitForTimeout(500);
-      const images = { svg: `probe-d${dpr}-k${k}-svg.png`, gpu: `probe-d${dpr}-k${k}-gpu.png` };
-      writeFileSync(join(outDir, images.svg), shots.svg);
-      writeFileSync(join(outDir, images.gpu), shots.gpu);
-      const arms: Arms = { svg: decodePng(shots.svg), gpu: decodePng(shots.gpu), blankSvg: decodePng(blanks.svg), blankGpu: decodePng(blanks.gpu) };
-      const lines = PROBES.map((probe, i) => measureLine(probe, arms, k, dpr, i));
-      const joins = JOINS.map(probe => measureJoin(probe, arms, k, dpr));
-      const shapes = SHAPES.map(probe => measureJoin(probe, arms, k, dpr));
-      if (renderer !== "gpu" || blankRenderer !== "gpu")
-        for (const line of [...lines, ...joins, ...shapes])
-          Object.assign(line, { status: "fail", pass: false, failures: [`renderer ${renderer} (blank: ${blankRenderer})`] });
-      report.cells.push({ dpr, k, images, renderer, lines, joins, shapes });
-      const count = (list: Json[], status: string) => list.filter(l => l.status === status).length;
-      log(
-        `d${dpr} k${k}: lines ${count(lines, "pass")} pass, ${count(lines, "fail")} fail, ${count(lines, "not comparable")} not comparable; ` +
-          `joins ${count(joins, "pass")}/${joins.length} pass, shapes ${count(shapes, "pass")}/${shapes.length} pass (${renderer})`
-      );
-      write();
+      for (const mode of modes) {
+        await page.evaluate(m => document.getElementById("strokeProbe")!.setAttribute("shape-rendering", m), mode);
+        await page.waitForTimeout(500);
+        const renderer = await waitGpu(page);
+        const shots = await captureArms(page);
+        const images = { svg: `probe-d${dpr}-k${k}-${mode}-svg.png`, gpu: `probe-d${dpr}-k${k}-${mode}-gpu.png` };
+        writeFileSync(join(outDir, images.svg), shots.svg);
+        writeFileSync(join(outDir, images.gpu), shots.gpu);
+        const arms: Arms = { svg: decodePng(shots.svg), gpu: decodePng(shots.gpu), blankSvg: decodePng(blanks.svg), blankGpu: decodePng(blanks.gpu) };
+        const lines = PROBES.map((probe, i) => measureLine(probe, arms, k, dpr, i));
+        const joins = JOINS.map(probe => measureJoin(probe, arms, k, dpr));
+        const shapes = SHAPES.map(probe => measureJoin(probe, arms, k, dpr));
+        if (renderer !== "gpu" || blankRenderer !== "gpu")
+          for (const line of [...lines, ...joins, ...shapes])
+            Object.assign(line, { status: "fail", pass: false, failures: [`renderer ${renderer} (blank: ${blankRenderer})`] });
+        report.cells.push({ dpr, k, mode, crisp: crispMode(mode), viewboxMode, images, renderer, lines, joins, shapes });
+        const count = (list: Json[], status: string) => list.filter(l => l.status === status).length;
+        log(
+          `d${dpr} k${k} ${mode}: lines ${count(lines, "pass")} pass, ${count(lines, "fail")} fail, ${count(lines, "not comparable")} not comparable; ` +
+            `joins ${count(joins, "pass")}/${joins.length} pass, shapes ${count(shapes, "pass")}/${shapes.length} pass (${renderer})`
+        );
+        write();
+      }
+      await page.evaluate(() => document.getElementById("strokeProbe")!.removeAttribute("shape-rendering"));
     }
     await context.close();
   }
   const failing = report.cells.flatMap(c =>
-    [...c.lines, ...c.joins, ...c.shapes].filter(l => l.status === "fail").map(l => `d${c.dpr} k${c.k} ${l.probe}: ${(l.failures as string[]).join(", ")}`)
+    [...c.lines, ...c.joins, ...c.shapes].filter(l => l.status === "fail").map(l => `d${c.dpr} k${c.k} ${c.mode} ${l.probe}: ${(l.failures as string[]).join(", ")}`)
   );
   if (report.errors.length) failing.unshift(`page errors: ${report.errors.slice(0, 3).join(" | ")}`);
   report.failure = failing.length ? failing.slice(0, 12).join("; ") : null;

@@ -1436,7 +1436,7 @@ const DEFS: Record<string, CheckDef> = {
         metrics: data && {
           cells: (data.cells ?? []).map((c: Json) => {
             const n = (list: unknown, status: string) => ((list as Json[] | undefined) ?? []).filter(l => l.status === status).length;
-            return `d${c.dpr} k${c.k}: lines ${n(c.lines, "pass")} pass ${n(c.lines, "fail")} fail ${n(c.lines, "not comparable")} n/c, joins ${n(c.joins, "pass")}/${((c.joins as Json[] | undefined) ?? []).length}, shapes ${n(c.shapes, "pass")} pass ${n(c.shapes, "fail")} fail ${n(c.shapes, "not comparable")} n/c`;
+            return `d${c.dpr} k${c.k}${c.mode ? ` ${c.mode}` : ""}: lines ${n(c.lines, "pass")} pass ${n(c.lines, "fail")} fail ${n(c.lines, "not comparable")} n/c, joins ${n(c.joins, "pass")}/${((c.joins as Json[] | undefined) ?? []).length}, shapes ${n(c.shapes, "pass")} pass ${n(c.shapes, "fail")} fail ${n(c.shapes, "not comparable")} n/c`;
           }),
           worstJoinNotches: Math.max(0, ...(data.cells ?? []).flatMap((c: Json) => ((c.joins as Json[] | undefined) ?? []).map(l => Number(l.notches) || 0))),
           worstWidthDeltaPx: Math.max(0, ...(data.cells ?? []).flatMap((c: Json) => (c.lines as Json[]).map(l => Math.abs(Number(l.widthDeltaPx) || 0)))),

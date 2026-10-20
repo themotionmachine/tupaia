@@ -4,10 +4,17 @@
 // id of the last batch that marked the pixel (a banded stroke or an anti-aliased fill: first fragment wins within
 // the batch); bits 0x07 = fill winding (0x7F for a deepWinding fill, which clears the ids under it first).
 // Every test that draws colour requires the mask bit clear, so unmasked targets (bit never set) share the same tests.
-import { TARGET_BUDGET, targetSamples } from "./budget";
+import { msaaFlag, TARGET_BUDGET, targetSamples } from "./budget";
 import { type Camera, screenToClip, type Viewport, visibleWorld, worldScissor, worldToClip } from "./camera";
 import type { GpuDevice, TrackedBuffer, TrackedProgram, TrackedTarget, TrackedTexture } from "./device";
-import { COVERAGE_SAMPLES, discProfile, outsideView, radialSegmentsPerRadian, squareCapDashes } from "./geometry";
+import {
+  COVERAGE_SAMPLES,
+  discProfile,
+  hairlineStroke,
+  outsideView,
+  radialSegmentsPerRadian,
+  squareCapDashes
+} from "./geometry";
 import { GlState } from "./gl-state";
 import { MARKER_FLOATS, type MarkerInstances } from "./markers";
 import { hatchUvAtZoom } from "./raster";
@@ -30,6 +37,8 @@ export interface FillBatch {
   deepWinding?: boolean;
   // SVG draws this shape with analytic coverage, not 4x MSAA (geometry.ts analyticShape): the fringe box-filters
   analytic?: boolean;
+  // SVG draws it without anti-aliasing (geometry.ts aliasedShape): the pixel centre alone
+  aliased?: boolean;
 }
 export interface StrokeBatch {
   bounds?: Rect4 | null;
@@ -45,6 +54,9 @@ export interface StrokeBatch {
   dashCap?: number; // capCode of stroke-linecap, applied to every dash end
   sharedSegments?: boolean; // subpaths share segments (geometry.ts hasSharedSegments): draw in coverage bands
   analytic?: boolean; // SVG draws it with analytic coverage, not 4x MSAA (geometry.ts analyticShape): box filter
+  aliased?: boolean; // SVG draws it without anti-aliasing (geometry.ts aliasedShape): the pixel centre alone
+  // under 1 device px wide SVG draws it as a width-modulated hairline (geometry.ts thinHairline, hairlineStroke)
+  hairline?: boolean;
 }
 export interface SpriteBatch {
   kind: "sprites";
@@ -134,12 +146,15 @@ export function emptyOnView(frame: Frame, batch: Batch, visible: Rect4, pad: num
 
 const shaders = { fill, fringe, stroke, sprite, glyph, image, marker };
 // Stencil bits that count a fill's winding: bit 0x01 for even-odd, else mod 8 in 0x07, or mod 128 in 0x7F (id bits
-// borrowed, cleared first, no fringe) for a nonzero fill whose subpaths might stack 8 deep (prepare.ts deepWinding).
+// borrowed and cleared first, then resolved to bit 0x01 before the fringe) for a nonzero fill whose subpaths might
+// stack 8 deep (prepare.ts deepWinding).
 export function windingBits(fill: Pick<FillBatch, "evenOdd" | "deepWinding">): number {
   return fill.evenOdd ? 0x01 : fill.deepWinding ? STENCIL.winding | STENCIL.id : STENCIL.winding;
 }
 type Kind = keyof typeof shaders;
 const FLOAT = 4;
+const MASK_WHITE: Rgba = [1, 1, 1, 1];
+const MASK_BLACK: Rgba = [0, 0, 0, 1];
 // Coverage floors of a banded stroke's passes, highest first (framegraph stroke).
 export const COVERAGE_BANDS = [1, 0.75, 0.5, 0.25, 0] as const;
 export const STENCIL = { hidden: 0x80, id: 0x78, winding: 0x07, idShift: 3, ids: 15 } as const;
@@ -174,6 +189,7 @@ export class FrameGraph {
     fringes: 0,
     bandedStrokes: 0,
     idClears: 0,
+    deepResolves: 0,
     stencilClears: 0,
     maskFills: 0,
     maskCulled: 0,
@@ -186,6 +202,8 @@ export class FrameGraph {
   private strip: TrackedBuffer;
   private square: TrackedBuffer;
   private group: TrackedTarget | null = null;
+  // a single-sample group's mask coverage (maskCoverage), on the group target's depth/stencil buffer
+  private mask: { texture: TrackedTexture; framebuffer: WebGLFramebuffer } | null = null;
   private world = new Float32Array(9);
   private patternMatrix = new Float32Array(9);
   private screen = new Float32Array(9);
@@ -203,6 +221,7 @@ export class FrameGraph {
   private readonly canvasMultisampled: boolean;
   private readonly fillAa = fillAaFlag();
   private readonly sampled = sampledCoverageFlag();
+  private readonly hardwareMsaa = msaaFlag();
   private patternMatrixFringe = new Float32Array(9);
   readonly state: GlState;
 
@@ -345,8 +364,10 @@ export class FrameGraph {
     const deep = !fill.evenOdd && !!fill.deepWinding;
     if (deep) this.clearIds(fill.bounds);
     this.stencilFan(frame, fill);
-    const winding = windingBits(fill);
-    if (!deep && this.fillAa && !this.multisampled && frame.edges && fill.edgeCount) {
+    let winding = windingBits(fill);
+    if (this.fillAa && !this.multisampled && frame.edges && fill.edgeCount) {
+      // a deep fill's winding borrows the id bits the fringe marks with: resolve it to bit 0x01 first (ids zeroed)
+      if (deep) winding = this.resolveDeepWinding(frame, fill);
       this.antialiasedFill(frame, fill, winding);
       return;
     }
@@ -359,6 +380,24 @@ export class FrameGraph {
     state.stencilOp(gl.ZERO, gl.ZERO, gl.ZERO);
     this.paint(program, fill, this.patternMatrix);
     gl.drawArrays(gl.TRIANGLES, fill.first, fill.count);
+  }
+
+  // Nonzero winding mod 128 (deepWinding, 0x7F) into bit 0x01 with the id bits zeroed, colour writes off, so the fill
+  // can take the fringe like any other: hidden pixels kept winding 0 in stencilFan and stay 0.
+  private resolveDeepWinding(frame: Frame, fill: FillBatch): number {
+    const gl = this.device.gl;
+    const state = this.state;
+    const program = this.use("fill");
+    this.attribute(program, "a_position", frame.fans!, 2, 2, 0, 0);
+    state.colorMask(false);
+    // passes where 1 <= winding (any nonzero winding mod 128) and REPLACE writes that ref, 1, over all seven bits
+    state.stencilFunc(gl.LEQUAL, 0x01, STENCIL.winding | STENCIL.id);
+    state.stencilMask(STENCIL.winding | STENCIL.id);
+    state.stencilOp(gl.KEEP, gl.KEEP, gl.REPLACE);
+    gl.drawArrays(gl.TRIANGLES, fill.first, fill.count);
+    state.colorMask(true);
+    this.passes.deepResolves++;
+    return 0x01;
   }
 
   // Zero the batch-id bits under a fill whose winding borrows them (deepWinding), keeping the mask bit.
@@ -453,7 +492,7 @@ export class FrameGraph {
     const px = this.pxPerWorld();
     state.uniform1f(fringe.uniforms.u_pad, 1 / px);
     state.uniform1f(fringe.uniforms.u_pxPerWorld, px);
-    this.coverage(fringe, fill.analytic);
+    this.coverage(fringe, fill.analytic, fill.aliased);
     this.paint(fringe, fill, this.patternMatrixFringe);
     // inside (winding set, hence visible): REPLACE writes the id and zeroes the winding
     state.stencilFunc(gl.NOTEQUAL, id, winding);
@@ -484,7 +523,8 @@ export class FrameGraph {
     if (frame.caps) this.attribute(program, "a_caps", frame.caps, 2, 2, stroke.first * 2, 1);
     const state = this.state;
     const px = this.pxPerWorld();
-    const half = Math.max(0, stroke.width) / 2;
+    // a hairline batch under 1 device px: the 1 px stroke at width/1px of its colour (geometry.ts thinHairline)
+    const { half, scale } = hairlineStroke(stroke.width, px, stroke.hairline);
     state.uniform1f(program.uniforms.u_halfWidth, half);
     state.uniform1f(program.uniforms.u_pad, 1 / px);
     state.uniform1f(program.uniforms.u_pxPerWorld, px);
@@ -492,7 +532,7 @@ export class FrameGraph {
     state.uniform1f(program.uniforms.u_discRadius, disc.radius);
     state.uniform1f(program.uniforms.u_discScale, disc.scale);
     state.uniform1f(program.uniforms.u_radialPerRadian, radialSegmentsPerRadian(half * px));
-    state.uniform4fv(program.uniforms.u_color, this.premultiplied(stroke.color));
+    state.uniform4fv(program.uniforms.u_color, this.premultiplied(stroke.color, scale));
     const dash = strokeDashes(stroke);
     state.uniform1fv(program.uniforms.u_dashes, dash.dashes);
     state.uniform1i(program.uniforms.u_dashCount, dash.count);
@@ -500,7 +540,7 @@ export class FrameGraph {
     state.uniform1f(program.uniforms.u_dashOn, dash.on);
     state.uniform1f(program.uniforms.u_dashOffset, dash.offset);
     state.uniform1f(program.uniforms.u_dashCap, dash.cap);
-    this.coverage(program, stroke.analytic);
+    this.coverage(program, stroke.analytic, stroke.aliased);
     // Joins are split at their bisectors in the shader, so a path overlaps itself only where it crosses itself or its
     // subpaths cross or coincide. Opaque, crossings blend: src-over of two opaque partial coverages a and b gives
     // 1 - (1 - a)(1 - b), the union for crossing edges, and a full-coverage pixel stays full. A translucent stroke, or
@@ -508,7 +548,7 @@ export class FrameGraph {
     // coverage mask per path. Each pixel then keeps one fragment, marked with this batch's id, drawn in bands of
     // decreasing coverage (COVERAGE_BANDS) so the one kept is within 0.25 of the largest: a faint edge pixel of one
     // segment never blocks the body of a crossing one, and coincident edges draw once.
-    if (stroke.color[3] >= 1 && !stroke.sharedSegments) {
+    if (stroke.color[3] * scale >= 1 && !stroke.sharedSegments) {
       state.uniform1f(program.uniforms.u_minCoverage, -1); // blended: no floor, split the bisector sliver
       this.plain();
       gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, stroke.count);
@@ -526,8 +566,8 @@ export class FrameGraph {
   }
 
   // u_samples / u_sampleOffsets of the stroke and fringe programs (shaders.ts coverage models)
-  private coverage(program: TrackedProgram, analytic: boolean | undefined): void {
-    const samples = this.sampled && !analytic ? 4 : 0;
+  private coverage(program: TrackedProgram, analytic: boolean | undefined, aliased?: boolean): void {
+    const samples = aliased && this.sampled ? 1 : this.sampled && !analytic ? 4 : 0;
     this.state.uniform1i(program.uniforms.u_samples, samples);
   }
 
@@ -601,12 +641,26 @@ export class FrameGraph {
     }
   }
 
-  private quad(texture: WebGLTexture, matrix: Float32Array, rect: Float32List, uv: Float32List, opacity: number): void {
+  // mask: a coverage texture over the same rect and uv whose red channel multiplies the colour (maskCoverage)
+  private quad(
+    texture: WebGLTexture,
+    matrix: Float32Array,
+    rect: Float32List,
+    uv: Float32List,
+    opacity: number,
+    mask: WebGLTexture | null = null
+  ): void {
     const gl = this.device.gl;
     const state = this.state;
     const program = this.use("image");
     state.uniformMatrix3fv(program.uniforms.u_matrix, matrix);
     this.attribute(program, "a_corner", this.square, 2, 2, 0, 0);
+    state.uniform1i(program.uniforms.u_masked, mask ? 1 : 0);
+    if (mask) {
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, mask);
+      state.uniform1i(program.uniforms.u_mask, 1);
+    }
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, texture);
     state.uniform1i(program.uniforms.u_texture, 0);
@@ -640,40 +694,41 @@ export class FrameGraph {
     }
     this.passes.composites++;
     if (batch.mask && batch.opacity >= 1) this.passes.opaqueMasked++;
-    if (!this.group || this.group.width !== width || this.group.height !== height) {
-      this.device.release(this.group);
-      const samples = targetSamples(width, height, this.device.maxSamples, TARGET_BUDGET, this.viewport.dpr);
-      this.group = this.device.target("group", width, height, samples);
+    const samples = this.hardwareMsaa
+      ? targetSamples(width, height, this.device.maxSamples, TARGET_BUDGET, this.viewport.dpr)
+      : 0;
+    let target = this.group;
+    if (!target || target.width !== width || target.height !== height || target.samples !== samples) {
+      this.device.release(target);
+      this.releaseMask();
+      target = this.group = this.device.target("group", width, height, samples);
       this.state.reset(); // allocation binds outside the cache
     }
-    // The previous composite sampled this texture on unit 0. Unbind it before attaching it for direct rendering:
-    // WebGL validates feedback loops even when the fill shader's texture branch is disabled.
+    // The previous composite sampled these textures on units 0 and 1. Unbind them before attaching them for direct
+    // rendering: WebGL validates feedback loops even when the fill shader's texture branch is disabled.
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, null);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, null);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.group.framebuffer);
-    gl.clearColor(0, 0, 0, 0);
-    this.state.stencilMask(0xff);
-    // a masked group starts hidden everywhere (bit 0x80); its content draws only where white mask items cleared it
-    gl.clearStencil(batch.mask ? STENCIL.hidden : 0);
-    gl.clear(gl.COLOR_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
-    gl.clearStencil(0);
     // the group target has its own stencil: fresh ids there, the outer target's ids resume afterwards
     const outer = { id: this.id, idBox: this.idBox, idUnbounded: this.idUnbounded, multisampled: this.multisampled };
+    this.multisampled = target.samples > 0;
+    // A single-sample group takes its mask as coverage (maskCoverage); a multisampled one (?gpu-msaa=1) as the stencil.
+    const coverage = batch.mask && !target.samples ? this.maskCoverage(frame, batch.mask, target) : null;
     this.id = 0;
     this.idBox = null;
     this.idUnbounded = false;
-    this.multisampled = this.group.samples > 0;
-    if (batch.mask) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target.framebuffer);
+    gl.clearColor(0, 0, 0, 0);
+    this.state.stencilMask(0xff);
+    // a stencil-masked group starts hidden everywhere (bit 0x80); its content draws only where white items cleared it
+    gl.clearStencil(batch.mask && !coverage ? STENCIL.hidden : 0);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
+    gl.clearStencil(0);
+    if (batch.mask && !coverage) {
       // binary luminance mask: white items clear the hidden bit, black items set it, in document order
       for (const { fill, white } of batch.mask) {
-        if (!frame.fans || !fill.count) continue;
-        // Same conservative cull as fill batches: every mask triangle lies inside its path bounds, so an item wholly
-        // outside the view writes no on-screen stencil and skipping it leaves the mask, and the order of the rest, exact.
-        if (fill.bounds && outsideView(fill.bounds, this.visible, 1 / this.camera.k)) {
-          this.passes.maskCulled++;
-          continue;
-        }
-        this.passes.maskFills++;
+        if (!frame.fans || !fill.count || this.maskCulled(fill)) continue;
         this.stencilFan(frame, fill, true);
         this.state.colorMask(false);
         // passes where the winding is set (ref & mask is 0) and replaces the whole value: 0 visible, 0x80 hidden
@@ -688,14 +743,70 @@ export class FrameGraph {
     this.batches(frame, batch.children);
     this.masked = false;
     ({ id: this.id, idBox: this.idBox, idUnbounded: this.idUnbounded, multisampled: this.multisampled } = outer);
-    if (this.group.samples) {
-      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.group.framebuffer);
-      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this.group.resolve);
+    if (target.samples) {
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, target.framebuffer);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, target.resolve);
       gl.blitFramebuffer(0, 0, width, height, 0, 0, width, height, gl.COLOR_BUFFER_BIT, gl.NEAREST);
     }
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     const { width: w, height: h } = this.viewport;
-    this.quad(this.group.texture, this.screen, [0, 0, w, h], [0, 1, 1, 0], batch.opacity);
+    this.quad(target.texture, this.screen, [0, 0, w, h], [0, 1, 1, 0], batch.opacity, coverage);
+  }
+
+  // Same conservative cull as fill batches: every mask triangle lies inside its path bounds, so an item wholly outside
+  // the view writes nothing on screen and skipping it leaves the mask, and the order of the rest, exact.
+  private maskCulled(fill: FillBatch): boolean {
+    if (fill.bounds && outsideView(fill.bounds, this.visible, 1 / this.camera.k)) {
+      this.passes.maskCulled++;
+      return true;
+    }
+    this.passes.maskFills++;
+    return false;
+  }
+
+  // A luminance mask drawn as SVG draws it: its white and black items, in document order, as anti-aliased fills (fringe
+  // and all) over transparent black, into a colour texture the composite multiplies the group by (red = luminance). A
+  // stencil mask is binary, so without hardware samples its edges were aliased, and hardware samples sit off SVG's
+  // (budget.ts canvasAntialias). The texture shares the group target's depth/stencil buffer (cleared after it), so it
+  // costs one RGBA8 texture.
+  private maskCoverage(frame: Frame, mask: NonNullable<GroupBatch["mask"]>, group: TrackedTarget): WebGLTexture {
+    const gl = this.device.gl;
+    if (!this.mask || this.mask.texture.width !== group.width || this.mask.texture.height !== group.height) {
+      this.releaseMask();
+      const texture = this.device.texture("group mask", { width: group.width, height: group.height, data: null });
+      gl.bindTexture(gl.TEXTURE_2D, null); // texture() leaves it bound on unit 0: a feedback loop once attached
+      const framebuffer = gl.createFramebuffer()!;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture.handle, 0);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_STENCIL_ATTACHMENT, gl.RENDERBUFFER, group.depthStencil);
+      this.mask = { texture, framebuffer };
+      if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        this.releaseMask();
+        throw new Error("Incomplete framebuffer group mask");
+      }
+      this.state.reset();
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.mask.framebuffer);
+    gl.clearColor(0, 0, 0, 0);
+    this.state.stencilMask(0xff);
+    gl.clearStencil(0);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
+    this.id = 0;
+    this.idBox = null;
+    this.idUnbounded = false;
+    for (const { fill, white } of mask) {
+      if (!frame.fans || !fill.count || this.maskCulled(fill)) continue;
+      this.fill(frame, { ...fill, color: white ? MASK_WHITE : MASK_BLACK, tile: null });
+    }
+    return this.mask.texture.handle;
+  }
+
+  private releaseMask(): void {
+    if (!this.mask) return;
+    if (!this.device.lost) this.device.gl.deleteFramebuffer(this.mask.framebuffer);
+    this.device.release(this.mask.texture);
+    this.mask = null;
   }
 
   dispose(): void {
@@ -704,6 +815,7 @@ export class FrameGraph {
     this.device.release(this.strip);
     this.device.release(this.square);
     this.device.release(this.group);
+    this.releaseMask();
     this.device.release(this.markerBuffer);
     this.group = null;
     this.markerBuffer = null;

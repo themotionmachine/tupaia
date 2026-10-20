@@ -571,6 +571,42 @@ export function analyticShape(tag: string, subpaths: Subpath[], dashed = false):
   return !dashed && subpaths.length === 1 && !subpaths[0].closed && subpaths[0].points.length === 4;
 }
 
+// Chrome without anti-aliasing (shape-rendering optimizeSpeed, the app's default on #viewbox, or crispEdges; scene.ts
+// crispRendering). Probed in plain SVG on Metal at dpr 1 and 2 (~/.tupaia-gates/w3b-stroke3/exp/sr*.mjs), the same
+// paths under each value:
+// - fills, and strokes of round or square cap or round or bevel join, are drawn exactly as with anti-aliasing (4x MSAA);
+// - a stroke of butt cap and miter join (the defaults) under 1 device px wide is a hairline: the pixels of the same
+//   path stroked 1 device px wide (4x MSAA, quarter steps), times the device width (a 0.1 px curve paints the 1 px
+//   curve's 386 pixels at a tenth of its levels, where with anti-aliasing it paints 90 pixels at a quarter). Closed
+//   paths too: the cap value decides, not whether the path has ends. At 1 device px and wider nothing changes;
+// - a <rect> loses its anti-aliasing (fill and stroke cover the pixels whose centre is inside), its thin stroke is the
+//   same width-modulated hairline. Circles and ellipses change too, but they are native only with
+//   ?gpu-native-shapes=1 and are not modelled.
+// A stroke SVG draws analytically (analyticShape: a lone straight line, any cap) is a hairline under 1 device px in
+// both modes: across it, the 1 px line's box-filtered profile (a tent) times the width (~/.tupaia-gates/w3b-stroke3/exp/
+// lone.mjs: 13 51 at 0.25 px where its own box filter gives 0 64); from 1 px up, the box filter (prepare.ts sets
+// `hairline` on every analytic stroke batch).
+// Whether a batch takes the hairline rule below 1 device px (framegraph.ts stroke, hairlineStroke).
+export function thinHairline(style: { crisp?: boolean; lineCap?: string; lineJoin?: string }): boolean {
+  return !!style.crisp && (style.lineCap ?? "butt") === "butt" && (style.lineJoin ?? "miter") === "miter";
+}
+// Whether the shape is drawn without anti-aliasing at all: coverage from the pixel centre alone (u_samples 1).
+export function aliasedShape(tag: string, style: { crisp?: boolean }): boolean {
+  return !!style.crisp && tag.toLowerCase() === "rect";
+}
+// The drawn half width (world) and colour scale of a stroke of `width` (world) at `px` device px per world unit:
+// below 1 device px a hairline batch is drawn as the 1 px stroke at width/1px of its colour (thinHairline).
+export function hairlineStroke(
+  width: number,
+  px: number,
+  hairline: boolean | undefined
+): { half: number; scale: number } {
+  const half = Math.max(0, width) / 2;
+  const device = 2 * half * px;
+  if (!hairline || !(px > 0) || device >= 1) return { half, scale: 1 };
+  return { half: 0.5 / px, scale: device };
+}
+
 // Chrome's 4x MSAA sample positions (Metal and D3D standard pattern: (3,1), (7,3), (1,5), (5,7) / 8 from the pixel's
 // top-left, y down) as offsets from the pixel centre in GL window pixels (y up), for shaders.ts u_sampleOffsets.
 export const COVERAGE_SAMPLES: readonly (readonly [number, number])[] = [
