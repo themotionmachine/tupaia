@@ -427,6 +427,23 @@ bool fillCovers(vec2 q, float len, float px) {
   bool next = d.x * e.y - d.y * e.x > 0.0;
   return v_convex.y > 0.5 ? inside && next : inside || next;
 }
+// The analytic box filter at a corner (a rect's, say): the product of this edge's coverage and that of a neighbour
+// turning 45 degrees or more at a convex vertex, the box filter's area for perpendicular edges. Chrome's analytic rect
+// takes that product; the edge's coverage alone was up to 0.44 off at a corner pixel. Gentler turns (a circle's chords)
+// keep the edge's own coverage. q and the bounds as in fillCovers.
+float cornerCoverage(vec2 q, float len, float px) {
+  float f = 1.0;
+  vec2 d = v_neighbours.xy;
+  float back = -dot(q, d);
+  if (v_convex.x > 0.5 && d.x <= 0.7072 && back >= -0.5 && back <= v_neighbourLengths.x * px + 0.5)
+    f *= clamp(0.5 + d.x * q.y - d.y * q.x, 0.0, 1.0);
+  vec2 e = q - vec2(len, 0.0);
+  d = v_neighbours.zw;
+  float ahead = dot(e, d);
+  if (v_convex.y > 0.5 && d.x <= 0.7072 && ahead >= -0.5 && ahead <= v_neighbourLengths.y * px + 0.5)
+    f *= clamp(0.5 + d.x * e.y - d.y * e.x, 0.0, 1.0);
+  return f;
+}
 void main() {
   float px = u_pxPerWorld;
   vec2 stepX = dFdx(v_local) * px;
@@ -445,7 +462,7 @@ void main() {
       if (fillCovers(vec2(x, s) + stepX * o.x + stepY * o.y, len, px)) n++;
     }
     cov = float(n) / float(u_samples);
-  } else cov = clamp(0.5 + s, 0.0, 1.0);
+  } else cov = clamp(0.5 + s, 0.0, 1.0) * cornerCoverage(vec2(x, s), len, px);
   // an inside centre whose samples all miss still marks the pixel (drawn at 0), so the cover does not fill it
   if (u_inside == 1 ? cov >= 1.0 : cov <= 0.0) discard;
   vec4 base = u_patterned == 1 ? texture(u_tile, (u_worldToUv * vec3(v_world, 1.0)).xy) : u_color;
