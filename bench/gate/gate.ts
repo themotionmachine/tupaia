@@ -1085,7 +1085,8 @@ async function presetsCheck(ctx: Ctx): Promise<Partial<Result>> {
         compatShare: round(r.compatShare, 4),
         hard: r.hard.length,
         worst: r.worst && `${r.worst.cell} ssim ${round(r.worst.ssim, 4)} over16 ${round(r.worst.over16, 4)}`,
-        failing: r.failing.slice(0, 12)
+        failing: r.failing.slice(0, 12),
+        notApplicable: r.notApplicable
       }))
     },
     report: join(ctx.dir, "presets.json"),

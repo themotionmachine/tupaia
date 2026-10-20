@@ -196,7 +196,7 @@ export interface GoldenCellLike {
   pass: boolean;
   failures?: string[];
   census?: { native: number; compat: number; skipped: number } | null;
-  metrics?: { ssim?: number; over16Fraction?: number; over44Fraction?: number } | null;
+  metrics?: { ssim?: number; over16Fraction?: number; over44Fraction?: number; inkSvg?: number; inkGpu?: number } | null;
   /** the golden's per-gate verdicts of the cell (golden-metrics judgeCell) */
   gates?: Partial<Record<"ssim" | "over16" | "over44" | "conservative" | "coverage" | "populated", boolean>>;
   renderer?: { active?: string; fallbackReason?: string };
@@ -228,11 +228,25 @@ export interface PresetRow {
   hard: string[]; // GPU fallback, timeouts, harness errors: never acceptable under any preset
   failing: string[]; // "family/k" of every failing cell
   inducedCells: string[];
+  /** "family/k" of cells that paint nothing in either arm under this preset (both arms' ink under MIN_INK_PIXELS, and
+   *  the only failures are the two "empty in ... arm" ones): the preset styles the layer away (vignette opacity 0,
+   *  coastline stroke-width 0, borders in the backdrop colour), so there is nothing to compare. Not a failure and not
+   *  induced; listed separately. A cell where one arm has ink and the other does not is never N/A. */
+  notApplicable: string[];
   worst: { cell: string; ssim: number | null; over16: number | null } | null;
 }
 
 // the exact hard-failure phrases layer-golden.ts emits: a GPU that is not drawing, a prepare that never settled, a harness error
 const HARD = /^(GPU not active|GPU frame did not settle|harness:)/;
+const EMPTY_ARM = /^empty in (SVG|GPU) arm /;
+/** Empty in both arms: neither arm paints ink and nothing failed but the emptiness itself. Needs the ink metrics. */
+export function emptyInBothArms(c: GoldenCellLike): boolean {
+  const m = c.metrics;
+  if (c.pass || m?.inkSvg == null || m.inkGpu == null) return false;
+  if (m.inkSvg >= MIN_INK_PIXELS || m.inkGpu >= MIN_INK_PIXELS) return false;
+  const failures = c.failures ?? [];
+  return failures.length > 0 && failures.every(f => EMPTY_ARM.test(f));
+}
 const cellId = (c: GoldenCellLike) => `${c.family}/k${c.k}${/@/.test(c.key) ? c.key.slice(c.key.indexOf("@")) : ""}`;
 
 /** Aggregates one golden report (cells of several presets) by preset. `baseline` is the preset the induced count is relative to. */
@@ -241,7 +255,8 @@ export function summarizePresets(cells: GoldenCellLike[], baseline = "default", 
   const base = new Map(cells.filter(c => c.preset === baseline).map(c => [cellId(c), c]));
   const rows = presets.map<PresetRow>(preset => {
     const mine = cells.filter(c => c.preset === preset);
-    const failed = mine.filter(c => !c.pass);
+    const na = mine.filter(emptyInBothArms);
+    const failed = mine.filter(c => !c.pass && !na.includes(c));
     const gates = [...INDUCIBLE_GATES, reading] as const;
     const inducedGates: Record<string, number> = {};
     const inducedBy = (c: GoldenCellLike): string[] => {
@@ -251,7 +266,7 @@ export function summarizePresets(cells: GoldenCellLike[], baseline = "default", 
       if (!c.gates || !was.gates) return !c.pass && was.pass ? ["verdict"] : [];
       return gates.filter(g => was.gates![g] === true && c.gates![g] === false);
     };
-    const induced = preset === baseline ? [] : mine.filter(c => inducedBy(c).length);
+    const induced = preset === baseline ? [] : mine.filter(c => !na.includes(c) && inducedBy(c).length);
     const fromPass = induced.filter(c => !c.pass && base.get(cellId(c))?.pass);
     for (const c of induced) for (const g of inducedBy(c)) inducedGates[g] = (inducedGates[g] ?? 0) + 1;
     const sum = (key: "native" | "compat" | "skipped") => mine.reduce((n, c) => n + (c.census?.[key] ?? 0), 0);
@@ -261,7 +276,7 @@ export function summarizePresets(cells: GoldenCellLike[], baseline = "default", 
     return {
       preset,
       cells: mine.length,
-      pass: mine.length - failed.length,
+      pass: mine.length - failed.length - na.length,
       fail: failed.length,
       induced: induced.length,
       inducedFromPass: fromPass.length,
@@ -273,6 +288,7 @@ export function summarizePresets(cells: GoldenCellLike[], baseline = "default", 
       hard: failed.flatMap(c => (c.failures ?? []).filter(f => HARD.test(f)).map(f => `${cellId(c)}: ${f.slice(0, 160)}`)),
       failing: failed.map(cellId),
       inducedCells: induced.map(cellId),
+      notApplicable: na.map(cellId),
       worst: withMetrics ? { cell: cellId(withMetrics), ssim: withMetrics.metrics?.ssim ?? null, over16: withMetrics.metrics?.over16Fraction ?? null } : null
     };
   });
