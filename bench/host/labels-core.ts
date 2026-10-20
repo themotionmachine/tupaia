@@ -250,16 +250,17 @@ export function classifyRegistration(reg: Registration | null, minInk: number = 
   return "registered";
 }
 
-// Atlas keys (src/gpu/text.ts GlyphAtlas.glyph): fill `${font}|0|${char}`, halo `${font}|${halo}|${join}|${miter}|${char}`.
-// A CSS font string carries no "|"; the character may be one.
-export function decodeGlyphKey(key: string): { font: string; halo: number; char: string } | null {
+// Atlas keys (src/gpu/text.ts GlyphAtlas.glyph): fill `${font}|0|${ink}|${char}`, halo
+// `${font}|${halo}|${join}|${miter}|${ink}|${char}` (ink: the opaque paint colour the mask is cut in, "rgb(r,g,b)").
+// A CSS font string and a colour carry no "|"; the character may be one.
+export function decodeGlyphKey(key: string): { font: string; halo: number; char: string; ink: string } | null {
   const parts = key.split("|");
-  if (parts.length < 3) return null;
+  if (parts.length < 4) return null;
   const halo = Number(parts[1]);
   if (!Number.isFinite(halo)) return null;
-  if (halo === 0) return { font: parts[0], halo, char: parts.slice(2).join("|") };
-  if (parts.length < 5) return null;
-  return { font: parts[0], halo, char: parts.slice(4).join("|") };
+  if (halo === 0) return { font: parts[0], halo, ink: parts[2], char: parts.slice(3).join("|") };
+  if (parts.length < 6) return null;
+  return { font: parts[0], halo, ink: parts[4], char: parts.slice(5).join("|") };
 }
 
 // The (dy-shifted) baseline point under a glyph's advance midpoint, in world units, from one instance
@@ -291,7 +292,7 @@ export function gpuGlyphs(dpr: number): Record<string, any> {
   for (const [key, glyph] of atlas.glyphs) byUv.set(`${glyph.u0},${glyph.v0}`, [key, glyph]);
   const FLOATS = 15; // src/gpu/text.ts GLYPH_FLOATS
   const data: Float32Array = payload.glyphs;
-  const out: { char: string; font: string; scale: number; x: number; y: number; angle: number }[] = [];
+  const out: { char: string; font: string; scale: number; x: number; y: number; angle: number; shift: number }[] = [];
   let unknown = 0;
   for (let i = 0; i + FLOATS <= data.length; i += FLOATS) {
     const hit = byUv.get(`${data[i + 7]},${data[i + 8]}`);
@@ -303,7 +304,7 @@ export function gpuGlyphs(dpr: number): Record<string, any> {
     const parts = key.split("|");
     const halo = Number(parts[1]);
     if (halo !== 0) continue;
-    const char = parts.slice(2).join("|");
+    const char = parts.slice(3).join("|"); // decodeGlyphKey: `${font}|0|${ink}|${char}`
     // glyphBaseline, inlined
     const h = data[i + 6];
     if (!(h > 0) || !(glyph.height > 0)) continue;
@@ -312,7 +313,8 @@ export function gpuGlyphs(dpr: number): Record<string, any> {
     const angle = data[i + 2];
     const wx = data[i] - Math.sin(angle) * shift;
     const wy = data[i + 1] + Math.cos(angle) * shift;
-    out.push({ char, font: parts[0], scale, x: (wx * view.k + view.x) * dpr, y: (wy * view.k + view.y) * dpr, angle: (angle * 180) / Math.PI });
+    // shift: the baseline shift (and, on the measured path, dy) the instance applies along the glyph normal, device px
+    out.push({ char, font: parts[0], scale, x: (wx * view.k + view.x) * dpr, y: (wy * view.k + view.y) * dpr, angle: (angle * 180) / Math.PI, shift: shift * view.k * dpr });
   }
   return { glyphs: out, unknown, instances: data.length / FLOATS, view: { k: view.k, x: view.x, y: view.y } };
 }

@@ -440,7 +440,17 @@ void main() {
   fs: sprite.fs
 };
 
-// Label glyphs: instance (cx cy angle) + (lx ly w h) + uv + rgba; the atlas stores coverage in alpha.
+// Label glyphs: instance (cx cy angle) + (lx ly w h) + uv + rgba; the atlas stores coverage in alpha. A negative
+// alpha marks a soft cell (a text-shadow's blurred mask, text.ts): drawn with |alpha| and no coverage floor.
+//
+// GLYPH (W3; this program only, the rest of the file is STROKE2's): the coverage is reconstructed with a Lanczos-3
+// filter, not bilinear. A curved label's glyph is an axis-aligned mask cut at the raster bucket and drawn rotated, at a
+// sub-texel offset, where Skia rasterizes the SVG glyph directly at its rotation and position. Bilinear sampling
+// smears every edge over about one more device px (a faint fringe: on the parity labels the GPU arm had ~20% more ink
+// pixels than the SVG); Lanczos-3 keeps the edge as sharp as the mask (exact at texel centres), and the 3% coverage
+// floor drops the faint ringing and fringe it leaves where Skia's own coverage is already zero. Where the bucket
+// oversamples the screen by more than 10% (zoom between powers of two), the mask is box-filtered over the pixel
+// footprint instead (four bilinear taps), which a fixed-size kernel would alias.
 export const glyph = {
   vs: `${header}
 in vec2 a_corner;
@@ -452,21 +462,69 @@ uniform mat3 u_matrix;
 uniform float u_atlasScale; // GLYPH_ATLAS / the uploaded atlas rows (text.ts glyphAtlasRows)
 out vec2 v_uv;
 out vec4 v_color;
+out float v_soft;
 void main() {
   vec2 local = a_box.xy + a_corner * a_box.zw;
   float c = cos(a_anchor.z);
   float s = sin(a_anchor.z);
   vec2 world = a_anchor.xy + vec2(c * local.x - s * local.y, s * local.x + c * local.y);
   v_uv = mix(a_uv.xy, a_uv.zw, a_corner) * vec2(1.0, u_atlasScale);
-  v_color = vec4(a_color.rgb * a_color.a, a_color.a);
+  float alpha = abs(a_color.a);
+  v_color = vec4(a_color.rgb * alpha, alpha);
+  v_soft = a_color.a < 0.0 ? 1.0 : 0.0;
   gl_Position = vec4((u_matrix * vec3(world, 1.0)).xy, 0.0, 1.0);
 }`,
   fs: `${header}
 in vec2 v_uv;
 in vec4 v_color;
+in float v_soft;
 uniform sampler2D u_atlas;
 out vec4 color;
-void main() { color = v_color * texture(u_atlas, v_uv).a; }`
+float lanczos3(float x) {
+  x = abs(x);
+  if (x < 1e-4) return 1.0;
+  if (x >= 3.0) return 0.0;
+  float p = 3.14159265 * x;
+  return 3.0 * sin(p) * sin(p / 3.0) / (p * p);
+}
+void main() {
+  ivec2 size = textureSize(u_atlas, 0);
+  vec2 p = v_uv * vec2(size) - 0.5;
+  vec2 dx = dFdx(p);
+  vec2 dy = dFdy(p);
+  float minify = max(length(dx), length(dy)); // atlas texels per device px
+  float coverage = 0.0;
+  if (minify > 1.1) {
+    vec2 texel = 1.0 / vec2(size);
+    for (int i = 0; i < 4; i++) {
+      vec2 o = vec2(i == 1 || i == 3 ? 0.25 : -0.25, i >= 2 ? 0.25 : -0.25);
+      coverage += texture(u_atlas, (p + 0.5 + o.x * dx + o.y * dy) * texel).a;
+    }
+    coverage *= 0.25;
+  } else {
+    vec2 f = fract(p);
+    ivec2 base = ivec2(floor(p)) - 2;
+    float wx[6];
+    float wy[6];
+    float sx = 0.0;
+    float sy = 0.0;
+    for (int i = 0; i < 6; i++) {
+      wx[i] = lanczos3(f.x - float(i - 2));
+      wy[i] = lanczos3(f.y - float(i - 2));
+      sx += wx[i];
+      sy += wy[i];
+    }
+    for (int j = 0; j < 6; j++) {
+      float row = 0.0;
+      for (int i = 0; i < 6; i++) row += wx[i] * texelFetch(u_atlas, clamp(base + ivec2(i, j), ivec2(0), size - 1), 0).a;
+      coverage += wy[j] * row;
+    }
+    coverage /= sx * sy;
+  }
+  coverage = clamp(coverage, 0.0, 1.0);
+  if (v_soft < 0.5 && coverage < 0.03) coverage = 0.0;
+  color = v_color * coverage;
+}`
 };
 
 // Textured rectangle (compat runs in world or screen space, group composites) with an opacity multiplier.

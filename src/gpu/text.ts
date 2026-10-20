@@ -1,5 +1,7 @@
-// Curved <text><textPath><tspan> labels as instanced glyph quads. Metrics come from the actual loaded font via
-// Canvas2D measureText of prefixes (kerning included); glyphs are rasterized into a shelf-packed alpha atlas.
+// Curved <text><textPath><tspan> labels (and plain straight <text>) as instanced glyph quads. Each character sits where
+// the SVG's own layout puts it (getStartPositionOfChar...: the hidden SVG is the model and the reference); a text the
+// SVG has not laid out (viewport-culled, display:none) is measured with Canvas2D instead (kerned prefix widths of the
+// loaded font). Glyphs are rasterized, in their own paint colour, into a shelf-packed alpha atlas.
 import { cumulativeLengths, layoutOnPath } from "./geometry";
 import { parseColor, type Rgba } from "./scene";
 import { flattenPath } from "./svg-path";
@@ -7,7 +9,7 @@ import { flattenPath } from "./svg-path";
 export const GLYPH_FLOATS = 15; // cx cy angle lx ly w h u0 v0 u1 v1 r g b a
 const ATLAS = 2048;
 export const GLYPH_ATLAS = ATLAS; // atlas edge in px; glyph uvs are normalized by it
-const PAD = 2;
+const PAD = 3; // transparent margin per cell: the glyph shader's Lanczos-3 kernel reads 3 texels past a quad edge
 
 // Atlas rows the glyph instances sample: the shelves fill from the top, so everything below the lowest cell bottom
 // (v1) is empty. One more row keeps the transparent gutter under that cell, so linear filtering at the cell edge reads
@@ -57,11 +59,21 @@ export class GlyphAtlas {
   }
 
   // halo = 0 draws the fill mask; halo > 0 draws a stroke mask of that pixel width with the given SVG line join.
-  glyph(font: string, char: string, halo: number, join: CanvasLineJoin = "round", miter = 4): Glyph | null {
-    const key = halo > 0 ? `${font}|${halo}|${join}|${miter}|${char}` : `${font}|0|${char}`;
+  // `ink` is the opaque colour the text paints with (inkColor): Skia's glyph masks depend on the paint's luminance
+  // (contrast and gamma "preblend"), so a mask cut in white is visibly heavier than the dark text SVG draws. The
+  // coverage read from the atlas is the one SVG paints only when the mask is cut in (the luminance of) its own colour.
+  glyph(
+    font: string,
+    char: string,
+    halo: number,
+    join: CanvasLineJoin = "round",
+    miter = 4,
+    ink = "#fff"
+  ): Glyph | null {
+    const key = halo > 0 ? `${font}|${halo}|${join}|${miter}|${ink}|${char}` : `${font}|0|${ink}|${char}`;
     // miter corners can reach miterLimit * half the stroke width past the outline
     const extra = ((join === "miter" ? Math.max(1, miter) : 1) * halo) / 2 + PAD;
-    return this.entry(key, font, char, extra, "auto", c => {
+    return this.entry(key, font, char, extra, "auto", ink, c => {
       if (halo > 0) {
         c.lineJoin = join;
         c.miterLimit = miter;
@@ -73,17 +85,17 @@ export class GlyphAtlas {
 
   // The blurred coverage of a whole string (a CSS text-shadow is the blur of the text's union, not of each glyph):
   // `blur` is the shadow blur in this raster's pixels (canvas shadowBlur and CSS blur radius both mean sigma = blur/2).
-  shadow(font: string, text: string, blur: number, kerning: CanvasFontKerning): Glyph | null {
-    const key = `${font}|shadow|${blur}|${kerning}|${text}`;
+  shadow(font: string, text: string, blur: number, kerning: CanvasFontKerning, ink = "#fff"): Glyph | null {
+    const key = `${font}|shadow|${blur}|${kerning}|${ink}|${text}`;
     // a Gaussian of sigma = blur/2 is negligible past 3 sigma
     const extra = Math.ceil(1.5 * blur) + PAD;
-    return this.entry(key, font, text, extra, kerning, (c, cell) => {
+    return this.entry(key, font, text, extra, kerning, ink, (c, cell) => {
       // only the shadow lands in the cell: the text itself is drawn off the canvas and its shadow offset back
       c.beginPath();
       c.rect(cell.x, cell.y, cell.width, cell.height);
       c.clip();
       const away = 4 * ATLAS;
-      c.shadowColor = "#fff";
+      c.shadowColor = ink;
       c.shadowBlur = blur;
       c.shadowOffsetX = away;
       c.fillText(text, -away, 0);
@@ -96,6 +108,7 @@ export class GlyphAtlas {
     text: string,
     extra: number,
     kerning: CanvasFontKerning,
+    ink: string,
     paint: (c: CanvasRenderingContext2D, cell: { x: number; y: number; width: number; height: number }) => void
   ): Glyph | null {
     const cached = this.glyphs.get(key);
@@ -113,7 +126,7 @@ export class GlyphAtlas {
     if (this.y + height > ATLAS) return null;
     c.save();
     c.translate(this.x - left, this.y - top);
-    c.fillStyle = c.strokeStyle = "#fff";
+    c.fillStyle = c.strokeStyle = ink;
     c.textBaseline = "alphabetic";
     paint(c, { x: left, y: top, width, height });
     c.restore();
@@ -249,18 +262,224 @@ export interface LabelBatch {
 
 let measure: CanvasRenderingContext2D | null = null;
 
-export function prefixAdvances(text: string, width: (s: string) => number): number[] {
+// SVG character start positions from Canvas2D widths, when the SVG's own layout cannot be read (svgCharPositions):
+// character i starts at width(prefix(i+1)) - width(char i). A kern pair moves the second character (HarfBuzz adds it to
+// the first one's advance), so width(prefix(i)) alone would leave out the kern between characters i-1 and i. Returns
+// each character's advance as SVG paints it (start(i+1) - start(i); the last one its own width), code point by code
+// point. Pass the width through wholeRunWidth so kern pairs across a space count too.
+export function kernedAdvances(text: string, width: (s: string) => number): number[] {
   const chars = [...text];
-  const result: number[] = [];
-  let previous = 0;
+  const starts: number[] = [];
   let prefix = "";
-  for (const char of chars) {
+  for (const [i, char] of chars.entries()) {
     prefix += char;
-    const next = width(prefix);
-    result.push(next - previous);
+    starts.push(i ? width(prefix) - width(char) : 0);
+  }
+  const total = chars.length ? width(prefix) : 0;
+  return starts.map((start, i) => (i + 1 < starts.length ? starts[i + 1] : total) - start);
+}
+
+// Canvas2D shapes a string word by word (its word cache splits at spaces), so a kern pair across a space (Times kerns
+// " W", "y." and " T") is lost; SVG shapes the whole run. A no-break space is the space glyph in most fonts and does not
+// split the run, so measuring with it keeps those pairs. Used only when the font gives the two the same width.
+export function wholeRun(text: string, width: (s: string) => number): string {
+  return text.includes(" ") && Math.abs(width(" ") - width("\u00a0")) <= 1e-6 ? text.replaceAll(" ", "\u00a0") : text;
+}
+
+export function wholeRunWidth(width: (s: string) => number): (s: string) => number {
+  return text => width(wholeRun(text, width));
+}
+
+// The kern before each code point (between it and the previous one; 0 for the first), from the same widths as
+// kernedAdvances: width(prefix(i+1)) - width(prefix(i)) - width(char i).
+export function kernsBefore(text: string, width: (s: string) => number): number[] {
+  const kerns: number[] = [];
+  let prefix = "";
+  let previous = 0;
+  for (const char of text) {
+    const next = width(prefix + char);
+    kerns.push(prefix ? next - previous - width(char) : 0);
+    prefix += char;
     previous = next;
   }
-  return result;
+  return kerns;
+}
+
+// How far each character's painted pen origin lies past the start Chromium's SVG query API reports for it
+// (getStartPositionOfChar), along the baseline. HarfBuzz applies a legacy 'kern' table pair by splitting it: half to
+// the first glyph's advance, half to the second's advance plus the same half to its x offset, so the second glyph
+// paints where the whole kern puts it while its character is reported to start half the kern earlier. GPOS kerning
+// (most web fonts) moves the first advance only, so the reported start is the painted origin. W3 GLYPH probes
+// (tspan-isolated ink centroids at 80 px): Times "AVA" reported 5.1 px off its paint, Verdana and Impact up to 4.3 px,
+// on <text> and <textPath> alike; Cinzel, Arial and other GPOS fonts 0. The font does not say which it uses, so the
+// SVG's own per-character advances decide (`reported`, null where unknown): a split pair reports
+// own(i) + (kern(i) + kern(i+1))/2, a GPOS one own(i) + kern(i+1), letter-spacing added to both. Returns kern(i)/2 per
+// code point when the split reading fits better, else zeros (also when nothing kerns).
+export function kernOffsets(reported: (number | null)[], own: number[], kerns: number[], spacing = 0): number[] {
+  let split = 0;
+  let gpos = 0;
+  for (const [i, advance] of reported.entries()) {
+    if (advance === null) continue;
+    const next = kerns[i + 1] ?? 0;
+    split += Math.abs(advance - (own[i] + spacing + (kerns[i] + next) / 2));
+    gpos += Math.abs(advance - (own[i] + spacing + next));
+  }
+  return kerns.map(kern => (split < gpos ? kern / 2 : 0));
+}
+
+// kernOffsets for the code points `chars` of a run whose first UTF-16 unit is `unit` in the SVG positions.
+function reportedOffsets(
+  svg: (CharPosition | null)[],
+  unit: number,
+  chars: string[],
+  width: (s: string) => number,
+  spacing: number
+): number[] {
+  const reported: (number | null)[] = [];
+  for (const char of chars) {
+    reported.push(svg[unit]?.advance ?? null);
+    unit += char.length;
+  }
+  return kernOffsets(
+    reported,
+    chars.map(char => width(char)),
+    kernsBefore(chars.join(""), width),
+    spacing
+  );
+}
+
+// The opaque colour a glyph mask is cut in (GlyphAtlas.glyph `ink`): the paint colour without its alpha, which the
+// instance colour carries.
+export function inkColor(color: Rgba): string {
+  const [r, g, b] = color.map(channel => Math.round(Math.min(1, Math.max(0, channel)) * 255));
+  return `rgb(${r},${g},${b})`;
+}
+
+// Where the SVG itself puts each addressable character (UTF-16 unit) of a laid-out <text>, in its user space:
+// getStartPositionOfChar / getEndPositionOfChar / getRotationOfChar, which include kerning (across spaces too; a
+// start may sit half its leading kern before the painted origin, kernOffsets), letter-spacing, text-anchor, startOffset,
+// dy and the path. Null when the element is not laid out (display:none, a test DOM), has a different character count
+// than expected, or the API throws. An entry is null for a character the SVG does not render (past the end of its
+// path: Chromium reports it at the origin with no advance).
+export interface CharPosition {
+  x: number; // start of the character on its (dy-shifted) baseline
+  y: number;
+  ex: number; // end
+  ey: number;
+  advance: number; // distance from start to end
+  angle: number; // radians
+}
+
+export function svgCharPositions(text: SVGTextElement, expected: number): (CharPosition | null)[] | null {
+  if (typeof text.getNumberOfChars !== "function" || typeof text.getStartPositionOfChar !== "function") return null;
+  try {
+    const count = text.getNumberOfChars();
+    if (count !== expected) return null;
+    const out: (CharPosition | null)[] = [];
+    for (let i = 0; i < count; i++) {
+      const start = text.getStartPositionOfChar(i);
+      const end = text.getEndPositionOfChar(i);
+      if (!start || !end) return null;
+      if (start.x === 0 && start.y === 0 && end.x === 0 && end.y === 0) {
+        out.push(null);
+        continue;
+      }
+      const angle = (text.getRotationOfChar(i) * Math.PI) / 180;
+      const advance = Math.hypot(end.x - start.x, end.y - start.y);
+      if (![start.x, start.y, advance, angle].every(Number.isFinite)) return null;
+      out.push({ x: start.x, y: start.y, ex: end.x, ey: end.y, advance, angle });
+    }
+    // nothing placed at all: a DOM without SVG text layout, not a text the SVG hides entirely
+    return out.some(Boolean) ? out : null;
+  } catch {
+    return null;
+  }
+}
+
+// The dominant-baseline:central shift as the SVG applies it, in user units at a CTM scale. Chromium lays SVG text out
+// with a font scaled to the screen and rounds that font's ascent and descent, so the shift depends on the scale in a
+// way the canvas font box at the raster bucket does not reproduce (it differs by up to half a device px per glyph).
+// One hidden probe <svg> outside svg#map measures it: the extent of "H" under central minus under auto, at the
+// label's CTM scale. Null when the probe cannot be laid out (no SVG text API, e.g. a test DOM).
+let centralProbe: { group: SVGGElement; auto: SVGTextElement; central: SVGTextElement } | null | undefined;
+const centralShifts = new Map<string, number | null>();
+
+export function svgCentralShift(style: TextStyle, px: number, scale: number): number | null {
+  if (!(scale > 0) || !(px > 0)) return null;
+  const key = `${style.fontStyle} ${style.fontWeight} ${px}px ${style.fontFamily}|${style.textRendering}|${scale}`;
+  if (centralShifts.has(key)) return centralShifts.get(key)!;
+  const probe = centralProbeElements();
+  let shift: number | null = null;
+  if (probe) {
+    try {
+      probe.group.setAttribute("transform", `scale(${scale})`);
+      for (const text of [probe.auto, probe.central]) {
+        text.setAttribute("font-family", style.fontFamily || "");
+        text.setAttribute("font-size", String(px));
+        text.setAttribute("font-style", style.fontStyle || "normal");
+        text.setAttribute("font-weight", style.fontWeight || "normal");
+        text.setAttribute("text-rendering", style.textRendering || "auto");
+      }
+      const value = probe.central.getExtentOfChar(0).y - probe.auto.getExtentOfChar(0).y;
+      shift = Number.isFinite(value) ? value : null;
+    } catch {
+      shift = null;
+    }
+  }
+  if (centralShifts.size > 512) centralShifts.clear();
+  centralShifts.set(key, shift);
+  return shift;
+}
+
+function centralProbeElements() {
+  if (centralProbe !== undefined) return centralProbe;
+  centralProbe = null;
+  const doc = globalThis.document;
+  if (!doc?.body || typeof doc.createElementNS !== "function") return null;
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = doc.createElementNS(ns, "svg");
+  svg.setAttribute("width", "1");
+  svg.setAttribute("height", "1");
+  svg.setAttribute("aria-hidden", "true");
+  svg.id = "gpuTextProbe";
+  // laid out but never painted or hit (visibility, not display: a display:none text has no layout to query)
+  svg.setAttribute(
+    "style",
+    "position:fixed;left:-100px;top:-100px;overflow:hidden;visibility:hidden;pointer-events:none"
+  );
+  const group = doc.createElementNS(ns, "g");
+  const auto = doc.createElementNS(ns, "text") as SVGTextElement;
+  const central = doc.createElementNS(ns, "text") as SVGTextElement;
+  central.setAttribute("dominant-baseline", "central");
+  for (const text of [auto, central]) text.textContent = "H";
+  group.append(auto, central);
+  svg.append(group);
+  doc.body.append(svg);
+  // a DOM without SVG text layout (a test DOM) reports no extent: the canvas font box stands in
+  let laidOut = false;
+  try {
+    auto.setAttribute("font-size", "16");
+    laidOut = typeof auto.getExtentOfChar === "function" && auto.getExtentOfChar(0).height > 0;
+  } catch {
+    laidOut = false;
+  }
+  if (!laidOut) {
+    svg.remove();
+    return null;
+  }
+  centralProbe = { group, auto, central };
+  return centralProbe;
+}
+
+// CSS px per user unit of an element's coordinate system (its screen CTM), or null.
+function screenScale(element: SVGGraphicsElement): number | null {
+  try {
+    const m = element.getScreenCTM?.();
+    const scale = m ? Math.sqrt(Math.abs(m.a * m.d - m.b * m.c)) : Number.NaN;
+    return scale > 0 && Number.isFinite(scale) ? scale : null;
+  } catch {
+    return null;
+  }
 }
 
 export function cssFont(style: CSSStyleDeclaration, px: number): string {
@@ -454,7 +673,17 @@ async function layoutLabel(
   const start = startOffsetLength(textPath.getAttribute("startOffset"), total);
   if (!(total > 0)) return "textPath geometry";
   if (start === null) return "startOffset";
+  // The SVG's own character positions (kerning, letter-spacing, anchor, startOffset, dy and the path included) when the
+  // label is laid out; otherwise (a viewport-culled label is display:none) the measured layout below.
+  const svg = svgCharPositions(
+    text,
+    lines.reduce((sum, line) => sum + (line.textContent || "").length, 0)
+  );
+  const ctmScale = screenScale(text);
+  // the <text>'s own baseline: a central one makes every tspan's central baseline a nested one (baselineShiftFor)
+  const rootBaseline = getComputedStyle(text).dominantBaseline;
   let dy = 0;
+  let unit = 0; // the line's first addressable character (UTF-16 unit) in the whole text
   for (const [index, line] of lines.entries()) {
     const style = getComputedStyle(line);
     const unsupported = unsupportedStyle(style as unknown as Record<string, string>);
@@ -490,33 +719,67 @@ async function layoutLabel(
     }
     const rasterFont = cssFont(style, px * scale);
     measure.font = rasterFont;
-    measure.fontKerning = style.textRendering === "optimizeSpeed" ? "none" : "auto";
-    const baselineShift = centralBaselineShift(style.dominantBaseline, measure.measureText(content), scale);
-    if (baselineShift === null) return "central baseline metrics";
-    const advances = spacedAdvances(
-      prefixAdvances(content, s => measure!.measureText(s).width / scale),
-      spacing
+    // SVG text keeps kerning under text-rendering: optimizeSpeed (Chromium lays out auto, optimizeSpeed and
+    // geometricPrecision alike), so the measured layout always kerns
+    measure.fontKerning = "auto";
+    // a tspan that leaves its central <text> for another baseline aligns in ways not modelled here
+    if (rootBaseline === "central" && style.dominantBaseline !== "central") return "baseline";
+    const baselineShift = baselineShiftFor(
+      style,
+      px,
+      ctmScale,
+      measure.measureText(content),
+      scale,
+      rootBaseline === "central"
     );
+    if (baselineShift === null) return "central baseline metrics";
+    const width = wholeRunWidth(s => measure!.measureText(s).width / scale);
+    const advances = spacedAdvances(kernedAdvances(content, width), spacing);
     if (!advances) return "letter-spacing";
     const anchor = style.textAnchor === "middle" ? "middle" : style.textAnchor === "end" ? "end" : "start";
-    const placed = layoutOnPath(points, advances, (start + x) / total, anchor);
+    const chars = [...content];
+    const offsets = svg ? reportedOffsets(svg, unit, chars, width, spacing) : [];
+    // per character: the advance midpoint on the (dy-shifted) baseline, the angle there, the pen origin's offset from
+    // the midpoint along the baseline, and the dy the instance still has to apply along the normal (0 when the SVG's
+    // position already includes it)
+    const placed: ({ x: number; y: number; angle: number; origin: number; dy: number } | null)[] = [];
+    if (svg) {
+      let at = unit;
+      for (const [i, char] of chars.entries()) {
+        const p = svg[at];
+        at += char.length;
+        placed.push(
+          p && {
+            x: (p.x + p.ex) / 2,
+            y: (p.y + p.ey) / 2,
+            angle: p.angle,
+            // the painted origin: the reported start, moved by a split kern (kernOffsets)
+            origin: -p.advance / 2 + offsets[i],
+            dy: 0
+          }
+        );
+      }
+    } else
+      for (const [i, p] of layoutOnPath(points, advances, (start + x) / total, anchor).entries())
+        placed.push(p.visible ? { x: p.x, y: p.y, angle: p.angle, origin: -advances[i] / 2, dy } : null);
+    unit += content.length;
     const passes: [number, Rgba | null][] = [
       [0, fill],
       [strokeWidth * scale, strokeWidth > 0 ? stroke : null]
     ];
     if (strokeBeforeFill(style.paintOrder)) passes.reverse();
-    const chars = [...content];
     let picked = false;
     for (const [halo, color] of passes) {
       if (!color) continue;
+      const ink = inkColor(color);
       for (let i = 0; i < chars.length; i++) {
         const at = placed[i];
-        if (!at.visible || !chars[i].trim()) continue;
-        const glyph = atlas.glyph(rasterFont, chars[i], halo, join, miter);
+        if (!at || !chars[i].trim()) continue;
+        const glyph = atlas.glyph(rasterFont, chars[i], halo, join, miter, ink);
         if (!glyph) return "glyph atlas full";
-        // the pen origin sits half the (spaced) advance before the path sample, as in SVG textPath layout
-        const lx = -advances[i] / 2 + glyph.left / scale;
-        const ly = dy + baselineShift + glyph.top / scale;
+        // the pen origin sits about half the (spaced) advance before the path sample, as in SVG textPath layout
+        const lx = at.origin + glyph.left / scale;
+        const ly = at.dy + baselineShift + glyph.top / scale;
         const [w, h] = [glyph.width / scale, glyph.height / scale];
         out.push(at.x, at.y, at.angle, lx, ly, w, h, glyph.u0, glyph.v0, glyph.u1, glyph.v1, ...color);
         if (!picked) boxes.push({ id: text.id, corners: quad(at.x, at.y, at.angle, lx, ly, w, h) });
@@ -525,6 +788,35 @@ async function layoutLabel(
     }
   }
   return "";
+}
+
+// dominant-baseline shift in user units: the SVG's own (svgCentralShift, at the element's CTM scale) when it can be
+// probed, else the canvas font box at the raster scale. Null for an unsupported baseline or unreadable metrics.
+// `nested`: the characters sit in a child inline box (textPath, tspan) of a <text> whose own dominant baseline is
+// central too (#labels sets it on the group, so every label inherits it). Chromium then paints the child's central
+// baseline rounded to a whole CSS px (ceil of the half-px value its rounded ascent and descent give), while
+// getExtentOfChar and a direct text child keep the half px: measured on Almendra SC 14-27.7 px at k 1-2, painted
+// minus API was 0 or exactly 1 device px at dpr 2, and centralNestedShift reproduces every case.
+function baselineShiftFor(
+  style: TextStyle | CSSStyleDeclaration,
+  px: number,
+  ctmScale: number | null,
+  metrics: { fontBoundingBoxAscent: number; fontBoundingBoxDescent: number },
+  scale: number,
+  nested = false
+): number | null {
+  const baseline = (style as TextStyle).dominantBaseline ?? "";
+  const fallback = centralBaselineShift(baseline === "alphabetic" ? "auto" : baseline, metrics, scale);
+  if (fallback === null || baseline !== "central" || !ctmScale) return fallback;
+  const shift = svgCentralShift(style as TextStyle, px, ctmScale);
+  if (shift === null) return fallback;
+  return nested ? centralNestedShift(shift, ctmScale) : shift;
+}
+
+// A nested central baseline as Chromium paints it: the shift in CSS px (a multiple of half a px) rounded up to a whole
+// CSS px, back in user units.
+export function centralNestedShift(shift: number, ctmScale: number): number {
+  return Math.ceil(shift * ctmScale - 1e-3) / ctmScale;
 }
 
 // ---------------------------------------------------------------- straight text (outside #labels)
@@ -693,12 +985,39 @@ async function layoutStraight(
   measure!.font = rasterFont;
   measure!.fontKerning = kerning;
   const metrics = measure!.measureText(content);
-  const baselineShift = centralBaselineShift(plan.baseline, metrics, scale);
+  const baselineShift = baselineShiftFor(
+    { ...(style as unknown as TextStyle), dominantBaseline: plan.baseline },
+    px,
+    screenScale(text),
+    metrics,
+    scale
+  );
   if (baselineShift === null) return "central baseline metrics";
-  const advances = prefixAdvances(content, s => measure!.measureText(s).width / scale);
+  const runWidth = wholeRunWidth(s => measure!.measureText(s).width / scale);
+  const advances = kernedAdvances(content, runWidth);
   const width = advances.reduce((sum, advance) => sum + advance, 0);
-  const x0 = plan.x - (plan.anchor === "middle" ? width / 2 : plan.anchor === "end" ? width : 0);
-  const y0 = plan.y;
+  const chars = [...content];
+  // each character's pen origin: the SVG's own layout when the text is laid out (its reported start moved by a split
+  // kern, kernOffsets), else the measured advances from the anchored start
+  const svg = svgCharPositions(text, content.length);
+  const pens: [number, number][] = [];
+  if (svg?.[0]) {
+    const offsets = reportedOffsets(svg, 0, chars, runWidth, 0);
+    let unit = 0;
+    for (const [i, char] of chars.entries()) {
+      const p = svg[unit] ?? svg[0];
+      const along = offsets[i];
+      pens.push([p.x + along * Math.cos(p.angle), p.y + along * Math.sin(p.angle)]);
+      unit += char.length;
+    }
+  } else {
+    let pen = plan.x - (plan.anchor === "middle" ? width / 2 : plan.anchor === "end" ? width : 0);
+    for (const advance of advances) {
+      pens.push([pen, plan.y]);
+      pen += advance;
+    }
+  }
+  const [x0, y0] = pens[0] ?? [plan.x, plan.y];
   const instances: number[] = [];
   const push = (cx: number, cy: number, glyph: Glyph, glyphScale: number, color: Rgba) =>
     instances.push(
@@ -722,28 +1041,32 @@ async function layoutStraight(
     const sigma = (shadow.blur * dpr) / 2; // device px
     const reduce = sigma > 2 ? 2 / sigma : 1;
     const shadowScale = scale * reduce;
-    const glyph = atlas.shadow(cssFont(style, px * shadowScale), content, shadow.blur * dpr * reduce, kerning);
+    const glyph = atlas.shadow(
+      cssFont(style, px * shadowScale),
+      wholeRun(content, s => measure!.measureText(s).width),
+      shadow.blur * dpr * reduce,
+      kerning,
+      inkColor(shadow.color)
+    );
     if (!glyph) return "glyph atlas full";
-    push(x0 + (shadow.x * dpr) / scale, y0 + (shadow.y * dpr) / scale, glyph, shadowScale, shadow.color);
+    // a negative alpha marks the cell soft for the glyph shader (no coverage floor: the blur's faint tail is real)
+    const [r, g, b, a] = shadow.color;
+    push(x0 + (shadow.x * dpr) / scale, y0 + (shadow.y * dpr) / scale, glyph, shadowScale, [r, g, b, -a]);
   }
   const passes: [number, Rgba | null][] = [
     [0, plan.fill],
     [plan.strokeWidth * scale, plan.stroke]
   ];
   if (strokeBeforeFill(style.paintOrder)) passes.reverse();
-  const chars = [...content];
   let box: number[] | null = null;
   for (const [halo, color] of passes) {
     if (!color) continue;
-    let pen = x0;
+    const ink = inkColor(color);
     for (let i = 0; i < chars.length; i++) {
-      const advance = advances[i];
-      if (chars[i].trim()) {
-        const glyph = atlas.glyph(rasterFont, chars[i], halo, plan.join, plan.miter);
-        if (!glyph) return "glyph atlas full";
-        push(pen, y0, glyph, scale, color);
-      }
-      pen += advance;
+      if (!chars[i].trim()) continue;
+      const glyph = atlas.glyph(rasterFont, chars[i], halo, plan.join, plan.miter, ink);
+      if (!glyph) return "glyph atlas full";
+      push(pens[i][0], pens[i][1], glyph, scale, color);
     }
     box ??= [
       x0,

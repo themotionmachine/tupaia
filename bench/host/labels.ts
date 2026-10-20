@@ -26,9 +26,13 @@
 //               multi-line state labels end their first line with a space, so text.ts sends both to the compat lane;
 //               variant `native` removes the text-shadow and trims edge spaces in curved labels' tspans (both arms
 //               see the same DOM) so that the curved labels go native and the analytic check has a sample.
-//   advance     Character start positions from measureText, the way text.ts lays a label out (prefix widths at the
-//               power-of-two raster bucket, kerning off under text-rendering:optimizeSpeed), against SVG
-//               getStartPositionOfChar(i) (where the SVG puts character i, at the same CTM scale), per pinned font:
+//   advance     Character start positions from measureText, the way text.ts measures a label (kerned starts at the
+//               power-of-two raster bucket, always kerned, no-break spaces so pairs across a space count), against SVG
+//               getStartPositionOfChar(i) at the same CTM scale. Chromium reports a start half its leading kern before
+//               the painted origin when HarfBuzz split the kern (legacy 'kern' table; text.ts kernOffsets, W3 GLYPH
+//               ink-centroid probes), so the model's prediction of the reported start is origin - kern/2 there and
+//               origin under GPOS kerning: one check of both the measured starts the fallback layout draws at and
+//               the kerns the SVG-positioned layout corrects with. Per pinned font:
 //               every family of window.fonts plus the fixture's label fonts, sizes 6/14/22 px, k 1/1.5/3 (raster
 //               scale 2/3/6 at dpr 2: one in-bucket, two rounded up), text-rendering auto and optimizeSpeed, on
 //               kerning-heavy probe strings and the fixture's own label strings (reported apart). Every available
@@ -60,7 +64,9 @@
 //   LABELS_BREAK         none | freeze | measure | shift | drop (self-test only):
 //                        freeze  stops the GPU from seeing DOM changes for the second probe of each threshold and for
 //                                each font switch (a missed invalidation: the frame keeps the old visibility or face);
-//                        measure scales Canvas2D measureText widths by 1.04 from page start (GPU advances off);
+//                        measure scales Canvas2D measureText widths by 1.04 from page start (GPU advances off) and
+//                                moves the page's getStart/EndPositionOfChar 1.5 user units right (GPU anchors off;
+//                                the harness's own reference reads are exempt);
 //                        shift   moves the GPU canvas 1 CSS px right (every GPU glyph displaced by dpr device px);
 //                        drop    covers the right half of the viewport with the background in the GPU arm's captures
 //                                only (the GPU draws nothing there: dropped labels, for native and compat alike).
@@ -216,6 +222,16 @@ async function openContext(world: { name: string; path: string }, parity: Json |
           }
         });
       };
+      // text.ts anchors laid-out glyphs on the SVG's own character positions, which measureText does not reach: move
+      // what the page reads 1.5 user units right, except while the harness reads its own reference (__labelsReading)
+      const proto = SVGTextContentElement.prototype;
+      for (const name of ["getStartPositionOfChar", "getEndPositionOfChar"] as const) {
+        const read = proto[name];
+        proto[name] = function (this: SVGTextContentElement, index: number) {
+          const point = read.call(this, index);
+          return (globalThis as any).__labelsReading ? point : new DOMPoint(point.x + 1.5, point.y);
+        };
+      }
     });
   const scripts = ["bridge.js", "bridge-mutations.js", ...readdirSync(resolve(root, "mcp/src/bridge-ext")).filter(n => n.endsWith(".js")).sort().map(n => `bridge-ext/${n}`)];
   await context.addInitScript(scripts.map(n => readFileSync(resolve(root, "mcp/src", n), "utf8")).join("\n"));
@@ -508,16 +524,47 @@ function svgLabels(args: { group: string | null; chars: boolean; dpr: number; id
       if (reading > 0) row.reading = reading;
       const style = getComputedStyle(text.querySelector("tspan") ?? text);
       row.fontPx = Number.parseFloat(style.fontSize) || 0;
-      // text.ts draws a dominant-baseline:central label shifted by half the font box (centralBaselineShift), while
-      // Chromium's start/end-position API stays on the nominal path; the analytic check compares nominal positions.
-      // The shift it undoes is text.ts's own, at the glyph's raster font and scale (stepGlyphs); this one, at the
-      // 1x font size, is kept only to show how far the two differ (Chromium rounds ascent/descent per font size).
+      // Chromium's start/end-position API stays on the nominal (dy-shifted) path for a dominant-baseline:central label;
+      // the glyphs it paints sit lower by the central shift, which Chromium computes on its screen-scaled font with
+      // rounded ascent/descent. The harness measures that shift itself, from the SVG: a hidden probe <svg> (its own,
+      // outside svg#map) at the label's CTM scale, extent of "H" under central minus under auto, in user units.
       row.baseline = style.dominantBaseline;
-      if (style.dominantBaseline === "central") {
-        const context = ((globalThis as any).__labelsMeasure ??= document.createElement("canvas").getContext("2d")) as CanvasRenderingContext2D;
-        context.font = `${style.fontStyle} ${style.fontWeight} ${row.fontPx}px ${style.fontFamily}`;
-        const metrics = context.measureText(text.textContent || "");
-        row.centralShift1x = (metrics.fontBoundingBoxAscent - metrics.fontBoundingBoxDescent) / 2;
+      if (style.dominantBaseline === "central" && m) {
+        const ns = "http://www.w3.org/2000/svg";
+        const w2 = globalThis as any;
+        if (!w2.__labelsProbe) {
+          const probe = document.createElementNS(ns, "svg");
+          probe.setAttribute("width", "1");
+          probe.setAttribute("height", "1");
+          probe.setAttribute("style", "position:fixed;left:-200px;top:-200px;overflow:hidden;visibility:hidden;pointer-events:none");
+          const g = document.createElementNS(ns, "g");
+          const auto = document.createElementNS(ns, "text");
+          const central = document.createElementNS(ns, "text");
+          central.setAttribute("dominant-baseline", "central");
+          auto.textContent = central.textContent = "H";
+          g.append(auto, central);
+          probe.append(g);
+          document.body.append(probe);
+          w2.__labelsProbe = { g, auto, central };
+        }
+        const { g, auto, central } = w2.__labelsProbe;
+        const ctmScale = Math.sqrt(Math.abs(m.a * m.d - m.b * m.c));
+        g.setAttribute("transform", `scale(${ctmScale})`);
+        for (const t of [auto, central]) {
+          t.setAttribute("font-family", style.fontFamily);
+          t.setAttribute("font-size", String(row.fontPx));
+          t.setAttribute("font-style", style.fontStyle);
+          t.setAttribute("font-weight", style.fontWeight);
+          t.setAttribute("text-rendering", style.textRendering);
+        }
+        const extentShift = central.getExtentOfChar(0).y - auto.getExtentOfChar(0).y;
+        // Painted, not reported: when the characters sit in a child inline box (textPath/tspan) of a <text> whose own
+        // baseline is central too (#labels sets it on the group), Chromium paints the child's central baseline rounded
+        // up to a whole CSS px; getExtentOfChar keeps the half px. Measured on painted pixels (W3 GLYPH probes,
+        // Almendra SC 14-27.7 px, k 1-2, dpr 2: painted minus extent 0 or exactly 1 device px, always this rule).
+        const nested = getComputedStyle(text).dominantBaseline === "central" && text.children.length > 0;
+        row.centralShiftSvg = nested ? Math.ceil(extentShift * ctmScale - 1e-3) / ctmScale : extentShift;
+        row.centralNested = nested;
       }
       const chars: Json[] = [];
       if (m && reading >= 0) {
@@ -526,8 +573,10 @@ function svgLabels(args: { group: string | null; chars: boolean; dpr: number; id
           const char = content[i];
           if (!char.trim()) continue;
           try {
+            w.__labelsReading = true; // break=measure moves these for the page, not for the reference
             const s = text.getStartPositionOfChar(i);
             const e = text.getEndPositionOfChar(i);
+            w.__labelsReading = false;
             const x = text.getExtentOfChar(i);
             const [mx, my] = map((s.x + e.x) / 2, (s.y + e.y) / 2);
             const corners = [map(x.x, x.y), map(x.x + x.width, x.y), map(x.x + x.width, x.y + x.height), map(x.x, x.y + x.height)];
@@ -541,6 +590,7 @@ function svgLabels(args: { group: string | null; chars: boolean; dpr: number; id
               empty: !(x.width > 0 && x.height > 0)
             });
           } catch {
+            w.__labelsReading = false;
             // a character the layout does not place (past the end of its path)
           }
         }
@@ -550,22 +600,6 @@ function svgLabels(args: { group: string | null; chars: boolean; dpr: number; id
     out.push(row);
   });
   return { groupHidden, labels: out, camera: (0, eval)("(() => { const t = d3.zoomTransform(document.querySelector('#map')); return { k: t.k, x: t.x, y: t.y }; })()") };
-}
-
-// text.ts centralBaselineShift, per raster font: (fontBoundingBoxAscent − fontBoundingBoxDescent) / 2 in raster px, from
-// the very font string text.ts measured (the atlas key's font is its rasterFont, px × scale). Dividing by the glyph's
-// scale gives text.ts's shift in world units. The font box is a font-level metric (Chromium takes it from the primary
-// font, not from the string), so the measured string does not matter.
-function fontCentres(fonts: string[]): Record<string, number> {
-  const g = globalThis as any;
-  const context = (g.__labelsMeasure ??= document.createElement("canvas").getContext("2d")) as CanvasRenderingContext2D;
-  const out: Record<string, number> = {};
-  for (const font of fonts) {
-    context.font = font;
-    const metrics = context.measureText("Hg");
-    out[font] = (metrics.fontBoundingBoxAscent - metrics.fontBoundingBoxDescent) / 2;
-  }
-  return out;
 }
 
 // ------------------------------------------------------------------ evidence
@@ -807,7 +841,6 @@ async function stepGlyphs(page: Page, blanks: Blanks, dir: string): Promise<Json
           const state = await page.evaluate(svgLabels, { group: null, chars: true, dpr, ids: null });
           const gpuSide = await page.evaluate(gpuGlyphs, dpr);
           if (gpuSide.error) report.errors.push(`harness: ${gpuSide.error}`);
-          const centres: Record<string, number> = Array.isArray(gpuSide.glyphs) ? await page.evaluate(fontCentres, [...new Set((gpuSide.glyphs as Json[]).map(g => g.font as string))]) : {};
           const shots = await captureArms(page);
           const svg = decode(shots.svg);
           const gpu = decode(shots.gpu);
@@ -869,27 +902,30 @@ async function stepGlyphs(page: Page, blanks: Blanks, dir: string): Promise<Json
             row.pixel = { ...stats(charShifts), missing: charsMissing };
             if (label.native && Array.isArray(gpuSide.glyphs)) {
               const near = (gpuSide.glyphs as Json[]).filter(g => g.x >= label.box.x0 - 40 && g.x <= label.box.x1 + 40 && g.y >= label.box.y0 - 40 && g.y <= label.box.y1 + 40);
-              const svgPoints = (label.chars as Json[]).filter(c => !c.empty);
               const radius = Math.max(4, 0.6 * label.fontPx * k * dpr);
-              // back to the nominal baseline: undo text.ts's own central-baseline shift (its raster font, its scale)
-              // along each glyph's normal
+              // both sides on the baseline the glyphs are painted on: the GPU's (its instance, shift applied) and the
+              // SVG's (its nominal position moved along the character's normal by the SVG's own central shift)
               const central = label.baseline === "central";
-              const nominal = (near as Json[]).map(g => {
-                const a = (g.angle * Math.PI) / 180;
-                const shift = central ? ((centres[g.font] ?? 0) / g.scale) * gpuSide.view.k * dpr : 0;
-                return { ...g, shift, x: g.x + Math.sin(a) * shift, y: g.y - Math.cos(a) * shift } as Json;
-              });
+              const svgShift = central ? (label.centralShiftSvg ?? 0) * k * dpr : 0;
+              const svgPoints = (label.chars as Json[])
+                .filter(c => !c.empty)
+                .map(c => {
+                  const a = (c.rotation * Math.PI) / 180;
+                  return { ...c, x: c.x - Math.sin(a) * svgShift, y: c.y + Math.cos(a) * svgShift };
+                });
+              const nominal = near as Json[];
               const pairs = matchGlyphs(svgPoints, nominal as any, radius);
               const errors = pairs.map(p => p.distance);
               analytic.push(...errors);
               const components = pairs.map(p => alongNormal(nominal[p.j].x - svgPoints[p.i].x, nominal[p.j].y - svgPoints[p.i].y, nominal[p.j].angle));
               along.push(...components.map(c => Math.abs(c.along)));
               normal.push(...components.map(c => Math.abs(c.normal)));
-              if (central && pairs.length && label.centralShift1x !== undefined) {
-                // how far the 1x estimate the earlier harness used is from text.ts's own shift, in device px
-                const delta = nominal[pairs[0].j].shift - label.centralShift1x * k * dpr;
-                centralDelta.push(Math.abs(delta));
-                row.centralShift = { gpu: Number(nominal[pairs[0].j].shift.toFixed(3)), at1x: Number((label.centralShift1x * k * dpr).toFixed(3)) };
+              if (central && pairs.length && label.centralShiftSvg !== undefined) {
+                // the shift the GPU instance applies (central shift, plus dy on text.ts's measured path) next to the
+                // SVG's central shift, device px: a diagnostic, the analytic error above already includes it
+                const gpuShift = nominal[pairs[0].j].shift;
+                centralDelta.push(Math.abs(gpuShift - svgShift));
+                row.centralShift = { gpu: Number(gpuShift.toFixed(3)), svg: Number(svgShift.toFixed(3)) };
               }
               for (const [index, p] of pairs.entries()) {
                 const delta = Math.abs((((svgPoints[p.i].rotation - nominal[p.j].angle) % 360) + 540) % 360 - 180);
@@ -936,7 +972,7 @@ async function stepGlyphs(page: Page, blanks: Blanks, dir: string): Promise<Json
       skippedLabels: v.skipped.length,
       skippedByGroup,
       missingLabels: missingLabels.length,
-      analytic: { ...stats(analytic), unmatched, along: stats(along), normal: stats(normal), angleDeg: stats(angles), centralShiftVs1x: stats(centralDelta) },
+      analytic: { ...stats(analytic), unmatched, along: stats(along), normal: stats(normal), angleDeg: stats(angles), centralShiftVsSvg: stats(centralDelta) },
       pixel: { ...stats(shifts), missing: missingGlyphs, withinTol: pixelCounted ? Number((pixelWithin / pixelCounted).toFixed(4)) : null },
       labelShift: stats(labelShifts)
     };
@@ -1021,7 +1057,8 @@ async function stepAdvance(page: Page): Promise<Json> {
                 const bucket = bucketOf(k * dpr);
                 const cs = getComputedStyle(text);
                 context.font = `${cs.fontStyle} ${cs.fontWeight} ${size * bucket}px ${cs.fontFamily}`;
-                context.fontKerning = rendering === "optimizeSpeed" ? "none" : "auto";
+                // text.ts's measured layout (the path for a label the SVG has not laid out): always kerned, as SVG is
+                context.fontKerning = "auto";
                 for (const s of strings) {
                   text.textContent = s;
                   const n = text.getNumberOfChars();
@@ -1029,10 +1066,29 @@ async function stepAdvance(page: Page): Promise<Json> {
                   let previousSvg = 0;
                   let previousGpu = 0;
                   const origin = text.getStartPositionOfChar(0).x;
+                  // text.ts wholeRun: no-break spaces keep Canvas2D from shaping word by word (kerns across spaces)
+                  const nbsp = Math.abs(context.measureText(" ").width - context.measureText("\u00a0").width) <= 1e-6;
+                  const W = (x: string) => context.measureText(nbsp ? x.replaceAll(" ", "\u00a0") : x).width;
+                  // text.ts kernsBefore / kernOffsets: a legacy 'kern' table pair is split by HarfBuzz and Chromium
+                  // reports the second character half the kern before its painted origin; a GPOS pair is not. Which
+                  // one is read off the SVG's own character advances, as text.ts does.
+                  const kerns = [...s].map((c, i) => (i ? W(s.slice(0, i + 1)) - W(s.slice(0, i)) - W(c) : 0));
+                  let splitFit = 0;
+                  let gposFit = 0;
+                  for (let i = 0; i < n; i++) {
+                    const reported = text.getEndPositionOfChar(i).x - text.getStartPositionOfChar(i).x;
+                    const next = kerns[i + 1] ?? 0;
+                    splitFit += Math.abs(reported - (W(s[i]) + (kerns[i] + next) / 2) / bucket);
+                    gposFit += Math.abs(reported - (W(s[i]) + next) / bucket);
+                  }
+                  const split = splitFit < gposFit;
                   for (let i = 1; i <= n; i++) {
-                    // where the SVG puts character i (the end of the last one for i = n), in user units
+                    // where the SVG reports character i (the end of the last one for i = n), in user units
                     const svg = (i < n ? text.getStartPositionOfChar(i).x : text.getEndPositionOfChar(n - 1).x) - origin;
-                    const gpu = context.measureText(s.slice(0, i)).width / bucket;
+                    // text.ts kernedAdvances puts character i's painted origin at width(prefix(i+1)) - width(char i);
+                    // the reported start the model predicts is that, less half the kern when the font's kerns split
+                    const offset = i < n && split ? kerns[i] / 2 : 0;
+                    const gpu = (i < n ? W(s.slice(0, i + 1)) - W(s[i]) - offset : W(s)) / bucket;
                     const cum = Math.abs(gpu - svg) * k * dpr;
                     const advance = Math.abs(gpu - previousGpu - (svg - previousSvg)) * k * dpr;
                     previousSvg = svg;
