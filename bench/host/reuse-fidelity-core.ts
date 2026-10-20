@@ -20,24 +20,41 @@ export interface ReuseObservation {
   reused: OnStateMetrics;
   fresh: OnStateMetrics;
   gpu: { active: string | null; timedOut?: boolean; fallbackReason?: string };
+  // the `definition` edit only: how many pixels of the SVG arm the edit changed (isolated family, before vs after). A
+  // definition edit proves nothing unless it is visible, and whether the raster was kept is not the point: the frame after
+  // it must show the new definition, kept or re-cut. Absent for the other edits.
+  visiblePx?: number;
 }
+
+// An edit of a definition must change at least this many SVG pixels of the isolated family to count as exercised.
+export const DEFINITION_VISIBLE_PX = 100;
 
 export type ReuseVerdict = { status: "PASS" | "FAIL" | "INFO"; problems: string[]; exercised: boolean };
 
 export function judgeReuse(o: ReuseObservation): ReuseVerdict {
   const label = `${o.edit}/${o.family}`;
-  const exercised = !!o.kept?.keptLayers.includes(o.layerId);
+  const definition = o.visiblePx !== undefined;
+  const exercised = definition ? o.visiblePx! >= DEFINITION_VISIBLE_PX : !!o.kept?.keptLayers.includes(o.layerId);
   const problems: string[] = [];
   if (o.freshKept !== null && o.freshKept > 0) problems.push(`${label}: the fresh control reused ${o.freshKept} raster(s)`);
   if (!exercised) {
     if (problems.length) return { status: "FAIL", problems, exercised };
-    return { status: "INFO", problems: [`${label}: no raster of #${o.layerId} was reused across the edit`], exercised };
+    return {
+      status: "INFO",
+      problems: [definition ? `${label}: the definition edit changed ${o.visiblePx} SVG px of #${o.layerId} (needs ${DEFINITION_VISIBLE_PX})` : `${label}: no raster of #${o.layerId} was reused across the edit`],
+      exercised
+    };
   }
   problems.push(...judgeOnStateFidelity({ label, before: o.fresh, after: o.reused, gpu: o.gpu }));
   return { status: problems.length ? "FAIL" : "PASS", problems, exercised };
 }
 
+// A cell that raced a redraw is not a measurement: it is a failure (the check retried and could not get a still frame).
+export function judgeRaced(label: string, raced: readonly string[]): string[] {
+  return raced.length ? [`${label}: the canvas redrew while its screenshot was taken, in every attempt (${raced.join(", ")}); not measured`] : [];
+}
+
 // An edit no family's cell reused across proves nothing: the check would pass vacuously.
 export function judgeExercised(edit: string, verdicts: ReuseVerdict[]): string[] {
-  return verdicts.some(v => v.exercised) ? [] : [`${edit}: no family reused a raster across the edit (check is vacuous)`];
+  return verdicts.some(v => v.exercised) ? [] : [`${edit}: no family ${edit === "definition" ? "showed a visible definition edit" : "reused a raster across the edit"} (check is vacuous)`];
 }

@@ -11,7 +11,7 @@ const mime = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css
 const server = createServer((request, response) => {
   const path = resolve(dist, "." + new URL(request.url || "/", "http://localhost").pathname);
   if (!path.startsWith(dist + "/") && path !== dist) return void response.writeHead(403).end();
-  try { const file = path === dist ? resolve(dist, "index.html") : path; response.setHeader("content-type", mime[extname(file)] || "application/octet-stream"); response.end(readFileSync(file)); }
+  try { const file = path === dist ? resolve(dist, "index.html") : path; response.setHeader("content-type", (mime as Record<string, string>)[extname(file)] || "application/octet-stream"); response.end(readFileSync(file)); }
   catch { response.writeHead(404).end(); }
 });
 await new Promise<void>(done => server.listen(0, "127.0.0.1", done));
@@ -50,7 +50,7 @@ try {
    const idle=await page.evaluate(()=>new Promise<number[]>(resolve=>{const times:number[]=[];let previous=0;const tick=(t:number)=>{if(previous)times.push(t-previous);previous=t;if(times.length<120)requestAnimationFrame(tick);else resolve(times)};requestAnimationFrame(tick);}));
    await page.evaluate(()=>{
     const w=globalThis as any;
-    const state=w.__nativeNav={running:true,intervals:[] as number[],events:[] as number[],tasks:[] as number[],gpuFrames:0,frames:0,previous:0,preparesAtStart:w.rendererStatus?.().gpu?.prepares||0,preparesDuring:[] as number[],movingFrames:0,cameras:[] as number[][]};
+    const state: any=w.__nativeNav={running:true,intervals:[] as number[],events:[] as number[],tasks:[] as number[],gpuFrames:0,frames:0,previous:0,preparesAtStart:w.rendererStatus?.().gpu?.prepares||0,preparesDuring:[] as number[],movingFrames:0,cameras:[] as number[][]};
     const event=(e:Event)=>{const stamp=e.timeStamp;requestAnimationFrame(()=>state.events.push(performance.now()-stamp));};
     window.addEventListener("mousemove",event,true);window.addEventListener("wheel",event,true);
     const observer=new PerformanceObserver(list=>{for(const e of list.getEntries())state.tasks.push(e.duration)});

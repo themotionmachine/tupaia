@@ -97,7 +97,7 @@ try {
       const pack = (0, eval)("pack");
       const fields = ["cells", "burgs", "states", "routes", "rivers", "features", "markers", "cultures", "religions", "provinces", "zones", "goods", "markets", "deals", "ice"];
       const bytes = new TextEncoder().encode(JSON.stringify(Object.fromEntries(fields.map(field => [field, pack[field]]))));
-      return Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))).map(value => value.toString(16).padStart(2, "0")).join("");
+      return Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes as BufferSource))).map(value => value.toString(16).padStart(2, "0")).join("");
     });
     try {
       await stage(arm, "boot", async () => {
@@ -145,7 +145,7 @@ try {
             gl.bindFramebuffer(gl.READ_FRAMEBUFFER, previousRead);
             const glError = gl.getError();
             const png = canvas.toDataURL();
-            const hash = async (bytes: Uint8Array) => Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))).map(value => value.toString(16).padStart(2, "0")).join("");
+            const hash = async (bytes: Uint8Array) => Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes as BufferSource))).map(value => value.toString(16).padStart(2, "0")).join("");
             const before = w.rendererStatus().gpu.pickProfile.queries;
             const selection = w.gpuSelect(640, 360, 0);
             const gpu = w.rendererStatus().gpu;

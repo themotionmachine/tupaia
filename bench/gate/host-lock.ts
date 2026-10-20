@@ -10,7 +10,8 @@
 //                   by a stream of shared runs. (A raw hostlock.py does not use the turnstile; it can still wait
 //                   behind a long stream of shared runs. It never runs concurrently with one.)
 //   <path>.slot<i>  i = 0..slots-1, the shared cap. A shared holder also holds one slot file LOCK_EX, polling until
-//                   one is free.
+//                   one is free. With slots = 0 there is no cap (the per-worktree dist lock: any number of readers,
+//                   one writer, writer never starved).
 // The helper prints "locked <mode> <slot>" once it owns the lock and keeps it until its stdin closes, which also
 // happens if the gate dies, so a lock can never outlive its gate.
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
@@ -26,7 +27,7 @@ export const LOCK_HELPER = [
   "fcntl.flock(main, fcntl.LOCK_EX if mode == 'exclusive' else fcntl.LOCK_SH)",
   "fcntl.flock(turnstile, fcntl.LOCK_UN)",
   "slot, held = -1, None",
-  "while mode == 'shared' and held is None:",
+  "while mode == 'shared' and slots > 0 and held is None:",
   "    for i in range(slots):",
   "        f = open('%s.slot%d' % (path, i), 'a+')",
   "        try:",
@@ -54,6 +55,8 @@ export interface HostLockOptions {
   log?: (message: string) => void;
   // false in tests: do not look for a hostlock.py ancestor or TUPAIA_GATE_LOCK_HELD
   detectInherited?: boolean;
+  // what the lock is called in the progress lines (default "host lock")
+  label?: string;
 }
 
 export class HostLock {
@@ -87,7 +90,12 @@ export class HostLock {
     });
     this.helper = helper;
     const notice = setTimeout(
-      () => log(`waiting for the ${mode} host lock ${this.options.path} (${mode === "exclusive" ? "browser jobs are running" : "an exclusive job is running or waiting, or all shared slots are busy"})`),
+      () =>
+        log(
+          `waiting for the ${mode} ${this.options.label ?? "host lock"} ${this.options.path} (${
+            this.options.label ? (mode === "exclusive" ? "checks are reading it" : "a rebuild holds or awaits it") : mode === "exclusive" ? "browser jobs are running" : "an exclusive job is running or waiting, or all shared slots are busy"
+          })`
+        ),
       1500
     );
     try {
@@ -110,7 +118,7 @@ export class HostLock {
       clearTimeout(notice);
     }
     this.waitSeconds = (Date.now() - started) / 1000;
-    if (this.waitSeconds > 1.5) log(`${mode} host lock acquired after ${this.waitSeconds.toFixed(0)}s`);
+    if (this.waitSeconds > 1.5) log(`${mode} ${this.options.label ?? "host lock"} acquired after ${this.waitSeconds.toFixed(0)}s`);
   }
 
   async release(): Promise<void> {

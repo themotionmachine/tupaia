@@ -18,9 +18,18 @@
 //   zoom    the camera from k 1.5 to 1.9 (the same raster bucket at dpr 2): zoom-end label font-size writes on
 //           #labels > g (the subtree rule) plus every camera-dependent attribute the app writes;
 //   move    every marker's x/y by (25, 15) (the markers run must be re-cut; with any other family isolated it is hidden);
-//   toggle  rulers off (run boundaries change around a removed layer).
+//   toggle  rulers off (run boundaries change around a removed layer);
+//   definition  every pattern, symbol, gradient, marker or coat of arms the isolated family paints through is recoloured
+//           (reuse-fidelity-page.ts editDefinitions): the closure logic of compat-reuse.ts that dirties only the runs that
+//           reach a changed definition. The frame after the edit must show the new colours, whether the run was kept or
+//           re-cut; the edit must change the SVG by DEFINITION_VISIBLE_PX or the cell is INFO. A family that paints
+//           through no definition (most of them on the parity fixture) is INFO at once, without a capture.
 // REUSE_BREAK=stale (self-test, the run must FAIL): ?gpu-compat-reuse-break=stale makes the tracker ignore every edit,
 // so stale rasters are reused; the move edit leaves the markers family showing its old position.
+// REUSE_BREAK=definitions (self-test, the definition edit must FAIL, the move edit must still PASS): the tracker ignores
+// only definition changes (the ids a change reaches), so a family keeps its raster across a recoloured definition.
+// A capture that raced a redraw (the canvas drew while its screenshot was taken) is retried up to RACE_ATTEMPTS times; one
+// that still raced is a FAIL, never an INFO.
 //
 // Environment: REUSE_DPR (2), REUSE_LAUNCHER (metal), REUSE_FAMILIES (comma list of golden family names, default the
 // families with compat runs on the parity fixture), REUSE_EDITS, REUSE_BREAK, REUSE_MAP (parity .map), GATE_OUT_DIR.
@@ -32,24 +41,26 @@ import { encodePng } from "../png.ts";
 import { captureArms, decode, isolateLayers, launch, loadParity, openPage, parityFixture, serveDist, settleApp, type Sink, waitCurrent, zoomTo } from "./census-lib.ts";
 import { type Check, failureSummary, fail, info, judged, pass } from "./census-core.ts";
 import { FAMILIES } from "./golden-families.ts";
-import { judgeExercised, judgeReuse, type ReuseVerdict } from "./reuse-fidelity-core.ts";
+import { judgeExercised, judgeRaced, judgeReuse, type ReuseVerdict } from "./reuse-fidelity-core.ts";
+import { editDefinitions, listDefinitions } from "./reuse-fidelity-page.ts";
 
 const env = process.env;
 const outDir = env.GATE_OUT_DIR || process.cwd();
 const dpr = Number(env.REUSE_DPR || 2);
 const breakMode = env.REUSE_BREAK || "none";
-if (!["none", "stale"].includes(breakMode)) throw Error("REUSE_BREAK must be none|stale");
+if (!["none", "stale", "definitions"].includes(breakMode)) throw Error("REUSE_BREAK must be none|stale|definitions");
 const DEFAULT_FAMILIES = "markers,emblems,military,labels,goods,markets,precipitation,population,burgs,lakes,coastline,states,provinces,ocean,texture,cells,coordinates,compass,ice,fog,rulers";
 const families = (env.REUSE_FAMILIES || DEFAULT_FAMILIES).split(",").map(s => s.trim()).filter(Boolean).map(name => {
   const family = FAMILIES.find(f => f.name === name);
   if (!family) throw Error(`REUSE_FAMILIES: unknown family ${name}`);
   return family;
 });
-const EDITS = ["zoom", "move", "toggle"] as const;
+const EDITS = ["zoom", "move", "toggle", "definition"] as const;
 type Edit = (typeof EDITS)[number];
 const edits = (env.REUSE_EDITS || EDITS.join(",")).split(",").map(s => s.trim()).filter(Boolean) as Edit[];
 for (const edit of edits) if (!EDITS.includes(edit)) throw Error(`REUSE_EDITS: unknown edit ${edit}`);
 const BASE_K = 1.5;
+const RACE_ATTEMPTS = 3;
 const EDIT_K = 1.9; // k·dpr 3 → 3.8: the same power-of-two raster bucket (4), so world raster keys stay valid
 
 const started = Date.now();
@@ -74,7 +85,7 @@ try {
   const { page } = opened;
   report.adapter = opened.adapter;
   // the reuse path whatever the build default (and the self-test's blind tracker): the renderer reads both at boot
-  const params = `&gpu-compat-reuse=1${breakMode === "stale" ? "&gpu-compat-reuse-break=stale" : ""}`;
+  const params = `&gpu-compat-reuse=1${breakMode === "none" ? "" : `&gpu-compat-reuse-break=${breakMode}`}`;
   await page.goto(`${page.url()}${params}`);
   await page.evaluate(async () => {
     const ready = await (globalThis as any).__tupaia.call("ready", { timeoutMs: 120000 });
@@ -108,8 +119,9 @@ try {
     return waitCurrent(page, 120000);
   };
   // apply / undo an edit (page side; each returns once the app has settled)
-  const apply = async (edit: Edit, on: boolean) => {
-    if (edit === "zoom") await page.evaluate(zoomTo, { k: on ? EDIT_K : BASE_K });
+  const apply = async (edit: Edit, on: boolean, family: { id: string }) => {
+    if (edit === "definition") await page.evaluate(editDefinitions, { id: family.id, set: on });
+    else if (edit === "zoom") await page.evaluate(zoomTo, { k: on ? EDIT_K : BASE_K });
     else if (edit === "move")
       await page.evaluate(set => {
         // every marker's own position: the run keeps its elements (a transform on #markers would regroup it into one
@@ -136,35 +148,22 @@ try {
   }
   const frames = () => page.evaluate(() => (globalThis as any).rendererStatus?.()?.gpu?.frames ?? 0);
   const cell = async (refined: boolean): Promise<Cell> => {
-    await settleApp(page);
-    const wait = await waitCurrent(page, 120000, refined);
-    const before = await frames();
-    const shots = await captureArms(page);
-    const raced = (await frames()) !== before;
-    return { shots, metrics: measureCell(decode(shots.svg), decode(shots.gpu), blankSvg, blankGpu), raced, gpu: wait, ms: wait.ms };
+    let last!: Cell;
+    for (let attempt = 1; attempt <= RACE_ATTEMPTS; attempt++) {
+      await settleApp(page);
+      const wait = await waitCurrent(page, 120000, refined);
+      const before = await frames();
+      const shots = await captureArms(page);
+      const raced = (await frames()) !== before;
+      last = { shots, metrics: measureCell(decode(shots.svg), decode(shots.gpu), blankSvg, blankGpu), raced, gpu: wait, ms: wait.ms };
+      if (!raced) return last;
+      log(`capture raced a redraw (attempt ${attempt}/${RACE_ATTEMPTS})`);
+    }
+    return last;
   };
-  // Holds the settle refinement (page side, on the renderer instance): the current frame shows the base rasters, reused
-  // or cut, only until the settle details replace them over the whole view. A settle that would prepare still runs.
-  const hold = (on: boolean) =>
-    page.evaluate(on => {
-      const r = (globalThis as any).gpuRenderer;
-      if (on) {
-        if (Object.hasOwn(r, "settle")) return;
-        const original = r.settle;
-        r.settle = function (this: any) {
-          const p = this.prepared;
-          const refine = p && !this.preparing && !this.moving && !this.prepareWanted && p.revision === this.revision && p.bucket === this.bucket();
-          if (!refine) return original.call(this);
-          this.__refineHeld = true;
-        };
-      } else if (Object.hasOwn(r, "settle")) {
-        delete r.settle;
-        if (r.__refineHeld) {
-          delete r.__refineHeld;
-          r.scheduleSettle();
-        }
-      }
-    }, on);
+  // Holds the settle refinement (renderer test hook GpuRenderer.holdRefinement): the current frame shows the base rasters,
+  // reused or cut, only until the settle details replace them over the whole view. A settle that would prepare still runs.
+  const hold = (on: boolean) => page.evaluate(on => (globalThis as any).gpuRenderer.holdRefinement(on), on);
   // the current frame first (the base rasters, the settle refinement held), then the refined frame
   const cells = async (change: () => Promise<unknown>) => {
     await hold(true);
@@ -190,20 +189,40 @@ try {
     const verdicts: ReuseVerdict[] = [];
     for (const family of families) {
       const id = `reuse.${edit}.${family.name}`;
+      if (edit === "definition") {
+        // most families paint through no definition: nothing to recolour, nothing to capture
+        const defs = await page.evaluate(listDefinitions, { id: family.id });
+        if (!defs.length) {
+          const verdict: ReuseVerdict = { status: "INFO", problems: [`${edit}/${family.name}: #${family.id} paints through no pattern, symbol, gradient, marker or coat of arms`], exercised: false };
+          verdicts.push(verdict);
+          report.cells.push({ edit, family: family.name, status: "INFO", exercised: false, definitions: [], problems: verdict.problems });
+          add(info(id, "P2", verdict.problems[0]));
+          continue;
+        }
+      }
       // 1. base state, family isolated, current (its rasters cut or reused from the frame before)
       await page.evaluate(isolateLayers, { ids: [family.id], bg: "#ffffff" });
       await settle();
       const baseProbe = await probe();
+      // the definition edit must be visible: the SVG of the isolated family before it (a stale raster is only a failure
+      // when the right answer differs from the stale one)
+      const baseSvg = edit === "definition" ? decode((await captureArms(page)).svg) : null;
       // 2. the edit: the prepare reuses every run it finds clean
       // 3. reused cells: the current frame (base rasters, D12) and the refined one (settle details, carried or re-cut)
       const probed: { value?: Awaited<ReturnType<typeof probe>> } = {};
       const reusedCells = await cells(async () => {
-        await apply(edit, true);
+        await apply(edit, true, family);
         await page.evaluate(isolateLayers, { ids: [family.id], bg: "#ffffff" });
         await settle();
         probed.value = await probe();
       });
       const kept = probed.value!;
+      let visiblePx: number | undefined;
+      if (baseSvg) {
+        const after = decode(reusedCells.current.shots.svg);
+        visiblePx = 0;
+        for (let i = 0; i < baseSvg.data.length; i += 4) if (baseSvg.data[i] !== after.data[i] || baseSvg.data[i + 1] !== after.data[i + 1] || baseSvg.data[i + 2] !== after.data[i + 2]) visiblePx++;
+      }
       // 4. fresh control: forced re-prepare, every run dirty
       const freshCells = await cells(() => page.evaluate(() => (globalThis as any).gpuRenderer.invalidate(true)));
       const freshProbe = await probe();
@@ -218,21 +237,25 @@ try {
           freshKept: freshProbe.enabled ? freshProbe.worldKept : null,
           reused: pick(reusedCells[stage].metrics),
           fresh: pick(freshCells[stage].metrics),
-          gpu: reusedCells[stage].gpu
+          gpu: reusedCells[stage].gpu,
+          visiblePx
         });
-      const stages = (["current", "refined"] as const).filter(stage => !reusedCells[stage].raced && !freshCells[stage].raced);
+      // every stage is judged; a stage whose capture still raced a redraw after the retries is a failure (the metrics of a
+      // frame that changed under the screenshot say nothing), never a silent INFO
+      const stages = ["current", "refined"] as const;
       const byStage = stages.map(stage => ({ stage, verdict: judge(stage) }));
+      const racedStages = stages.filter(stage => reusedCells[stage].raced || freshCells[stage].raced);
+      const racedProblems = judgeRaced(`${edit}/${family.name}`, racedStages);
       const verdict: ReuseVerdict = {
-        status: byStage.some(v => v.verdict.status === "FAIL") ? "FAIL" : byStage.some(v => v.verdict.status === "PASS") ? "PASS" : "INFO",
-        problems: byStage.flatMap(v => v.verdict.problems),
+        status: racedProblems.length || byStage.some(v => v.verdict.status === "FAIL") ? "FAIL" : byStage.some(v => v.verdict.status === "PASS") ? "PASS" : "INFO",
+        problems: [...racedProblems, ...byStage.flatMap(v => v.verdict.problems)],
         exercised: byStage.some(v => v.verdict.exercised)
       };
-      if (!stages.length) verdict.problems.push(`${edit}/${family.name}: every capture raced a redraw`);
       verdicts.push(verdict);
       let evidence: string | undefined;
       if (verdict.status === "FAIL") {
         for (const { stage, verdict: v } of byStage) {
-          if (v.status !== "FAIL") continue;
+          if (v.status !== "FAIL" && !racedStages.includes(stage)) continue;
           const base = join(outDir, "cells", `${edit}-${family.name}-${stage}`);
           writeFileSync(`${base}-reused-gpu.png`, reusedCells[stage].shots.gpu);
           writeFileSync(`${base}-reused-svg.png`, reusedCells[stage].shots.svg);
@@ -242,7 +265,7 @@ try {
         }
       }
       const row = (stage: "current" | "refined") => ({ reused: pick(reusedCells[stage].metrics), fresh: pick(freshCells[stage].metrics), raced: reusedCells[stage].raced || freshCells[stage].raced, ms: reusedCells[stage].ms });
-      report.cells.push({ edit, family: family.name, status: verdict.status, exercised: verdict.exercised, kept, baseRuns: baseProbe.runs, freshKept: freshProbe.worldKept, current: row("current"), refined: row("refined"), problems: verdict.problems });
+      report.cells.push({ edit, family: family.name, status: verdict.status, exercised: verdict.exercised, visiblePx, kept, baseRuns: baseProbe.runs, freshKept: freshProbe.worldKept, current: row("current"), refined: row("refined"), problems: verdict.problems });
       const m = (stage: "current" | "refined") => {
         const [f, r] = [freshCells[stage].metrics, reusedCells[stage].metrics];
         return `${stage}: ssim ${f.ssim.toFixed(4)}/${r.ssim.toFixed(4)}, over16 ${(f.over16Fraction * 100).toFixed(3)}%/${(r.over16Fraction * 100).toFixed(3)}%, ink ratio ${f.inkRatio.toFixed(3)}/${r.inkRatio.toFixed(3)}`;
@@ -252,10 +275,10 @@ try {
       else if (verdict.status === "INFO") add(info(id, "P2", `${verdict.problems.join("; ")} (${Object.entries(kept.reasons).map(([k, v]) => `${k}: ${v}`).join(", ") || "no reasons"})`));
       else add(fail(id, "P2", `${verdict.problems.join("; ")} (${metrics})`, evidence));
       // back to the base state for the next family
-      await apply(edit, false);
+      await apply(edit, false, family);
       write();
     }
-    add(judged(`reuse.${edit}.exercised`, "P2", judgeExercised(edit, verdicts), `${verdicts.filter(v => v.exercised).length}/${verdicts.length} families reused a raster across the edit`));
+    add(judged(`reuse.${edit}.exercised`, "P2", judgeExercised(edit, verdicts), `${verdicts.filter(v => v.exercised).length}/${verdicts.length} families ${edit === "definition" ? "showed a visible definition edit" : "reused a raster across the edit"}`));
   }
   await page.evaluate(isolateLayers, { ids: [], restore: true });
   add(sink.errors.length ? fail("run.page-errors", "P2", sink.errors.slice(0, 3).join(" | ")) : pass("run.page-errors", "P2", "no page errors"));

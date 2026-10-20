@@ -42,7 +42,7 @@ try {
       localStorage.setItem("azgaarAssistant", "hide");
       const w = globalThis as any;
       w.__webglRequests = 0;
-      for (const prototype of [HTMLCanvasElement.prototype, globalThis.OffscreenCanvas?.prototype].filter(Boolean)) {
+      for (const prototype of [HTMLCanvasElement.prototype, globalThis.OffscreenCanvas?.prototype].filter(Boolean) as any[]) {
         const get = prototype.getContext;
         prototype.getContext = function (id: string, ...args: unknown[]) {
           if (/webgl/.test(id)) w.__webglRequests++;

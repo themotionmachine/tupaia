@@ -143,3 +143,22 @@ test("a dead gate releases its lock", async () => {
   await b.done;
   await b.lock.release();
 });
+
+test("slots=0 (the dist lock): any number of shared readers, one exclusive writer that is not starved", async () => {
+  const path = fresh();
+  const readers = [request(path, "shared", 0), request(path, "shared", 0), request(path, "shared", 0)];
+  await Promise.all(readers.map(r => r.done));
+  assert.ok(readers.every(r => r.lock.slot === -1 || r.lock.slot === null), "no slot is taken");
+  const writer = request(path, "exclusive", 0);
+  await sleep(500);
+  assert.equal(writer.acquired, false, "the writer waits for the readers");
+  const late = request(path, "shared", 0);
+  await sleep(400);
+  assert.equal(late.acquired, false, "a reader that arrives while the writer waits queues behind it");
+  await Promise.all(readers.map(r => r.lock.release()));
+  await writer.done;
+  assert.equal(late.acquired, false, "the writer holds it alone");
+  await writer.lock.release();
+  await late.done;
+  await late.lock.release();
+});

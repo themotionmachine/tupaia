@@ -398,6 +398,7 @@ async function probeSeeds(origin: string, seeds: string[]): Promise<void> {
     for (const seed of seeds) {
       const gen = await bridge<any>(page, "generateMap", { seed, template: C.template, cells: C.cells, states: C.states, burgs: C.burgs, width: C.width, height: C.height, timeoutMs: 180000 });
       const land = await page.evaluate(() => {
+        const pack = (globalThis as any).pack;
         let n = 0;
         for (let i = 1; i < pack.cells.i.length; i++) if (pack.cells.h[i] >= 20) n++;
         return Math.round((100 * n) / pack.cells.i.length);

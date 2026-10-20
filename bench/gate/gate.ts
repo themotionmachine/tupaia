@@ -11,7 +11,7 @@
 // Exit 0 = pass, 1 = check failed, 2 = usage or environment error. See docs/performance/webgl-rewrite/GATE.md.
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { FAMILIES, FAMILY_NAMES, parsePresets, parseZooms, STYLE_PRESETS, selectFamilies } from "../host/golden-families.ts";
@@ -29,6 +29,8 @@ const GATE_HOME = resolve(process.env.TUPAIA_GATE_OUT || join(homedir(), ".tupai
 const OUT_BASE = join(GATE_HOME, basename(REPO));
 const FIXTURE_SHA = "f5c0d703e4a21dc608981285644ba05618ed01f45d3d45fb34827087b679f5c0";
 const FIXTURE_CACHE = join(GATE_HOME, "fixtures", `shared-v8-${FIXTURE_SHA.slice(0, 8)}.map`);
+const DIST_BUILD_PREFIX = ".dist-build-"; // .gitignore
+const DIST_OLD_PREFIX = ".dist-old-";
 const FIXTURE_LEGACY = "/tmp/tupaia-navigation-shared-v8.map";
 
 type Value = string | number | boolean;
@@ -209,6 +211,17 @@ class EnvError extends UsageError {}
 
 // host-lock.ts: shared slots for correctness checks, the exclusive lock for timing checks (GATE.md "Host lock").
 const lock = new HostLock({ path: LOCK_PATH, slots: slotCount(), log });
+// The per-worktree dist lock (W3b HARNESS; GATE.md "Building dist"). `build` writes a new dist/ off to the side and swaps
+// it in under the EXCLUSIVE dist lock; a browser check holds the SHARED dist lock for as long as it reads dist/ (a tier:
+// from its first browser step to its last). So a rebuild waits for the checks in this worktree to finish, a check never
+// meets a half-written or a swapped-in-mid-run bundle, and checks in the same worktree still run side by side. The lock
+// is per worktree (keyed by the repo path), unrelated to the host lock, which is per host.
+const DIST_LOCK_PATH = `${LOCK_PATH}.dist-${createHash("sha1").update(REPO).digest("hex").slice(0, 10)}`;
+const distLock = new HostLock({ path: DIST_LOCK_PATH, slots: 0, log, detectInherited: false, label: "dist lock" });
+const releaseLocks = async () => {
+  await distLock.release();
+  await lock.release();
+};
 
 // ---------------------------------------------------------------- process running
 
@@ -249,7 +262,7 @@ function killGroup(child: ChildProcess, signal: NodeJS.Signals): void {
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
     if (activeChild) killGroup(activeChild, "SIGKILL");
-    void lock.release().finally(() => process.exit(130));
+    void releaseLocks().finally(() => process.exit(130));
   });
 }
 
@@ -723,7 +736,7 @@ async function goldenCheck(ctx: Ctx): Promise<Partial<Result>> {
 // the symbols (`coa=pre`, its default), which is why it cannot see this. Here, per cell, the GPU frame is built with #coas
 // empty (current and refined, emblems absent) and the symbols are then put back, exactly what a late fetch does; the
 // emblems cell must then follow them. A renderer that does not fails with "empty in GPU arm" and a whole-frame gap, with
-// `coaLate.reprepared` false in the report. Expected to FAIL until the renderer observes #coas (LIFE3).
+// `coaLate.reprepared` false in the report; only that is labelled a race. The renderer has observed #coas since W3 LIFE3.
 async function coaRaceCheck(ctx: Ctx): Promise<Partial<Result>> {
   Object.assign(ctx.args, { layers: "emblems", coastk: "", preset: "default", bg: "#ffffff", reading: "over44", keep: "all", break: "none", gpu_arm: "canvas", params: "", svg_ref: "auto", settle_ms: 400, coa: "late" });
   const result = await goldenCheck(ctx);
@@ -732,8 +745,12 @@ async function coaRaceCheck(ctx: Ctx): Promise<Partial<Result>> {
   if (!cells.length) problems.push("no emblems cell was captured");
   for (const cell of cells) if (!cell.coaLate?.symbols) problems.push(`${cell.key}: the symbols were not held back (the check is vacuous)`);
   const late = cells.map(c => ({ cell: c.key, pass: c.pass, symbols: c.coaLate?.symbols, reprepared: c.coaLate?.reprepared, inkSvg: c.metrics?.inkSvg, inkGpu: c.metrics?.inkGpu }));
-  const raced = result.failure && !problems.length ? `lazy-COA race: ${result.failure}` : null;
-  const failure = [raced, ...problems].filter(Boolean).join(" | ") || null;
+  // Only a cell whose renderer did not prepare again after the symbols came back is the race. Any other failure (GPU not
+  // active, a harness error, a metric gap although it did re-prepare) is a golden failure and keeps its own label.
+  const raced = cells.filter(c => !c.pass && c.coaLate && c.coaLate.reprepared === false).map(c => c.key);
+  let label: string | null = null;
+  if (result.failure && !problems.length) label = raced.length ? `lazy-COA race (no re-prepare after the symbols returned: ${raced.join(", ")}): ${result.failure}` : `golden failed, not the lazy-COA race (every failing cell re-prepared, or has no coaLate): ${result.failure}`;
+  const failure = [label, ...problems].filter(Boolean).join(" | ") || null;
   return { ...result, exit_code: failure ? 1 : 0, failure, metrics: { ...result.metrics, late } };
 }
 
@@ -1183,6 +1200,18 @@ const DEFS: Record<string, CheckDef> = {
         return { failure: code ? `${errors} TypeScript error(s)` : null, metrics: { errors } };
       })
   },
+  // bench/ is outside tsconfig.json (src only). tsconfig.bench.json covers bench/host and bench/gate under the same strict
+  // settings (labels.ts is excluded there, with a note); a type error there used to surface only when node stripped it.
+  "typecheck-bench": {
+    lock: null,
+    keys: [],
+    timeout: 300,
+    run: ctx =>
+      runScript(ctx, [join(BIN, "tsc"), "-p", "tsconfig.bench.json"], {}, null, 300, (_d, code) => {
+        const errors = (tail(ctx.log, 1e7).match(/error TS\d+/g) ?? []).length;
+        return { failure: code ? `${errors} TypeScript error(s) under bench/` : null, metrics: { errors } };
+      })
+  },
   unit: {
     lock: null,
     keys: [],
@@ -1202,10 +1231,40 @@ const DEFS: Record<string, CheckDef> = {
         const code = await exec([join(BIN, "tsc")], ctx.env(), ctx.log, 300, false);
         if (code) return { exit_code: code, failure: "tsc failed (npm run build = tsc && vite build)", metrics: {} };
       }
-      return runScript(ctx, [join(BIN, "vite"), "build"], {}, null, 600, (_d, code) => ({
-        failure: code ? "vite build failed" : null,
-        metrics: code ? {} : { dist: distFingerprint()?.slice(0, 16), files: walk(join(REPO, "dist")).length }
+      // Atomic: vite writes a fresh directory next to dist/, and dist/ is swapped for it under the exclusive dist lock
+      // (no check in this worktree is reading dist/ then). A failed build leaves dist/ exactly as it was.
+      const fresh = join(REPO, `${DIST_BUILD_PREFIX}${process.pid}`);
+      rmSync(fresh, { recursive: true, force: true });
+      const result = await runScript(ctx, [join(BIN, "vite"), "build", "--outDir", fresh, "--emptyOutDir"], {}, null, 600, (_d, code) => ({
+        failure: code ? "vite build failed" : !existsSync(join(fresh, "index.html")) ? "vite build wrote no index.html" : null,
+        metrics: {}
       }));
+      if (result.failure) {
+        rmSync(fresh, { recursive: true, force: true });
+        return result;
+      }
+      const waitStart = Date.now();
+      if (distLock.held) throw new Error("build cannot swap dist/ while this gate process is itself reading it");
+      log("build: taking the exclusive dist lock to swap in the new dist/ (waits for the checks that are reading this worktree's dist/)");
+      await distLock.acquire("exclusive");
+      const waited = (Date.now() - waitStart) / 1000;
+      try {
+        const old = join(REPO, `${DIST_OLD_PREFIX}${process.pid}`);
+        rmSync(old, { recursive: true, force: true });
+        const dist = join(REPO, "dist");
+        if (existsSync(dist)) renameSync(dist, old);
+        try {
+          renameSync(fresh, dist);
+        } catch (error) {
+          if (existsSync(old)) renameSync(old, dist);
+          throw error;
+        }
+        rmSync(old, { recursive: true, force: true });
+      } finally {
+        await distLock.release();
+      }
+      const fingerprint = distFingerprint();
+      return { ...result, metrics: { dist: fingerprint?.slice(0, 16), files: walk(join(REPO, "dist")).length, dist_lock_wait_s: Number(waited.toFixed(1)) } };
     }
   },
   bench: {
@@ -1619,9 +1678,9 @@ const DEFS: Record<string, CheckDef> = {
     lock: "shared",
     keys: ["edits", "families", "dpr", "launcher", "break"],
     spec: {
-      edits: { type: "string", default: "zoom,move,toggle" },
+      edits: { type: "string", default: "zoom,move,toggle,definition" },
       families: { type: "string", default: "" },
-      break: { type: "enum", values: ["none", "stale"], default: "none" }
+      break: { type: "enum", values: ["none", "stale", "definitions"], default: "none" }
     },
     timeout: 3600,
     run: async ctx => {
@@ -1630,26 +1689,38 @@ const DEFS: Record<string, CheckDef> = {
       return runScript(ctx, nodeScript("bench/host/reuse-fidelity.ts"), env, report, 3600, data => ({ failure: reportFailure(data), metrics: data && { summary: data.summary, failing: (data.checks ?? []).filter((c: Json) => c.status === "FAIL").map((c: Json) => c.id).slice(0, 8), exercised: (data.checks ?? []).filter((c: Json) => /\.exercised$/.test(c.id)).map((c: Json) => `${c.id}: ${c.detail}`) } }));
     }
   },
-  // The reuse check must still fail: with the reuse tracker blind to edits (?gpu-compat-reuse-break=stale) the markers
-  // family keeps its raster from before the move edit and must fail; the emblems family (untouched) must still pass.
+  // The reuse check must still fail, twice over. (1) With the reuse tracker blind to every edit (?gpu-compat-reuse-break=stale)
+  // the markers family keeps its raster from before the move edit and must fail; emblems (untouched by the move) must pass.
+  // (2) With the tracker blind to DEFINITION changes only (=definitions) the definition edit (the fog layer's mask and filter,
+  // which live inside svg#map, so only the closure logic of compat-reuse.ts dirties the run; the definitions outside svg#map
+  // are also dirtied globally by the renderer's definition watch, so they cannot show the blindness) must fail, while the move edit on markers in the same run must not fail (re-cut: INFO, or reused and right: PASS): the closure logic is
+  // what is blinded, not the whole tracker.
   "reuse-fidelity-selftest": {
     lock: "shared",
     keys: ["launcher"],
-    timeout: 1200,
+    timeout: 2400,
     run: async ctx => {
-      const report = join(ctx.dir, "reuse-fidelity.json");
-      const env = { REUSE_EDITS: "move", REUSE_FAMILIES: "markers,emblems", REUSE_DPR: "2", REUSE_LAUNCHER: String(ctx.args.launcher), REUSE_BREAK: "stale", REUSE_MAP: resolveNamedFixture("parity") };
-      const code = await exec(nodeScript("bench/host/reuse-fidelity.ts"), ctx.env({ ...env, GATE_OUT_DIR: ctx.dir }), ctx.log, 1200, true);
-      const data = readJson(report);
-      const status = (id: string) => (data?.checks ?? []).find((c: Json) => c.id === id)?.status;
+      const base = { REUSE_DPR: "2", REUSE_LAUNCHER: String(ctx.args.launcher), REUSE_MAP: resolveNamedFixture("parity") };
+      const arms = [
+        { name: "stale", env: { ...base, REUSE_EDITS: "move", REUSE_FAMILIES: "markers,emblems", REUSE_BREAK: "stale" }, expect: { "reuse.move.markers": ["FAIL"], "reuse.move.emblems": ["PASS"] } },
+        { name: "definitions", env: { ...base, REUSE_EDITS: "move,definition", REUSE_FAMILIES: "markers,fog", REUSE_BREAK: "definitions" }, expect: { "reuse.definition.fog": ["FAIL"], "reuse.move.markers": ["PASS", "INFO"] } }
+      ];
       const problems: string[] = [];
-      if (!data) problems.push(`no report (exit ${code})`);
-      else {
-        if (status("reuse.move.markers") !== "FAIL") problems.push(`reuse.move.markers should FAIL with a blind tracker (got ${status("reuse.move.markers")})`);
-        if (status("reuse.move.emblems") !== "PASS") problems.push(`reuse.move.emblems should still PASS (got ${status("reuse.move.emblems")})`);
-        if ((data.checks ?? []).some((c: Json) => c.id === "run.harness")) problems.push("harness error");
+      const summary: Json = {};
+      for (const arm of arms) {
+        const dir = join(ctx.dir, arm.name);
+        mkdirSync(dir, { recursive: true });
+        const code = await exec(nodeScript("bench/host/reuse-fidelity.ts"), ctx.env({ ...arm.env, GATE_OUT_DIR: dir }), ctx.log, 1200, true);
+        const data = readJson(join(dir, "reuse-fidelity.json"));
+        const status = (id: string) => (data?.checks ?? []).find((c: Json) => c.id === id)?.status;
+        if (!data) problems.push(`${arm.name}: no report (exit ${code})`);
+        else {
+          for (const [id, want] of Object.entries(arm.expect)) if (!want.includes(status(id))) problems.push(`${arm.name}: ${id} should be ${want.join(" or ")} (got ${status(id)})`);
+          if ((data.checks ?? []).some((c: Json) => c.id === "run.harness")) problems.push(`${arm.name}: harness error`);
+        }
+        summary[arm.name] = { code, ...Object.fromEntries(Object.keys(arm.expect).map(id => [id, status(id)])), summary: data?.summary };
       }
-      return { exit_code: problems.length ? 1 : 0, failure: problems.length ? problems.join(" | ") : null, metrics: { markers: status("reuse.move.markers"), emblems: status("reuse.move.emblems"), summary: data?.summary } };
+      return { exit_code: problems.length ? 1 : 0, failure: problems.length ? problems.join(" | ") : null, metrics: summary };
     }
   },
   // The label harness must still fail: on the parity fixture, a clean run and four broken ones. `freeze` stops the GPU
@@ -1795,7 +1866,8 @@ async function timing(ctx: Ctx, script: string): Promise<Partial<Result>> {
 // ---------------------------------------------------------------- orchestration
 
 // `mode` is the tier's lock mode when a tier runs the check (the strongest any of its steps needs).
-async function runCheck(check: string, args: Args, mode: LockMode | null = null, quiet = false): Promise<Result> {
+// `dist`: keep = a tier holds the shared dist lock past this check; expect = the fingerprint the tier's dist must still have.
+async function runCheck(check: string, args: Args, mode: LockMode | null = null, quiet = false, dist: { keep?: boolean; expect?: string | null } = {}): Promise<Result> {
   const def = DEFS[check];
   const dir = makeDir(check);
   const logPath = join(dir, "run.log");
@@ -1825,6 +1897,7 @@ async function runCheck(check: string, args: Args, mode: LockMode | null = null,
   let started = Date.now();
   let lockWait = 0;
   let partial: Partial<Result>;
+  let distHere = false;
   try {
     if (def.lock && !existsSync(join(REPO, "dist/index.html"))) throw new EnvError("dist/ is missing: run `gate build` first");
     if (def.lock) ctx.map(); // a missing fixture is a usage error before any lock wait
@@ -1835,10 +1908,20 @@ async function runCheck(check: string, args: Args, mode: LockMode | null = null,
       lockWait = lock.waitSeconds;
       started = Date.now(); // runtime excludes the wait for the host lock
     }
+    if (def.lock && !distLock.held) {
+      // shared: any number of checks read dist/ together; a `gate build` in this worktree waits for them (see distLock)
+      await distLock.acquire("shared");
+      distHere = true;
+      started = Date.now();
+    }
+    if (def.lock && dist.expect && distFingerprint() !== dist.expect)
+      throw new EnvError("dist/ changed since this tier started (another build in this worktree): results would mix two builds; rerun the tier");
     partial = await def.run(ctx);
   } catch (error) {
     if (error instanceof UsageError) throw error;
     partial = { exit_code: 1, failure: `gate error: ${error instanceof Error ? error.stack : error}` };
+  } finally {
+    if (distHere && !dist.keep) await distLock.release();
   }
   const result: Result = {
     check,
@@ -1881,6 +1964,7 @@ async function runCheck(check: string, args: Args, mode: LockMode | null = null,
 const TIERS: Record<string, Array<[string, Args]>> = {
   quick: [
     ["typecheck", {}],
+    ["typecheck-bench", {}],
     ["unit", {}],
     ["build", { typecheck: false }]
   ],
@@ -1924,6 +2008,10 @@ const TIERS: Record<string, Array<[string, Args]>> = {
         ] as [string, Args]
     )
   ).concat([
+    // W3 PICK: the picking gate at zoom 1 and 4 (the browser tier runs zoom 2 only). PICK2 makes them pass; nightly keeps
+    // going past a failure, so a failing one is recorded here without stopping the matrix or the browser tier
+    ["picking", { zoom: "1" }],
+    ["picking", { zoom: "4" }],
     // gate gap 16: 20 world-replace cycles + resizes with no growth (~20 min); and the census checks' own self-tests (~20 min)
     ["memory-cycles", {}],
     ["census-selftest", {}],
@@ -1949,6 +2037,10 @@ async function runTier(tier: string, args: Args): Promise<number> {
   const steps: Json[] = [];
   let failedAt: string | null = null;
   const pairedDirs: string[] = [];
+  // The dist this tier runs on: set when its build step passes (or at its first browser step when `build` is skipped).
+  // A browser tier keeps the shared dist lock to its end, so a build in this worktree waits; nightly gives it back between
+  // steps (it lasts hours) and relies on the fingerprint check to refuse a rebuilt dist/.
+  let tierDist: string | null = null;
   // One lock for the whole tier, taken at its first browser step: exclusive if any step that will run needs it.
   // (nightly releases it after each step; see below.)
   const modes = TIERS[tier].filter(([check]) => !skip.has(check)).map(([check]) => DEFS[check].lock);
@@ -1956,7 +2048,13 @@ async function runTier(tier: string, args: Args): Promise<number> {
   const keepGoing = Boolean(args.keep_going) || tier === "nightly";
   for (const [check, preset] of TIERS[tier]) {
     const label =
-      check === "paired" ? `paired#${preset.block}` : check === "golden" && tier === "nightly" ? `golden[d${preset.dpr} ${preset.preset}]` : check;
+      check === "paired"
+        ? `paired#${preset.block}`
+        : check === "golden" && tier === "nightly"
+          ? `golden[d${preset.dpr} ${preset.preset}]`
+          : check === "picking" && preset.zoom
+            ? `picking[k${preset.zoom}]`
+            : check;
     if (skip.has(check)) {
       steps.push({ check: label, status: "SKIP" });
       continue;
@@ -1970,10 +2068,10 @@ async function runTier(tier: string, args: Args): Promise<number> {
     if (check === "paired-summary" && pairedDirs.length === 5) stepArgs.dirs = pairedDirs.join(",");
     let result: Result;
     try {
-      result = await runCheck(check, stepArgs, mode);
+      result = await runCheck(check, stepArgs, mode, false, { keep: tier !== "nightly", expect: tierDist });
     } catch (error) {
       if (!(error instanceof UsageError) || error instanceof EnvError) {
-        await lock.release();
+        await releaseLocks();
         throw error;
       }
       // e.g. the parity fixture is not there yet: this step fails, the tier reports it and goes on as configured
@@ -1982,13 +2080,14 @@ async function runTier(tier: string, args: Args): Promise<number> {
       continue;
     }
     if (check === "paired" && !result.failure) pairedDirs.push(result.dir);
+    if (!result.failure && (check === "build" || (DEFS[check].lock && !tierDist))) tierDist = distFingerprint();
     steps.push({ check: label, status: result.failure ? "FAIL" : "PASS", seconds: result.seconds, exit_code: result.exit_code, failure: result.failure, metrics: result.metrics, dir: result.dir });
     if (result.failure) failedAt ??= label;
     // nightly: give the host lock back between golden steps, so a queued exclusive (timing) run gets in between
     // instead of waiting out the 3-4 h matrix behind one tier-wide shared hold
     if (tier === "nightly") await lock.release();
   }
-  await lock.release();
+  await releaseLocks();
   const seconds = Number(((Date.now() - started) / 1000).toFixed(1));
   const pass = !failedAt;
   // Table on stderr; one JSON line on stdout.
@@ -2035,7 +2134,7 @@ async function main(): Promise<number> {
   const args = parseArgs(target, rest, def.keys, def.spec);
   if (args.layer && !["smoke", "fidelity"].includes(target)) throw new UsageError("layer is only valid for smoke/fidelity");
   const result = await runCheck(target, args);
-  await lock.release();
+  await releaseLocks();
   process.stdout.write(JSON.stringify(result) + "\n");
   return result.failure ? 1 : 0;
 }
@@ -2043,7 +2142,7 @@ async function main(): Promise<number> {
 main().then(
   code => process.exit(code),
   async error => {
-    await lock.release();
+    await releaseLocks();
     if (error instanceof UsageError) {
       process.stderr.write(`gate: ${error.message}\n`);
       process.stdout.write(JSON.stringify({ check: process.argv[2] ?? null, exit_code: 2, failure: error.message }) + "\n");

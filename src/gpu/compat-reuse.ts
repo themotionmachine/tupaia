@@ -161,6 +161,7 @@ export class CompatDirt {
   }
 
   private define(at: number, record: ReuseRecord, reason: string): void {
+    if (blindTracker() === "definitions") return; // self-test: definition changes reach no run
     const ids = definitionIds(record);
     if (!ids) {
       this.mark(at, reason);
@@ -171,7 +172,7 @@ export class CompatDirt {
 
   // Changes to the definitions the clone copies from outside svg#map (watchCompatInputs), one epoch per batch.
   noteDefinitions(records: Iterable<ReuseRecord>, reason: string): void {
-    if (blindTracker()) return;
+    if (blindTracker() === "stale") return;
     let at = 0;
     for (const record of records) {
       if (!at) at = ++this.epoch;
@@ -194,7 +195,7 @@ export class CompatDirt {
 
   // Records that classify() counts as pixel changes (markers.ts pixelRecords), one epoch per batch.
   note(records: Iterable<ReuseRecord>): void {
-    if (blindTracker()) return;
+    if (blindTracker() === "stale") return;
     let at = 0;
     for (const record of records) {
       if (!at) at = ++this.epoch;
@@ -331,15 +332,19 @@ export class CompatDirt {
   }
 }
 
-// Self-test of the reuse fidelity check (bench/host/reuse-fidelity.ts, REUSE_BREAK=stale): ?gpu-compat-reuse-break=stale
-// makes the tracker ignore every DOM edit, so a reused raster can be stale; the check must catch it.
-let blind: boolean | null = null;
-function blindTracker(): boolean {
-  if (blind === null)
+// Self-test of the reuse fidelity check (bench/host/reuse-fidelity.ts, REUSE_BREAK): ?gpu-compat-reuse-break=stale makes
+// the tracker ignore every DOM edit, so a reused raster can be stale; =definitions blinds only the definition path
+// (define: the ids a definition change reaches, matched against each run's reference closure) and leaves every other
+// edit tracked. The check must catch both.
+type Blind = "stale" | "definitions" | null;
+let blind: Blind | undefined;
+function blindTracker(): Blind {
+  if (blind === undefined)
     try {
-      blind = new URLSearchParams(globalThis.location?.search ?? "").get("gpu-compat-reuse-break") === "stale";
+      const mode = new URLSearchParams(globalThis.location?.search ?? "").get("gpu-compat-reuse-break");
+      blind = mode === "stale" || mode === "definitions" ? mode : null;
     } catch {
-      blind = false;
+      blind = null;
     }
   return blind;
 }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { judgeExercised, judgeReuse, type ReuseObservation } from "./reuse-fidelity-core.ts";
+import { DEFINITION_VISIBLE_PX, judgeExercised, judgeRaced, judgeReuse, type ReuseObservation } from "./reuse-fidelity-core.ts";
 
 const good = { ssim: 0.99, over16Fraction: 0.001, over16OfInk: 0.05, inkRatio: 0.98 };
 const base = (over: Partial<ReuseObservation> = {}): ReuseObservation => ({
@@ -45,4 +45,32 @@ test("the GPU must be on the frame it measures", () => {
 test("an edit that no family reused across is vacuous", () => {
   assert.deepEqual(judgeExercised("zoom", [judgeReuse(base())]), []);
   assert.equal(judgeExercised("zoom", [judgeReuse(base({ kept: null }))]).length, 1);
+});
+
+test("a definition edit is judged whether or not the raster was kept, once it is visible", () => {
+  const visible = DEFINITION_VISIBLE_PX + 1;
+  // the run was re-cut (nothing kept): still judged, and as close to the SVG as fresh: PASS
+  assert.equal(judgeReuse(base({ edit: "definition", family: "emblems", layerId: "emblems", kept: { worldKept: 0, keptLayers: [] }, visiblePx: visible })).status, "PASS");
+  // a stale raster that kept the old colours is further from the new SVG than the fresh frame: FAIL
+  const stale = { ssim: 0.8, over16Fraction: 0.05, over16OfInk: 0.9, inkRatio: 0.6 };
+  const v = judgeReuse(base({ edit: "definition", family: "emblems", layerId: "emblems", visiblePx: visible, reused: stale }));
+  assert.equal(v.status, "FAIL");
+  assert.equal(v.exercised, true);
+});
+
+test("a definition edit that changes no pixel of the family proves nothing (INFO, not exercised)", () => {
+  const v = judgeReuse(base({ edit: "definition", family: "zones", layerId: "zones", visiblePx: 3, reused: { ...good, ssim: 0.4 } }));
+  assert.equal(v.status, "INFO");
+  assert.equal(v.exercised, false);
+  assert.match(v.problems[0], /needs 100/);
+  assert.equal(judgeExercised("definition", [v]).length, 1);
+});
+
+test("a fresh control that reused something fails even when the definition edit was invisible", () => {
+  assert.equal(judgeReuse(base({ edit: "definition", visiblePx: 0, freshKept: 2 })).status, "FAIL");
+});
+
+test("a capture that raced a redraw in every attempt is a failure, not an INFO", () => {
+  assert.deepEqual(judgeRaced("move/markers", []), []);
+  assert.equal(judgeRaced("move/markers", ["current", "refined"]).length, 1);
 });

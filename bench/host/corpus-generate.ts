@@ -68,7 +68,7 @@ try {
     page.on("pageerror", e => errors.push(e.message));
     page.on("dialog", d => d.dismiss());
     await page.goto(`${origin}/?seed=${seed}`);
-    await page.waitForFunction(() => typeof pack !== "undefined" && pack?.cells?.i?.length > 0, null, { timeout: 120000 });
+    await page.waitForFunction(() => typeof (globalThis as any).pack !== "undefined" && (globalThis as any).pack?.cells?.i?.length > 0, null, { timeout: 120000 });
     const info = await page.evaluate(
       async ([wantCells, stepFor]) => {
         const g = globalThis as any;
