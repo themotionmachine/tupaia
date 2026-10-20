@@ -109,6 +109,60 @@ export interface MarkerBatch {
 }
 export type Batch = FillBatch | StrokeBatch | SpriteBatch | GlyphBatch | ImageBatch | GroupBatch | MarkerBatch;
 
+// ---- PAN (W4a): the pan cache. A drag only translates the camera, and on the parity world with every layer on at k 2
+// all but ~2 ms of a ~40 ms GPU frame is the static world below the live trade markers (fills, mostly). While the
+// renderer moves it draws through FrameGraph.pan(): that world is kept in a texture of the drawing buffer, drawn again
+// shifted by the camera delta (snapped to whole device pixels, so the copy is 1:1), and only the strips the pan
+// uncovered render it (scissored, culled to the strip); the result is copied back as the next cache, and the marker
+// slot, the world above it and the screen overlays draw live over it. At rest the renderer draws through render()
+// and releases the cache: a settled frame never comes from it.
+
+// Top-level batch indices of a frame for the pan cache: [0, slot) is the static world it keeps (everything below the
+// batch holding the live marker slot, or the whole world without one), [slot, length) draws live every frame (the
+// marker slot's batch, the world above it, then the screen overlays, which follow the world: prepare.ts puts root
+// overlays after #viewbox last). null when there is nothing to keep or a screen overlay sits under the world.
+export function panSplit(batches: readonly Batch[]): { slot: number } | null {
+  const holdsMarkers = (batch: Batch): boolean =>
+    batch.kind === "markers" || (batch.kind === "group" && batch.children.some(holdsMarkers));
+  let slot = -1;
+  let worldEnd = 0;
+  let screenBefore = false;
+  for (let i = 0; i < batches.length; i++) {
+    const batch = batches[i];
+    if (batch.kind === "image" && batch.screen) {
+      if (!worldEnd) screenBefore = true;
+      continue;
+    }
+    if (screenBefore || worldEnd < i) return null; // an overlay under or between world batches
+    worldEnd = i + 1;
+    if (slot < 0 && holdsMarkers(batch)) slot = i;
+  }
+  const kept = slot < 0 ? worldEnd : slot;
+  return kept > 0 ? { slot: kept } : null;
+}
+
+// Device-pixel rects [x, y, width, height] (top-left origin) a cached frame moved by (dx, dy) whole device pixels no
+// longer covers: the columns it left (full height), then the rows it left beside them. Disjoint.
+export function exposedStrips(dx: number, dy: number, width: number, height: number): Rect4[] {
+  const ax = Math.min(Math.abs(dx), width);
+  const ay = Math.min(Math.abs(dy), height);
+  const strips: Rect4[] = [];
+  if (ax) strips.push([dx > 0 ? 0 : width - ax, 0, ax, height]);
+  if (ay && ax < width) strips.push([dx > 0 ? ax : 0, dy > 0 ? 0 : height - ay, width - ax, ay]);
+  return strips;
+}
+
+// Telemetry of the pan cache (cumulative): frames drawn from it (shifted), frames that (re)built it, motion frames
+// drawn without it because the zoom changed, allocations refused for room, and the strips rendered with their pixels.
+export interface PanStats {
+  shifts: number;
+  rebuilds: number;
+  zooms: number;
+  refused: number;
+  strips: number;
+  stripPixels: number;
+}
+
 export interface Frame {
   batches: Batch[];
   fans: TrackedBuffer | null; // vec2 triangles
@@ -226,6 +280,19 @@ export class FrameGraph {
   private idUnbounded = false;
   // whether the current target is multisampled (fills need no fringe there)
   private multisampled = false;
+  // PAN: the device rect (GL origin) every clear and draw of the current pass stays inside: a pan strip, or null
+  private clip: Rect4 | null = null;
+  // PAN: the cached static world (texture of the drawing buffer) and what it holds: the frame, the camera (whole
+  // device pixels from the one it was built at), a key of everything else it depends on, and the zoom the last moving
+  // frame had (a changed zoom draws without the cache until it holds still)
+  private panCache: {
+    texture: TrackedTexture;
+    frame: Frame | null;
+    camera: Camera;
+    key: string;
+    k: number;
+  } | null = null;
+  readonly panStats: PanStats = { shifts: 0, rebuilds: 0, zooms: 0, refused: 0, strips: 0, stripPixels: 0 };
   private readonly canvasMultisampled: boolean;
   private readonly fillAa = fillAaFlag();
   private readonly sampled = sampledCoverageFlag();
@@ -258,10 +325,178 @@ export class FrameGraph {
     clear: Rgba,
     markers: MarkerInstances | null = null
   ): void {
+    this.begin(frame, camera, viewport, clear, markers);
+    if (frame) this.batches(frame, frame.batches);
+    this.end();
+  }
+
+  // PAN: `frame` for a moving camera, through the pan cache (panSplit above). Returns the camera drawn: `camera`, or
+  // `camera` moved by under half a device pixel so that the cached world shifts by whole device pixels. null when
+  // nothing was drawn: no static world to keep, a multisampled canvas (the cache is copied out of the drawing buffer),
+  // the zoom changed since the last moving frame (zooming redraws everything anyway: the cache would only add a copy),
+  // or `room` refused the cache texture (`bytes`). The caller then renders the frame as usual.
+  // Exact but for two things: the strips render the same batches at the same camera as render() would there (each
+  // pixel sees the same batch sequence; culling only skips batches that write nothing in the strip), the shifted pixels
+  // were rendered the same way at the cached camera, and the live part draws over a cleared stencil (its fresh ids are
+  // above anything left there either way). Translation by whole device pixels can still move float rounding at edges,
+  // and an image's detail raster is chosen per pass (imageSource): a strip inside the detail's cover takes it where
+  // render() takes it only when it covers the whole view, so a moving frame can show the detail beside the base raster
+  // of the same image. Neither reaches a frame at rest.
+  pan(
+    frame: Frame,
+    camera: Camera,
+    viewport: Viewport,
+    clear: Rgba,
+    markers: MarkerInstances | null,
+    epoch: number,
+    room: (bytes: number) => boolean
+  ): Camera | null {
+    const gl = this.device.gl;
+    const split = this.canvasMultisampled ? null : panSplit(frame.batches);
+    if (!split) {
+      this.releasePan();
+      return null;
+    }
+    const [width, height] = [gl.drawingBufferWidth, gl.drawingBufferHeight];
+    let cache = this.panCache;
+    if (cache && (cache.texture.width !== width || cache.texture.height !== height)) {
+      this.releasePan();
+      cache = null;
+    }
+    if (cache && cache.k !== camera.k) {
+      cache.k = camera.k;
+      cache.frame = null;
+      this.panStats.zooms++;
+      return null;
+    }
+    if (!cache) {
+      if (!room(width * height * 4)) {
+        this.panStats.refused++;
+        return null;
+      }
+      const texture = this.device.texture("pan cache", { width, height, data: null });
+      gl.bindTexture(gl.TEXTURE_2D, texture.handle);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.bindTexture(gl.TEXTURE_2D, null);
+      cache = this.panCache = { texture, frame: null, camera, key: "", k: camera.k };
+    }
+    const key = `${epoch} ${clear.join(",")} ${viewport.width}x${viewport.height}@${viewport.dpr} ${split.slot}`;
+    const [sx, sy] = [width / viewport.width, height / viewport.height];
+    let shift: [number, number] | null = null;
+    let drawn = camera;
+    if (cache.frame === frame && cache.key === key) {
+      const dx = Math.round((camera.x - cache.camera.x) * sx);
+      const dy = Math.round((camera.y - cache.camera.y) * sy);
+      const exposed = exposedStrips(dx, dy, width, height).reduce((sum, [, , w, h]) => sum + w * h, 0);
+      // past half the view uncovered, the strips cost about what a full redraw does
+      if (exposed <= (width * height) / 2) {
+        shift = [dx, dy];
+        drawn = { k: camera.k, x: cache.camera.x + dx / sx, y: cache.camera.y + dy / sy };
+      }
+    }
+    this.begin(frame, drawn, viewport, clear, markers);
+    if (shift) {
+      const [dx, dy] = shift;
+      // the cached pixels already hold the clear colour under the world: replaced, not blended over it
+      gl.disable(gl.BLEND);
+      this.quad(cache.texture.handle, this.screen, [dx / sx, dy / sy, width / sx, height / sy], [0, 1, 1, 0], 1);
+      gl.enable(gl.BLEND);
+      for (const strip of exposedStrips(dx, dy, width, height)) this.panStrip(frame, split.slot, strip, sx, sy);
+      this.panStats.shifts++;
+    } else {
+      this.batches(frame, frame.batches, 0, split.slot);
+      this.panStats.rebuilds++;
+    }
+    gl.bindTexture(gl.TEXTURE_2D, cache.texture.handle);
+    gl.copyTexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 0, 0, width, height);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    Object.assign(cache, { frame, camera: drawn, key });
+    // the live part over a cleared stencil, fresh ids from 0
+    this.state.stencilMask(0xff);
+    gl.clearStencil(0);
+    gl.clear(gl.STENCIL_BUFFER_BIT);
+    this.resetIds();
+    this.visible = visibleWorld(drawn, viewport);
+    this.batches(frame, frame.batches, split.slot);
+    this.end();
+    return drawn;
+  }
+
+  // Bytes the pan cache holds (0 without one): transient, released at rest (renderer.ts).
+  get panBytes(): number {
+    return this.panCache?.texture.bytes ?? 0;
+  }
+
+  releasePan(): void {
+    if (!this.panCache) return;
+    this.device.release(this.panCache.texture);
+    this.panCache = null;
+  }
+
+  // One exposed strip of a pan (device px, top-left origin): the kept batches, culled to the strip's world rect and
+  // scissored to it, over the stencil the frame cleared (strips are disjoint, so ids restart).
+  private panStrip(frame: Frame, to: number, [x, y, w, h]: Rect4, sx: number, sy: number): void {
+    const gl = this.device.gl;
+    const { k, x: cx, y: cy } = this.camera;
+    this.visible = [(x / sx - cx) / k, (y / sy - cy) / k, ((x + w) / sx - cx) / k, ((y + h) / sy - cy) / k];
+    this.clip = [x, gl.drawingBufferHeight - y - h, w, h];
+    gl.enable(gl.SCISSOR_TEST);
+    gl.scissor(this.clip[0], this.clip[1], this.clip[2], this.clip[3]);
+    this.resetIds();
+    this.batches(frame, frame.batches, 0, to);
+    gl.disable(gl.SCISSOR_TEST);
+    this.clip = null;
+    this.panStats.strips++;
+    this.panStats.stripPixels += w * h;
+  }
+
+  private resetIds(): void {
+    this.id = 0;
+    this.idBox = null;
+    this.idUnbounded = false;
+  }
+
+  // A clear limited to `box` (device px, GL origin; null = the whole target) within the pass's clip: false when they do
+  // not meet (nothing to clear in this pass). unscissor() restores the clip afterwards.
+  private scissor(box: Rect4 | null): boolean {
+    const gl = this.device.gl;
+    const clip = this.clip;
+    let rect = box;
+    if (clip && box) {
+      const x0 = Math.max(box[0], clip[0]);
+      const y0 = Math.max(box[1], clip[1]);
+      const x1 = Math.min(box[0] + box[2], clip[0] + clip[2]);
+      const y1 = Math.min(box[1] + box[3], clip[1] + clip[3]);
+      if (x1 <= x0 || y1 <= y0) return false;
+      rect = [x0, y0, x1 - x0, y1 - y0];
+    } else if (clip) rect = clip;
+    if (rect) {
+      gl.enable(gl.SCISSOR_TEST);
+      gl.scissor(rect[0], rect[1], rect[2], rect[3]);
+    }
+    return true;
+  }
+
+  private unscissor(): void {
+    const gl = this.device.gl;
+    const clip = this.clip;
+    if (clip) gl.scissor(clip[0], clip[1], clip[2], clip[3]);
+    else gl.disable(gl.SCISSOR_TEST);
+  }
+
+  private begin(
+    frame: Frame | null,
+    camera: Camera,
+    viewport: Viewport,
+    clear: Rgba,
+    markers: MarkerInstances | null
+  ): void {
     const gl = this.device.gl;
     this.camera = camera;
     this.viewport = viewport;
     this.visible = visibleWorld(camera, viewport);
+    this.clip = null;
     this.drawBatches.submitted = this.drawBatches.culled = 0;
     for (const key of Object.keys(this.passes) as (keyof FrameGraph["passes"])[]) this.passes[key] = 0;
     this.markerInstances = markers;
@@ -291,17 +526,18 @@ export class FrameGraph {
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
     gl.enable(gl.STENCIL_TEST);
-    this.id = 0;
-    this.idBox = null;
-    this.idUnbounded = false;
+    this.resetIds();
     this.multisampled = this.canvasMultisampled;
-    if (frame) this.batches(frame, frame.batches);
-    gl.disable(gl.STENCIL_TEST);
-    state.bindVertexArray(null);
   }
 
-  private batches(frame: Frame, list: Batch[]): void {
-    for (const batch of list) {
+  private end(): void {
+    this.device.gl.disable(this.device.gl.STENCIL_TEST);
+    this.state.bindVertexArray(null);
+  }
+
+  private batches(frame: Frame, list: Batch[], from = 0, to = list.length): void {
+    for (let i = from; i < to; i++) {
+      const batch = list[i];
       if (
         (batch.kind === "fill" || batch.kind === "stroke") &&
         batch.bounds &&
@@ -421,14 +657,11 @@ export class FrameGraph {
       ? worldScissor(bounds, this.camera, this.viewport, gl.drawingBufferWidth, gl.drawingBufferHeight)
       : null;
     if (bounds && !scissor) return;
-    if (scissor) {
-      gl.enable(gl.SCISSOR_TEST);
-      gl.scissor(scissor[0], scissor[1], scissor[2], scissor[3]);
-    }
+    if (!this.scissor(scissor)) return;
     this.state.stencilMask(STENCIL.id);
     gl.clearStencil(0);
     gl.clear(gl.STENCIL_BUFFER_BIT);
-    if (scissor) gl.disable(gl.SCISSOR_TEST);
+    this.unscissor();
     this.passes.idClears++;
   }
 
@@ -460,18 +693,14 @@ export class FrameGraph {
     const gl = this.device.gl;
     if (this.id >= STENCIL.ids) {
       const box = this.idUnbounded ? null : this.idBox;
-      if (box) {
-        gl.enable(gl.SCISSOR_TEST);
-        gl.scissor(box[0], box[1], box[2] - box[0], box[3] - box[1]);
+      if (this.scissor(box && [box[0], box[1], box[2] - box[0], box[3] - box[1]])) {
+        this.state.stencilMask(STENCIL.id);
+        gl.clearStencil(0);
+        gl.clear(gl.STENCIL_BUFFER_BIT);
+        this.unscissor();
+        this.passes.idClears++;
       }
-      this.state.stencilMask(STENCIL.id);
-      gl.clearStencil(0);
-      gl.clear(gl.STENCIL_BUFFER_BIT);
-      if (box) gl.disable(gl.SCISSOR_TEST);
-      this.passes.idClears++;
-      this.id = 0;
-      this.idBox = null;
-      this.idUnbounded = false;
+      this.resetIds();
     }
     const scissor = bounds
       ? worldScissor(bounds, this.camera, this.viewport, gl.drawingBufferWidth, gl.drawingBufferHeight)
@@ -691,7 +920,8 @@ export class FrameGraph {
   }
 
   private image(batch: ImageBatch): void {
-    const source = imageSource(batch, visibleWorld(this.camera, this.viewport));
+    // the pass's visible world: the view (as visibleWorld), or a pan strip's, which takes detail wherever it covers it
+    const source = imageSource(batch, this.visible);
     if (!source.texture) return;
     this.quad(
       source.texture.handle,
@@ -822,6 +1052,7 @@ export class FrameGraph {
     this.device.release(this.square);
     this.device.release(this.group);
     this.releaseMask();
+    this.releasePan();
     this.device.release(this.markerBuffer);
     this.group = null;
     this.markerBuffer = null;
