@@ -86,6 +86,54 @@ export function caravanNear(x: number, y: number, radius: number): boolean {
   return false;
 }
 
-export function caravanPauseStats(): { paused: boolean; pauses: number; syncs: number; written: number } {
-  return { paused, ...stats };
+export function caravanPauseStats(): {
+  paused: boolean;
+  pauses: number;
+  syncs: number;
+  written: number;
+  held: boolean;
+  heldChanges: number;
+} {
+  return { paused, ...stats, held, heldChanges };
+}
+
+// ---- PAN (W4a): a GPU gesture holds the caravan layer's structure. A caravan group appended (a route segment starts)
+// or removed (it ends) under the canvas re-layerizes the whole visible document as a pose write did (~155 ms on the
+// parity world with every layer on): with the default 30 caravans, a hitch in about every other pan. While the GPU
+// renderer moves the map with its canvas on screen, such changes wait. An ending caravan stays in the DOM, marked
+// ended (the GPU stops drawing it, as it would have vanished); a starting one waits. The renderer releases them when
+// the gesture ends, in the task that writes the SVG camera anyway (one layerize for all of it), and before the SVG is
+// shown. SVG mode never holds.
+let held = false;
+let heldChanges = 0;
+const ended = new WeakSet<Element>();
+const waiting: (() => void)[] = [];
+
+export function caravanChangesHeld(): boolean {
+  return held;
+}
+
+// Ended while held: still in the DOM until the hold is released, no longer drawn
+export function caravanEnded(group: Element): boolean {
+  return ended.has(group);
+}
+
+// Holds (true) or releases (false) structural changes; releasing runs the held ones in the order they came
+export function holdCaravanChanges(value: boolean): void {
+  if (value === held) return;
+  held = value;
+  if (held) return;
+  for (const change of waiting.splice(0)) change();
+}
+
+// A structural change of the caravan layer: run now, or once the hold is released. `removes`: the group the change
+// takes out of the DOM, marked ended meanwhile.
+export function caravanChange(change: () => void, removes?: Element | null): void {
+  if (!held) {
+    change();
+    return;
+  }
+  if (removes) ended.add(removes);
+  waiting.push(change);
+  heldChanges++;
 }

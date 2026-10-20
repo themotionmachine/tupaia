@@ -3,7 +3,7 @@
 // classifier keeps those transient updates from invalidating the static prepare (they only request a frame).
 // While the canvas presents the map the controller keeps the poses out of the SVG (renderers/caravan-poses.ts): they
 // are read from there, and the renderer redraws on their tick instead of on a record.
-import { caravanTransform } from "../renderers/caravan-poses";
+import { caravanEnded, caravanTransform } from "../renderers/caravan-poses";
 import type { GpuDevice, TrackedTexture } from "./device";
 import { type Affine, decodeSvg, multiply, parseTransform } from "./raster";
 
@@ -402,7 +402,8 @@ export class TradeMarkers {
     }
     const runs: MarkerRun[] = [];
     for (const group of root.children) {
-      if (group.tagName !== "g" || group.getAttribute("display") === "none") continue;
+      // PAN (W4a): a caravan that ended during a GPU gesture stays in the DOM until the gesture ends, no longer drawn
+      if (group.tagName !== "g" || group.getAttribute("display") === "none" || caravanEnded(group)) continue;
       const transform = caravanTransform(group);
       this.issue = markerIssue(group, transform);
       if (this.issue) return null;

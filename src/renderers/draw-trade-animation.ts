@@ -2,7 +2,15 @@ import { curveCatmullRom, easeLinear, line } from "d3";
 import { lazy } from "@/lazy-loaders";
 import type { Point } from "../generators/voronoi";
 import { ensureEl, minmax } from "../utils";
-import { caravanDomPaused, liveGroups, livePose, recordPose, settlePose } from "./caravan-poses";
+import {
+  caravanChange,
+  caravanChangesHeld,
+  caravanDomPaused,
+  liveGroups,
+  livePose,
+  recordPose,
+  settlePose
+} from "./caravan-poses";
 import type { TradeBatch } from "./trade-animation";
 
 const lineGen = line<Point>().curve(curveCatmullRom.alpha(0.1));
@@ -93,6 +101,11 @@ export async function draw(
       onComplete?.();
       return;
     }
+    // a segment starting during a GPU gesture waits for its end (caravan-poses.ts holdCaravanChanges)
+    if (caravanChangesHeld()) {
+      caravanChange(() => animateSegment(idx));
+      return;
+    }
 
     const segment = segments[idx];
     const size = options.trade.animation.markerSize;
@@ -174,9 +187,12 @@ export async function draw(
         settlePose(this);
       })
       .on("end", () => {
-        group.remove();
-        if (node) liveGroups.delete(node);
-        setTimeout(() => animateSegment(idx + 1), options.trade.animation.segmentChangePause);
+        // during a GPU gesture the group stays (ended, not drawn) until it ends (caravan-poses.ts holdCaravanChanges)
+        caravanChange(() => {
+          group.remove();
+          if (node) liveGroups.delete(node);
+          setTimeout(() => animateSegment(idx + 1), options.trade.animation.segmentChangePause);
+        }, node);
       });
   }
 }
