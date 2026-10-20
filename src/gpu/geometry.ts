@@ -1,3 +1,4 @@
+import { measureContour, parseContours } from "./dash-measure";
 import type { Subpath } from "./svg-path";
 
 export class F32 {
@@ -84,12 +85,16 @@ export function appendFan(subpaths: Subpath[], out: F32): number {
   return vertices;
 }
 
-export function appendSegments(subpaths: Subpath[], out: F32): number {
+// One stroke instance per non-degenerate segment: x0 y0 x1 y1 and the path distance at its start (the dash pattern's
+// clock). `distances` (per subpath, per point) overrides the chord sum, for dashed curves measured as SVG measures them
+// (measuredSubpaths).
+export function appendSegments(subpaths: Subpath[], out: F32, distances?: ArrayLike<number>[]): number {
   let instances = 0;
-  for (const { points, closed } of subpaths) {
+  subpaths.forEach(({ points, closed }, s) => {
     const n = points.length >> 1;
-    if (n < 2) continue;
+    if (n < 2) return;
     const segCount = closed ? n : n - 1;
+    const measured = distances?.[s];
     let d = 0;
     for (let i = 0; i < segCount; i++) {
       const j = (i + 1) % n;
@@ -99,12 +104,111 @@ export function appendSegments(subpaths: Subpath[], out: F32): number {
       const y1 = points[j * 2 + 1];
       const len = Math.hypot(x1 - x0, y1 - y0);
       if (len === 0) continue;
-      out.push5(x0, y0, x1, y1, d);
+      out.push5(x0, y0, x1, y1, measured ? measured[i] : d);
       d += len;
       instances++;
     }
-  }
+  });
   return instances;
+}
+
+// Curve flattening for native geometry. The scene flattens every path at SCENE_CURVE_TOLERANCE (0.2 world units: 0.4
+// device px at k 1, dpr 2, but 3.2 at k 8), and SVG's curves stay within a fraction of a device pixel at every zoom:
+// the chord error moved whole edges of rivers, routes and coastline at k >= 2 (the D11 gate failed them on 23-36 % of
+// their ink over Δ16). Strokes and thin fills are flattened again at prepare for the raster bucket (device px per world
+// unit, a power of two at or above camera scale × dpr): DEVICE_CURVE_TOLERANCE device px, never coarser than the
+// scene. Wide fills keep the scene's polylines (their edge error is under the neighbouring fill; the parity goldens pass
+// them at 0.2) and so does the rest of the vertex budget (parity world, k 8: +52k stroke and +20k river points, ~2 MiB,
+// against +6.8 MiB for every curve at 0.02).
+export const DEVICE_CURVE_TOLERANCE = 0.3;
+export function curveTolerance(bucket: number, coarse = 0.2): number {
+  return Math.min(coarse, DEVICE_CURVE_TOLERANCE / Math.max(1, bucket));
+}
+export const hasCurves = (d: string) => /[CcQqSsTtAa]/.test(d);
+// A fill whose mean half width (area / perimeter, world units) is under `halfWidth`: a river, not a region.
+export function thinFill(subpaths: Subpath[], halfWidth = 2): boolean {
+  let area = 0,
+    perimeter = 0;
+  for (const { points: p } of subpaths) {
+    const n = p.length >> 1;
+    for (let i = 0, j = n - 1; i < n; j = i++) {
+      area += p[j * 2] * p[i * 2 + 1] - p[i * 2] * p[j * 2 + 1];
+      perimeter += Math.hypot(p[i * 2] - p[j * 2], p[i * 2 + 1] - p[j * 2 + 1]);
+    }
+  }
+  return perimeter > 0 && Math.abs(area) / 2 / perimeter < halfWidth;
+}
+
+// A dashed path flattened with each point's distance as SVG measures it. Chrome dashes a path along Skia's contour
+// measure (dash-measure.ts: chords subdivided to 0.5 / resScale world units, resScale the device scale), whose length
+// falls short of the curve's by an amount that accumulates along a route; a finer polyline's own chord sum runs ahead
+// of it, so its dashes drift off SVG's (routes k 1: 40 % of the ink over Δ16 at 0.02 world units). Points sit at
+// uniform t on each curve (svg-path.ts subdivision counts at `tolerance`), each with the measure's distance at its t.
+export function measuredSubpaths(
+  d: string,
+  tolerance: number,
+  resScale: number
+): { subpaths: Subpath[]; distances: Float64Array[] } {
+  const subpaths: Subpath[] = [];
+  const distances: Float64Array[] = [];
+  for (const contour of parseContours(d, tolerance)) {
+    const measure = measureContour(contour, resScale);
+    const { leaves } = measure;
+    const points: number[] = [];
+    const dist: number[] = [];
+    let leaf = 0;
+    let last = 0;
+    // the measure's distance at parameter t of segment `seg` (leaves are in segment and t order)
+    const at = (seg: number, t: number) => {
+      while (leaf < leaves.length && (leaves[leaf].seg < seg || (leaves[leaf].seg === seg && leaves[leaf].t1 < t)))
+        leaf++;
+      const l = leaves[leaf];
+      if (!l || l.seg !== seg) return last;
+      last = l.d0 + (l.len * Math.min(1, Math.max(0, t - l.t0))) / (l.t1 - l.t0);
+      return last;
+    };
+    const s0 = contour.segs[0];
+    points.push(s0[0], s0[1]);
+    dist.push(0);
+    contour.segs.forEach((s, seg) => {
+      let n = 1;
+      if (s.length === 8) {
+        const ddx = Math.max(Math.abs(s[0] - 2 * s[2] + s[4]), Math.abs(s[2] - 2 * s[4] + s[6]));
+        const ddy = Math.max(Math.abs(s[1] - 2 * s[3] + s[5]), Math.abs(s[3] - 2 * s[5] + s[7]));
+        n = Math.ceil(Math.sqrt((Math.hypot(ddx, ddy) * 0.75) / tolerance));
+      } else if (s.length === 6)
+        n = Math.ceil(Math.sqrt((Math.hypot(s[0] - 2 * s[2] + s[4], s[1] - 2 * s[3] + s[5]) * 0.25) / tolerance));
+      n = Math.min(Math.max(1, n || 1), 256);
+      for (let k = 1; k <= n; k++) {
+        const t = k / n;
+        const u = 1 - t;
+        let x: number, y: number;
+        if (s.length === 4) [x, y] = [u * s[0] + t * s[2], u * s[1] + t * s[3]];
+        else if (s.length === 6)
+          [x, y] = [u * u * s[0] + 2 * u * t * s[2] + t * t * s[4], u * u * s[1] + 2 * u * t * s[3] + t * t * s[5]];
+        else {
+          const [a, b, c, e] = [u * u * u, 3 * u * u * t, 3 * u * t * t, t * t * t];
+          [x, y] = [a * s[0] + b * s[2] + c * s[4] + e * s[6], a * s[1] + b * s[3] + c * s[5] + e * s[7]];
+        }
+        points.push(x, y);
+        dist.push(at(seg, t));
+      }
+    });
+    // a closed contour ends on its start: SVG's closing segment is the wrap from the last point
+    if (
+      contour.closed &&
+      points.length >= 6 &&
+      points[0] === points[points.length - 2] &&
+      points[1] === points[points.length - 1]
+    ) {
+      points.length -= 2;
+      dist.length -= 1;
+    }
+    if (points.length < 4) continue;
+    subpaths.push({ points, closed: contour.closed });
+    distances.push(Float64Array.from(dist));
+  }
+  return { subpaths, distances };
 }
 
 export function polylineLength(points: ArrayLike<number>): number {
@@ -374,39 +478,52 @@ export function unpackEnd(value: number): { code: number; angle: number } {
 }
 
 // Fill anti-aliasing edges (framegraph fringe pass): every boundary edge of a fill, oriented so the filled side is on
-// its left ((-dy, dx) normal), 4 floats each. Which side is filled comes from the winding number on each side of a
-// ring (its own orientation plus the winding of the other rings at the midpoint of its first edge), so holes, islands and
-// even-odd fills orient correctly as long as rings do not cross. Edges with fill on both sides or neither (nested
+// its left ((-dy, dx) normal). Which side is filled comes from the winding number on each side of a ring (its own
+// orientation plus the winding of the other rings at the midpoint of its first edge), so holes, islands and even-odd
+// fills orient correctly as long as rings do not cross. Rings with fill on both sides or neither (nested
 // same-direction nonzero rings) are internal and omitted. Past `maxWork` point-in-ring steps the other rings are
 // ignored (each ring's own orientation decides), which is still right for nonzero fills with reversed holes.
+// Stream (2 floats per point, consecutive edges share their endpoints): per kept ring of m distinct points q, in the
+// oriented order, q[m-1], q[0..m-1], q[0], q[1], then one FRINGE_SENTINEL point. Instance k of the fringe reads points
+// k..k+3 as (previous point, edge start, edge end, next point), so the ring's m edges are instances 0..m-1 of its block
+// and each sees both neighbouring edges; the 4 instances that straddle two blocks hold the sentinel and draw nothing.
+// Returns the number of instances to draw from this call's first point (0 when no ring is kept); half the 4 floats
+// per edge of separate endpoint copies for a long ring.
+export const FILL_EDGE_SENTINEL = 3.0e38; // shaders.ts FRINGE_SENTINEL
 export function appendFillEdges(subpaths: Subpath[], out: F32, evenOdd: boolean, maxWork = 4_000_000): number {
-  const rings: { p: ArrayLike<number>; n: number; area: number; box: [number, number, number, number] }[] = [];
+  const rings: { p: number[]; n: number; area: number; box: [number, number, number, number] }[] = [];
   for (const { points } of subpaths) {
-    const n = points.length >> 1;
+    // distinct consecutive points (wrapping), so every edge has a length and a direction
+    const p: number[] = [];
+    for (let i = 0; i + 1 < points.length; i += 2) {
+      const x = points[i],
+        y = points[i + 1];
+      if (p.length && p[p.length - 2] === x && p[p.length - 1] === y) continue;
+      p.push(x, y);
+    }
+    while (p.length >= 4 && p[0] === p[p.length - 2] && p[1] === p[p.length - 1]) p.length -= 2;
+    const n = p.length >> 1;
     if (n < 3) continue;
     let area = 0;
     const box: [number, number, number, number] = [Infinity, Infinity, -Infinity, -Infinity];
     for (let i = 0, j = n - 1; i < n; j = i++) {
-      area += points[j * 2] * points[i * 2 + 1] - points[i * 2] * points[j * 2 + 1];
-      box[0] = Math.min(box[0], points[i * 2]);
-      box[1] = Math.min(box[1], points[i * 2 + 1]);
-      box[2] = Math.max(box[2], points[i * 2]);
-      box[3] = Math.max(box[3], points[i * 2 + 1]);
+      area += p[j * 2] * p[i * 2 + 1] - p[i * 2] * p[j * 2 + 1];
+      box[0] = Math.min(box[0], p[i * 2]);
+      box[1] = Math.min(box[1], p[i * 2 + 1]);
+      box[2] = Math.max(box[2], p[i * 2]);
+      box[3] = Math.max(box[3], p[i * 2 + 1]);
     }
-    if (area !== 0 && Number.isFinite(area)) rings.push({ p: points, n, area, box });
+    if (area !== 0 && Number.isFinite(area)) rings.push({ p, n, area, box });
   }
   let work = 0;
-  let count = 0;
+  let points = 0;
   const filled = (w: number) => (evenOdd ? (w & 1) !== 0 : w !== 0);
   for (let r = 0; r < rings.length; r++) {
     const { p, n, area } = rings[r];
     // the midpoint of the ring's first edge: a vertex is often shared with a touching ring, where the winding of the
     // other ring is ambiguous; an edge midpoint is ambiguous only on an edge the rings share
-    let e = 0;
-    while (e < n - 1 && p[e * 2] === p[e * 2 + 2] && p[e * 2 + 1] === p[e * 2 + 3]) e++;
-    const f = (e + 1) % n;
-    const x = (p[e * 2] + p[f * 2]) / 2,
-      y = (p[e * 2 + 1] + p[f * 2 + 1]) / 2;
+    const x = (p[0] + p[2]) / 2,
+      y = (p[1] + p[3]) / 2;
     let around = 0;
     if (rings.length > 1 && work <= maxWork)
       for (let o = 0; o < rings.length; o++) {
@@ -420,19 +537,120 @@ export function appendFillEdges(subpaths: Subpath[], out: F32, evenOdd: boolean,
     const left = filled(around + (area > 0 ? 1 : 0));
     const right = filled(around + (area > 0 ? 0 : -1));
     if (left === right) continue;
-    for (let i = 0; i < n; i++) {
-      const j = (i + 1) % n;
-      const ax = p[i * 2],
-        ay = p[i * 2 + 1],
-        bx = p[j * 2],
-        by = p[j * 2 + 1];
-      if (ax === bx && ay === by) continue;
-      if (left) out.push4(ax, ay, bx, by);
-      else out.push4(bx, by, ax, ay);
-      count++;
-    }
+    // the k-th point in the oriented order, wrapping
+    const at = (k: number) => {
+      const i = (((left ? k : -k) % n) + n) % n;
+      out.push2(p[i * 2], p[i * 2 + 1]);
+    };
+    for (let k = -1; k <= n + 1; k++) at(k);
+    out.push2(FILL_EDGE_SENTINEL, FILL_EDGE_SENTINEL);
+    points += n + 4;
   }
-  return count;
+  // the last block's straddling instances are not drawn: nothing past this call's points is read
+  return points ? points - 3 : 0;
+}
+
+// The edges a fringe draws from an appendFillEdges stream (instances `first`.. of `count`): [x0, y0, x1, y1] per
+// edge, plus its previous and next points, skipping the instances that straddle two rings (tests and diagnostics).
+export function fillEdgeList(stream: ArrayLike<number>, count: number, first = 0): number[][] {
+  const edges: number[][] = [];
+  for (let k = first; k < first + count; k++) {
+    const window = Array.from({ length: 8 }, (_, i) => stream[k * 2 + i]);
+    if (window.some(v => Math.abs(v) > 1e38)) continue;
+    edges.push([window[2], window[3], window[4], window[5], window[0], window[1], window[6], window[7]]);
+  }
+  return edges;
+}
+
+// Whether SVG (Chrome) rasterises this shape with analytic coverage instead of 4x MSAA (shaders.ts coverage models):
+// a rect, circle or ellipse element, and for strokes a lone undashed straight line (a <line>, or a path of one
+// two-point subpath). Everything else, polylines and curves included, is sampled.
+export function analyticShape(tag: string, subpaths: Subpath[], dashed = false): boolean {
+  const name = tag.toLowerCase();
+  if (name === "rect" || name === "circle" || name === "ellipse") return !dashed;
+  return !dashed && subpaths.length === 1 && !subpaths[0].closed && subpaths[0].points.length === 4;
+}
+
+// Chrome's 4x MSAA sample positions (Metal and D3D standard pattern: (3,1), (7,3), (1,5), (5,7) / 8 from the pixel's
+// top-left, y down) as offsets from the pixel centre in GL window pixels (y up), for shaders.ts u_sampleOffsets.
+export const COVERAGE_SAMPLES: readonly (readonly [number, number])[] = [
+  [-0.125, 0.375],
+  [0.375, 0.125],
+  [-0.375, -0.125],
+  [0.125, -0.375]
+];
+
+// Skia's round caps and joins are chord fans, not arcs: its stroke tessellator spends 0.5 / acos(1 - 0.25 / r) radial
+// segments per radian at device radius r (precision 4; ~/.tupaia-gates/w3-stroke2/exp/dots.mjs: 99.4-100 % of the
+// pixels of round-capped dots of r 0.5-4 px match the fan, 88-94 % a disc). For shaders.ts u_radialPerRadian.
+export function radialSegmentsPerRadian(r: number): number {
+  if (!(r > 0)) return 0.5 / Math.PI;
+  return 0.5 / Math.acos(Math.max(1 - 0.25 / r, -1));
+}
+
+// Whether q (relative to the centre, within the sector) lies in the chord fan of radius h from direction a, turning
+// toward b, over `span` radians in ceil(span * perRadian) equal sectors (shaders.ts fanHas). perRadian <= 0: the arc.
+export function fanCovers(
+  q: readonly number[],
+  a: readonly number[],
+  b: readonly number[],
+  span: number,
+  h: number,
+  perRadian: number
+): boolean {
+  if (perRadian <= 0) return q[0] * q[0] + q[1] * q[1] <= h * h;
+  const n = Math.max(1, Math.ceil(span * perRadian - 1e-4));
+  const turn = a[0] * b[1] - a[1] * b[0] < 0 ? -1 : 1;
+  const phi = Math.atan2(turn * (a[0] * q[1] - a[1] * q[0]), a[0] * q[0] + a[1] * q[1]);
+  const step = span / n;
+  const mid = (Math.min(Math.max(Math.floor(phi / step), 0), n - 1) + 0.5) * step;
+  const m = [a[0] * Math.cos(mid) - a[1] * turn * Math.sin(mid), a[1] * Math.cos(mid) + a[0] * turn * Math.sin(mid)];
+  return q[0] * m[0] + q[1] * m[1] <= h * Math.cos(step / 2);
+}
+
+// CPU mirror of the stroke shader's sample test (shaders.ts strokeCovers): whether the point q (segment-local device
+// px: along from the segment start, across toward its left normal) lies in the stroke outline near a segment of
+// length `len` with end codes c0/c1 and neighbouring directions dIn/dOut (segment-local unit vectors), half width h.
+// Dashes are not mirrored here (dashCovered covers the pattern). Round caps and joins are chord fans of
+// radialSegmentsPerRadian (perRadian <= 0: exact arcs).
+export function strokeCovers(
+  q: [number, number],
+  len: number,
+  c0: number,
+  c1: number,
+  dIn: [number, number],
+  dOut: [number, number],
+  h: number,
+  perRadian = 0
+): boolean {
+  const cross = (a: readonly number[], b: readonly number[]) => a[0] * b[1] - a[1] * b[0];
+  const capHas = (p: number[]) => p[0] >= 0 && fanCovers(p, [0, 1], [1, 0], Math.PI, h, perRadian);
+  const joinHas = (p: number[], a: number[], b: number[], code: number) => {
+    if (p[0] * a[0] + p[1] * a[1] < 0 || p[0] * b[0] + p[1] * b[1] > 0)
+      return code === JOIN.round && p[0] * p[0] + p[1] * p[1] <= h * h;
+    if (code === JOIN.round) {
+      const side = cross(a, b) > 0 ? -1 : 1;
+      const turn = Math.acos(Math.min(1, Math.max(-1, a[0] * b[0] + a[1] * b[1])));
+      return fanCovers(p, [-side * a[1], side * a[0]], [-side * b[1], side * b[0]], turn, h, perRadian);
+    }
+    if (Math.abs(cross(a, p)) > h || Math.abs(cross(b, p)) > h) return false;
+    const c = Math.sqrt(Math.max(0, (1 + a[0] * b[0] + a[1] * b[1]) * 0.5));
+    const tip = [a[0] - b[0], a[1] - b[1]];
+    const tipLength = Math.hypot(tip[0], tip[1]);
+    return (
+      !((code === JOIN.bevel || c < 0.25) && tipLength > 1e-6) || (p[0] * tip[0] + p[1] * tip[1]) / tipLength <= h * c
+    );
+  };
+  const [x, y] = q;
+  let inside = Math.abs(y) <= h && x >= (c0 === 0 ? -h : 0) && x <= (c1 === 0 ? len + h : len);
+  if (!inside && c0 === 2) inside = capHas([-x, -y]);
+  if (!inside && c0 >= 3)
+    inside = (x * dIn[0] + y * dIn[1] <= 0 && Math.abs(cross(dIn, q)) <= h) || joinHas([x, y], dIn, [1, 0], c0);
+  const e = [x - len, y];
+  if (!inside && c1 === 2) inside = capHas(e);
+  if (!inside && c1 >= 3)
+    inside = (e[0] * dOut[0] + e[1] * dOut[1] >= 0 && Math.abs(cross(dOut, e)) <= h) || joinHas(e, [1, 0], dOut, c1);
+  return inside;
 }
 
 // Whether two subpaths of a stroke share a segment (same endpoints, either direction), as the cell grid's neighbouring

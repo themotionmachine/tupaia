@@ -54,15 +54,20 @@ import {
 import type { GpuDevice, TextureSource, TrackedBuffer, TrackedTexture } from "./device";
 import type { Batch, FillBatch, Frame, ImageBatch, StrokeBatch } from "./framegraph";
 import {
+  analyticShape,
   appendFillEdges,
   appendSegments,
   appendStrokeCaps,
   capCode,
+  curveTolerance,
   F32,
+  hasCurves,
   hasSharedSegments,
   mayWindDeep,
+  measuredSubpaths,
   normalizeDashes,
-  pathBounds
+  pathBounds,
+  thinFill
 } from "./geometry";
 import { appendStencilMeshes, type MeshStats, newMeshStats } from "./mesh";
 import { indexOverlays, releaseRuns, swapOverlays, uploadAll } from "./overlays";
@@ -548,7 +553,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
 
   const fill = (subpaths: Subpath[], evenOdd: boolean): FillBatch => {
     const first = fans.length / 2;
-    const edgeFirst = edges.length / 4;
+    const edgeFirst = edges.length / 2; // ring points (geometry.ts appendFillEdges)
     return {
       kind: "fill",
       first,
@@ -565,12 +570,13 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
 
   const stroke = (
     subpaths: Subpath[],
-    style: Pick<ShapeStyle, "stroke" | "width" | "dashes" | "dashOffset" | "lineJoin" | "lineCap">
+    style: Pick<ShapeStyle, "stroke" | "width" | "dashes" | "dashOffset" | "lineJoin" | "lineCap">,
+    distances?: ArrayLike<number>[]
   ) => {
     const dashes = normalizeDashes(style.dashes);
     if (dashes.length > 8) return null;
     const first = segments.length / 5;
-    const count = appendSegments(subpaths, segments);
+    const count = appendSegments(subpaths, segments, distances);
     appendStrokeCaps(subpaths, caps, style.lineJoin, style.lineCap);
     const batch: StrokeBatch = {
       kind: "stroke",
@@ -633,8 +639,14 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
         const dashed = normalizeDashes(style.dashes).length > 0;
         const dashRings = () => dashHitRings(draw.d, style.dashes, style.dashOffset, viewScale);
         const strokeRings = () => strokeHitRings(dashed ? dashRings : null, hitRings);
+        // strokes and thin fills are flattened again for the raster bucket, dashed curves on SVG's dash measure
+        // (geometry.ts curveTolerance, measuredSubpaths)
+        const curved = hasCurves(draw.d);
+        const fine = curved ? curveTolerance(ctx.bucket, SCENE_CURVE_TOLERANCE) : SCENE_CURVE_TOLERANCE;
+        const refine = fine < SCENE_CURVE_TOLERANCE;
         if (style.fill || style.pattern) {
-          const batch = fill(subpaths, style.evenOdd);
+          const batch = fill(refine && thinFill(subpaths) ? flattenPath(draw.d, fine) : subpaths, style.evenOdd);
+          batch.analytic = analyticShape(draw.element.tagName, subpaths); // SVG draws it analytically or with 4x MSAA
           if (style.pattern) {
             const result = await tile(style.pattern);
             if (typeof result === "string") {
@@ -657,11 +669,20 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
             );
         }
         if (style.stroke) {
-          const batch = stroke(subpaths, style);
+          // dashed curves 4x finer (0.075 device px): each SVG dash is cut from the true curve, and chords within 0.3 px
+          // of it left dash ends off by up to a quarter px (stroke-probe d2 k4 trails: 27 % of the ink over Δ16);
+          // parity world: +4.9k-14k points by bucket, under 0.4 MiB
+          const measured = dashed && curved ? measuredSubpaths(draw.d, fine / 4, ctx.bucket) : null;
+          const batch = stroke(
+            measured?.subpaths ?? (refine ? flattenPath(draw.d, fine) : subpaths),
+            style,
+            measured?.distances
+          );
           if (!batch) {
             nativeFallback(draw, "dash pattern > 8", out);
             continue;
           }
+          batch.analytic = analyticShape(draw.element.tagName, subpaths, batch.dashCount > 0);
           pending.push(batch);
           if (hits?.stroke) {
             const rings = strokeRings();

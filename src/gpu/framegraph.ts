@@ -7,7 +7,7 @@
 import { TARGET_BUDGET, targetSamples } from "./budget";
 import { type Camera, screenToClip, type Viewport, visibleWorld, worldScissor, worldToClip } from "./camera";
 import type { GpuDevice, TrackedBuffer, TrackedProgram, TrackedTarget, TrackedTexture } from "./device";
-import { discProfile, outsideView, squareCapDashes } from "./geometry";
+import { COVERAGE_SAMPLES, discProfile, outsideView, radialSegmentsPerRadian, squareCapDashes } from "./geometry";
 import { GlState } from "./gl-state";
 import { MARKER_FLOATS, type MarkerInstances } from "./markers";
 import { hatchUvAtZoom } from "./raster";
@@ -28,6 +28,8 @@ export interface FillBatch {
   edgeCount?: number;
   // nonzero fill with 8 or more subpaths of one orientation: winding may reach 8, past the 3-bit counter
   deepWinding?: boolean;
+  // SVG draws this shape with analytic coverage, not 4x MSAA (geometry.ts analyticShape): the fringe box-filters
+  analytic?: boolean;
 }
 export interface StrokeBatch {
   bounds?: Rect4 | null;
@@ -42,6 +44,7 @@ export interface StrokeBatch {
   dashOffset: number;
   dashCap?: number; // capCode of stroke-linecap, applied to every dash end
   sharedSegments?: boolean; // subpaths share segments (geometry.ts hasSharedSegments): draw in coverage bands
+  analytic?: boolean; // SVG draws it with analytic coverage, not 4x MSAA (geometry.ts analyticShape): box filter
 }
 export interface SpriteBatch {
   kind: "sprites";
@@ -99,7 +102,7 @@ export interface Frame {
   fans: TrackedBuffer | null; // vec2 triangles
   caps: TrackedBuffer | null;
   segments: TrackedBuffer | null; // x0 y0 x1 y1 distance
-  edges?: TrackedBuffer | null; // fill boundary edges x0 y0 x1 y1, filled side on the left
+  edges?: TrackedBuffer | null; // fill boundary ring points, filled side on the left (geometry.ts appendFillEdges)
   sprites: TrackedBuffer | null; // x y s u0 v0 u1 v1
   glyphs: TrackedBuffer | null; // GLYPH_FLOATS per instance
   atlas: TrackedTexture | null;
@@ -150,6 +153,16 @@ function fillAaFlag(): boolean {
     return true;
   }
 }
+// Stroke and fill-edge coverage model (shaders.ts coverage models): SVG's 4 samples per pixel, except the batches SVG
+// draws analytically; ?gpu-coverage=area box-filters everything (the W2 model) for A/B comparisons.
+function sampledCoverageFlag(): boolean {
+  try {
+    return new URLSearchParams(globalThis.location?.search ?? "").get("gpu-coverage") !== "area";
+  } catch {
+    return true;
+  }
+}
+const SAMPLE_OFFSETS = new Float32Array(COVERAGE_SAMPLES.flat());
 
 export class FrameGraph {
   readonly drawBatches = { submitted: 0, culled: 0 };
@@ -189,6 +202,7 @@ export class FrameGraph {
   private multisampled = false;
   private readonly canvasMultisampled: boolean;
   private readonly fillAa = fillAaFlag();
+  private readonly sampled = sampledCoverageFlag();
   private patternMatrixFringe = new Float32Array(9);
   readonly state: GlState;
 
@@ -200,6 +214,12 @@ export class FrameGraph {
       this.programs[kind] = device.program(kind, shaders[kind].vs, shaders[kind].fs);
       this.vaos[kind] = gl.createVertexArray()!;
     }
+    // constant per program: set once here, before render() resets the cached GL state
+    for (const kind of ["fringe", "stroke"] as Kind[]) {
+      gl.useProgram(this.programs[kind].program);
+      gl.uniform2fv(this.programs[kind].uniforms.u_sampleOffsets, SAMPLE_OFFSETS);
+    }
+    gl.useProgram(null);
     this.strip = device.buffer("stroke corners", new Float32Array([0, -1, 1, -1, 0, 1, 1, 1]));
     this.square = device.buffer("unit square", new Float32Array([0, 0, 1, 0, 0, 1, 1, 1]));
   }
@@ -425,10 +445,15 @@ export class FrameGraph {
     const id = this.nextId(fill.bounds) << STENCIL.idShift;
     const fringe = this.use("fringe");
     this.attribute(fringe, "a_corner", this.strip, 2, 2, 0, 0);
-    this.attribute(fringe, "a_edge", frame.edges!, 4, 4, fill.edgeFirst! * 4, 1);
+    // four consecutive ring points per instance (geometry.ts appendFillEdges): previous, edge start and end, next
+    const base = fill.edgeFirst! * 2;
+    this.attribute(fringe, "a_prev", frame.edges!, 2, 2, base, 1);
+    this.attribute(fringe, "a_edge", frame.edges!, 4, 2, base + 2, 1);
+    this.attribute(fringe, "a_next", frame.edges!, 2, 2, base + 6, 1);
     const px = this.pxPerWorld();
     state.uniform1f(fringe.uniforms.u_pad, 1 / px);
     state.uniform1f(fringe.uniforms.u_pxPerWorld, px);
+    this.coverage(fringe, fill.analytic);
     this.paint(fringe, fill, this.patternMatrixFringe);
     // inside (winding set, hence visible): REPLACE writes the id and zeroes the winding
     state.stencilFunc(gl.NOTEQUAL, id, winding);
@@ -466,6 +491,7 @@ export class FrameGraph {
     const disc = this.disc(half * px);
     state.uniform1f(program.uniforms.u_discRadius, disc.radius);
     state.uniform1f(program.uniforms.u_discScale, disc.scale);
+    state.uniform1f(program.uniforms.u_radialPerRadian, radialSegmentsPerRadian(half * px));
     state.uniform4fv(program.uniforms.u_color, this.premultiplied(stroke.color));
     const dash = strokeDashes(stroke);
     state.uniform1fv(program.uniforms.u_dashes, dash.dashes);
@@ -474,6 +500,7 @@ export class FrameGraph {
     state.uniform1f(program.uniforms.u_dashOn, dash.on);
     state.uniform1f(program.uniforms.u_dashOffset, dash.offset);
     state.uniform1f(program.uniforms.u_dashCap, dash.cap);
+    this.coverage(program, stroke.analytic);
     // Joins are split at their bisectors in the shader, so a path overlaps itself only where it crosses itself or its
     // subpaths cross or coincide. Opaque, crossings blend: src-over of two opaque partial coverages a and b gives
     // 1 - (1 - a)(1 - b), the union for crossing edges, and a full-coverage pixel stays full. A translucent stroke, or
@@ -496,6 +523,12 @@ export class FrameGraph {
       gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, stroke.count);
     }
     this.passes.bandedStrokes++;
+  }
+
+  // u_samples / u_sampleOffsets of the stroke and fringe programs (shaders.ts coverage models)
+  private coverage(program: TrackedProgram, analytic: boolean | undefined): void {
+    const samples = this.sampled && !analytic ? 4 : 0;
+    this.state.uniform1i(program.uniforms.u_samples, samples);
   }
 
   private discs = new Map<number, { radius: number; scale: number }>();
