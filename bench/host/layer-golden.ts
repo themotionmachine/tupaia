@@ -32,6 +32,25 @@
 //                      composite: the canvas over the live SVG (the pre-W2 capture; diagnosis only)
 //                      probe: canvas (judged) plus the composite and the canvas over a magenta cover; any pixel that
 //                        differs between them is the SVG or the cover showing through the canvas, and fails the cell
+//   GOLDEN_SVG_REF  auto | vector | seen: what the SVG arm is for a family whose SVG display is a perf bitmap of its own
+//                    vectors (the burg icons, burg-canvas.ts; the cell mesh, cell-mesh-canvas.ts)       default auto
+//                      seen: the bitmap as the app displays it (the pre-W3 reference)
+//                      vector: the same SVG with the bitmap swapped back for its vectors, taken after the GPU arm
+//                      auto: per family, whichever the GPU is built to reproduce (DENSE below): vector for the burgs
+//                        (the GPU draws the restored vectors on purpose), seen for the cell mesh (the GPU keeps the
+//                        displayed asset on purpose, scene.ts). The other reference is always measured and reported.
+//   GOLDEN_SETTLE_MS the SVG arm is shot until two consecutive shots this far apart agree to within 64 px (default 400; 0
+//                    = one shot), so a reference that is still changing (a lazy raster, a refinement) is waited out or
+//                    fails as a harness error.
+//   GOLDEN_PRECOA    1 (default): render every emblem COA symbol before the first capture. 0: leave them lazy, as the app
+//                    does, so the cell catches the GPU/lazy-COA race (see `coa-race` in gate.ts golden-selftest).
+//   GOLDEN_COA_LATE  1: for the emblems family, the COA symbols arrive AFTER the GPU prepared, the lazy-COA race made
+//                    deterministic. The app inserts each symbol into #coas (svg#defElements, outside svg#map) only after
+//                    fetching its charges, so a prepare can precede it. Per cell: #coas is emptied, a revision inside
+//                    svg#map forces a prepare (the frame is built, refined and current WITHOUT the emblems), then the
+//                    symbols are put back. A renderer that follows #coas re-prepares and the cell passes; one that does
+//                    not keeps the empty frame and the cell fails the D11 coverage gate. Implies GOLDEN_PRECOA=0 for
+//                    the cell. Used by `gate coa-race`.
 //   GOLDEN_PARAMS    extra gpu-* URL flags for the page, "+"-joined (e.g. gpu-native-shapes=1)  default none
 //   GOLDEN_CAMERAS   fixture | centered: which camera frames a cell. "fixture" (default when GOLDEN_MAP is the parity
 //                    fixture) uses the manifest's recorded presets; "centered" centres the whole map at k
@@ -70,6 +89,12 @@ const reading = (env.GOLDEN_READING || DEFAULT_READING) as Reading;
 const keep = env.GOLDEN_KEEP || "all";
 const breakMode = env.GOLDEN_BREAK || "none";
 const gpuArm = env.GOLDEN_GPU_ARM || "canvas";
+const svgRefArg = env.GOLDEN_SVG_REF || "auto";
+const settleMs = Number(env.GOLDEN_SETTLE_MS ?? 400);
+const coaLate = env.GOLDEN_COA_LATE === "1";
+const preCoa = (env.GOLDEN_PRECOA ?? "1") !== "0" && !coaLate;
+if (!["auto", "vector", "seen"].includes(svgRefArg)) throw Error("GOLDEN_SVG_REF must be auto|vector|seen");
+if (!Number.isFinite(settleMs) || settleMs < 0) throw Error("GOLDEN_SETTLE_MS must be a number of ms >= 0");
 const urlParams = (env.GOLDEN_PARAMS || "").split("+").filter(Boolean);
 if (urlParams.some(kv => !/^gpu-[a-z0-9-]+=[\w.-]*$/.test(kv))) throw Error("GOLDEN_PARAMS entries must be gpu-<flag>=<value>");
 if (!/^#[\da-f]{6}$/i.test(bg)) throw Error(`GOLDEN_BG must be #rrggbb, got ${bg}`);
@@ -163,13 +188,23 @@ interface Cell {
   pendingCoas?: number;
   images?: Record<string, string>;
   seconds?: number;
+  // SVG-arm reference: "svg" (the SVG as shown, no dense bitmap), "vector" (a dense bitmap swapped back for its vectors;
+  // see DENSE) or "seen" (the dense bitmap as shown). otherRef is the verdict against the other reference, bitmapVsVector how
+  // far the shown bitmap is from its vectors; both are info only.
+  svgRef?: string;
+  // GOLDEN_COA_LATE: the symbols were held back until the GPU frame was built, then returned
+  coaLate?: { symbols: number; preparesBefore: number; preparesAfter: number; reprepared: boolean };
+  svgShots?: number;
+  svgVector?: { bitmaps: number };
+  otherRef?: { ref: string; pass: boolean; failures: string[]; ssim: number; over16Fraction: number; over44Fraction: number; inkSvg: number; inkGpu: number; inkRatio: number; over16OfInk: number };
+  bitmapVsVector?: { ssim: number; over16OfInk: number; inkBitmap: number; inkVector: number };
 }
 
 const report = {
   schema: 1,
   runStartedUtc: new Date().toISOString(),
   fixture: { path: mapPath, sha256: mapSha },
-  args: { layers: families.map(f => f.name), k: zooms, coastk: coastZooms, dpr: dprs, preset: presets, bg, reading, keep, break: breakMode, gpuArm, params: urlParams, cameras: cameraMode, parity: !!parity },
+  args: { layers: families.map(f => f.name), svgRef: svgRefArg, settleMs, preCoa, coaLate, k: zooms, coastk: coastZooms, dpr: dprs, preset: presets, bg, reading, keep, break: breakMode, gpuArm, params: urlParams, cameras: cameraMode, parity: !!parity },
   coverage: COVERAGE,
   census: env.GOLDEN_CENSUS || null,
   diagnosticBreak: breakMode !== "none" ? `${breakMode}: the GPU arm is deliberately broken; this run is expected to FAIL` : null,
@@ -300,8 +335,9 @@ async function loadFixture(page: Page, preset: string, toggles: string[]): Promi
   // The GPU renderer does not observe #coas (only the opt-in compat reuse does), so a prepare that races those
   // fetches keeps a raster with the emblems missing (seen ad hoc: emblems k 4 GPU ink 79K vs SVG 173K px). That race
   // is a renderer finding, not something a parity cell should measure by luck; with the symbols in place first, zoom
-  // styling only flips group classes, which the renderer does observe.
-  const coas = await page.evaluate(async () => {
+  // styling only flips group classes, which the renderer does observe. GOLDEN_PRECOA=0 skips this on purpose: it is the
+  // `coa-race` self-test arm, which must FAIL while the renderer misses a symbol arriving in #coas after its prepare.
+  const coas = !preCoa ? null : await page.evaluate(async () => {
     const w = globalThis as any;
     if (!w.COArenderer || !w.renderGroupCOAs) return "no COA renderer";
     for (const g of document.querySelectorAll<SVGGElement>("svg#map #emblems > g"))
@@ -380,6 +416,37 @@ async function waitGpu(page: Page): Promise<{ active: string; fallbackReason?: s
     return { active: s?.active, fallbackReason: s?.fallbackReason || undefined };
   });
   return timedOut ? { ...status, timedOut } : status;
+}
+
+// GOLDEN_COA_LATE (see the header): build the GPU frame with #coas empty, then bring the symbols back. Returns what
+// happened; `reprepared` is whether the renderer prepared again within 5 s of the symbols arriving.
+const gpuPrepares = (page: Page) => page.evaluate(() => (globalThis as any).rendererStatus?.()?.gpu?.prepares ?? -1);
+async function lateCoas(page: Page): Promise<{ symbols: number; preparesBefore: number; preparesAfter: number; reprepared: boolean }> {
+  const symbols = await page.evaluate(() => {
+    const w = globalThis as any;
+    const coas = document.getElementById("coas");
+    if (!coas) return -1;
+    w.__goldenCoas = [...coas.childNodes];
+    coas.replaceChildren();
+    // a revision inside svg#map: the renderer prepares now, against a #coas without symbols
+    document.querySelector("svg#map #emblems")?.setAttribute("data-golden-coa-late", String(Date.now()));
+    return w.__goldenCoas.length;
+  });
+  if (symbols <= 0) throw Error(symbols < 0 ? "GOLDEN_COA_LATE: no #coas" : "GOLDEN_COA_LATE: #coas holds no symbols to hold back");
+  const start = await gpuPrepares(page);
+  await page.waitForFunction(n => ((globalThis as any).rendererStatus?.()?.gpu?.prepares ?? -1) > n, start - 1, { timeout: 20000, polling: 50 }).catch(() => {});
+  await waitGpu(page); // the frame as it stands without the symbols: current and refined
+  const preparesBefore = await gpuPrepares(page);
+  await page.evaluate(() => {
+    const w = globalThis as any;
+    document.getElementById("coas")!.append(...w.__goldenCoas);
+    delete w.__goldenCoas;
+  });
+  const reprepared = await page
+    .waitForFunction(n => ((globalThis as any).rendererStatus?.()?.gpu?.prepares ?? -1) > n, preparesBefore, { timeout: 5000, polling: 50 })
+    .then(() => true, () => false);
+  await waitGpu(page);
+  return { symbols, preparesBefore, preparesAfter: await gpuPrepares(page), reprepared };
 }
 
 // Self-test only: breaks the GPU frame in place and redraws. SVG is untouched. Each mode reports what it changed; a
@@ -523,7 +590,7 @@ const countDiff = (a: Buffer, b: Buffer) => {
 
 // The GPU arm (see GOLDEN_GPU_ARM), then the SVG arm (canvas hidden), from one DOM state. A GPU re-prepare between
 // the shots would mean the arms are not the same frame, so it is an error.
-async function captureArms(page: Page): Promise<{ gpu: Buffer; svg: Buffer; showThrough: { composite: number; magenta: number } | null; probe: Record<string, Buffer> }> {
+async function captureArms(page: Page): Promise<{ gpu: Buffer; svg: Buffer; svgShots: number; svgSettled: boolean; showThrough: { composite: number; magenta: number } | null; probe: Record<string, Buffer> }> {
   const stamp = await gpuStamp(page);
   let gpu: Buffer;
   let showThrough: { composite: number; magenta: number } | null = null;
@@ -549,22 +616,141 @@ async function captureArms(page: Page): Promise<{ gpu: Buffer; svg: Buffer; show
       probe = { composite, magenta };
     }
   }
-  const old = await page.evaluate(() => {
+  const old = await hideCanvas(page);
+  await twoFrames(page);
+  const settle = await shootSvg(page);
+  await showCanvas(page, old);
+  const after = await gpuStamp(page);
+  if (after !== stamp) throw Error(`GPU frame changed while the arms were captured (prepares/revision/visible ${stamp} → ${after})`);
+  return { gpu, svg: settle.png, svgShots: settle.shots, svgSettled: settle.settled, svgMoving: settle.moving, showThrough, probe };
+}
+
+const hideCanvas = (page: Page) =>
+  page.evaluate(() => {
     const c = document.querySelector("canvas[data-gpu-renderer]") as HTMLCanvasElement | null;
     if (!c) return null;
     const value = c.style.visibility;
     c.style.visibility = "hidden";
     return value;
   });
-  await twoFrames(page);
-  const svg = await page.screenshot({ animations: "disabled" });
-  await page.evaluate(value => {
+const showCanvas = (page: Page, value: string | null) =>
+  page.evaluate(value => {
     const c = document.querySelector("canvas[data-gpu-renderer]") as HTMLCanvasElement | null;
     if (c) c.style.visibility = value || "";
-  }, old);
-  const after = await gpuStamp(page);
-  if (after !== stamp) throw Error(`GPU frame changed while the arms were captured (prepares/revision/visible ${stamp} → ${after})`);
-  return { gpu, svg, showThrough, probe };
+  }, value);
+
+// One SVG-arm shot (the canvas must be hidden already) that waits for the reference to hold still: shots GOLDEN_SETTLE_MS
+// apart repeat until two in a row differ by at most SETTLE_NOISE_PX pixels (at most 6 shots). Chromium's own raster is
+// not bit-stable shot to shot: 9 px of one emblem frame flickered between identical-DOM shots (measured), so exact
+// equality would fail good cells. A reference still changing after that (a lazy raster, a refinement) is reported as not
+// settled, with where, and fails the cell as a harness error.
+const SETTLE_NOISE_PX = 64;
+async function shootSvg(page: Page): Promise<{ png: Buffer; shots: number; settled: boolean; moving?: string }> {
+  let png = await page.screenshot({ animations: "disabled" });
+  if (settleMs === 0) return { png, shots: 1, settled: true };
+  let moving: string | undefined;
+  for (let shots = 2; shots <= 6; shots++) {
+    await page.waitForTimeout(settleMs);
+    const next = await page.screenshot({ animations: "disabled" });
+    const change = next.equals(png) ? { n: 0, where: "" } : describeChange(png, next);
+    png = next;
+    if (change.n <= SETTLE_NOISE_PX) return { png, shots, settled: true };
+    moving = change.where;
+  }
+  return { png, shots: 6, settled: false, moving };
+}
+// how many pixels two shots of the SVG arm differ in, and "N px differ in x0,y0-x1,y1" (device px)
+function describeChange(a: Buffer, b: Buffer): { n: number; where: string } {
+  const x = decodePng(a);
+  const y = decodePng(b);
+  let n = 0;
+  let x0 = Infinity, y0 = Infinity, x1 = -1, y1 = -1;
+  for (let i = 0; i < x.data.length; i += 4)
+    if (x.data[i] !== y.data[i] || x.data[i + 1] !== y.data[i + 1] || x.data[i + 2] !== y.data[i + 2]) {
+      const px = (i / 4) % x.width, py = Math.floor(i / 4 / x.width);
+      n++;
+      x0 = Math.min(x0, px); y0 = Math.min(y0, py); x1 = Math.max(x1, px); y1 = Math.max(y1, py);
+    }
+  return { n, where: `${n} px differ in ${x0},${y0}-${x1},${y1}` };
+}
+
+// ------------------------------------------------------------------ SVG reference for dense bitmap layers
+//
+// Two layers are drawn by the app as ONE raster of their own vectors, for speed (commit 9a5021eb): the burg icons
+// (burg-canvas.ts, <image data-burg-vectors>) and the cell mesh (cell-mesh-canvas.ts, <image data-cell-mesh>). The raster
+// is cut once at min(dpr, 2) px per map unit (the burg SVG is first decoded at 1 px per unit), so in SVG mode it is
+// shown upscaled by k and stays blurry for every zoom up to 4, where dense-zoom.ts swaps in crisp vector <use>s (burgs,
+// k > 4). It never sharpens with time (the settle shots below prove it), so it is not a transient: it is what SVG mode
+// shows. What the GPU is meant to reproduce differs by layer:
+//   burgs: the scene routes the export clone, which restores the icons' vectors ("restored burg vectors"), so the GPU
+//          draws crisp icons on purpose. Against the shown bitmap the cells measured the bitmap's blur (ink ratio
+//          0.21-0.63), not the icons. Reference: the vector form, the same SVG with the bitmap swapped back for its
+//          vectors (what saves, exports and editors use).
+//   cells: the scene keeps the displayed asset ("cell mesh bitmap" compat, scene.ts) unless gpu-native-cells=1, so the
+//          GPU's frame is meant to equal what SVG mode shows. Reference: the bitmap as shown.
+// Either way the other reference is measured against the same GPU frame and reported (`otherRef`), and how far the bitmap
+// is from its vectors too (`bitmapVsVector`). The swap happens after the GPU arm is shot, in the app's own state.
+type DenseKind = "burgs" | "cells";
+const DENSE: Record<string, { kind: DenseKind; ref: "vector" | "seen" }> = { icons: { kind: "burgs", ref: "vector" }, cells: { kind: "cells", ref: "seen" } };
+
+// Swaps the bitmap for vectors in the live DOM; returns what it swapped, or null when SVG shows no bitmap here.
+const vectorize = (page: Page, kind: DenseKind) =>
+  page.evaluate(kind => {
+    const w = globalThis as any;
+    if (kind === "burgs") {
+      const bitmaps = [...document.querySelectorAll("svg#map #burgIcons image[data-burg-vectors], svg#map #anchors image[data-burg-vectors]")].filter(i => !i.hasAttribute("data-zoom-hidden"));
+      if (!bitmaps.length) return null;
+      w.prepareBurgIcons(); // editing mode: restores every group's <use>s and stops the app re-compacting them
+      return { bitmaps: bitmaps.length };
+    }
+    const group = document.getElementById("cells");
+    const image = group?.querySelector<SVGImageElement>("image[data-cell-mesh]");
+    if (!group || !image) return null;
+    const graph = (0, eval)("customization") === 1 ? w.grid : w.pack;
+    let d = "";
+    for (let n = 0; n < graph.cells.i.length; n++) {
+      const vertices = graph.cells.v[graph.cells.i[n]];
+      if (!vertices.length) continue;
+      const start = graph.vertices.p[vertices[0]];
+      d += `M${start[0]} ${start[1]}`;
+      for (let i = 1; i < vertices.length; i++) d += `L${graph.vertices.p[vertices[i]][0]} ${graph.vertices.p[vertices[i]][1]}`;
+      d += "Z";
+    }
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", d);
+    w.__goldenCellImage = image;
+    group.replaceChildren(path); // stroke, width and opacity come from #cells, as for the bitmap's source
+    return { bitmaps: 1 };
+  }, kind);
+// The vector-form SVG shot of a dense family (GPU canvas hidden for the shot), then the bitmap is put back and the app
+// and the GPU settle again. null when SVG shows no bitmap here (the burgs above k 4 already show vectors).
+async function captureVector(page: Page, kind: DenseKind): Promise<{ png: Buffer; shots: number; settled: boolean; moving?: string; swapped: number } | null> {
+  const old = await hideCanvas(page);
+  let swapped: { bitmaps: number } | null = null;
+  try {
+    swapped = await vectorize(page, kind);
+    if (!swapped) return null;
+    await twoFrames(page);
+    return { ...(await shootSvg(page)), swapped: swapped.bitmaps };
+  } finally {
+    await showCanvas(page, old);
+    if (swapped) await restoreBitmap(page, kind);
+  }
+}
+// Puts the bitmap back (the app's own compaction for the burgs), then waits for the app and the GPU to settle again.
+async function restoreBitmap(page: Page, kind: DenseKind): Promise<void> {
+  await page.evaluate(async kind => {
+    const w = globalThis as any;
+    if (kind === "burgs") {
+      w.finishBurgIcons();
+      await w.burgRenderReady;
+    } else if (w.__goldenCellImage) {
+      document.getElementById("cells")?.replaceChildren(w.__goldenCellImage);
+      delete w.__goldenCellImage;
+    }
+  }, kind);
+  await settleApp(page);
+  await waitGpu(page);
 }
 
 // The blanks: every family hidden, captured in both arms. They are what "painted nothing" looks like in each arm
@@ -637,6 +823,10 @@ try {
               cell.renderer = status;
               if (status.active !== "gpu") cell.failures.push(`GPU not active: ${status.fallbackReason ?? "no frame"}`);
               else if (status.timedOut) cell.failures.push("GPU frame did not settle within 60 s");
+              if (coaLate && family.id === "emblems") {
+                cell.coaLate = await lateCoas(page);
+                if (!cell.coaLate.reprepared) cell.notes = [...(cell.notes ?? []), "the renderer did not prepare again when the COA symbols arrived"];
+              }
               if (breakMode !== "none") {
                 const dropped = await breakFrame(page, breakMode);
                 cell.dropped = dropped;
@@ -668,18 +858,45 @@ try {
                   for (const [name, png] of Object.entries(shots.probe)) writeFileSync(`${base}-probe-${name}.png`, png);
                 }
               }
-              const svg = decodePng(shots.svg);
+              cell.svgShots = shots.svgShots;
+              if (!shots.svgSettled) cell.failures.push(`harness: the SVG arm was still changing after ${shots.svgShots} shots ${settleMs} ms apart (${shots.svgMoving})`);
+              // dense bitmap families: the vector form is the reference (GOLDEN_SVG_REF), the shown bitmap is reported
+              let svgPng = shots.svg;
+              let otherPng: Buffer | null = null; // the dense family's other SVG reference
+              cell.svgRef = "svg";
+              const dense = DENSE[family.id];
+              if (dense) {
+                const ref = svgRefArg === "auto" ? dense.ref : svgRefArg;
+                const vec = await captureVector(page, dense.kind);
+                if (vec) {
+                  if (!vec.settled) cell.failures.push(`harness: the vector-form SVG arm was still changing after ${vec.shots} shots (${vec.moving})`);
+                  otherPng = ref === "vector" ? shots.svg : vec.png;
+                  if (ref === "vector") svgPng = vec.png;
+                  cell.svgRef = ref;
+                  cell.svgVector = { bitmaps: vec.swapped };
+                  const g = decodePng(shots.gpu);
+                  const m = measureCell(decodePng(otherPng), g, blankSvg, blankGpu);
+                  const v = judgeCell({ metrics: m, census: cell.census, domDrawables: cell.domDrawables, expected: null }, reading);
+                  // the other reference, against the same GPU frame: info only
+                  cell.otherRef = { ref: ref === "vector" ? "seen" : "vector", pass: v.pass, failures: v.failures, ssim: m.ssim, over16Fraction: m.over16Fraction, over44Fraction: m.over44Fraction, inkSvg: m.inkSvg, inkGpu: m.inkGpu, inkRatio: m.inkRatio, over16OfInk: m.over16OfInk };
+                  // how far the shown bitmap is from its own vectors: the blur, as the same metrics
+                  const blur = measureCell(decodePng(shots.svg), decodePng(vec.png), blankSvg, blankSvg);
+                  cell.bitmapVsVector = { ssim: blur.ssim, over16OfInk: blur.over16OfInk, inkBitmap: blur.inkSvg, inkVector: blur.inkGpu };
+                } // else SVG shows vectors already (burgs above k 4): svgRef stays "svg"
+              }
+              const svg = decodePng(svgPng);
               const gpu = decodePng(shots.gpu);
               cell.metrics = measureCell(svg, gpu, blankSvg, blankGpu);
               const verdict = judgeCell({ metrics: cell.metrics, census: cell.census, domDrawables: cell.domDrawables, expected: cell.expected }, reading);
               cell.gates = verdict.gates;
-              if (verdict.notes.length) cell.notes = verdict.notes;
+              if (verdict.notes.length) cell.notes = [...(cell.notes ?? []), ...verdict.notes];
               cell.failures.push(...verdict.failures);
               cell.pass = cell.failures.length === 0;
               cell.class = classify(cell, verdict.gates);
               if (keep === "all" || !cell.pass) {
                 const base = join(cellDir, `${family.name}-k${fmt(k)}${first ? "" : `@${camera.id}`}`);
-                writeFileSync(`${base}-svg.png`, shots.svg);
+                writeFileSync(`${base}-svg.png`, svgPng);
+                if (otherPng) writeFileSync(`${base}-svg-${cell.otherRef?.ref === "seen" ? "bitmap" : "vector"}.png`, otherPng);
                 writeFileSync(`${base}-gpu.png`, shots.gpu);
                 writeFileSync(`${base}-diff.png`, encodePng(heatmap(svg, gpu)));
                 cell.images = { svg: relative(outDir, `${base}-svg.png`), gpu: relative(outDir, `${base}-gpu.png`), diff: relative(outDir, `${base}-diff.png`) };
@@ -693,7 +910,7 @@ try {
             const m = cell.metrics;
             log(
               `${cell.pass ? "PASS" : "FAIL"} ${key}${m ? ` ssim ${m.ssim.toFixed(4)} over16 ${(m.over16Fraction * 100).toFixed(3)}% over44 ${(m.over44Fraction * 100).toFixed(3)}% changed ${(m.changedFraction * 100).toFixed(2)}%` : ""}` +
-                `${cell.census ? ` census n${cell.census.native}/c${cell.census.compat}/s${cell.census.skipped}` : ""}${cell.pass ? "" : ` :: ${cell.failures.join("; ")}`}${cell.notes ? ` [note: ${cell.notes.join("; ")}]` : ""}`
+                `${cell.census ? ` census n${cell.census.native}/c${cell.census.compat}/s${cell.census.skipped}` : ""}${cell.svgRef && cell.svgRef !== "svg" ? ` ref ${cell.svgRef}` : ""}${cell.otherRef ? ` (vs ${cell.otherRef.ref}: ${cell.otherRef.pass ? "pass" : "fail"} ratio ${cell.otherRef.inkRatio.toFixed(3)} o16ink ${(cell.otherRef.over16OfInk * 100).toFixed(1)}%)` : ""}${cell.pass ? "" : ` :: ${cell.failures.join("; ")}`}${cell.notes ? ` [note: ${cell.notes.join("; ")}]` : ""}`
             );
             write();
           }

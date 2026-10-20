@@ -170,7 +170,7 @@ const gated = (preset: string, family: string, gates: Record<string, boolean>): 
   const ok = Object.values(gates).every(Boolean);
   return cell(preset, family, 1, ok, { gates, failures: ok ? [] : ["conservative: changed 0.9% (max 0.5%)"] });
 };
-const allGates = { ssim: true, over16: true, over44: true, conservative: true, populated: true };
+const allGates = { ssim: true, over16: true, over44: true, conservative: true, coverage: true, populated: true };
 
 test("preset induced is counted per gate: a cell that already fails one gate cannot hide a regression of another", () => {
   const cells = [
@@ -183,7 +183,7 @@ test("preset induced is counted per gate: a cell that already fails one gate can
     gated("light", "texture", { ...allGates, conservative: false }),
     gated("light", "ocean", { ...allGates, conservative: false })
   ];
-  const { rows } = summarizePresets(cells);
+  const { rows } = summarizePresets(cells, "default", "conservative");
   const ancient = rows.find(r => r.preset === "ancient")!;
   assert.equal(ancient.induced, 1);
   assert.deepEqual(ancient.inducedCells, ["texture/k1"]);
@@ -192,10 +192,28 @@ test("preset induced is counted per gate: a cell that already fails one gate can
   assert.match(judgePresets(rows).join(), /ancient: 1 cell\(s\) fail a gate under this preset that passes under the baseline \(ssim 1, over16 1;/);
 });
 
-test("preset induced follows the reading: over44 gate under the over44 reading, conservative otherwise", () => {
+test("preset induced follows the reading: over44 (the D11 default) gates, conservative only when asked", () => {
   const cells = [gated("default", "ocean", allGates), gated("gloom", "ocean", { ...allGates, over44: false })];
-  assert.equal(summarizePresets(cells).rows.find(r => r.preset === "gloom")!.induced, 0, "over44 is not gated under the conservative reading");
-  assert.equal(summarizePresets(cells, "default", "over44").rows.find(r => r.preset === "gloom")!.induced, 1);
+  assert.equal(summarizePresets(cells, "default", "conservative").rows.find(r => r.preset === "gloom")!.induced, 0, "over44 is not gated under the conservative reading");
+  assert.equal(summarizePresets(cells).rows.find(r => r.preset === "gloom")!.induced, 1, "the default reading is over44");
+});
+
+test("preset induced counts the D11 coverage gate, and inducedFromPass only cells that fully pass under the baseline", () => {
+  const cells = [
+    // passes everything under default, loses ink under night: induced by coverage, and from a pass
+    gated("default", "burgs", allGates),
+    gated("night", "burgs", { ...allGates, coverage: false }),
+    // already fails coverage under default and fails it again under night: not induced
+    gated("default", "rivers", { ...allGates, coverage: false }),
+    gated("night", "rivers", { ...allGates, coverage: false }),
+    // fails coverage under default, and under night loses ssim as well: induced (ssim) but not from a pass
+    gated("default", "routes", { ...allGates, coverage: false }),
+    gated("night", "routes", { ...allGates, coverage: false, ssim: false })
+  ];
+  const night = summarizePresets(cells).rows.find(r => r.preset === "night")!;
+  assert.deepEqual(night.inducedCells.sort(), ["burgs/k1", "routes/k1"]);
+  assert.deepEqual(night.inducedGates, { coverage: 1, ssim: 1 });
+  assert.equal(night.inducedFromPass, 1);
 });
 
 test("preset hard failures are anchored on the golden's own phrases, not any mention of a fallback", () => {
