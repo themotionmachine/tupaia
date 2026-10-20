@@ -6,7 +6,7 @@
 // the canonical SVG before editor dispatch. GPU selection remains separately opt-in via ?gpu-select. An open editor
 // suspends the GPU, and hide() writes the GPU camera before revealing the canonical SVG.
 import { canvasAntialias, DETAIL_RESERVE, GPU_BUDGET, windowAllowance } from "./budget";
-import { type Camera, parseViewboxTransform, screenToWorld, type Viewport, visibleWorld } from "./camera";
+import { type Camera, parseViewboxTransform, screenToWorld, type Viewport } from "./camera";
 import { forgetCompatClone, type Region } from "./compat";
 import { compatDirt, watchCompatInputs } from "./compat-reuse";
 import { GpuDevice } from "./device";
@@ -41,6 +41,8 @@ import {
   prepareFrame,
   type RetainedFrame,
   refineCompat,
+  refineRequest,
+  refineView,
   refreshOverlays as refreshOverlayBatches,
   releaseDetail,
   retainFrame
@@ -1238,17 +1240,12 @@ export class GpuRenderer {
         this.prepareWanted ? "settle-wanted" : prepared.revision !== this.revision ? "settle-revision" : "settle-bucket"
       );
     if (action === "none" || !this.active()) return;
-    const [x0, y0, x1, y1] = visibleWorld(this.view, this.viewport, 64);
-    const visible = { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
-    const margin = 128 * this.viewport.dpr;
-    const pixels = {
-      width: Math.round(this.viewport.width * this.viewport.dpr + margin),
-      height: Math.round(this.viewport.height * this.viewport.dpr + margin)
-    };
+    const { visible, pixels } = refineView(this.view, this.viewport);
     const generation = this.generation;
     const token = ++this.refines; // a newer settle or prepare supersedes this refinement
-    // with reuse on, refineCompat itself releases every detail it does not keep for this view before measuring room
-    if (!this.compatReuse) releaseDetail(prepared, this.device);
+    // with reuse on, refineCompat itself releases every detail it does not keep for this view before measuring room;
+    // off, details cut for this very request (the prepare's first-frame details) are left for it to keep
+    if (!this.compatReuse) releaseDetail(prepared, this.device, refineRequest(visible, pixels));
     this.requestDraw();
     this.activeRefinements++;
     const done = this.traceJob("refine", "running");

@@ -7,6 +7,13 @@ export const TARGET_BUDGET = 80 << 20; // offscreen group target (MSAA colour + 
 export const MIN_COMPAT_BUDGET = 16 << 20; // least useful world compat share; below it the frame fails to SVG
 export const PEAK_LIMIT = 256 << 20; // transient ceiling while a replacement set coexists with the one it replaces
 export const DETAIL_RESERVE = 8 << 20; // steady headroom settle-time detail leaves for window refreshes
+// prepare-time details of sharp runs (labels, icons, markers) for the first frame: at most this, within the steady room
+export const FIRST_DETAIL_BUDGET = 32 << 20;
+// Room world rasters leave the view's sharp-run detail when zoomed past their base resolution (prepare detailShare).
+export const DETAIL_SHARE = 48 << 20;
+// Wall time the first frame's detail may add to a prepare (firstDetails): runs it has not started by then wait for the
+// settle refinement. A cap on time to the first current GPU frame (D12), not on legibility.
+export const FIRST_DETAIL_MS = 1500;
 
 // Bytes a bitmap window refresh may commit. The new set is allocated before the old one (`windowBytes`) is released,
 // so it must fit the peak room now and, once the old set is gone, the steady budget.
@@ -16,14 +23,26 @@ export function windowAllowance(total: number, windowBytes: number, budget = GPU
 
 // Compat raster bytes a prepare may still allocate: its steady share (budget minus target reserve and what the new
 // frame already owns or will upload) and the peak room left beside the previous frame (`total` = tracked now).
+// `reserve` is what the offscreen group target takes (targetReserve: the target the framegraph allocates for this
+// backing store, never more than TARGET_BUDGET).
 export function compatAllowance(
   total: number,
   own: number,
   pending: number,
   budget = GPU_BUDGET,
-  peak = PEAK_LIMIT
+  peak = PEAK_LIMIT,
+  reserve = TARGET_BUDGET
 ): number {
-  return Math.max(0, Math.min(budget - TARGET_BUDGET - own - pending, peak - total - pending));
+  return Math.max(0, Math.min(budget - reserve - own - pending, peak - total - pending));
+}
+
+// The group target the framegraph allocates for a backing store of `width` x `height` device px (framegraph composite:
+// targetSamples within TARGET_BUDGET), capped at TARGET_BUDGET so the reserve is never larger than before it was sized.
+// At DPR 2 the target has no MSAA: 1512x982 CSS px is a 47.5 MB target, 1280x720 29.5 MB, against the flat 80 MiB the
+// steady share used to set aside, which left the canonical bitmap windows of a 1512x982 world no room at load.
+export function targetReserve(width: number, height: number, maxSamples: number, dpr: number): number {
+  const [w, h] = [Math.max(1, Math.round(width)), Math.max(1, Math.round(height))];
+  return Math.min(TARGET_BUDGET, targetBytes(w, h, targetSamples(w, h, maxSamples, TARGET_BUDGET, dpr)));
 }
 
 export interface PixelBounds {

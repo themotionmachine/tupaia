@@ -14,6 +14,7 @@ import {
   reliefCell,
   TARGET_BUDGET,
   targetBytes,
+  targetReserve,
   targetSamples,
   windowAllowance
 } from "./budget";
@@ -114,6 +115,28 @@ describe("memory allowances", () => {
     // re-prepare beside a 150 MiB frame: peak room binds
     expect(compatAllowance(210 * MiB, 10 * MiB, 5 * MiB)).toBe(PEAK_LIMIT - 215 * MiB);
     expect(compatAllowance(300 * MiB, 0, 0)).toBe(0);
+  });
+
+  it("reserves the group target this backing store gets, never more than TARGET_BUDGET", () => {
+    // DPR 2: no MSAA, 8 B/px. 1512x982 CSS px is a 47.5 MB target, not the flat 80 MiB the share used to set aside.
+    expect(targetReserve(3024, 1964, 4, 2)).toBe(3024 * 1964 * 8);
+    expect(targetReserve(2560, 1440, 4, 2)).toBe(2560 * 1440 * 8);
+    // DPR 1 keeps MSAA within the target budget; a target past it is capped at the old reserve
+    expect(targetReserve(1920, 1080, 4, 1)).toBe(targetBytes(1920, 1080, 4));
+    expect(targetReserve(6000, 4000, 4, 2)).toBe(TARGET_BUDGET);
+    for (const [w, h, dpr] of [
+      [1280, 720, 1],
+      [2560, 1440, 1],
+      [3024, 1964, 2],
+      [5120, 2880, 2]
+    ])
+      expect(targetReserve(w, h, 4, dpr)).toBeLessThanOrEqual(TARGET_BUDGET);
+    // the steady share grows by what the flat reserve over-counted
+    const reserve = targetReserve(3024, 1964, 4, 2);
+    expect(compatAllowance(0, 10 * MiB, 5 * MiB, GPU_BUDGET, PEAK_LIMIT, reserve)).toBe(
+      GPU_BUDGET - reserve - 15 * MiB
+    );
+    expect(compatAllowance(0, 10 * MiB, 5 * MiB)).toBe(GPU_BUDGET - TARGET_BUDGET - 15 * MiB);
   });
 
   it("no longer lifts compat to the 16 MiB floor when the room is smaller", () => {

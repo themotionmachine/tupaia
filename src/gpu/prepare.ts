@@ -1,18 +1,25 @@
 // Turns the canonical SVG into one GPU frame: shared vertex/instance buffers, pattern tiles, relief and glyph
 // atlases, compat rasters (DOM-ordered slots) and the CPU pick index. Async with a staleness check after every
 // await: a superseded job releases what it allocated and returns null.
+import { computedStyleText } from "../io/inline-style";
 import type { ReliefSprite } from "../renderers/relief-canvas";
 import { BitmapWindows, type WindowDetail } from "./bitmap-window";
 import {
   compatAllowance,
+  DETAIL_RESERVE,
+  DETAIL_SHARE,
+  FIRST_DETAIL_BUDGET,
+  FIRST_DETAIL_MS,
   fitScale,
   GPU_BUDGET,
   MIN_COMPAT_BUDGET,
+  PEAK_LIMIT,
   refineOrder,
   reliefCell,
+  targetReserve,
   windowAllowance
 } from "./budget";
-import type { Camera } from "./camera";
+import { type Camera, type Viewport, visibleWorld } from "./camera";
 import { resolveManyInClone } from "./clone-map";
 import {
   compatClone,
@@ -161,8 +168,27 @@ export interface CompatReuse {
 export const overlayShapes = (root: Element, svg: SVGSVGElement) =>
   compatShapes(root as unknown as CompatRoot, svg as unknown as SVGGraphicsElement);
 
-// Compat reasons whose content is high-frequency glyph/icon detail rather than a smooth fill or texture.
-export const SHARP_COMPAT = new Set(["text", "<svg>", "restored burg vectors"]);
+// Compat reasons whose content is high-frequency glyph/icon detail rather than a smooth fill or texture: text, marker
+// <svg>s, burg icons, emblem and icon <use>s, regiment emoji, and the small basic shapes the compat lane draws (rain
+// drops, population lines, ruler and goods markers: scene.ts routes <circle>/<rect>/<line>... here unless
+// ?gpu-native-shapes=1). Blurry from the whole-world raster, they are what makes a first frame unreadable.
+export const SHARP_COMPAT = new Set([
+  "text",
+  "<svg>",
+  "restored burg vectors",
+  "use",
+  "<circle>",
+  "<ellipse>",
+  "<rect>",
+  "<line>",
+  "<polyline>",
+  "<polygon>"
+]);
+
+// A layer folded into one run (#armies) joins its reasons with "; ": sharp when any of them is. Every text reason
+// ("text", "text emoji", "text tspan"...) is sharp.
+export const sharpReason = (reason: string) =>
+  reason.split("; ").some(part => SHARP_COMPAT.has(part) || part.startsWith("text "));
 
 export interface Prepared {
   picking?: boolean; // absent on older callers means enabled
@@ -526,7 +552,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
     const last = runs[runs.length - 1];
     // world runs merge while adjacent; each screen root keeps its own alpha-cropped raster (corner controls would
     // otherwise share one viewport-sized texture)
-    const sharp = SHARP_COMPAT.has(reason) || element.tagName === "text";
+    const sharp = sharpReason(reason) || element.tagName === "text";
     if (last && !screen && !last.screen && out[out.length - 1] === last.slot) {
       last.sharp ||= sharp;
       return void last.elements.push(element);
@@ -900,6 +926,11 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
         glyphCount * GLYPH_FLOATS) *
       4;
     const pending = glyphBytes + vertexBytes;
+    // the group target this backing store gets (framegraph composite), not the flat TARGET_BUDGET cap
+    const { width: cssWidth, height: cssHeight, dpr } = ctx.screen;
+    const reserveTarget = targetReserve(cssWidth * dpr, cssHeight * dpr, device.maxSamples ?? 0, dpr);
+    const allowance = (spent: number) =>
+      compatAllowance(tracked(), owned(), spent, undefined, undefined, reserveTarget);
     const owned = () => textures.reduce((sum, texture) => sum + texture.bytes, 0) + windows.bytes;
 
     const worldRuns = runs.filter(run => !run.screen);
@@ -971,7 +1002,16 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
       // raster px per live CSS px: a world raster is cut at `ratio` px per unit for CSS px per unit ≈ bucket / dpr
       // (the reuse key holds the bucket, not the exact zoom); a screen raster at dpr px per CSS px
       const cssScale = run.screen ? ctx.screen.dpr : (ratio * ctx.screen.dpr) / ctx.bucket;
-      const canvas = await rasterizeRun(source, resolved as Element[], region, w, h, run.screen, cssScale);
+      const canvas = await rasterizeRun(
+        source,
+        resolved as Element[],
+        region,
+        w,
+        h,
+        run.screen,
+        cssScale,
+        run.elements
+      );
       if (ctx.stale()) return false;
       run.stamp = cloneStamp;
       if (!run.screen) {
@@ -998,7 +1038,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
     // uncovered and the renderer shows the SVG for that view instead of a frame missing its canonical bitmaps.
     if (windows.size) {
       const reserve = sum(true) + (worldRuns.length ? MIN_COMPAT_BUDGET : 0);
-      const limit = compatAllowance(tracked(), owned(), pending + reserve);
+      const limit = allowance(pending + reserve);
       const committed = await windows.refresh(ctx.camera, ctx.screen, ctx.stale, limit);
       if (!committed && ctx.stale()) {
         release();
@@ -1012,9 +1052,13 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
     // world rasters step down the ladder; a share too small for useful world rasters (or for the screen overlays)
     // fails the prepare, and the renderer shows the SVG. Reused rasters count where a full re-prepare would allocate
     // them.
-    const budget = compatAllowance(tracked(), owned(), pending);
+    const budget = allowance(pending);
     if (budget < sum(true))
       throw new BudgetError(`compat: screen overlays need ${mib(sum(true))}, ${mib(budget)} fits`);
+    // Zoomed past the base resolution, the view's sharp runs read from their settle detail (and the first frame's,
+    // firstDetails), not from the world raster: world rasters leave them detailShare of the room. At the overview the
+    // world raster is the view at device density, and takes all of it.
+    const share = detailShare(worldRuns, base, ctx.camera, ctx.screen, budget - sum(true));
     // With reuse on, world rasters shrink along the fixed ladder (compat.ts): a frame that keeps world rasters starts
     // at the previous frame's level, or higher (sharper) when the previous frame's world bytes would fit the room there,
     // so a reused frame steps back up as a full re-prepare would (an estimate: the dirty runs may change size). With
@@ -1024,7 +1068,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
     const previous = ctx.previous;
     if (ladder && previous && [...adopted.keys()].some(run => !run.screen)) {
       const bytes = previous.runs.reduce((n, run) => (run.screen ? n : n + rgba(run.slot.texture)), 0);
-      level = ladderStart(previous.compat.level, bytes, budget - sum(true));
+      level = ladderStart(previous.compat.level, bytes, budget - sum(true) - share);
       resolution = base * ladderScale(level);
     }
     // World rasters in run order at the current level. Whenever their bytes exceed the room, the level steps down to
@@ -1043,7 +1087,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
           return null;
         }
       }
-      const worldRoom = budget - sum(true);
+      const worldRoom = budget - sum(true) - share;
       const bytes = sum(false);
       if (bytes <= worldRoom) continue;
       if (worldRoom < MIN_COMPAT_BUDGET)
@@ -1136,7 +1180,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
     // was built beside alive, and that frame's own `ctx` after it: every prepare would chain the one before (about 6 MB
     // and 70 DOM nodes per prepare in the memory census). Nothing below this line reads the previous frame.
     ctx.previous = null;
-    return {
+    const prepared: Prepared = {
       frame,
       picking,
       pick,
@@ -1162,10 +1206,81 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
       payload,
       release
     };
+    // The first frame's sharp runs at device density (firstDetails); a stale job gives up like any other step.
+    if (!(await firstDetails(prepared, ctx, reserveTarget))) {
+      release();
+      return null;
+    }
+    ctx.mark?.("detail");
+    return prepared;
   } catch (error) {
     release();
     throw error;
   }
+}
+
+// The room world rasters leave the view's sharp runs when the camera is zoomed past their base resolution: one detail
+// at device density per sharp world run (each at most the refined view), at most DETAIL_SHARE, and never more than half
+// the world room or past MIN_COMPAT_BUDGET of it. The 80 MiB flat target reserve used to leave this room by accident
+// (the group target is 29.5 MB at 1280x720 DPR 2); sized to the actual target (targetReserve), world rasters would
+// take it all and the settle detail of a zoomed view had none (dense parity world, k8: no detail at all).
+export function detailShare(
+  runs: readonly CompatRun[],
+  base: number,
+  camera: Camera,
+  viewport: Viewport,
+  room: number
+): number {
+  const sharp = runs.filter(run => run.sharp).length;
+  if (!sharp) return 0;
+  const { visible, pixels } = refineView(camera, viewport);
+  if (!(visible.width > 0) || pixels.width / visible.width <= base) return 0;
+  const want = Math.min(DETAIL_SHARE, sharp * pixels.width * pixels.height * 4);
+  return Math.max(0, Math.min(want, room / 2, room - MIN_COMPAT_BUDGET));
+}
+
+// Compat world rasters are cut once for the whole world, at most 2 px per unit and lower under budget pressure (1.1 px
+// on the dense parity world): icons, markers and short labels drawn from them were unreadable in the first GPU frame
+// of any zoom past 1 until the settle refinement replaced them (W2 TEXT). Before the frame commits, the sharp runs
+// (SHARP_COMPAT: text, marker <svg>, burg icon vectors, <use> emblems, primitive shapes) get their settle detail for the
+// camera the prepare started at: the request the settle refinement makes next, which then keeps them (releaseDetail
+// keeps a matching request) instead of re-cutting. Bounded by FIRST_DETAIL_BUDGET, the room the steady budget leaves
+// once the previous frame is gone (and the peak room beside it now) and FIRST_DETAIL_MS of wall time (smallest
+// footprint first, so markers and icons before the precipitation field); runs whose base is already as dense as the
+// screen are skipped. Detail is optional: a failure leaves the base. False only when the job went stale.
+async function firstDetails(prepared: Prepared, ctx: PrepareContext, reserveTarget: number): Promise<boolean> {
+  if (!firstDetailEnabled() || !prepared.runs.some(run => run.sharp && !run.screen && run.slot.texture)) return true;
+  const { device } = ctx;
+  const frameBytes =
+    prepared.runs.reduce((n, run) => n + (run.slot.texture?.bytes ?? 0), 0) +
+    (prepared.windows?.bytes ?? 0) +
+    [...prepared.payload.recipes.keys()].reduce((n, texture) => n + texture.bytes, 0) +
+    (prepared.frame.atlas?.bytes ?? 0) +
+    Object.values(prepared.frame).reduce(
+      (n, item) => n + (item && typeof item === "object" && "kind" in item && item.kind === "buffer" ? item.bytes : 0),
+      0
+    );
+  const start = device.memory().total;
+  const steady = GPU_BUDGET - DETAIL_RESERVE - reserveTarget - frameBytes;
+  const deadline = performance.now() + FIRST_DETAIL_MS;
+  const room = () => {
+    if (performance.now() > deadline) return 0;
+    const spent = device.memory().total - start;
+    return Math.min(FIRST_DETAIL_BUDGET - spent, steady - spent, PEAK_LIMIT - device.memory().total);
+  };
+  if (room() <= 0) return true;
+  const { visible, pixels } = refineView(ctx.camera, ctx.screen);
+  try {
+    await refineCompat(prepared, ctx, visible, pixels, GPU_BUDGET, {
+      only: run => run.sharp,
+      room,
+      minGain: 1.01,
+      first: true
+    });
+  } catch {
+    // optional, like the settle refinement: the base rasters keep drawing
+  }
+  return !ctx.stale();
 }
 
 // Pairs this prepare's compat runs with the previous frame's: same elements in the same order, same raster key, same
@@ -1325,14 +1440,68 @@ function adoptRuns(device: GpuDevice, svg: SVGSVGElement, runs: CompatRun[], pre
 // A detail already cut for this exact request at full density, from content unchanged since (this frame's, or one
 // prepareFrame carried over from a clean run), is kept where a full re-refine would allocate the same bytes; the
 // export clone is cut only when some detail must be rasterized.
+// The view a settle refinement cuts details for: the visible world plus 64 CSS px, at backing density plus 128 CSS px
+// (the renderer's settle and prepareFrame's first-frame pass ask for the same request, so the second keeps the first).
+export function refineView(
+  camera: Camera,
+  viewport: Viewport
+): { visible: Region; pixels: { width: number; height: number } } {
+  const [x0, y0, x1, y1] = visibleWorld(camera, viewport, 64);
+  const margin = 128 * viewport.dpr;
+  return {
+    visible: { x: x0, y: y0, width: x1 - x0, height: y1 - y0 },
+    pixels: {
+      width: Math.round(viewport.width * viewport.dpr + margin),
+      height: Math.round(viewport.height * viewport.dpr + margin)
+    }
+  };
+}
+
+export const refineRequest = (visible: Region, pixels: { width: number; height: number }) =>
+  `${visible.x},${visible.y},${visible.width},${visible.height}@${pixels.width}x${pixels.height}`;
+
+export interface RefineOptions {
+  // only these world runs are considered (their details kept, cut or dropped); the others are left as they are
+  only?: (run: CompatRun) => boolean;
+  // bytes the pass may still allocate now (default: budget - tracked total)
+  room?: () => number;
+  // skip a run unless the detail would be more than `minGain` times denser than its base raster
+  minGain?: number;
+  // the first frame's pass (firstDetails): runs even with ?gpu-refine=0, which turns off only the settle refinement
+  first?: boolean;
+}
+
+// Diagnosis switch: ?gpu-refine=0 turns settle refinement off, so a golden run (`params=gpu-refine=0`) measures the
+// first GPU frame a prepare commits instead of the refined one.
+// ?gpu-first-detail=0 leaves the first frame on its base rasters (firstDetails off); ?gpu-refine=0 turns off only the
+// settle refinement, so a gate run with it measures the first frame a camera change commits.
+export function firstDetailEnabled(): boolean {
+  try {
+    return new URLSearchParams(globalThis.location?.search ?? "").get("gpu-first-detail") !== "0";
+  } catch {
+    return true;
+  }
+}
+
+export function refineEnabled(): boolean {
+  try {
+    return new URLSearchParams(globalThis.location?.search ?? "").get("gpu-refine") !== "0";
+  } catch {
+    return true;
+  }
+}
+
 export async function refineCompat(
   prepared: Prepared,
   ctx: PrepareContext,
   visible: Region,
   pixels: { width: number; height: number },
-  budget = GPU_BUDGET
+  budget = GPU_BUDGET,
+  options: RefineOptions = {}
 ): Promise<boolean> {
-  const world = prepared.runs.filter(run => !run.screen && run.slot.texture);
+  if (!options.first && !refineEnabled()) return false;
+  const { only } = options;
+  const world = prepared.runs.filter(run => !run.screen && run.slot.texture && (!only || only(run)));
   if (!world.length) return false;
   const { device } = ctx;
   // Sharp runs, then smallest visible footprint first (see refineOrder); every previous detail that is not kept is
@@ -1343,7 +1512,11 @@ export async function refineCompat(
     world.map(run => run.sharp)
   );
   const runs = order.map(index => world[index]);
-  const request = `${visible.x},${visible.y},${visible.width},${visible.height}@${pixels.width}x${pixels.height}`;
+  // The first frame's pass has FIRST_DETAIL_MS for a fixed cost per run (serialize, decode, read back): the runs with
+  // the most elements first (the rain, emblems, burg icons, armies), not three-element market runs.
+  if (options.first) runs.sort((a, b) => b.elements.length - a.elements.length);
+  const request = refineRequest(visible, pixels);
+  const roomNow = options.room ?? (() => budget - device.memory().total);
   const bytesOf = (run: CompatRun) => {
     const texture = run.slot.detail?.texture;
     return texture ? texture.width * texture.height * 4 : 0;
@@ -1364,13 +1537,27 @@ export async function refineCompat(
   const stats = { kept: 0, rasterized: 0, cloned: false };
   let clone: SVGSVGElement | null = null;
   const density = pixels.width / visible.width;
+  // Sharp runs share the room at one density instead of first come, first served: in a dense scene the runs refined
+  // first took it all at full density and a view-wide one refined later (the rain at k 8) kept the 1 px-per-unit base.
+  // Each sharp run's detail is at most `share` of the device density, sized from its base raster's footprint in the
+  // view (an upper bound of the detail it cuts), against the room a full re-refine starts with (kept details freed).
+  const footprint = (run: CompatRun) => {
+    const [x, y, w, h] = run.slot.rect;
+    const iw = Math.min(x + w, visible.x + visible.width) - Math.max(x, visible.x);
+    const ih = Math.min(y + h, visible.y + visible.height) - Math.max(y, visible.y);
+    return iw > 0 && ih > 0 ? Math.ceil(iw * density + 2) * Math.ceil(ih * density + 2) * 4 : 0;
+  };
+  const sharpBytes = runs.reduce((n, run) => (run.sharp ? n + footprint(run) : n), 0);
+  const startRoom = roomNow() + keptAfter;
+  const share = sharpBytes > startRoom ? Math.sqrt(Math.max(0, startRoom) / sharpBytes) : 1;
   // The detail a raster alpha-cropped to `size` (null: fully transparent) becomes with `room` left: full (fit 1),
-  // downscaled into the room while that still beats the base raster's density, or none (null: the base stays).
-  const decide = (size: [number, number] | null, room: number): number | null => {
+  // downscaled into the room (a sharp run to its share at most) while that still beats the base raster's density, or
+  // none (null: the base stays).
+  const decide = (size: [number, number] | null, room: number, cap = 1): number | null => {
     if (!size) return 1;
     const bytes = size[0] * size[1] * 4;
-    if (bytes <= room) return 1;
-    const fit = Math.sqrt(Math.max(0, room) / bytes);
+    const fit = Math.min(cap, bytes <= room ? 1 : Math.sqrt(Math.max(0, room) / bytes));
+    if (fit >= 1) return 1;
     if (!(density * fit > prepared.compat.resolution)) return null;
     return Math.floor(size[0] * fit) >= 1 && Math.floor(size[1] * fit) >= 1 ? fit : null;
   };
@@ -1392,7 +1579,7 @@ export async function refineCompat(
       keptAfter -= bytes;
       kept.delete(run);
       // what a full re-refine cuts here, beside only the details before this run: the same detail is kept
-      const fit = decide(meta.size, budget - (device.memory().total - keptAfter - bytes));
+      const fit = decide(meta.size, roomNow() + keptAfter + bytes, run.sharp ? share : 1);
       if (fit === meta.fit) {
         entry.density = density * fit;
         stats.kept++;
@@ -1402,6 +1589,11 @@ export async function refineCompat(
       drop(run);
       if (fit === null) continue; // it would keep the base: nothing to cut
     }
+    // the base raster is already about as dense as the detail would be (k 1 with an unscaled base)
+    if (options.minGain && density <= prepared.compat.resolution * options.minGain) continue;
+    // the first frame's pass out of room (or past FIRST_DETAIL_MS): leave the rest to the settle refinement rather
+    // than cut what it would drop (a full settle pass still cuts a fully transparent run as a null detail)
+    if (options.first && roomNow() <= 0) continue;
     if (!clone) {
       clone = await compatClone(ctx.revision);
       stats.cloned = true;
@@ -1417,7 +1609,8 @@ export async function refineCompat(
       pixels.width,
       pixels.height,
       false,
-      ctx.screen?.dpr ?? 1 // absent in partial test contexts
+      ctx.screen?.dpr ?? 1, // absent in partial test contexts
+      run.elements
     );
     if (ctx.stale()) return false;
     let cropped = cropRaster(canvas, visible);
@@ -1425,15 +1618,15 @@ export async function refineCompat(
     // even when an uncropped viewport would exceed the budget. A run that cannot fit is downscaled into the remaining
     // headroom while that still beats the base raster's density, else it keeps the base.
     const size: [number, number] | null = cropped && [cropped.canvas.width, cropped.canvas.height];
-    let room = budget - device.memory().total;
+    let room = roomNow();
     if (size && size[0] * size[1] * 4 > room && keptAfter) {
       // a full re-refine would see the room without the later kept details: free them, they are cut again in turn
       for (const later of kept) drop(later);
       kept.clear();
       keptAfter = 0;
-      room = budget - device.memory().total;
+      room = roomNow();
     }
-    const fit = decide(size, room);
+    const fit = decide(size, room, run.sharp ? share : 1);
     if (cropped && fit !== 1) {
       const scaled = fit === null ? null : scaleCanvas(cropped.canvas, fit);
       cropped.canvas.width = cropped.canvas.height = 0;
@@ -1488,15 +1681,7 @@ function overlayCopy(live: Element, clone: SVGSVGElement): Element | null {
     const defaults = getComputedStyle(empty);
     for (const element of [copy, ...copy.querySelectorAll("*")]) {
       if (!element.matches("g, #ruler *, #scaleBar > text, #prec text")) continue;
-      const computed = getComputedStyle(element);
-      let style = "";
-      const add = (key: string) => {
-        const value = computed.getPropertyValue(key);
-        if (key === "cursor" || element.hasAttribute(key) || value === defaults.getPropertyValue(key)) return;
-        style += `${key}:${value};`;
-      };
-      for (let i = 0; i < computed.length; i++) add(computed[i]);
-      for (const key in computed) add(key);
+      const style = computedStyleText(element, getComputedStyle(element), key => defaults.getPropertyValue(key));
       if (style !== "") element.setAttribute("style", style);
     }
     empty.remove();
@@ -1606,9 +1791,11 @@ export async function refreshOverlays(
 
 export const hasDetail = (prepared: Prepared) => prepared.runs.some(run => run.slot.detail?.texture);
 
-export function releaseDetail(prepared: Prepared, device: GpuDevice): void {
+// Releases every settle detail, except those cut for `keep` (a refineRequest): the settle refinement that follows
+// keeps them itself where a full re-refine would cut the same (the prepare-time first-frame details, refineCompat).
+export function releaseDetail(prepared: Prepared, device: GpuDevice, keep?: string): void {
   for (const run of prepared.runs)
-    if (run.slot.detail) {
+    if (run.slot.detail && !(keep !== undefined && run.detailMeta?.request === keep)) {
       releaseShared(device, run.slot.detail.texture);
       run.slot.detail = null;
       run.detailMeta = undefined;
