@@ -5,9 +5,11 @@ import {
   neutralAttribute,
   type ReuseNode,
   type ReuseRecord,
+  referenceClosure,
   releaseShared,
   retain,
   type SheetLike,
+  sameExternals,
   styleState,
   subject
 } from "./compat-reuse";
@@ -542,5 +544,178 @@ describe("pixelRecords: what the tracker sees", () => {
     ];
     expect(pixelRecords(records)).toEqual([records[4], records[5]]);
     expect(classify(records)).toBe("static");
+  });
+});
+
+// COST2 item 5: the closure narrowing of a6a2c75c (a definition change dirties only the runs that paint through it),
+// case by case through the whole path: referenceClosure on the run, the tracker's note() on the change, evaluate().
+describe("compat reuse: reference closures (definition narrowing)", () => {
+  const finder = (...roots: Fake[]) => {
+    const find = (node: Fake, id: string): Fake | null => {
+      if (node.id === id) return node;
+      for (const child of node.children) {
+        const hit = find(child, id);
+        if (hit) return hit;
+      }
+      return null;
+    };
+    return (id: string) => {
+      for (const root of roots) {
+        const hit = find(root, id);
+        if (hit) return hit;
+      }
+      return null;
+    };
+  };
+  // the map, plus svg#defElements outside it (#coas, icon symbols, hatching)
+  function scene() {
+    const w = world();
+    const outside = el("svg", "defElements");
+    const coas = el("g", "coas", outside);
+    const icons = el("defs", "", outside);
+    return { ...w, outside, coas, icons, resolve: finder(w.svg, outside) };
+  }
+  type Scene = ReturnType<typeof scene>;
+  // run 0 is the subject; run 1 (route labels) paints through nothing but #other
+  const judge = (sc: Scene, subject: Fake[], change: (sc: Scene) => ReuseRecord, outside = false) => {
+    const dirt = new CompatDirt();
+    const stamp = dirt.now();
+    const other = el("text", "o", sc.labels, { fill: "url(#other)" });
+    el("pattern", "other", sc.defs);
+    const runs = [
+      { elements: subject, stamp },
+      { elements: [other], stamp }
+    ];
+    const closures = runs.map(run => referenceClosure(run.elements, sc.resolve));
+    const record = change(sc);
+    if (outside) dirt.noteDefinitions([record], "outside #map");
+    else dirt.note([record]);
+    return dirt.evaluate(
+      runs,
+      false,
+      closures.map(c => c.ids),
+      new Set(),
+      closures.map(c => [...c.externals.values()])
+    );
+  };
+
+  it("<use> chains: a symbol reached through another <use> definition", () => {
+    const sc = scene();
+    const sym = el("symbol", "anchor", sc.icons);
+    const glyph = el("path", "", sym, { d: "M0 0" });
+    const wrapper = el("symbol", "wrap", sc.defs);
+    el("use", "", wrapper, { href: "#anchor" });
+    const icon = el("use", "i", sc.emblems, { href: "#wrap" });
+    expect([...referenceClosure([icon], sc.resolve).ids].sort()).toEqual(["anchor", "wrap"]);
+    const why = judge(sc, [icon], () => attr(glyph, "d"), true);
+    expect(why[0]).toMatch(/#anchor/);
+    expect(why[1]).toBe("");
+  });
+
+  it("pattern to pattern: a pattern inheriting another's content by href", () => {
+    const sc = scene();
+    const base = el("pattern", "hatch1", sc.icons);
+    const line = el("line", "", base);
+    el("pattern", "hatchZoom", sc.defs, { href: "#hatch1" });
+    const zone = el("path", "z", sc.routes, { fill: "url(#hatchZoom)" });
+    const why = judge(sc, [zone], () => attr(line, "stroke"), true);
+    expect(why[0]).toMatch(/#hatch1/);
+    expect(why[1]).toBe("");
+    // the inheriting pattern itself
+    const again = scene();
+    const inherit = el("pattern", "hatchZoom", again.defs, { href: "#hatch1" });
+    el("pattern", "hatch1", again.icons);
+    const zone2 = el("path", "z", again.routes, { fill: "url(#hatchZoom)" });
+    expect(judge(again, [zone2], () => attr(inherit, "patternTransform"))[0]).toMatch(/#hatchZoom/);
+  });
+
+  it("clipPath: a change inside the clip path, and a clip path no run uses", () => {
+    const sc = scene();
+    const clip = el("clipPath", "clip", sc.defs);
+    const shape = el("rect", "", clip);
+    const fog = el("g", "fog", sc.viewbox, { "clip-path": "url(#clip)" });
+    const why = judge(sc, [fog], () => attr(shape, "width"));
+    expect(why[0]).toMatch(/#clip/);
+    expect(why[1]).toBe("");
+    const other = scene();
+    const unused = el("clipPath", "unused", other.defs);
+    const fog2 = el("g", "fog", other.viewbox, { "clip-path": "url(#clip)" });
+    el("clipPath", "clip", other.defs);
+    expect(judge(other, [fog2], () => attr(el("rect", "", unused), "width"))).toEqual(["", ""]);
+  });
+
+  it("textPath: a curve in the definitions is narrowed; a curve on the map is watched", () => {
+    const sc = scene();
+    const textPaths = el("g", "textPaths", sc.defs);
+    const curve = el("path", "textPath_label1", textPaths, { d: "M0 0" });
+    const label = el("text", "label1", sc.labels);
+    el("textPath", "", label, { href: "#textPath_label1" });
+    const why = judge(sc, [label], () => attr(curve, "d"));
+    expect(why[0]).toMatch(/#textPath_label1/);
+    expect(why[1]).toBe("");
+    // a textPath naming a route path on the map: an external reference, watched by the tracker
+    const map = scene();
+    const label2 = el("text", "label2", map.labels);
+    el("textPath", "", label2, { href: "#r" });
+    const closure = referenceClosure([label2], map.resolve);
+    expect(closure.external).toBe("#r");
+    expect([...closure.externals.values()]).toEqual([map.route]);
+    expect(judge(map, [label2], m => attr(m.route, "d"))[0]).toBe("reference <path#r> changed");
+    expect(judge(map, [label2], m => attr(el("path", "r9", m.routes), "d"))).toEqual(["", ""]);
+  });
+
+  it("COA symbols: an emblem through its COA in #coas to the charge it uses", () => {
+    const sc = scene();
+    const coa = el("svg", "burgCOA1", sc.coas);
+    const charge = el("g", "charge_lion", el("defs", "", coa));
+    el("use", "", coa, { href: "#charge_lion" });
+    const emblem = el("use", "e1", sc.emblems, { href: "#burgCOA1" });
+    expect([...referenceClosure([emblem], sc.resolve).ids].sort()).toEqual(["burgCOA1", "charge_lion"]);
+    const why = judge(sc, [emblem], () => attr(el("path", "", charge), "d"), true);
+    expect(why[0]).toMatch(/charge_lion|burgCOA1/);
+    expect(why[1]).toBe("");
+    // another burg's COA arriving leaves this emblem clean
+    expect(judge(scene(), [emblem], s => children(s.coas, [el("svg", "burgCOA2")]), true)).toEqual(["", ""]);
+  });
+
+  it("filters: a filter and the image a primitive pulls in", () => {
+    const sc = scene();
+    const filter = el("filter", "dropShadow", sc.defs);
+    const offset = el("feOffset", "", filter);
+    el("feImage", "", filter, { href: "#shadowTile" });
+    const tile = el("image", "shadowTile", sc.defs);
+    const coast = el("g", "sea_island", sc.viewbox, { filter: "url(#dropShadow)" });
+    expect([...referenceClosure([coast], sc.resolve).ids].sort()).toEqual(["dropShadow", "shadowTile"]);
+    expect(judge(sc, [coast], () => attr(offset, "dx"))[0]).toMatch(/#dropShadow/);
+    expect(judge(sc, [coast], () => attr(tile, "href"))[0]).toMatch(/#shadowTile/);
+  });
+
+  it("references from an ancestor's style count, and a later rename into a named id", () => {
+    const sc = scene();
+    sc.labels.attrs.set("style", "mask: url('#fogMask')");
+    const label = el("text", "l", sc.labels);
+    expect(referenceClosure([label], sc.resolve).ids.has("fogMask")).toBe(true);
+    // a definition renamed to the id the run names (it was unresolved before)
+    const renamed = el("mask", "fogMask", sc.defs);
+    expect(judge(sc, [label], () => attr(renamed, "id", "oldMask"))[0]).toMatch(/#fogMask/);
+  });
+
+  it("an external target replaced or removed is not the one the raster was cut with", () => {
+    const sc = scene();
+    const halo = el("path", "h", sc.routes, { "clip-path": "url(#stateClip)" });
+    el("use", "", el("clipPath", "stateClip", sc.defs), { href: "#r" });
+    const cut = referenceClosure([halo], sc.resolve).externals;
+    expect(sameExternals(cut, referenceClosure([halo], sc.resolve).externals)).toBe(true);
+    // the states redrawn: #r is a new element
+    sc.routes.children.splice(sc.routes.children.indexOf(sc.route), 1);
+    const redrawn = el("path", "r", sc.routes);
+    expect(referenceClosure([halo], sc.resolve).externals.get("r")).toBe(redrawn);
+    expect(sameExternals(cut, referenceClosure([halo], sc.resolve).externals)).toBe(false);
+    // removed: the id resolves to nothing now
+    sc.routes.children.length = 0;
+    expect(sameExternals(cut, referenceClosure([halo], sc.resolve).externals)).toBe(false);
+    // nothing external: always the same
+    expect(sameExternals(undefined, new Map())).toBe(true);
+    expect(sameExternals(undefined, cut)).toBe(false);
   });
 });

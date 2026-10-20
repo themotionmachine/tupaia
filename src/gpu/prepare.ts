@@ -61,10 +61,12 @@ import {
 import {
   compatDirt,
   documentStyle,
+  type ReuseNode,
   referenceClosure,
   releaseShared,
   retain,
   type StyleState,
+  sameExternals,
   sharedReleaser
 } from "./compat-reuse";
 import type { GpuDevice, TextureSource, TrackedBuffer, TrackedTexture } from "./device";
@@ -161,6 +163,9 @@ interface CompatRun {
   // world run: the world box its live geometry reaches (compat-bounds.ts measureBounds; null: unbounded), measured once
   // per frame at the frame's revision
   bounds?: Box | null;
+  // live elements outside the definitions its raster paints through, by id (compat-reuse.ts referenceClosure), as of
+  // the prepare that cut or reused it
+  externals?: Map<string, ReuseNode>;
 }
 
 // Per-prepare compat reuse (telemetry). `reasons` counts dirty runs by why they were dirty (at most 8 distinct).
@@ -1447,6 +1452,22 @@ function adoptRuns(device: GpuDevice, svg: SVGSVGElement, runs: CompatRun[], pre
   const now = compatDirt.now();
   let detailBytes = 0;
   const carried = new Set<ImageBatch["detail"]>();
+  // What each run paints through (referenceClosure), recorded on every run: a definition change dirties only the runs
+  // that name it, and a later frame reuses a run's raster only while its live external references are the same elements
+  const document = svg.ownerDocument;
+  const closures = new Map<CompatRun, ReturnType<typeof referenceClosure>>();
+  const closureOf = (run: CompatRun) => {
+    let closure = closures.get(run);
+    if (!closure) {
+      closure = referenceClosure(run.elements as unknown as Parameters<typeof referenceClosure>[0], id =>
+        document.getElementById(id)
+      );
+      closures.set(run, closure);
+      run.externals = closure.externals;
+    }
+    return closure;
+  };
+  if (style) for (const run of runs) closureOf(run);
   if (style && previous?.runs.length) {
     const before = new Map<Element, CompatRun>();
     for (const run of previous.runs) before.set(run.elements[0], run);
@@ -1464,22 +1485,27 @@ function adoptRuns(device: GpuDevice, svg: SVGSVGElement, runs: CompatRun[], pre
       else if (previous.styleKey !== style.key) count("stylesheets");
       else pairs.push({ run, old });
     }
-    const document = svg.ownerDocument;
-    // what each run paints through: a definition change dirties only the runs that name it
-    const closures = pairs.map(({ run }) =>
-      referenceClosure(run.elements as unknown as Parameters<typeof referenceClosure>[0], id =>
-        document.getElementById(id)
-      )
-    );
+    const closures = pairs.map(({ run }) => closureOf(run));
     const verdicts = compatDirt.evaluate(
       pairs.map(pair => pair.old),
       !!style.structural,
       closures.map(closure => closure.ids),
-      style.references
+      style.references,
+      closures.map(closure => [...closure.externals.values()])
     );
     pairs.forEach(({ run, old }, i) => {
-      const external = verdicts[i] || closures[i].external;
-      if (external) count(verdicts[i] || `reference ${external}`);
+      // a live element the run paints through (the states halo clips by #stateN paths): watched by the tracker while
+      // it is the same element inside svg#map (the tracker sees only svg#map records), else never reused
+      const { externals, external } = closures[i];
+      const outside = [...externals].find(([, node]) => !svg.contains(node as unknown as Node));
+      const why =
+        verdicts[i] ||
+        (outside
+          ? `reference #${outside[0]}`
+          : sameExternals(old.externals, externals)
+            ? ""
+            : `reference ${external} replaced`);
+      if (why) count(why);
       else {
         if (run.screen) report.screenClean++;
         else report.worldClean++;
