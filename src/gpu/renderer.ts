@@ -270,7 +270,7 @@ export class GpuRenderer {
   // LIFE3: svg#defElements (COAs, icon symbols, patterns) outside svg#map; a change the map references re-prepares
   private definitions: DefinitionWatch;
   private stopCompatWatch: () => void = () => {};
-  // compat raster reuse (prepare.ts compatReuseEnabled, opt-in): only then are the reuse tracker fed and the
+  // compat raster reuse (prepare.ts compatReuseEnabled, on by default; ?gpu-compat-reuse=0 opts out): only then are the reuse tracker fed and the
   // document-wide outside-input watcher installed, and previous details carried; off, prepare and refine release
   // details as before. Fixed per page load (URL flag or build env).
   private readonly compatReuse = compatReuseEnabled();

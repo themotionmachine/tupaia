@@ -599,8 +599,9 @@ export function documentStyle(svg: Element): StyleState {
 // ---- inputs outside #map -----------------------------------------------------------------------------------------
 
 // Watches what the clone reads outside svg#map (stylesheets, #defElements, #coas, any defs, the attributes of svg#map's
-// ancestors) and font loads; each change dirties every run. Returns the disposer. A document-wide observer: the
-// renderer installs it only while reuse is enabled (compatReuseEnabled), never on the default input path.
+// ancestors) and font loads: a definition change dirties only the runs whose reference closure reaches it, anything
+// else every run. Returns the disposer. A document-wide observer: the renderer installs it while reuse is enabled
+// (compatReuseEnabled, on by default since W3 COST), so it is on the default GPU input path.
 export function watchCompatInputs(dirt = compatDirt): () => void {
   const outside = (node: Node | null): boolean => {
     const element = node instanceof Element ? node : node?.parentElement;
