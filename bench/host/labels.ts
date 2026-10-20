@@ -62,7 +62,8 @@
 //   LABELS_FONTS         font-switch step: comma list of switch ids               default all
 //   LABELS_ADVANCE_FONTS advance step: at most this many families (0 = all)      default 0
 //   LABELS_ADVANCE_FAMILIES advance step: exactly these families (comma list)    default every pinned family
-//   LABELS_ZOOM_PARTS    zoom step: shadows and/or carry (comma list)                default shadows,carry
+//   LABELS_ZOOM_PARTS    zoom step: shadows, carry and/or fresh (comma list)         default shadows,carry,fresh
+//   LABELS_ZOOM_FRESH    zoom step: the fresh cameras (comma list of k)              default 1.1,1.4,1.9,2.8,3.5
 //   LABELS_KEEP          all | fail: PNGs for every capture or failing ones only  default fail
 //   LABELS_BREAK         none | freeze | measure | shift | drop (self-test only):
 //                        freeze  stops the GPU from seeing DOM changes for the second probe of each threshold and for
@@ -1452,7 +1453,11 @@ async function stepFonts(page: Page, blanks: Blanks, dir: string, world: string)
 //   pixel-registers the native glyphs (info).
 const ZOOM_PARTS = (env.LABELS_ZOOM_PARTS || "shadows,carry,fresh").split(",");
 // fresh-prepare cameras between powers of two (dpr 2: raster buckets 4 and 8)
-const ZOOM_FRESH = [1.1, 1.4, 1.9, 2.8, 3.5];
+// fresh cells judged against their power-of-two control (when the control misses D11 coverage itself): how much worse
+// they may read. Parity native, before the GLYPHZ re-cut: k1.1 over16-of-ink 29.0% vs k1 27.4%, shared k1.1/1.4
+// 25.3/24.9% (control k1 passes); after: 24-28% vs 27.4% on parity, 14.0/11.5% on shared.
+const FRESH_MARGIN = { over16OfInk: 0.03, inkRatio: 0.02 };
+const ZOOM_FRESH = (env.LABELS_ZOOM_FRESH || "1.1,1.4,1.9,2.8,3.5").split(",").map(Number);
 // [prepared, viewed] zoom pairs within one bucket at dpr 2; [1.5, 1.5] is a fresh prepare between powers of two
 const ZOOM_SHADOW_PAIRS: [number, number][] = [
   [1.1, 1.9],
@@ -1786,9 +1791,16 @@ async function stepZoom(page: Page, dir: string): Promise<Json> {
       write();
     }
     // ---- fresh
-    for (const k of ZOOM_PARTS.includes("fresh") ? ZOOM_FRESH : []) {
-      const cell: Json = { k, bucket: scaleBucket(k * dpr), failures: [] as string[] };
+    // controls first: the same view at the power of two at or below each camera (k * dpr on a bucket, so no re-cut)
+    const freshCameras = ZOOM_PARTS.includes("fresh") ? ZOOM_FRESH : [];
+    const controlOf = (k: number) => 2 ** Math.floor(Math.log2(k) + 1e-9);
+    const controls = [...new Set(freshCameras.map(controlOf))].filter(k => !freshCameras.includes(k));
+    const controlCells = new Map<number, Json>();
+    for (const k of [...controls, ...freshCameras]) {
+      const control = controls.includes(k);
+      const cell: Json = { k, control, bucket: scaleBucket(k * dpr), failures: [] as string[] };
       result.fresh.push(cell);
+      if (control) controlCells.set(k, cell);
       try {
         const at: [number, number] = states ? states.anchors[0].at : [gw / 2, gh / 2];
         const blanks = await captureBlanks(page, centerOn(k, at[0], at[1]));
@@ -1814,14 +1826,29 @@ async function stepZoom(page: Page, dir: string): Promise<Json> {
         cell.metrics = roundMetrics(m);
         const judged = judgeGolden(m);
         cell.gates = judged.gates;
-        cell.failures.push(...judged.failures);
+        cell.d11 = judged.failures;
+        if (!control) {
+          // D11 absolute; where the power-of-two control misses D11's coverage itself (rotated glyphs resampled from
+          // an atlas cut at phase 0, D14's cause: parity's native state label at k 1), the cell's coverage may not read
+          // worse than the control's by more than FRESH_MARGIN: what this part judges is the octave, not that
+          const base = controlCells.get(controlOf(k));
+          const baseCoverage = base?.metrics && base.d11?.some((f: string) => f.startsWith("coverage"));
+          cell.controlK = base?.k ?? k;
+          if (baseCoverage) {
+            const bm = base!.metrics;
+            cell.vsControl = { over16OfInk: [m.over16OfInk, bm.over16OfInk], inkRatio: [m.inkRatio, bm.inkRatio] };
+            cell.failures.push(...judged.failures.filter(f => !f.startsWith("coverage")));
+            if (m.over16OfInk > bm.over16OfInk + FRESH_MARGIN.over16OfInk) cell.failures.push(`coverage vs k${base!.k} control (itself over the D11 cap): over16 is ${(m.over16OfInk * 100).toFixed(2)}% of the layer's ink vs ${(bm.over16OfInk * 100).toFixed(2)}%`);
+            if (m.inkRatio < bm.inkRatio - FRESH_MARGIN.inkRatio) cell.failures.push(`coverage vs k${base!.k} control (itself over the D11 cap): ink ratio ${m.inkRatio.toFixed(3)} vs ${bm.inkRatio.toFixed(3)}`);
+          } else cell.failures.push(...judged.failures);
+        }
         cell.pass = cell.failures.length === 0;
         if (keep === "all" || !cell.pass) cell.images = saveShots(join(dir, "zoom", "fresh"), `k${fmtK(k)}`, shots, svg, gpu);
       } catch (error) {
         cell.failures.push(`harness: ${String(error).slice(0, 400)}`);
         cell.pass = false;
       }
-      log(`${cell.pass ? "PASS" : "FAIL"} zoom fresh k ${k}: fine ${JSON.stringify(cell.fine ?? null)}${cell.metrics ? ` ssim ${cell.metrics.ssim} ink ${cell.metrics.inkRatio} over16OfInk ${cell.metrics.over16OfInk} over16 ${cell.metrics.over16Fraction}` : ""} pixel within ${cell.pixel?.withinTol ?? "n/a"}${cell.pass ? "" : ` :: ${cell.failures.join("; ")}`}`);
+      log(`${cell.pass ? "PASS" : "FAIL"} zoom fresh k ${k}${control ? " (control)" : ""}: fine ${JSON.stringify(cell.fine ?? null)}${cell.metrics ? ` ssim ${cell.metrics.ssim} ink ${cell.metrics.inkRatio} over16OfInk ${cell.metrics.over16OfInk} over16 ${cell.metrics.over16Fraction}` : ""} D11 ${cell.d11?.length ? cell.d11.join("/") : "pass"} pixel within ${cell.pixel?.withinTol ?? "n/a"}${cell.pass ? "" : ` :: ${cell.failures.join("; ")}`}`);
       write();
     }
   } finally {
@@ -1843,7 +1870,7 @@ async function stepZoom(page: Page, dir: string): Promise<Json> {
     // GATED (W4a GLYPHZ): fresh frames between powers of two against the labels golden
     fresh: result.fresh.length,
     freshFail: result.fresh.filter((c: Json) => !c.pass).map((c: Json) => `k${c.k}`),
-    freshOver16OfInk: result.fresh.map((c: Json) => `k${c.k}: ${c.metrics?.over16OfInk ?? "n/a"}${c.fine?.drawn ? " fine" : ""}`)
+    freshOver16OfInk: result.fresh.map((c: Json) => `k${c.k}${c.control ? " (control)" : ""}: ${c.metrics?.over16OfInk ?? "n/a"}${c.fine?.drawn ? " fine" : ""}${c.d11?.length ? " D11 miss" : ""}`)
   };
   result.failure = failing.length ? `${failing.length} zoom cells failed: ${failing.slice(0, 6).map((c: Json) => `${c.variant ? `shadow ${c.variant}@k${c.kPrepared}->k${c.kViewed}` : c.kViewed !== undefined ? `carry k${c.kPrepared}->k${c.kViewed}` : `fresh k${c.k}`} (${c.failures[0]})`).join("; ")}` : null;
   return result;
