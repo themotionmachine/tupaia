@@ -119,6 +119,9 @@ export function installReplay(config: { arm: string; editors: string[] }) {
       }
     }
     out.notes = hashValue(w.notes ?? null);
+    // biomesData is a top-level `let` of the classic main.js (a global binding, not a window property): the biomes
+    // editor renames, adds and recolours biomes there, outside pack/grid
+    out.biomesData = hashValue((0, eval)("typeof biomesData === 'undefined' ? null : biomesData"));
     return out;
   };
 
@@ -179,10 +182,38 @@ export function installReplay(config: { arm: string; editors: string[] }) {
     return parts.join(">");
   };
   rp.pathOf = pathOf;
+  // Pixels of the 2d canvases inside svg#map (the manual-assignment paint overlay, the heightmap editor's #heights):
+  // outerHTML does not carry them, so an undo that only repaints one would be invisible to the DOM hash. The
+  // renderer's own canvas lives outside svg#map; dense-zoom overlays are presentation.
+  rp.canvasHashes = () => {
+    const out: Record<string, string> = {};
+    const root = mapRoot();
+    if (!root) return out;
+    for (const canvas of root.querySelectorAll("canvas")) {
+      if (inOverlay(canvas)) continue;
+      const key = "canvas " + pathOf(canvas);
+      try {
+        const context = (canvas as HTMLCanvasElement).getContext("2d");
+        if (!context) {
+          out[key] = "not-2d";
+          continue;
+        }
+        const h = hasher();
+        h.int(canvas.width);
+        h.int(canvas.height);
+        h.bytes(context.getImageData(0, 0, canvas.width, canvas.height).data);
+        out[key] = h.done();
+      } catch (error) {
+        out[key] = "unreadable";
+      }
+    }
+    return out;
+  };
   rp.domHashes = () => {
     const out: Record<string, string> = {};
     const root = mapRoot();
     if (!root) return out;
+    Object.assign(out, rp.canvasHashes());
     const attrs = [...root.attributes].map(a => a.name + "=" + a.value).sort();
     out["svg#map@attrs"] = hashText(attrs.join("\n"));
     for (const child of root.children) {
@@ -608,6 +639,7 @@ export function beginStep(arg: { index: number; seed: number }) {
     camera: rp.camera(),
     gpuView: rp.gpuView(),
     cameraMoves: 0,
+    canvases: rp.canvasHashes(),
     stop: rp.track(),
     telemetry: rp.telemetry(),
     model: rp.lastModel ?? rp.modelHashes()
@@ -623,6 +655,8 @@ export function endStep() {
   const domDelta: string[] = step.stop();
   const model = rp.modelHashes();
   rp.lastModel = model;
+  const canvases = rp.canvasHashes();
+  const canvasChanged = [...new Set([...Object.keys(canvases), ...Object.keys(step.canvases)])].filter(k => canvases[k] !== step.canvases[k]).sort();
   const after = rp.telemetry();
   const routes: Record<string, number> = {};
   for (const key of Object.keys(after)) if (after[key] !== (step.telemetry[key] ?? 0)) routes[key] = after[key] - (step.telemetry[key] ?? 0);
@@ -635,6 +669,7 @@ export function endStep() {
     // a delta list can be long (a brush touches hundreds of elements): kept whole for the comparison
     domDelta,
     domDeltaCount: domDelta.length,
+    canvasChanged,
     calls: { ...rp.calls },
     dialogs: rp.dialogs(),
     errors: [...rp.errors],
