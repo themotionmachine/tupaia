@@ -7,6 +7,7 @@ vi.mock("../io/export", () => ({ prepareMapClone }));
 import { cropRegion } from "./budget";
 import {
   type BatchMember,
+  boundsWithin,
   gridWindow,
   liveBounds,
   measureBounds,
@@ -181,6 +182,7 @@ describe("geometry bounds", () => {
     expect(seen).toEqual([true]);
     expect(sheet.disabled).toBe(false);
     expect(item.bounds).toEqual({ x0: 1 - 2, y0: 2 - 2, x1: 4 + 2, y1: 6 + 2 });
+    expect((item as { boxes?: unknown }).boxes).toEqual([{ x0: 1, y0: 2, x1: 4, y1: 6 }]); // each element's own, unpadded
     expect(screen.bounds).toBeUndefined(); // screen runs are never windowed
     // measured once per frame: a second call leaves it
     item.bounds = "kept";
@@ -196,6 +198,25 @@ describe("geometry bounds", () => {
     });
     measureBounds([{ elements: [document.getElementById("u")!], screen: false }] as never, viewbox);
     expect(seen).toEqual([true, false]);
+  });
+});
+
+// [LABFIX] what a run reaches in a zoomed view: its element boxes clipped to it, not its world-wide union
+describe("boundsWithin", () => {
+  const view = { x: 100, y: 100, width: 50, height: 50 };
+  const p = WINDOW_PAD_UNITS;
+  it("unions the padded element boxes clipped to the region, ignoring those outside it", () => {
+    const boxes = [
+      { x0: 0, y0: 0, x1: 10, y1: 10 }, // far outside
+      { x0: 110, y0: 110, x1: 120, y1: 115 },
+      { x0: 140, y0: 120, x1: 160, y1: 125 }, // crosses the right edge
+      { x0: 900, y0: 900, x1: 1000, y1: 950 }
+    ];
+    expect(boundsWithin(boxes, view)).toEqual({ x0: 110 - p, y0: 110 - p, x1: 150, y1: 125 + p });
+  });
+  it("is null when nothing reaches the region", () => {
+    expect(boundsWithin([{ x0: 0, y0: 0, x1: 10, y1: 10 }], view)).toBeNull();
+    expect(boundsWithin([], view)).toBeNull();
   });
 });
 

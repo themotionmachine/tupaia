@@ -185,6 +185,9 @@ interface Cell {
   expected?: CensusCounts | null;
   censusKinds?: Record<string, number> | null;
   compatRunElements?: number;
+  // the family's compat world runs as drawn: base raster resolution (px per world unit), and per run its base texture and
+  // settle/first detail (texture size, world rect, px per unit); diagnosis only, never gated
+  compat?: unknown;
   domDrawables?: number;
   renderer?: { active: string; fallbackReason?: string; layers?: unknown };
   dropped?: unknown;
@@ -553,7 +556,23 @@ const readCensus = (page: Page, family: Family) =>
       if (target)
         for (const e of target.querySelectorAll("path,polygon,polyline,rect,circle,ellipse,line,text,use,image"))
           if (displayed(e) && getComputedStyle(e).visibility === "visible") domDrawables++;
-      return { layer, sink, compatRunElements, runsReadable, domDrawables, build: w.__gpuSceneCensus?.last?.build ?? null };
+      const density = (texture: any, rect: any) => (texture && rect?.[2] > 0 ? +(texture.width / rect[2]).toFixed(3) : null);
+      const mine = (runsReadable ? runs : []).filter((run: any) => (run.elements ?? []).some((e: Element) => target && (e === target || target.contains(e))));
+      const compat = status?.gpu?.compat
+        ? {
+            resolution: status.gpu.compat.resolution,
+            level: status.gpu.compat.level,
+            refine: status.gpu.compat.refine ?? null,
+            runs: mine.map((run: any) => ({
+              elements: run.elements?.length ?? 0,
+              sharp: !!run.sharp,
+              screen: !!run.screen,
+              base: run.slot?.texture ? { size: [run.slot.texture.width, run.slot.texture.height], density: density(run.slot.texture, run.slot.rect) } : null,
+              detail: run.slot?.detail ? { size: run.slot.detail.texture ? [run.slot.detail.texture.width, run.slot.detail.texture.height] : null, rect: run.slot.detail.rect, density: density(run.slot.detail.texture, run.slot.detail.rect), fit: run.detailMeta?.fit ?? null } : null
+            }))
+          }
+        : null;
+      return { layer, sink, compatRunElements, runsReadable, domDrawables, compat, build: w.__gpuSceneCensus?.last?.build ?? null };
     },
     { id: family.id, root: !!family.root }
   );
@@ -864,6 +883,7 @@ try {
               if (family.root && !seen.runsReadable) cell.failures.push("harness: gpuRenderer.prepared.runs is not readable; root-family GPU census unknown");
               cell.domDrawables = seen.domDrawables;
               cell.compatRunElements = seen.compatRunElements;
+              cell.compat = seen.compat;
               cell.censusKinds = seen.sink?.kinds ?? null;
               cell.census = family.root
                 ? { native: 0, compat: seen.compatRunElements, skipped: 0 }
