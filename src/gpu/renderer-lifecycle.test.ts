@@ -62,6 +62,8 @@ vi.mock("./prepare", () => ({
   hasDetail: () => false,
   releaseDetail: () => {},
   refineCompat: async () => false,
+  refineView: () => ({ visible: { x: 0, y: 0, width: 1, height: 1 }, pixels: { width: 1, height: 1 } }),
+  refineRequest: () => "",
   refreshOverlays: async (_prepared: unknown, _ctx: unknown, roots: Element[]) => {
     pipeline.overlayRoots.push(roots);
     return "full"; // no in-place world-overlay refresh yet: the lane hands it to a full prepare

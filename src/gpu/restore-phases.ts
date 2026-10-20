@@ -2,7 +2,7 @@
 // draw() call; these phases split that same span and say nothing about physical presentation (draw() returning only
 // means the commands were issued). Each phase is null until its boundary is observed: a missing restore event, a
 // stale/failed prepare or a disposal leaves the later phases null rather than inventing a duration.
-export type PrepareStep = "scene" | "clone" | "screen" | "windows" | "world" | "buffers";
+export type PrepareStep = "scene" | "clone" | "screen" | "windows" | "world" | "buffers" | "detail";
 
 export interface RestoreTiming {
   outcome: "restoring" | "drawn" | "superseded" | "disposed";

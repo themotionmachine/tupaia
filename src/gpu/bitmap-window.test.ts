@@ -126,6 +126,20 @@ describe("BitmapWindows", () => {
     expect(raw.release).not.toHaveBeenCalled();
   });
 
+  it("binds the visible-only crops within the caller's allowance even over maxBytes, never a margin past it", async () => {
+    // RES (W3): a 1512x982 world at k 1 needs ~68 MiB of visible crops for three canonical bitmaps, over the 64 MiB
+    // window cap, and the load showed the SVG. Visible first: margins stay within maxBytes, the visible view within
+    // the allowance the caller passes (steady share, swap peak).
+    const { device } = fakeDevice();
+    const windows = new BitmapWindows(device, 10, 30000); // visible 100² needs 101² * 4 = 40804 B > 30000
+    const slot = windows.add(image(1000, 1000), [0, 0, 1000, 1000]);
+    expect(await windows.refresh(at(0), view)).toBe(false); // no allowance given: maxBytes binds, as before
+    expect(await windows.refresh(at(0), view, undefined, 40803)).toBe(false);
+    expect(await windows.refresh(at(0), view, undefined, 1 << 20)).toBe(true);
+    expect(slot.texture).toMatchObject({ width: 101, height: 101 });
+    expect(windows.margin).toBe(0); // the margin still had to fit the 30000 B cap
+  });
+
   it("swaps atomically and releases the previous textures only after a successful refresh", async () => {
     const { device, live } = fakeDevice();
     const windows = new BitmapWindows(device, 10);

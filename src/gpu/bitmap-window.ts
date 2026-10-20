@@ -116,13 +116,16 @@ export class BitmapWindows {
   }
 
   // Resolves true once new crops are bound; false when stale, superseded or over budget (old bindings kept).
-  // `limit` caps the new set's bytes on top of maxBytes (callers pass their old+new peak headroom).
+  // `limit` is the caller's memory allowance for the new set (old+new peak headroom, steady share). A margin around the
+  // view must also fit maxBytes; the visible-only crops need only fit `limit` (visible first: a 1512x982 world at k 1
+  // needs ~68 MiB of visible crops for its three canonical bitmaps, over the 64 MiB margin cap, and showed the SVG).
   // Throws on canvas/upload failure after releasing every texture it created.
   async refresh(camera: Camera, viewport: Viewport, stale?: () => boolean, limit = Infinity): Promise<boolean> {
     if (this.disposed) return false;
     const token = ++this.token;
     const sources = [...this.sources];
-    const chosen = this.choose(sources, camera, viewport, Math.min(this.maxBytes, limit));
+    const visibleBudget = Number.isFinite(limit) ? Math.max(0, limit) : this.maxBytes;
+    const chosen = this.choose(sources, camera, viewport, Math.min(this.maxBytes, limit), visibleBudget);
     if (!chosen) return false;
 
     const canvases: (HTMLCanvasElement | null)[] = [];
@@ -193,10 +196,11 @@ export class BitmapWindows {
     this.sources = [];
   }
 
-  // Largest margin (halving down to 0) whose summed RGBA crop bytes, details included, fit `budget`. When even the
-  // visible-only crops do not fit with their details, the visible-only crops without details (each slot draws its
-  // source, as it does before a detail image exists); null when those do not fit either.
-  private choose(sources: Source[], camera: Camera, viewport: Viewport, budget: number) {
+  // Largest margin (halving down to 0) whose summed RGBA crop bytes, details included, fit `budget` (`visibleBudget`
+  // for the visible-only crops). When even the visible-only crops do not fit with their details, the visible-only crops
+  // without details (each slot draws its source, as it does before a detail image exists); null when those do not fit
+  // either.
+  private choose(sources: Source[], camera: Camera, viewport: Viewport, budget: number, visibleBudget = budget) {
     const max = this.device.maxTextureSize;
     const plan = (image: HTMLImageElement, rect: Rect4, window: Rect4) =>
       cropPlan(rect, image.naturalWidth, image.naturalHeight, window);
@@ -209,7 +213,9 @@ export class BitmapWindows {
         bytes += item.sw * item.sh * 4;
         if (item.sw > max || item.sh > max) return null;
       }
-      return bytes <= budget ? { window, plans, details, margin } : null;
+      return bytes <= (margin > 0 ? budget : Math.max(budget, visibleBudget))
+        ? { window, plans, details, margin }
+        : null;
     };
     let margin = Math.max(0, this.marginCss);
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
