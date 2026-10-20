@@ -1,6 +1,6 @@
 // Raw WebGL2 device: owns the context, tracks every allocation for memory telemetry and survives context loss.
 // memory() is an allocation estimate from tracked uploads (mipmaps and MSAA included), not measured GPU usage.
-import { targetBytes } from "./budget";
+import { MASK_BYTES_PER_PIXEL, targetBytes } from "./budget";
 
 export interface DeviceEvents {
   lost(): void;
@@ -33,6 +33,8 @@ export interface TrackedTarget {
   width: number;
   height: number;
   samples: number;
+  // a coverage attachment on another target's depth/stencil (coverage()): releasing it leaves that buffer alone
+  sharedDepthStencil?: boolean;
 }
 export interface TrackedProgram {
   kind: "program";
@@ -222,6 +224,49 @@ export class GpuDevice {
     return result;
   }
 
+  // Single-channel (R8) colour texture the size of `base`, in its own framebuffer on base's depth/stencil buffer: a
+  // group's mask coverage (framegraph maskCoverage). Tracked as a target, 1 B/px (budget.ts screenTargetBytes), so the
+  // steady share reserves it with the group target instead of finding it among the resident allocations.
+  coverage(label: string, base: TrackedTarget): TrackedTarget {
+    this.usable();
+    const gl = this.gl;
+    const { width, height } = base;
+    const texture = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, width, height, 0, gl.RED, gl.UNSIGNED_BYTE, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    const framebuffer = gl.createFramebuffer()!;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+    gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_STENCIL_ATTACHMENT, gl.RENDERBUFFER, base.depthStencil);
+    const complete = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    const result: TrackedTarget = {
+      kind: "target",
+      label,
+      framebuffer,
+      color: null,
+      depthStencil: base.depthStencil,
+      resolve: framebuffer,
+      texture,
+      width,
+      height,
+      samples: 0,
+      bytes: width * height * MASK_BYTES_PER_PIXEL,
+      sharedDepthStencil: true
+    };
+    if (!complete) {
+      this.destroy(result);
+      throw new Error(`Incomplete framebuffer ${label}`);
+    }
+    this.track(result);
+    return result;
+  }
+
   program(label: string, vertex: string, fragment: string): TrackedProgram {
     this.usable();
     const gl = this.gl;
@@ -285,7 +330,7 @@ export class GpuDevice {
       gl.deleteFramebuffer(resource.framebuffer);
       if (resource.resolve !== resource.framebuffer) gl.deleteFramebuffer(resource.resolve);
       if (resource.color) gl.deleteRenderbuffer(resource.color);
-      gl.deleteRenderbuffer(resource.depthStencil);
+      if (!resource.sharedDepthStencil) gl.deleteRenderbuffer(resource.depthStencil);
       gl.deleteTexture(resource.texture);
     }
   }

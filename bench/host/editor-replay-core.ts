@@ -137,7 +137,13 @@ export interface GpuState {
   pending: boolean | null;
   settledMs?: number | null;
   /** RES2: tracked GPU bytes after the step settled and the renderer's steady budget (rendererStatus().gpu.memory). */
-  memory?: { total: number; budget: number } | null;
+  memory?: {
+    total: number;
+    budget: number;
+    // W3c BUDGET: tracked bytes per allocation label, and the steady plan of the frame on screen (prepare.ts PrepareMemory)
+    labels?: Record<string, number>;
+    plan?: { resident: number; target: number; slack: number; frame: number; steady: number; firstDetails?: string } | null;
+  } | null;
 }
 
 export interface Resume {
@@ -172,6 +178,18 @@ export function maxSteadyBytes(steps: readonly StepObservation[]): number | null
       if (value != null && (max == null || value > max)) max = value;
   }
   return max;
+}
+
+// W3c BUDGET: where an overrun sits: the frame's planned steady bytes and the largest allocations by label.
+export function memoryWhere(memory: NonNullable<GpuState["memory"]>): string {
+  const parts: string[] = [];
+  if (memory.plan) parts.push(`planned ${mib(memory.plan.steady)}`);
+  const largest = Object.entries(memory.labels ?? {})
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 6)
+    .map(([label, bytes]) => `${label} ${mib(bytes)}`);
+  if (largest.length) parts.push(largest.join(", "));
+  return parts.length ? ` (${parts.join("; ")})` : "";
 }
 
 export interface StepObservation {
@@ -272,7 +290,7 @@ export function checkGpuStep(step: StepObservation, arm: Arm, resumeLimitMs: num
   // RES2: the steady budget (src/gpu/budget.ts GPU_BUDGET) is a gate, not a report: a settled frame over it fails
   const memory = gpu.memory;
   if (memory && gpu.settledMs != null && memory.total > memory.budget)
-    out.push(`${tag}: steady GPU memory ${mib(memory.total)} over the ${mib(memory.budget)} budget`);
+    out.push(`${tag}: steady GPU memory ${mib(memory.total)} over the ${mib(memory.budget)} budget${memoryWhere(memory)}`);
   if (step.resume?.steadyBytes != null && step.resume.budget != null && step.resume.steadyBytes > step.resume.budget)
     out.push(`${tag}: steady GPU memory ${mib(step.resume.steadyBytes)} at the refined frame over the ${mib(step.resume.budget)} budget`);
   if (step.op === "close" && !step.dialogs.length) {

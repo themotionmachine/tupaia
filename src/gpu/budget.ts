@@ -58,13 +58,47 @@ export function compatAllowance(
   return Math.max(0, Math.min(budget - reserve - own - pending, peak - total - pending));
 }
 
-// The group target the framegraph allocates for a backing store of `width` x `height` device px (framegraph composite:
-// targetSamples within TARGET_BUDGET), capped at TARGET_BUDGET so the reserve is never larger than before it was sized.
+// Bytes per device px of a single-sample group's mask coverage (framegraph maskCoverage): an R8 colour attachment, red =
+// luminance. It was an RGBA8 texture (W3b STROKE3) the steady share never counted: 14.06 MiB at 1280x720 DPR 2, and the
+// parity replay held 163-165 MiB once a masked group first drew after a prepare that planned to 160 MiB (W3c BUDGET).
+export const MASK_BYTES_PER_PIXEL = 1;
+
+// Samples of the group target the framegraph allocates for a `width` x `height` backing store (framegraph composite):
+// none by default (W3b STROKE3, canvasAntialias); with ?gpu-msaa=1, targetSamples within TARGET_BUDGET.
+export function groupSamples(
+  width: number,
+  height: number,
+  maxSamples: number,
+  dpr: number,
+  msaa = msaaFlag()
+): number {
+  return msaa ? targetSamples(width, height, maxSamples, TARGET_BUDGET, dpr) : 0;
+}
+
+// Every per-screen allocation the framegraph makes for one backing store: the group target (MSAA colour + depth/stencil +
+// resolve texture, or colour texture + depth/stencil) and, for a frame with masked groups on a single-sample target, the
+// mask coverage attachment beside it (it shares the target's depth/stencil). Both are tracked as targets (device.ts).
+export function screenTargetBytes(width: number, height: number, samples: number, masked: boolean): number {
+  return targetBytes(width, height, samples) + (masked && !samples ? width * height * MASK_BYTES_PER_PIXEL : 0);
+}
+
+// What the steady share holds back for the framegraph's per-screen targets (screenTargetBytes), sized with the same
+// sample policy the framegraph uses (groupSamples), so the composite never allocates past what the prepare reserved.
+// `masked`: the frame has a masked group (framegraph hasMaskedGroup); unknown callers reserve the mask. Capped at
+// TARGET_BUDGET so the reserve is never larger than the flat one of before: only a backing store over about 10M device
+// px (8 B/px past 80 MiB, a 5K display at DPR 2) reaches the cap, and the steady telemetry reports what it leaves out.
 // At DPR 2 the target has no MSAA: 1512x982 CSS px is a 47.5 MB target, 1280x720 29.5 MB, against the flat 80 MiB the
 // steady share used to set aside, which left the canonical bitmap windows of a 1512x982 world no room at load.
-export function targetReserve(width: number, height: number, maxSamples: number, dpr: number): number {
+export function targetReserve(
+  width: number,
+  height: number,
+  maxSamples: number,
+  dpr: number,
+  masked = true,
+  msaa = msaaFlag()
+): number {
   const [w, h] = [Math.max(1, Math.round(width)), Math.max(1, Math.round(height))];
-  return Math.min(TARGET_BUDGET, targetBytes(w, h, targetSamples(w, h, maxSamples, TARGET_BUDGET, dpr)));
+  return Math.min(TARGET_BUDGET, screenTargetBytes(w, h, groupSamples(w, h, maxSamples, dpr, msaa), masked));
 }
 
 export interface PixelBounds {

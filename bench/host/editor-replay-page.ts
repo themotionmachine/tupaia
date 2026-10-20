@@ -562,7 +562,22 @@ export function installReplay(config: { arm: string; editors: string[] }) {
       pending: g?.pending ?? null,
       // ms the post-action settle waited for the GPU (suspended+hidden, or a current frame); null = not reached
       settledMs: w.__rp.settledMs ?? null,
-      memory: g?.memory?.gpu ? { total: g.memory.gpu.total, budget: g.memory.budget } : null
+      memory: g?.memory?.gpu ? { total: g.memory.gpu.total, budget: g.memory.budget, ...memoryDetail() } : null
+    };
+  };
+  // Where the tracked bytes sit (W3c BUDGET): bytes per allocation label (numeric suffixes folded) and the plan of the
+  // frame on screen (prepare.ts PrepareMemory), so a steady overrun names its allocations.
+  const memoryDetail = () => {
+    const renderer = w.gpuRenderer;
+    const labels: Record<string, number> = {};
+    for (const resource of renderer?.device?.tracked ?? []) {
+      const label = String(resource.label || resource.kind).replace(/-\d+$/, "");
+      labels[label] = (labels[label] ?? 0) + resource.bytes;
+    }
+    const plan = renderer?.prepared?.compat?.memory;
+    return {
+      labels,
+      plan: plan ? { resident: plan.resident, target: plan.target, slack: plan.slack, frame: plan.frame, steady: plan.steady, firstDetails: plan.firstDetails } : null
     };
   };
   const status = () => w.rendererStatus?.()?.gpu;

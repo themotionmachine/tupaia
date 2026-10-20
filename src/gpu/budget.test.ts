@@ -7,12 +7,15 @@ import {
   DETAIL_RESERVE,
   fitScale,
   GPU_BUDGET,
+  groupSamples,
+  MASK_BYTES_PER_PIXEL,
   MIN_COMPAT_BUDGET,
   PEAK_LIMIT,
   padBounds,
   refineOrder,
   reliefCell,
   STEADY_SLACK,
+  screenTargetBytes,
   steadyOverrun,
   steadyReserve,
   TARGET_BUDGET,
@@ -121,25 +124,44 @@ describe("memory allowances", () => {
   });
 
   it("reserves the group target this backing store gets, never more than TARGET_BUDGET", () => {
-    // DPR 2: no MSAA, 8 B/px. 1512x982 CSS px is a 47.5 MB target, not the flat 80 MiB the share used to set aside.
-    expect(targetReserve(3024, 1964, 4, 2)).toBe(3024 * 1964 * 8);
-    expect(targetReserve(2560, 1440, 4, 2)).toBe(2560 * 1440 * 8);
-    // DPR 1 keeps MSAA within the target budget; a target past it is capped at the old reserve
-    expect(targetReserve(1920, 1080, 4, 1)).toBe(targetBytes(1920, 1080, 4));
+    // no MSAA (W3b STROKE3), 8 B/px. 1512x982 CSS px at DPR 2 is a 47.5 MB target, not the flat 80 MiB the share used
+    // to set aside; unmasked here, the mask coverage is the next test's
+    expect(targetReserve(3024, 1964, 4, 2, false)).toBe(3024 * 1964 * 8);
+    expect(targetReserve(2560, 1440, 4, 2, false)).toBe(2560 * 1440 * 8);
+    // ?gpu-msaa=1 keeps MSAA within the target budget below DPR 2; a target past it is capped at the old reserve
+    expect(targetReserve(1920, 1080, 4, 1, false, true)).toBe(targetBytes(1920, 1080, 4));
+    expect(targetReserve(1920, 1080, 4, 1, false)).toBe(targetBytes(1920, 1080, 0));
     expect(targetReserve(6000, 4000, 4, 2)).toBe(TARGET_BUDGET);
     for (const [w, h, dpr] of [
       [1280, 720, 1],
       [2560, 1440, 1],
       [3024, 1964, 2],
       [5120, 2880, 2]
-    ])
+    ]) {
       expect(targetReserve(w, h, 4, dpr)).toBeLessThanOrEqual(TARGET_BUDGET);
+      expect(targetReserve(w, h, 4, dpr, true, true)).toBeLessThanOrEqual(TARGET_BUDGET);
+    }
     // the steady share grows by what the flat reserve over-counted
     const reserve = targetReserve(3024, 1964, 4, 2);
     expect(compatAllowance(0, 10 * MiB, 5 * MiB, GPU_BUDGET, PEAK_LIMIT, reserve)).toBe(
       GPU_BUDGET - reserve - 15 * MiB
     );
     expect(compatAllowance(0, 10 * MiB, 5 * MiB)).toBe(GPU_BUDGET - TARGET_BUDGET - 15 * MiB);
+  });
+
+  // [W3c BUDGET] W3b STROKE3 added a mask coverage texture beside a single-sample group target (4 B/px RGBA8, 14.06 MiB
+  // at 1280x720 DPR 2) that no reserve counted: the parity replay's first frames held 163-165 MiB of a 160 MiB budget.
+  it("reserves the mask coverage of a frame with masked groups on a single-sample target, 1 B/px", () => {
+    expect(MASK_BYTES_PER_PIXEL).toBe(1);
+    expect(groupSamples(2560, 1440, 4, 1, false)).toBe(0);
+    expect(groupSamples(2560, 1440, 4, 1, true)).toBe(targetSamples(2560, 1440, 4, TARGET_BUDGET, 1));
+    expect(screenTargetBytes(2560, 1440, 0, true)).toBe(2560 * 1440 * 9);
+    expect(screenTargetBytes(2560, 1440, 0, false)).toBe(2560 * 1440 * 8);
+    // a multisampled group (?gpu-msaa=1) masks with its stencil: no coverage attachment
+    expect(screenTargetBytes(1920, 1080, 4, true)).toBe(targetBytes(1920, 1080, 4));
+    expect(targetReserve(2560, 1440, 4, 2, true)).toBe(2560 * 1440 * 9);
+    expect(targetReserve(2560, 1440, 4, 2)).toBe(targetReserve(2560, 1440, 4, 2, true)); // unknown: reserve it
+    expect(targetReserve(1920, 1080, 4, 1, true, true)).toBe(targetBytes(1920, 1080, 4));
   });
 
   it("no longer lifts compat to the 16 MiB floor when the room is smaller", () => {
@@ -306,7 +328,7 @@ describe("steady reserve (RES2)", () => {
   });
 
   it("keeps a frame that spends its whole share under the budget, with the slack to spare", () => {
-    const target = targetReserve(2560, 1440, 4, 2); // 28.125 MiB at 1280x720 DPR 2
+    const target = targetReserve(2560, 1440, 4, 2); // 31.64 MiB at 1280x720 DPR 2: group target and mask coverage
     const resident = 629_000;
     const own = 60 * MiB;
     const pending = 5 * MiB;

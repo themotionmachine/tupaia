@@ -179,6 +179,27 @@ describe("checkGpuStep", () => {
       step({ op: "camera", dialogs: [], gpu: gpu({ state: "active", suspendedReason: null, canvasVisible: true, settledMs, memory: { total, budget } }) });
     assert.deepEqual(checkGpuStep(idle(budget), "gpu", 1000), []);
     assert.match(checkGpuStep(idle(budget + 671089), "gpu", 1000).join(), /steady GPU memory 160\.64 MiB over the 160\.00 MiB budget/);
+    // W3c BUDGET: the failure names the frame's plan and the largest allocations (the unplanned group mask at W3b)
+    const over = step({
+      op: "camera",
+      dialogs: [],
+      gpu: gpu({
+        state: "active",
+        suspendedReason: null,
+        canvasVisible: true,
+        settledMs: 100,
+        memory: {
+          total: budget + 14_745_600,
+          budget,
+          labels: { "group mask": 14_745_600, group: 29_491_200, "bitmap-window": 44_236_800, fans: 3 << 20 },
+          plan: { resident: 0, target: 29_491_200, slack: 2 << 20, frame: 120 << 20, steady: 150 << 20 }
+        }
+      })
+    });
+    assert.match(
+      checkGpuStep(over, "gpu", 1000).join(),
+      /174\.06 MiB over the 160\.00 MiB budget \(planned 150\.00 MiB; bitmap-window 42\.19 MiB, group 28\.13 MiB, group mask 14\.06 MiB, fans 3\.00 MiB\)/
+    );
     // not settled (a prepare may be in flight: old and new frames coexist up to PEAK_LIMIT): not a steady reading
     assert.deepEqual(checkGpuStep(idle(budget + 1, null), "gpu", 1000).filter(f => /steady/.test(f)), []);
     const closed = step({
