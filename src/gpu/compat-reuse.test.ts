@@ -283,6 +283,27 @@ describe("compat reuse: references", () => {
     w.labels.attrs.set("style", "clip-path: url('#r')"); // through an ancestor
     expect(externalReference([w.a], resolve)).toBe("#r");
   });
+
+  it("[COMPAT] follows a definition to the live element it references (halo clip <use href=#state1>)", () => {
+    const w = world();
+    const clip = el("clipPath", "clip1", w.defs);
+    const use = el("use", "", clip, { href: "#r" });
+    const resolve = (id: string) => {
+      const find = (node: Fake): Fake | null => {
+        if (node.id === id) return node;
+        for (const child of node.children) {
+          const hit = find(child);
+          if (hit) return hit;
+        }
+        return null;
+      };
+      return find(w.svg);
+    };
+    w.a.attrs.set("clip-path", "url(#clip1)");
+    expect(externalReference([w.a], resolve)).toBe("#r");
+    use.attrs.set("href", "#missing");
+    expect(externalReference([w.a], resolve)).toBeNull();
+  });
 });
 
 describe("compat reuse: stylesheets", () => {

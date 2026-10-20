@@ -258,9 +258,20 @@ export function externalReference(
       if ("getAttributeNames" in node) references(node as ReferenceElement, ids);
     }
   }
+  // Followed through the definitions (COMPAT): a state halo is clipped by a definition, <clipPath><use href="#state1">,
+  // whose own target is a live #statesBody path; the raster now paints through it (compat.ts isolate holds it).
+  const seen = new Set<string>();
   for (const id of ids) {
+    if (seen.has(id)) continue;
+    seen.add(id);
     const target = resolve(id);
-    if (target && !inDefinitions(target)) return `#${id}`;
+    if (!target) continue;
+    if (!inDefinitions(target)) return `#${id}`;
+    const definition = target as unknown as Partial<ReferenceElement>;
+    if (!definition.getAttributeNames || !definition.querySelectorAll) continue;
+    references(definition as ReferenceElement, ids);
+    const descendants = definition.querySelectorAll("*");
+    for (let i = 0; i < descendants.length; i++) references(descendants[i], ids);
   }
   return null;
 }
