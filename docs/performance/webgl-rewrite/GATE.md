@@ -59,7 +59,7 @@ The files involved:
 | Lock | Checks |
 |---|---|
 | none | `typecheck`, `unit`, `build`, `bench`, `boundary-before`, `boundary-after`, `paired-summary`, `lock-probe` (it takes the lock itself, in its `mode`) |
-| shared | `smoke`, `fidelity`, `context`, `lifecycle`, `hatch`, `canonical`, `palette`, `package-smoke`, `paint`, `picking`, `integration`, `replay`, `replay-selftest`, `metrics`, `golden`, `golden-selftest`, `consumers`, `consumers-selftest`, `toggles`, `resize-print`, `customization`, `memory-cycles`, `presets`, `census-selftest`, `corpus`, `corpus-selftest`, `labels` |
+| shared | `smoke`, `fidelity`, `context`, `lifecycle`, `hatch`, `canonical`, `palette`, `package-smoke`, `paint`, `picking`, `integration`, `replay`, `replay-selftest`, `metrics`, `golden`, `golden-selftest`, `consumers`, `consumers-selftest`, `toggles`, `resize-print`, `customization`, `memory-cycles`, `presets`, `census-selftest`, `corpus`, `corpus-selftest`, `labels`, `labels-selftest`, `stroke-probe` |
 | exclusive | `navigation`, `native-recovery`, `restore`, `timing`, `profile`, `gpu-timing`, `paired`, `replay-resume` |
 
 Two classifications are judgement calls. `integration` is shared because it gates on correctness cohorts; when a
