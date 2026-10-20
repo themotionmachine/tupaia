@@ -273,7 +273,7 @@ try {
         return `${stage}: ssim ${f.ssim.toFixed(4)}/${r.ssim.toFixed(4)}, over16 ${(f.over16Fraction * 100).toFixed(3)}%/${(r.over16Fraction * 100).toFixed(3)}%, ink ratio ${f.inkRatio.toFixed(3)}/${r.inkRatio.toFixed(3)}`;
       };
       const metrics = `fresh/reused ${stages.map(m).join("; ")}; kept ${kept.worldKept}/${kept.world} world runs`;
-      if (verdict.status === "PASS") add(pass(id, "P2", `reused across the edit, as close to the SVG as a fresh prepare: ${metrics}`));
+      if (verdict.status === "PASS") add(pass(id, "P2", edit === "definition" ? `definition change reflected (${kept.worldKept > 0 ? "affected runs kept" : "affected runs re-cut"}), as close to the SVG as a fresh prepare: ${metrics}` : `reused across the edit, as close to the SVG as a fresh prepare: ${metrics}`));
       else if (verdict.status === "INFO") add(info(id, "P2", `${verdict.problems.join("; ")} (${Object.entries(kept.reasons).map(([k, v]) => `${k}: ${v}`).join(", ") || "no reasons"})`));
       else add(fail(id, "P2", `${verdict.problems.join("; ")} (${metrics})`, evidence));
       // back to the base state for the next family

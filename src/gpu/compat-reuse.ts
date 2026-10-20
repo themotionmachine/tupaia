@@ -161,7 +161,9 @@ export class CompatDirt {
   }
 
   private define(at: number, record: ReuseRecord, reason: string): void {
-    if (blindTracker() === "definitions") return; // self-test: definition changes reach no run
+    // self-test only: this blinds more than definitionIds. It returns before the ids lookup, so it also skips the
+    // `!ids -> mark()` global fallback; every definition change then reaches no run at all.
+    if (blindTracker() === "definitions") return;
     const ids = definitionIds(record);
     if (!ids) {
       this.mark(at, reason);
