@@ -533,6 +533,8 @@ void main() {
 export const SHADOW_MASK_SIGMA = 2;
 // text.ts GLYPH_ATLAS (the atlas edge its uvs are normalized by), repeated here because text.ts imports this file
 export const GLYPH_ATLAS_EDGE = 2048;
+// rowSnap's tie margin in device rows: well above float32 noise at a few thousand rows (about 1e-4)
+export const ROW_TIE = 1 / 256;
 export const glyph = {
   vs: `${header}
 in vec2 a_corner;
@@ -563,11 +565,13 @@ float centralShift() {
 // vertically. Elsewhere (rotated, soft, resampled cells) 0. text.ts glyphRowSnap is the reference copy.
 float rowSnap(vec2 top) {
   if (abs(a_anchor.z) > 1e-4 || u_rows <= 0.0) return 0.0;
-  float perWorld = u_matrix[1][1] * 0.5 * u_rows; // device rows per world unit (signed: the clip y axis)
+  // device rows counted down the screen, as Skia rounds them (floor(y + 0.5): a tie goes down), per world unit
+  float perWorld = -u_matrix[1][1] * 0.5 * u_rows;
   float texels = (a_uv.w - a_uv.y) * ${GLYPH_ATLAS_EDGE.toFixed(1)};
   if (abs(perWorld) < 1e-6 || abs(abs(perWorld) * a_box.w - texels) > 1e-3 * texels) return 0.0;
-  float rows = ((u_matrix * vec3(top, 1.0)).y + 1.0) * 0.5 * u_rows;
-  return (floor(rows + 0.5) - rows) / perWorld;
+  float rows = (1.0 - (u_matrix * vec3(top, 1.0)).y) * 0.5 * u_rows;
+  // a half row sits in float32 noise (glyphs of one baseline split both ways): resolve near-ties down, as exact ties go
+  return (floor(rows + 0.5 + ${ROW_TIE.toFixed(4)}) - rows) / perWorld;
 }
 void main() {
   vec2 world;

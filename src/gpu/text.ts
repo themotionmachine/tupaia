@@ -4,7 +4,7 @@
 // loaded font). Glyphs are rasterized, in their own paint colour, into a shelf-packed alpha atlas.
 import { cumulativeLengths, layoutOnPath } from "./geometry";
 import { parseColor, type Rgba } from "./scene";
-import { GLYPH_ATLAS_EDGE, SHADOW_MASK_SIGMA } from "./shaders";
+import { GLYPH_ATLAS_EDGE, ROW_TIE, SHADOW_MASK_SIGMA } from "./shaders";
 import { flattenPath } from "./svg-path";
 
 // cx cy angle lx ly w h u0 v0 u1 v1 r g b a ascent descent baseline. A soft (shadow) cell, alpha < 0, has cx cy = its
@@ -1130,8 +1130,9 @@ export function centralShiftAt(ascent: number, descent: number, mode: number, k:
 // W3c: the reference copy of the glyph shader's rowSnap (shaders.ts glyph). Skia draws axis-aligned text with its
 // baseline on a whole device row (subpixel positioning in x only), and the atlas cuts each cell with its baseline on
 // a whole texel row, so a cell drawn at one texel per device px goes where its top row is whole. Returns the world y
-// offset that does it: `rowsPerWorld` is device rows per world unit along the target's row axis (signed), `topRow` the
-// cell top's row coordinate on that axis. 0 for a rotated cell, or one resampled (not at its atlas resolution).
+// offset that does it: `rowsPerWorld` is device rows per world unit counted down the screen, `topRow` the cell top's
+// row on that axis; a half row (within ROW_TIE) rounds down the screen, as Skia's floor(y + 0.5) does. 0 for a
+// rotated cell, or one resampled (not at its atlas resolution).
 export function glyphRowSnap(
   angle: number,
   rowsPerWorld: number,
@@ -1141,7 +1142,7 @@ export function glyphRowSnap(
 ): number {
   if (Math.abs(angle) > 1e-4 || Math.abs(rowsPerWorld) < 1e-6) return 0;
   if (Math.abs(Math.abs(rowsPerWorld) * cellWorldHeight - cellTexels) > 1e-3 * cellTexels) return 0;
-  return (Math.floor(topRow + 0.5) - topRow) / rowsPerWorld;
+  return (Math.floor(topRow + 0.5 + ROW_TIE) - topRow) / rowsPerWorld;
 }
 
 // A face's ascent and descent (font box) per px of font size, measured once at a large size; null when unreadable.
