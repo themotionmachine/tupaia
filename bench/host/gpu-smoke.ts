@@ -43,11 +43,34 @@ try {
  report.status=await page.evaluate(()=>({...(globalThis as any).rendererStatus?.(),temporaryExportClones:document.querySelectorAll("#fantasyMap").length}));
  if((report.status as any)?.active!=="gpu")report.failure="GPU fallback: "+(report.status as any)?.fallbackReason;
  if((report.status as any)?.gpu?.canvasVisible){
-  const before=await page.evaluate(()=>({poses:[...document.querySelectorAll("#tradeAnimation > g")].map(e=>e.getAttribute("transform")),frames:(globalThis as any).rendererStatus?.().gpu?.frames||0}));
+  // Live trade markers are D3 groups in the hidden SVG; the GPU mirrors them per frame. Sample poses, GPU frame counter and both
+  // marker counts (DOM <use> in visible groups vs rendererStatus().gpu.markers) around a wait, then assert (TRADE packet).
+  const sample=()=>page.evaluate(()=>new Promise<any>(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>{
+    const groups=[...document.querySelectorAll("#tradeAnimation > g")] as Element[];
+    const shown=groups.filter(g=>g.getAttribute("display")!=="none");
+    resolve({poses:groups.map(e=>e.getAttribute("transform")),domMarkers:shown.reduce((n,g)=>n+g.querySelectorAll(":scope > use").length,0),frames:(globalThis as any).rendererStatus?.().gpu?.frames||0,gpuMarkers:(globalThis as any).rendererStatus?.().gpu?.markers??null,tradeOn:!!(globalThis as any).layerIsOn?.("toggleTrade")});
+  }))));
+  const before=await sample();
   await page.waitForTimeout(150);
-  const after=await page.evaluate(()=>({poses:[...document.querySelectorAll("#tradeAnimation > g")].map(e=>e.getAttribute("transform")),frames:(globalThis as any).rendererStatus?.().gpu?.frames||0}));
-  report.animation={markerCount:after.poses.length,moved:JSON.stringify(before.poses)!==JSON.stringify(after.poses),gpuFrameAdvance:after.frames-before.frames,frozenForFidelity:true};
+  const after=await sample();
+  // Counts are compared within one sample (same rAF turn); spawns/removals between the DOM read and the last GPU frame are retried.
+  const countSamples=[after];
+  for(let i=0;i<6&&countSamples.at(-1).gpuMarkers!==countSamples.at(-1).domMarkers;i++){await page.waitForTimeout(60);countSamples.push(await sample());}
+  const counted=countSamples.at(-1);
+  const markerCount=after.poses.length;
+  const animation:any={tradeLayerOn:after.tradeOn,markerCount,domMarkers:counted.domMarkers,gpuMarkers:counted.gpuMarkers,countSamples:countSamples.length,moved:JSON.stringify(before.poses)!==JSON.stringify(after.poses),gpuFrameAdvance:after.frames-before.frames,frozenForFidelity:true,failures:[] as string[]};
+  if(markerCount===0)animation.skipped="no live trade markers in the fixture (nothing to assert)";
+  else{
+    if(!animation.moved)animation.failures.push("markers present but no pose changed in 150 ms");
+    if(animation.gpuFrameAdvance<=0)animation.failures.push("GPU frame counter did not advance while markers animated");
+    if(animation.gpuMarkers!==animation.domMarkers)animation.failures.push(`gpu.markers ${animation.gpuMarkers} != DOM markers ${animation.domMarkers}`);
+    if(!(animation.gpuMarkers>0))animation.failures.push("GPU mirrored no markers");
+  }
+  report.animation=animation;
   await page.evaluate(()=>{(globalThis as any).d3.select("#tradeAnimation").selectAll("*").interrupt();return new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));});
+  // World positions of up to 3 distinct frozen markers (land first, then water) for the zoomed pixel check below.
+  (report as any).markerTargets=await page.evaluate(()=>{const seen=new Set<string>(),out:any[]=[];for(const g of [...document.querySelectorAll("#tradeAnimation > g:not([display=none])")] as Element[]){const u=g.querySelector(":scope > use"),m=/translate\(\s*([-\d.e]+)[ ,]+([-\d.e]+)\s*\)/.exec(g.getAttribute("transform")||"");if(!u||!m)continue;const key=(u.getAttribute("href")||"")+Math.round(Number(m[1]))+","+Math.round(Number(m[2]));if(seen.has(key))continue;seen.add(key);out.push({kind:u.getAttribute("href"),x:Number(m[1]),y:Number(m[2])});}
+    const water=out.filter(t=>/water/.test(t.kind)),land=out.filter(t=>/land/.test(t.kind));return [...land.slice(0,2),...water.slice(0,1),...land.slice(2),...water.slice(1)].slice(0,3);});
  }
 
  (report as any).reliefReference=await page.evaluate(async()=>({camera:{k:(0,eval)("scale"),x:(0,eval)("viewX"),y:(0,eval)("viewY")},images:await Promise.all([...document.querySelectorAll("#terrain image")].map(async(e:any)=>{const src=e.getAttribute("href");const image=new Image();if(src){image.src=src;try{await image.decode();}catch{}}return {attributes:e.getAttributeNames().filter((n:string)=>n!=="href"&&n!=="data-relief"),worldWidth:e.getAttribute("width"),worldHeight:e.getAttribute("height"),naturalWidth:image.naturalWidth,naturalHeight:image.naturalHeight,hidden:e.hasAttribute("data-zoom-hidden"),dense:e.hasAttribute("data-relief-viewport")};}))}));
@@ -77,6 +100,44 @@ try {
  const svg=await page.screenshot({path:output+"-svg.png",animations:"disabled"});
  await page.evaluate(old=>{const c=document.querySelector("canvas[data-gpu-renderer]") as HTMLCanvasElement | null;if(c)c.style.visibility=old||"";},old);
  report.diff=await page.evaluate(async images=>{const pixels=[];for(const data of images){const i=new Image();i.src="data:image/png;base64,"+data;await i.decode();const c=document.createElement("canvas");c.width=i.width;c.height=i.height;const x=c.getContext("2d")!;x.drawImage(i,0,0);pixels.push(x.getImageData(0,0,c.width,c.height));}const [a,b]=pixels;let changed=0,over16=0,max=0,sum=0;for(let p=0;p<a.data.length;p+=4){let delta=0;for(let j=0;j<3;j++)delta=Math.max(delta,Math.abs(a.data[p+j]-b.data[p+j]));if(delta)changed++;if(delta>16)over16++;max=Math.max(max,delta);sum+=delta;}return {width:a.width,height:a.height,changedFraction:changed/(a.width*a.height),over16Fraction:over16/(a.width*a.height),maxDelta:max,meanMaxChannelDelta:sum/(a.width*a.height)};},[gpu.toString("base64"),svg.toString("base64")]);
+
+ // Marker-crop pixel check (TRADE). The camera is zoomed onto each frozen marker so it spans tens of pixels. "Ink" = pixels differing >16 from the
+ // same arm with the trade layer hidden (SVG vs SVG, GPU vs GPU, so map-wide GPU/SVG differences are not ink). The GPU ink mask must overlap the SVG
+ // ink mask (IoU), so a missing, misplaced or wrongly sized marker cannot hide in a clean crop. Runs last: it moves the camera.
+ const targets=((report as any).markerTargets||[]) as {kind:string,x:number,y:number}[];
+ if(targets.length&&report.animation&&!report.failure){
+  const anim=report.animation as any;
+  const k=Number(process.env.SMOKE_MARKER_ZOOM||14);
+  const gpuSettled=()=>page.waitForFunction(()=>{const s=(globalThis as any).rendererStatus?.();return s?.active!=="gpu"||(s.gpu?.canvasVisible&&!s.gpu?.pending&&!s.gpu?.refinementPending);},{},{timeout:30000});
+  const shot=async(clip:any)=>(await page.screenshot({clip,animations:"disabled"})).toString("base64");
+  const masks=(images:string[])=>page.evaluate(async images=>{const px=[];let w=0;for(const data of images){const i=new Image();i.src="data:image/png;base64,"+data;await i.decode();const c=document.createElement("canvas");w=c.width=i.width;c.height=i.height;const x=c.getContext("2d")!;x.drawImage(i,0,0);px.push(x.getImageData(0,0,c.width,c.height).data);}
+    const ink=(a:Uint8ClampedArray,b:Uint8ClampedArray)=>{const m=new Uint8Array(a.length/4);for(let p=0;p<a.length;p+=4)if(Math.max(Math.abs(a[p]-b[p]),Math.abs(a[p+1]-b[p+1]),Math.abs(a[p+2]-b[p+2]))>16)m[p/4]=1;return m;};
+    const [g,s,sb,gb]=px,mg=ink(g,gb),ms=ink(s,sb);let both=0,either=0,gn=0,sn=0;for(let i=0;i<mg.length;i++){gn+=mg[i];sn+=ms[i];both+=mg[i]&ms[i];either+=mg[i]|ms[i];}
+    let rawDiff=0;for(let p=0;p<g.length;p+=4)if(Math.max(Math.abs(g[p]-s[p]),Math.abs(g[p+1]-s[p+1]),Math.abs(g[p+2]-s[p+2]))>16)rawDiff++;
+    return {pixels:g.length/4,width:w,gpuInk:gn,svgInk:sn,iou:either?both/either:null,inkRatio:sn?gn/sn:null,rawGpuVsSvgFraction:rawDiff/(g.length/4)};},images);
+  const results:any[]=[];
+  for(const t of targets){
+    await page.evaluate(async({x,y,k})=>{const w=globalThis as any;w.d3.select("#map").call((0,eval)("zoom").transform,w.d3.zoomIdentity.translate(640-x*k,360-y*k).scale(k));await w.__tupaia.settle();await Promise.all([w.reliefRenderReady,w.burgRenderReady]);},{x:t.x,y:t.y,k});
+    await page.waitForTimeout(100);await gpuSettled();
+    const clip={x:640-48,y:360-48,width:96,height:96};
+    const gpuShot=await shot(clip);
+    await page.evaluate(()=>{(document.querySelector("canvas[data-gpu-renderer]") as HTMLCanvasElement).style.visibility="hidden";});
+    const svgShot=await shot(clip);
+    await page.evaluate(()=>{(document.querySelector("#tradeAnimation") as SVGElement).style.display="none";});
+    const svgBare=await shot(clip);
+    await page.evaluate(()=>{(document.querySelector("canvas[data-gpu-renderer]") as HTMLCanvasElement).style.visibility="";});
+    await page.waitForTimeout(100);await gpuSettled();
+    const gpuBare=await shot(clip);
+    await page.evaluate(()=>{(document.querySelector("#tradeAnimation") as SVGElement).style.removeProperty("display");});
+    await page.waitForTimeout(100);await gpuSettled();
+    results.push({target:t,zoom:k,...(await masks([gpuShot,svgShot,svgBare,gpuBare]))});
+  }
+  const th={minSvgInkPixels:200,minIou:Number(process.env.SMOKE_MARKER_MIN_IOU||0.6),inkRatio:[0.6,1.6]};
+  anim.pixelCheck={cropCount:results.length,minIou:Math.min(...results.map(r=>r.iou??0)),threshold:th,crops:results};
+  const bad=results.filter(r=>r.svgInk<th.minSvgInkPixels||(r.iou??0)<th.minIou||(r.inkRatio??0)<th.inkRatio[0]||(r.inkRatio??0)>th.inkRatio[1]);
+  if(bad.length)anim.failures.push(`${bad.length}/${results.length} zoomed marker crops disagree SVG vs GPU (iou<${th.minIou}, ink ratio outside ${th.inkRatio.join("..")}, or SVG shows <${th.minSvgInkPixels} ink px)`);
+ }
+ if(report.animation&&(report.animation as any).failures?.length)report.failure??="trade animation: "+(report.animation as any).failures.join("; ");
 
  if(process.env.SMOKE_LIFECYCLE==="1" || process.env.SMOKE_CONTEXT==="1") {
    const cdp=await context.newCDPSession(page);
