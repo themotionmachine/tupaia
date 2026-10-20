@@ -15,8 +15,9 @@
 //   - GPU arms: suspended with the canvas hidden while the editor is open, and resumed after the close. The resume is
 //     timed from the trusted close click to the first current GPU frame and to the first refined frame (D4). After a
 //     session that changed the model, no GPU frame older than the latest DOM revision may be on screen (D13).
-// Math.random is seeded per step in every arm (the relief brush scatters icons randomly). Each script starts from a
-// fresh load of the fixture, so scripts are independent.
+// Math.random is seeded per step in every arm (the relief brush scatters icons randomly). Each script runs in its own
+// browser context and page, booted fresh and then loaded with the fixture, so scripts are independent (run order and
+// the editors argument change nothing).
 //
 // Environment (gate.ts maps its arguments onto these):
 //   REPLAY_MAP        .map fixture (default: the parity fixture, tests/fixtures/parity/parity-v1.map)
@@ -348,35 +349,38 @@ const recording: Record<string, { frozen: Frozen[]; steps: StepObservation[] }> 
 const observed: Record<string, Record<string, StepObservation[]>> = {};
 const harness: string[] = [];
 async function runArm(arm: Arm): Promise<void> {
-  log(`arm ${arm}: opening`);
-  const { page, close } = await openArm(arm);
-  try {
-    for (const script of scripts) {
-      if (arm !== "svg" && !recording[script.name]) continue; // the recording failed: nothing to replay
-      const armStart = Date.now();
+  // Every script gets its own browser context and page (a fresh boot, then the fixture). One page for all scripts leaked state
+  // between them that loadMap does not reset: main.js's camera globals (scale, viewX, viewY: a script's first camera step to
+  // the previous script's transform was ignored, so the viewbox stayed unzoomed and a click hit the planimeter label), the
+  // editors' own DOM (the relief editor's bulk-add button stays pressed, so the next script's icon change did nothing),
+  // lazily loaded editor modules and their one-time listeners, and jQuery UI dialog instances.
+  for (const script of scripts) {
+    if (arm !== "svg" && !recording[script.name]) continue; // the recording failed: nothing to replay
+    const armStart = Date.now();
+    log(`arm ${arm}: ${script.name} opening`);
+    let opened: Awaited<ReturnType<typeof openArm>> | undefined;
+    try {
+      opened = await openArm(arm);
+      const page = opened.page;
       (page as any).__broken = false;
-      try {
-        (page as any).__script = script.name;
-        await loadFixture(page, arm);
-        const frozen = arm === "svg" ? [] : recording[script.name].frozen;
-        const steps: StepObservation[] = [];
-        for (let i = 0; i < script.steps.length; i++) {
-          if (arm === "svg") frozen.push({});
-          steps.push(await runStep(page, arm, script.steps[i], i, frozen[i]));
-        }
-        if (arm === "svg") recording[script.name] = { frozen, steps };
-        (observed[script.name] ??= {})[arm] = steps;
-        log(`arm ${arm}: ${script.name} ${steps.length} steps in ${Math.round((Date.now() - armStart) / 100) / 10}s`);
-      } catch (error) {
-        const message = `${arm} ${script.name}: harness: ${String((error as Error)?.stack || error).slice(0, 800)}`;
-        harness.push(message);
-        log(message);
-        // close any dialog the failed script left so the next script starts clean
-        await page.evaluate(() => (globalThis as any).__rp?.dialogs?.().forEach((id: string) => (globalThis as any).$(id).dialog("close"))).catch(() => {});
+      (page as any).__script = script.name;
+      await loadFixture(page, arm);
+      const frozen = arm === "svg" ? [] : recording[script.name].frozen;
+      const steps: StepObservation[] = [];
+      for (let i = 0; i < script.steps.length; i++) {
+        if (arm === "svg") frozen.push({});
+        steps.push(await runStep(page, arm, script.steps[i], i, frozen[i]));
       }
+      if (arm === "svg") recording[script.name] = { frozen, steps };
+      (observed[script.name] ??= {})[arm] = steps;
+      log(`arm ${arm}: ${script.name} ${steps.length} steps in ${Math.round((Date.now() - armStart) / 100) / 10}s`);
+    } catch (error) {
+      const message = `${arm} ${script.name}: harness: ${String((error as Error)?.stack || error).slice(0, 800)}`;
+      harness.push(message);
+      log(message);
+    } finally {
+      await opened?.close().catch(() => {});
     }
-  } finally {
-    await close();
   }
 }
 
