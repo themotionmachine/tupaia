@@ -776,17 +776,18 @@ async function snapshot() {
     [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)))]
       .map(b => b.toString(16).padStart(2, "0"))
       .join("");
-  // the header's last field is the save time (Date.now()): compared with that one field masked, and reported raw
+  // the header's last field is the map id (Date.now() at creation, not a save time; the date field before it is
+  // day-granular and left alone): compared with that one field masked, and reported raw
   const header = (value: string) => value.slice(0, value.indexOf("\r\n"));
   const masked = (value: string) => {
     const head = header(value);
-    return head.slice(0, head.lastIndexOf("|") + 1) + "<saved-at>" + value.slice(head.length);
+    return head.slice(0, head.lastIndexOf("|") + 1) + "<map-id>" + value.slice(head.length);
   };
-  const stamp = (value: string) => header(value).slice(header(value).lastIndexOf("|") + 1);
+  const mapIdOf = (value: string) => header(value).slice(header(value).lastIndexOf("|") + 1);
   return {
     text,
     comparable: masked(text),
-    savedAt: stamp(text),
+    mapId: mapIdOf(text),
     deterministic: masked(text) === masked(again),
     svg,
     textSha: await sha(text),
@@ -1531,8 +1532,8 @@ try {
       edits,
       persisted,
       saveDeterministic: [first.deterministic, second.deterministic],
-      saveComparison: "exact text with only the header save-time field masked",
-      savedAt: [first.savedAt, second.savedAt],
+      saveComparison: "exact text with only the header map-id field masked",
+      mapId: [first.mapId, second.mapId],
       rawSaveEqual: first.text === second.text,
       saveSha256: [first.textSha, second.textSha],
       saveMaskedSha256: [first.comparableSha, second.comparableSha],

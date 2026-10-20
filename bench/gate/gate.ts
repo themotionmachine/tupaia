@@ -759,6 +759,65 @@ async function consumersCheck(ctx: Ctx): Promise<Partial<Result>> {
   return result;
 }
 
+// Legacy corpus (REWRITE-PLAN row 33): maps written by old versions load and migrate under svg and gpu, with the
+// census, the save fixed point, and a per-map golden at k 1 judged against the SVG arm (bench/host/corpus-load.ts).
+function corpusManifestIds(): string[] {
+  return JSON.parse(readFileSync(join(REPO, "tests/fixtures/corpus/manifest.json"), "utf8")).entries.map((e: Json) => e.id);
+}
+async function corpusCheck(ctx: Ctx): Promise<Partial<Result>> {
+  const report = join(ctx.dir, "corpus.json");
+  const env: Record<string, string> = {
+    CORPUS_MAPS: String(ctx.args.maps),
+    CORPUS_DPR: String(ctx.args.dpr),
+    CORPUS_GOLDEN: ctx.args.golden ? "1" : "0",
+    CORPUS_CONTROL: ctx.args.control ? "1" : "0",
+    CORPUS_STRICT: ctx.args.strict ? "1" : "0",
+    CORPUS_BREAK: String(ctx.args.break)
+  };
+  const result = await runScript(ctx, nodeScript("bench/host/corpus-load.ts"), env, report, DEFS.corpus.timeout, data => {
+    const checks: Json[] = data?.checks ?? [];
+    const failing = checks.filter(c => c.status === "FAIL");
+    return {
+      failure: reportFailure(data),
+      metrics: data && {
+        maps: data.args?.maps,
+        checks: checks.length,
+        failed: failing.length,
+        break: data.args?.break,
+        coverage: data.coverage && { gates: data.coverage.gates, unreached: data.coverage.unreached },
+        golden: Object.fromEntries(Object.entries(data.maps ?? {}).map(([id, m]: [string, Json]) => [id, m.golden])),
+        failing: failing.slice(0, 20).map((c: Json) => ({ id: c.id, why: String(c.detail).slice(0, 240), evidence: c.evidence })),
+        info: checks.filter(c => c.status === "INFO" && /unreachable|empty/.test(c.id)).slice(0, 20).map((c: Json) => `${c.id}: ${String(c.detail).slice(0, 160)}`)
+      }
+    };
+  });
+  // golden PNGs of failing cells stay in the evidence dir: <map>/golden/cells/...
+  return result;
+}
+
+// Re-proves that the corpus harness can still tell pass from fail: the gpu arm's first save and census are perturbed
+// (break=tamper, one small map, no golden) and the run must FAIL on exactly the save-equality and census-equality checks.
+async function corpusSelftestCheck(ctx: Ctx): Promise<Partial<Result>> {
+  const dir = join(ctx.dir, "broken");
+  mkdirSync(dir, { recursive: true });
+  const report = join(dir, "corpus.json");
+  const env = { CORPUS_MAPS: "legacy-v1.123", CORPUS_DPR: "2", CORPUS_GOLDEN: "0", CORPUS_BREAK: "tamper", GATE_OUT_DIR: dir };
+  const code = await exec(nodeScript("bench/host/corpus-load.ts"), ctx.env(env), ctx.log, DEFS["corpus-selftest"].timeout, true);
+  const data = readJson(report);
+  const failing: Json[] = (data?.checks ?? []).filter((c: Json) => c.status === "FAIL");
+  const failed = (suffix: string) => failing.some(c => String(c.id).endsWith(suffix));
+  const problems: string[] = [];
+  if (!data) problems.push(`no report written (exit ${code})`);
+  else if (String(data.failure ?? "").startsWith("harness:")) problems.push(`harness error: ${data.failure}`);
+  else {
+    if (!failed("save.arms-equal-1")) problems.push("break=tamper did not fail save.arms-equal-1: the harness can no longer see a changed save");
+    if (!failed("census.arms-equal")) problems.push("break=tamper did not fail census.arms-equal: the harness can no longer see a changed census");
+    const unexpected = failing.filter(c => !/(save\.arms-equal-1|census\.arms-equal|save\.gpu\.fixed-point|save\.arms-equal-[23])/.test(String(c.id)));
+    if (unexpected.length) problems.push(`unexpected failures: ${unexpected.slice(0, 4).map(c => `${c.id} (${String(c.detail).slice(0, 80)})`).join("; ")}`);
+  }
+  return { exit_code: problems.length ? 1 : 0, failure: problems.length ? problems.join(" | ") : null, metrics: { broken_failing: failing.map(c => c.id).slice(0, 12), checks: data?.checks?.length ?? 0 } };
+}
+
 // Re-proves that the consumers harness can still tell pass from fail: the gpu arm's text save and PNG export are
 // deliberately perturbed (break=tamper, save and export steps only, parity fixture) and the run must FAIL on exactly
 // the save-equality and PNG-equality checks, not on a harness error.
@@ -849,6 +908,7 @@ const DEFS: Record<string, CheckDef> = {
           "bench/gate/host-lock.test.ts",
           "bench/host/fixtures/fixtures.test.ts",
           "bench/host/consumers-lib.test.ts",
+          "bench/host/corpus-lib.test.ts",
           "bench/integration-fixture.test.ts",
           "bench/host/editor-replay-core.test.ts"
         ],
@@ -1101,6 +1161,21 @@ const DEFS: Record<string, CheckDef> = {
     timeout: 3600,
     run: consumersCheck
   },
+  // legacy corpus: maps written by old versions (tests/fixtures/corpus), svg arm against gpu arm (row 33)
+  corpus: {
+    lock: "shared",
+    keys: ["maps", "dpr", "golden", "control", "strict", "break"],
+    spec: {
+      maps: { type: "string", default: "all", check: text => { if (text !== "all") { const known = corpusManifestIds(); const bad = text.split(",").filter(m => !known.includes(m)); if (bad.length) throw new UsageError(`maps: unknown ${bad.join(", ")} (have ${known.join(", ")})`); } } },
+      golden: { type: "bool", default: true },
+      control: { type: "bool", default: false },
+      strict: { type: "bool", default: false }, // gate the manifest's known golden gaps too
+      break: { type: "enum", values: ["none", "tamper"], default: "none" }
+    },
+    timeout: 5400,
+    run: corpusCheck
+  },
+  "corpus-selftest": { lock: "shared", keys: [], timeout: 900, run: corpusSelftestCheck },
   "consumers-selftest": { lock: "shared", keys: [], timeout: 1200, run: consumersSelftestCheck },
   "golden-selftest": { lock: "shared", keys: ["reading"], timeout: 600, run: goldenSelftestCheck },
   golden: {
