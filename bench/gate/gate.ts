@@ -1304,6 +1304,19 @@ const DEFS: Record<string, CheckDef> = {
       }));
     }
   },
+  // W3b PAINT: trade caravans live against frozen on the parity world (every layer on): idle fps, main-thread layerize
+  // and forced prepare-to-current per arm. Fails when the live median prepare-to-current exceeds 2x the frozen one.
+  "trade-live": {
+    lock: "exclusive",
+    keys: ["dpr", "reps"],
+    spec: { reps: { type: "int", default: 3 } },
+    timeout: 1200,
+    run: ctx =>
+      runScript(ctx, nodeScript("bench/host/trade-live.ts"), { TRADE_DPR: String(ctx.args.dpr), TRADE_REPS: String(ctx.args.reps) }, join(ctx.dir, "trade-live.json"), 1200, data => ({
+        failure: reportFailure(data),
+        metrics: data && { adapter: data.contextProperties?.adapter, summary: data.summary, caravans: data.status?.caravans }
+      }))
+  },
   palette: {
     lock: "shared",
     keys: [],
@@ -1936,6 +1949,7 @@ TIERS.full = [
   ...TIERS.browser,
   ["fidelity", {}],
   ["navigation", {}],
+  ["trade-live", {}],
   ["metrics", { manifest: "fresh" }],
   ...[1, 2, 3, 4, 5].map(block => ["paired", { dpr: 2, block }] as [string, Args]),
   ["paired-summary", { dpr: 2 }]
