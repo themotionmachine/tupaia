@@ -262,25 +262,42 @@ export function checkGpuStep(step: StepObservation, arm: Arm, resumeLimitMs: num
 }
 
 /**
- * D13: after an editor session that changed the model (any step since the previous close changed the model DOM or
- * pack/grid/notes) closes, no GPU frame older than the latest DOM revision may be on screen. A session that changed
- * nothing may return to the last frame at once, so only changing sessions are judged.
+ * D13: after an editor session that changed the model closes, no GPU frame older than the latest DOM revision may be
+ * on screen. A session that changed nothing may return to the last frame at once, so only changing sessions are judged.
+ * "Changed" (W3 LIFE3, the renderer's net-change test): the model DOM at the close differs from the model DOM just
+ * before the editor opened (per-layer `dom` hashes), or a step of the session changed pack/grid/notes. An editor that
+ * rewrites the DOM on open and restores it on close (burg icons: rasters to vectors and back) changed nothing. Without
+ * a step before the open to compare with, any step's DOM delta since the previous close counts, as before.
  */
 export function checkStaleResume(steps: StepObservation[]): string[] {
   const out: string[] = [];
-  let changed = false;
+  let touched = false; // any step's DOM delta since the previous close (the fallback reading)
+  let model = false;
+  let base: Record<string, string> | null | undefined; // undefined: no editor opened yet in this session
+  let previous: StepObservation | null = null;
   for (const step of steps) {
-    if (step.domDeltaCount || step.modelChanged.length) changed = true;
+    if (base === undefined && step.dialogs.length) base = previous && !previous.dialogs.length ? previous.dom : null;
+    if (step.domDeltaCount) touched = true;
+    if (step.modelChanged.length) model = true;
+    previous = step;
     if (step.op !== "close") continue;
+    const changed = model || (base ? !sameHashes(base, step.dom) : touched);
     const stale = step.resume?.staleShown ?? 0;
     if (changed && stale) {
       const first = step.resume?.staleFirst;
       const detail = first ? ` (first +${first.at} ms via ${first.via}: frame revision ${first.frameRevision} < ${first.revision})` : "";
       out.push(`step ${step.index} close: stale GPU frame visible after a changing edit closed, ${stale}x${detail}`);
     }
-    changed = false;
+    touched = model = false;
+    base = undefined;
   }
   return out;
+}
+
+function sameHashes(a: Record<string, string>, b: Record<string, string>): boolean {
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  for (const key of keys) if (a[key] !== b[key]) return false;
+  return true;
 }
 
 /** Problems with the recording itself (svg arm): a script that does not do what it says proves nothing. */

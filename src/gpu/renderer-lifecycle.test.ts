@@ -4,6 +4,7 @@
 // page (hooks, show/hide, which work it schedules), not what it draws. The decisions themselves are in
 // lifecycle.test.ts; these prove they are wired to the events that need them.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { EMBLEM_RULES } from "../renderers/emblems/styles";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -384,5 +385,150 @@ describe("[LIFE2] resume hold (D13)", () => {
     pipeline.gate = null;
     await settled();
     expect(renderer.telemetry().frameRevision).toBe(2);
+  });
+});
+
+// W3 LIFE3: "changed" is the net change of the model DOM (net-change.ts), the suspension starts with the records of
+// the task that opened it, and definitions outside svg#map that the map references re-prepare (definitions.ts).
+describe("[LIFE3] net change and definitions", () => {
+  const openDialog = () => {
+    const dialog = document.createElement("div");
+    dialog.className = "ui-dialog";
+    document.body.append(dialog);
+    return dialog;
+  };
+  const closeDialog = (dialog: HTMLElement) => (dialog.style.display = "none");
+  const nextFrames = () => new Promise(resolve => setTimeout(resolve, 60));
+  let open: () => void;
+  const gate = () => (pipeline.gate = new Promise(resolve => (open = resolve)));
+
+  it("an editor whose edits left the map as it was returns to the last frame at once (Updating), no hold", async () => {
+    const rivers = document.getElementById("rivers")!;
+    const dialog = openDialog();
+    await vi.waitFor(() => expect(visible()).toBe(false));
+    rivers.setAttribute("opacity", "0.5"); // an editor preview...
+    await nextFrames();
+    rivers.removeAttribute("opacity"); // ...undone before the close
+    await nextFrames();
+    expect(renderer.telemetry().revision).toBe(2);
+    gate();
+    closeDialog(dialog);
+    await vi.waitFor(() => expect(visible()).toBe(true)); // the frame from before the session, while it re-prepares
+    expect(renderer.telemetry()).toMatchObject({
+      frameRevision: 0,
+      hold: { active: false, holds: 0, netUnchanged: 1, net: { verdict: "unchanged" } }
+    });
+    expect(renderer.intentProbe()).toMatchObject({ ready: true, current: false });
+    open();
+    await vi.waitFor(() => expect(renderer.telemetry().frameRevision).toBe(2));
+  });
+
+  it("an edit made in the same task that opened the editor counts as made inside it (holds)", async () => {
+    const dialog = openDialog();
+    document.getElementById("rivers")!.setAttribute("opacity", "0.5"); // same task as the open
+    await vi.waitFor(() => expect(visible()).toBe(false));
+    gate();
+    closeDialog(dialog);
+    await vi.waitFor(() => expect(pipeline.prepares).toHaveLength(2));
+    await nextFrames();
+    expect(visible()).toBe(false); // never the frame from before the edit
+    expect(renderer.telemetry().hold).toMatchObject({ active: true, holds: 1, skipped: 0, netUnchanged: 0 });
+    open();
+    await settled();
+  });
+
+  it("a customization mode set with its first DOM write in one task counts that write", async () => {
+    global.customization = 1;
+    document.getElementById("rivers")!.setAttribute("opacity", "0.5");
+    await vi.waitFor(() => expect(visible()).toBe(false));
+    gate();
+    global.customization = 0;
+    await vi.waitFor(() => expect(pipeline.prepares).toHaveLength(2), { timeout: 1000 });
+    await nextFrames();
+    expect(visible()).toBe(false);
+    expect(renderer.telemetry().hold).toMatchObject({ active: true, holds: 1 });
+    open();
+    await settled();
+  });
+
+  describe("definitions outside svg#map", () => {
+    let coas: Element;
+    beforeEach(async () => {
+      const definitions = document.createElementNS(SVG_NS, "svg");
+      definitions.id = "defElements";
+      definitions.innerHTML = `<defs><g id="coas"></g><g id="defs-relief"><symbol id="relief-hill-1"/></g></defs>`;
+      document.body.append(definitions);
+      coas = definitions.querySelector("#coas")!;
+      renderer.worldReplaced(1); // a load: the renderer (re)attaches to svg#defElements
+      const emblems = document.createElementNS(SVG_NS, "g");
+      emblems.id = "emblems";
+      emblems.innerHTML = `<g id="burgEmblems"><use data-i="1" href="#burgCOA1" x="5" y="5"/></g>`;
+      document.getElementById("viewbox")!.append(emblems);
+      await vi.waitFor(() => expect(renderer.telemetry().frameRevision).toBe(renderer.telemetry().revision));
+      await settled();
+    });
+    const coa = (id: string) => {
+      const svg = document.createElementNS(SVG_NS, "svg");
+      svg.id = id;
+      svg.innerHTML = `<g clip-path="url(#heater_${id})"><rect width="200" height="200" fill="#fff"/></g>`;
+      return svg;
+    };
+
+    it("a lazily rendered COA the map's emblems name re-prepares; one they do not name is ignored", async () => {
+      const { revision, prepares } = renderer.telemetry();
+      coas.append(coa("burgCOA2")); // a dialog preview with no emblem on the map
+      await nextFrames();
+      expect(renderer.telemetry()).toMatchObject({ revision, definitions: { revisions: 0, ignored: 1 } });
+      coas.append(coa("burgCOA1")); // the emblem's COA arrives after the frame was prepared without it
+      await vi.waitFor(() => expect(renderer.telemetry().revision).toBe(revision + 1));
+      expect(renderer.telemetry()).toMatchObject({
+        definitions: { revisions: 1, last: "definition #burgCOA1" },
+        invalidations: { last: "definition #burgCOA1" }
+      });
+      await vi.waitFor(() => expect(renderer.telemetry().prepares).toBe(prepares + 1));
+      // a change inside it (the emblem editor re-rendering it) is a revision too
+      coas.querySelector("#burgCOA1 rect")!.setAttribute("fill", "#f00");
+      await vi.waitFor(() => expect(renderer.telemetry().revision).toBe(revision + 2));
+    });
+
+    it("an editor preview's COA moving the shared emblem sheet is not a change; a different emblem sheet is", async () => {
+      const shared = document.createElementNS(SVG_NS, "style");
+      shared.setAttribute("data-emblem-shared-style", "");
+      shared.textContent = EMBLEM_RULES;
+      coas.append(shared);
+      await nextFrames();
+      const { revision } = renderer.telemetry();
+      const ignored = renderer.telemetry().definitions.ignored;
+      // COArenderer.draw for a burg editor's preview: the COA carries its own copy of the rules, the sheet moves after it
+      const preview = coa("burgCOA2");
+      preview.insertAdjacentHTML("afterbegin", `<defs><style>${EMBLEM_RULES}</style></defs>`);
+      coas.append(preview);
+      preview.after(shared);
+      await nextFrames();
+      expect(renderer.telemetry()).toMatchObject({ revision, definitions: { revisions: 0, ignored: ignored + 1 } });
+      const other = coa("burgCOA3");
+      other.insertAdjacentHTML("afterbegin", "<defs><style>g.secondary {fill: red}</style></defs>");
+      coas.append(other);
+      await vi.waitFor(() => expect(renderer.telemetry().revision).toBe(revision + 1));
+      expect(renderer.telemetry().definitions).toMatchObject({ revisions: 1, last: "definition emblem <style>" });
+    });
+
+    it("a referenced definition changed during an editor holds (the net test cannot see it)", async () => {
+      const dialog = openDialog();
+      await vi.waitFor(() => expect(visible()).toBe(false));
+      coas.append(coa("burgCOA1"));
+      await nextFrames();
+      gate();
+      closeDialog(dialog);
+      await vi.waitFor(() => expect(renderer.telemetry().hold.active).toBe(true));
+      expect(renderer.telemetry().hold).toMatchObject({
+        netUnsure: 1,
+        net: { verdict: "unsure", detail: "definition #burgCOA1" }
+      });
+      await nextFrames();
+      expect(visible()).toBe(false);
+      open();
+      await settled();
+    });
   });
 });
