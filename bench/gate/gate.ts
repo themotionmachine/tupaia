@@ -1788,7 +1788,12 @@ const TIERS: Record<string, Array<[string, Args]>> = {
     // 12 layers presets (row 39). About 16 minutes together; memory-cycles and census-selftest are nightly (~35 minutes)
     ["toggles", {}],
     ["customization", {}],
-    ["resize-print", {}]
+    ["resize-print", {}],
+    // wave 2: label fidelity (rows 15, 16, 41), the stroke width/dash/join probe, trade animation smoke (row 22)
+    ["labels-selftest", {}],
+    ["labels", {}],
+    ["stroke-probe", {}],
+    ["smoke", {}]
   ],
   // D5 nightly matrix: k {1,2,4,8} plus the coastline switch points, dpr {1,2}, the 12 built-in presets. One golden
   // step per (dpr, preset) so a failure names its cell and the rest keep going (keep_going is implied). PNGs are kept
@@ -1804,7 +1809,10 @@ const TIERS: Record<string, Array<[string, Args]>> = {
   ).concat([
     // gate gap 16: 20 world-replace cycles + resizes with no growth (~20 min); and the census checks' own self-tests (~20 min)
     ["memory-cycles", {}],
-    ["census-selftest", {}]
+    ["census-selftest", {}],
+    // row 33: legacy maps from old versions through load + auto-update, svg against gpu (~13 min)
+    ["corpus-selftest", {}],
+    ["corpus", {}]
   ] as Array<[string, Args]>)
 };
 TIERS.full = [
