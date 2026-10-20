@@ -1123,7 +1123,7 @@ const DEFS: Record<string, CheckDef> = {
       steps: { type: "string", default: "thresholds,glyphs,advance,fonts", check: text => { if (!text.split(",").every(s => ["thresholds", "glyphs", "advance", "fonts"].includes(s))) throw new UsageError("steps: thresholds,glyphs,advance,fonts"); } },
       sample: { type: "int", default: 200 },
       keep: { type: "enum", values: ["all", "fail"], default: "fail" },
-      break: { type: "enum", values: ["none", "freeze", "measure"], default: "none" }
+      break: { type: "enum", values: ["none", "freeze", "measure", "shift", "drop"], default: "none" }
     },
     timeout: 3600,
     run: async ctx => {
@@ -1133,9 +1133,11 @@ const DEFS: Record<string, CheckDef> = {
       return runScript(ctx, nodeScript("bench/host/labels.ts"), env, report, 3600, data => ({ failure: reportFailure(data), metrics: data && { summary: data.summary, break: data.args?.break, errors: data.errors?.slice(0, 4) } }));
     }
   },
-  // The label harness must still fail: on the parity fixture, a clean run and two broken ones. `freeze` stops the GPU
+  // The label harness must still fail: on the parity fixture, a clean run and four broken ones. `freeze` stops the GPU
   // from seeing DOM changes (a missed invalidation) and must trip the visible-set and re-atlas checks; `measure`
-  // scales measureText by 1.04 and must trip the advance and analytic glyph checks. Each detector must pass clean.
+  // scales measureText by 1.04 and must trip the advance and analytic glyph checks; `shift` moves the GPU canvas 1 CSS
+  // px and must trip pixel registration; `drop` blanks the right half of the GPU arm and must trip the presence check
+  // (an empty GPU window is a missing glyph, never a 0 px shift). Each detector must pass clean.
   "labels-selftest": {
     lock: "shared",
     keys: [],
@@ -1146,7 +1148,9 @@ const DEFS: Record<string, CheckDef> = {
       for (const [arm, extra] of [
         ["clean", { LABELS_STEPS: "thresholds,glyphs,advance,fonts", LABELS_BREAK: "none" }],
         ["freeze", { LABELS_STEPS: "thresholds,fonts", LABELS_BREAK: "freeze" }],
-        ["measure", { LABELS_STEPS: "glyphs,advance", LABELS_BREAK: "measure" }]
+        ["measure", { LABELS_STEPS: "glyphs,advance", LABELS_BREAK: "measure" }],
+        ["shift", { LABELS_STEPS: "glyphs", LABELS_BREAK: "shift" }],
+        ["drop", { LABELS_STEPS: "glyphs", LABELS_BREAK: "drop" }]
       ] as const) {
         const dir = join(ctx.dir, arm);
         mkdirSync(dir, { recursive: true });
@@ -1157,6 +1161,7 @@ const DEFS: Record<string, CheckDef> = {
       const cells = (arm: string): Json[] => step(arm, "thresholds")?.cells ?? [];
       const font = (arm: string, id: string): Json | undefined => (step(arm, "fonts")?.switches ?? []).find((c: Json) => c.id === id);
       const has = (cell: Json | undefined, prefix: string) => (cell?.failures ?? []).some((f: string) => f.startsWith(prefix));
+      const glyphs = (arm: string): Json | undefined => step(arm, "glyphs")?.variants?.native;
       const advance = (arm: string, family: string): number | undefined => (step(arm, "advance")?.rows ?? []).find((r: Json) => r.family === family)?.maxCumPx;
       const analytic = (arm: string): number | undefined => step(arm, "glyphs")?.variants?.native?.summary?.analytic?.p50;
       const problems: string[] = [];
@@ -1168,7 +1173,16 @@ const DEFS: Record<string, CheckDef> = {
         if (!cells("freeze").some(c => !c.pass && c.break === "freeze" && c.failures.some((f: string) => /missing on the GPU|GPU paints/.test(f)))) problems.push("freeze: no frozen threshold probe was caught by the visible-set check");
         if (!font("clean", "builtin") || has(font("clean", "builtin"), "re-atlas") || has(font("clean", "builtin"), "harness")) problems.push(`clean: builtin switch should re-atlas (${font("clean", "builtin")?.failures?.[0] ?? "no cell"})`);
         if (!has(font("freeze", "builtin"), "re-atlas")) problems.push("freeze: the builtin switch's missed re-atlas was not caught");
-        if (has(font("clean", "broken"), "broken font")) problems.push(`clean: broken font routing should pass (${font("clean", "broken")?.failures?.[0]})`);
+        if (!font("clean", "broken") || has(font("clean", "broken"), "broken font") || has(font("clean", "broken"), "harness")) problems.push(`clean: broken font routing should pass (${font("clean", "broken")?.failures?.[0] ?? "no cell"})`);
+        // pixel registration and presence: clean registers every sampled glyph near 0, shift moves it, drop loses it
+        const [cg, sg, dg] = [glyphs("clean"), glyphs("shift"), glyphs("drop")];
+        if (!cg?.summary) problems.push("clean: no native glyph variant");
+        else {
+          if (cg.summary.missingLabels || cg.summary.pixel?.missing) problems.push(`clean: ${cg.summary.missingLabels} labels and ${cg.summary.pixel?.missing} glyphs missing on the GPU`);
+          if (!(cg.summary.pixel?.p50 <= 1)) problems.push(`clean: pixel registration p50 ${cg.summary.pixel?.p50} should be within 1 device px`);
+        }
+        if (!(sg?.summary?.pixel?.p50 > 1.5) || !(sg?.failures ?? []).some((f: string) => f.startsWith("pixel:"))) problems.push(`shift: pixel registration should see the 2 device px shift (p50 ${sg?.summary?.pixel?.p50}, failures ${JSON.stringify(sg?.failures ?? null)})`);
+        if (!(dg?.summary?.missingLabels > 0) || !(dg?.summary?.pixel?.missing > 0) || !(dg?.failures ?? []).some((f: string) => f.startsWith("presence:"))) problems.push(`drop: the blanked labels should be missing, not registered (missing labels ${dg?.summary?.missingLabels}, glyphs ${dg?.summary?.pixel?.missing})`);
         for (const family of ["Georgia", "Almendra SC"]) {
           const [c, b] = [advance("clean", family), advance("measure", family)];
           if (!(c !== undefined && c <= 1)) problems.push(`clean: ${family} advance ${c} should be within 1 device px`);
@@ -1185,7 +1199,8 @@ const DEFS: Record<string, CheckDef> = {
           thresholds: { clean: cells("clean").map(c => `${c.key}:${c.pass ? "PASS" : "FAIL"}`), freeze: cells("freeze").map(c => `${c.key}:${c.pass ? "PASS" : "FAIL"}`) },
           fonts: { clean: font("clean", "builtin")?.failures?.length ?? null, freeze: font("freeze", "builtin")?.failures?.filter((f: string) => f.startsWith("re-atlas")).length ?? null },
           advance: { clean: advance("clean", "Georgia"), measure: advance("measure", "Georgia") },
-          analyticP50: { clean: analytic("clean"), measure: analytic("measure") }
+          analyticP50: { clean: analytic("clean"), measure: analytic("measure") },
+          pixel: Object.fromEntries(["clean", "shift", "drop"].map(arm => [arm, { p50: glyphs(arm)?.summary?.pixel?.p50, withinTol: glyphs(arm)?.summary?.pixel?.withinTol, missingGlyphs: glyphs(arm)?.summary?.pixel?.missing, missingLabels: glyphs(arm)?.summary?.missingLabels }]))
         }
       };
     }

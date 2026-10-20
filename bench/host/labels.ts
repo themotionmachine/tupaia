@@ -19,7 +19,9 @@
 //                 must be ≤ TOL.glyphPx for every character, and no native character may go unmatched;
 //               - pixel (every label, native and compat, curved and straight): the shift that best aligns the GPU
 //                 arm's ink with the SVG arm's inside each character's extent box (labels-core.ts register);
-//                 TOL.registerShare of the registered characters must be within TOL.registerPx.
+//                 TOL.registerShare of the characters must be within TOL.registerPx, where a window the GPU leaves
+//                 (nearly) empty is a missing character (labels-core.ts classifyRegistration), never a 0 px shift;
+//               - presence: a label whose whole box the GPU leaves (nearly) empty fails the variant.
 //               Variant `map` is the fixture as saved. Every built-in preset gives state labels a text-shadow, and
 //               multi-line state labels end their first line with a space, so text.ts sends both to the compat lane;
 //               variant `native` removes the text-shadow and trims edge spaces in curved labels' tspans (both arms
@@ -55,10 +57,13 @@
 //   LABELS_ADVANCE_FONTS advance step: at most this many families (0 = all)      default 0
 //   LABELS_ADVANCE_FAMILIES advance step: exactly these families (comma list)    default every pinned family
 //   LABELS_KEEP          all | fail: PNGs for every capture or failing ones only  default fail
-//   LABELS_BREAK         none | freeze | measure (self-test only):
+//   LABELS_BREAK         none | freeze | measure | shift | drop (self-test only):
 //                        freeze  stops the GPU from seeing DOM changes for the second probe of each threshold and for
 //                                each font switch (a missed invalidation: the frame keeps the old visibility or face);
-//                        measure scales Canvas2D measureText widths by 1.04 from page start (GPU advances off).
+//                        measure scales Canvas2D measureText widths by 1.04 from page start (GPU advances off);
+//                        shift   moves the GPU canvas 1 CSS px right (every GPU glyph displaced by dpr device px);
+//                        drop    covers the right half of the viewport with the background in the GPU arm's captures
+//                                only (the GPU draws nothing there: dropped labels, for native and compat alike).
 // Output in GATE_OUT_DIR: labels.json (`failure` is null on a pass), PNGs under <world>/.
 // Exit 0 when a report was written (verdicts are in it), 1 on a harness error.
 import { createHash } from "node:crypto";
@@ -71,9 +76,12 @@ import { decodePng, encodePng } from "../png.ts";
 import { isolateLayer } from "./golden-isolation.ts";
 import { resolveFixture } from "./fixtures/index.ts";
 import {
+  alongNormal,
   type Box,
+  classifyRegistration,
   clipBox,
   type GroupRule,
+  gpuGlyphs,
   inkCount,
   inkOf,
   labelHidden,
@@ -110,7 +118,7 @@ const advanceFamilies = env.LABELS_ADVANCE_FAMILIES ? env.LABELS_ADVANCE_FAMILIE
 const keep = env.LABELS_KEEP || "fail";
 if (keep !== "all" && keep !== "fail") throw Error("LABELS_KEEP must be all|fail");
 const breakMode = env.LABELS_BREAK || "none";
-if (!["none", "freeze", "measure"].includes(breakMode)) throw Error("LABELS_BREAK must be none|freeze|measure");
+if (!["none", "freeze", "measure", "shift", "drop"].includes(breakMode)) throw Error("LABELS_BREAK must be none|freeze|measure|shift|drop");
 const GOOGLE_FONT_FILE = env.LABELS_FONT_GOOGLE || "/System/Library/Fonts/Supplemental/Apple Chancery.ttf";
 const WEB_FONT_FILE = env.LABELS_FONT_WEB || "/System/Library/Fonts/Supplemental/Chalkduster.ttf";
 const LOCAL_FONT = env.LABELS_FONT_LOCAL || "Baskerville";
@@ -255,6 +263,14 @@ async function openContext(world: { name: string; path: string }, parity: Json |
     sheet.textContent = "#tooltip, #renderModeIndicator { visibility: hidden !important; }";
     document.head.append(sheet);
   }, readFileSync(world.path, "utf8"));
+  if (breakMode === "shift") await page.addStyleTag({ content: "canvas[data-gpu-renderer] { transform: translate(1px, 0) !important; }" });
+  if (breakMode === "drop")
+    await page.evaluate(bg => {
+      const cover = document.createElement("div");
+      cover.id = "labels-harness-drop";
+      cover.style.cssText = `position:fixed;left:50%;top:0;right:0;bottom:0;background:${bg};z-index:2147483647;pointer-events:none;display:none`;
+      document.body.append(cover);
+    }, BG);
   return { context, page, errors, warnings };
 }
 
@@ -310,8 +326,14 @@ async function waitGpu(page: Page): Promise<{ active: string; fallbackReason?: s
   return timedOut ? { ...status, timedOut } : status;
 }
 
+// LABELS_BREAK=drop: the cover is shown for the GPU arm's capture only
+const dropCover = (page: Page, on: boolean) =>
+  breakMode === "drop" ? page.evaluate(show => void ((document.getElementById("labels-harness-drop") as HTMLElement).style.display = show ? "block" : "none"), on) : Promise.resolve();
+
 async function captureArms(page: Page): Promise<{ gpu: Buffer; svg: Buffer }> {
+  await dropCover(page, true);
   const gpu = await page.screenshot({ animations: "disabled" });
+  await dropCover(page, false);
   const old = await page.evaluate(() => {
     const c = document.querySelector("canvas[data-gpu-renderer]") as HTMLCanvasElement | null;
     if (!c) return null;
@@ -475,22 +497,30 @@ function svgLabels(args: { group: string | null; chars: boolean; dpr: number; id
     if (args.chars && inside) {
       const m = text.getScreenCTM();
       const n = text.getNumberOfChars();
-      const content = (text.textContent || "").replace(/\s+/g, " ").trim();
+      // the addressable characters after SVG white-space processing: the collapsed and trimmed text fits most labels;
+      // multi-line labels (a tspan per line, an edge space on a line) may keep a space the trim drops
+      const raw = text.textContent || "";
+      const readings = [raw.replace(/\s+/g, " ").trim(), raw.replace(/\s+/g, " "), raw.replace(/\s+/g, " ").trimStart(), raw.replace(/\s+/g, " ").trimEnd(), raw];
+      const reading = readings.findIndex(r => r.length === n);
+      const content = reading >= 0 ? readings[reading] : readings[0];
       row.content = content;
       row.numberOfChars = n;
+      if (reading > 0) row.reading = reading;
       const style = getComputedStyle(text.querySelector("tspan") ?? text);
       row.fontPx = Number.parseFloat(style.fontSize) || 0;
       // text.ts draws a dominant-baseline:central label shifted by half the font box (centralBaselineShift), while
-      // Chromium's start/end-position API stays on the nominal path; the analytic check compares nominal positions
+      // Chromium's start/end-position API stays on the nominal path; the analytic check compares nominal positions.
+      // The shift it undoes is text.ts's own, at the glyph's raster font and scale (stepGlyphs); this one, at the
+      // 1x font size, is kept only to show how far the two differ (Chromium rounds ascent/descent per font size).
       row.baseline = style.dominantBaseline;
       if (style.dominantBaseline === "central") {
         const context = ((globalThis as any).__labelsMeasure ??= document.createElement("canvas").getContext("2d")) as CanvasRenderingContext2D;
         context.font = `${style.fontStyle} ${style.fontWeight} ${row.fontPx}px ${style.fontFamily}`;
         const metrics = context.measureText(text.textContent || "");
-        row.centralShift = (metrics.fontBoundingBoxAscent - metrics.fontBoundingBoxDescent) / 2;
+        row.centralShift1x = (metrics.fontBoundingBoxAscent - metrics.fontBoundingBoxDescent) / 2;
       }
       const chars: Json[] = [];
-      if (m && n === content.length) {
+      if (m && reading >= 0) {
         const map = (x: number, y: number) => [(m.a * x + m.c * y + m.e) * args.dpr, (m.b * x + m.d * y + m.f) * args.dpr];
         for (let i = 0; i < n; i++) {
           const char = content[i];
@@ -514,7 +544,7 @@ function svgLabels(args: { group: string | null; chars: boolean; dpr: number; id
             // a character the layout does not place (past the end of its path)
           }
         }
-      } else row.charsSkipped = m ? `getNumberOfChars ${n} != collapsed content ${content.length}` : "no CTM";
+      } else row.charsSkipped = m ? `getNumberOfChars ${n} matches no white-space reading of the content (${readings.map(r => r.length).join("/")})` : "no CTM";
       row.chars = chars;
     }
     out.push(row);
@@ -522,45 +552,20 @@ function svgLabels(args: { group: string | null; chars: boolean; dpr: number; id
   return { groupHidden, labels: out, camera: (0, eval)("(() => { const t = d3.zoomTransform(document.querySelector('#map')); return { k: t.k, x: t.x, y: t.y }; })()") };
 }
 
-// The GPU's own glyphs, read back from the prepared frame: each fill-pass instance's character (atlas key) and its
-// dy-shifted baseline midpoint (labels-core glyphBaseline, inlined: this is serialised), in device px through the
-// renderer's camera. A shape change in the renderer internals is a harness error, never a silent empty list.
-function gpuGlyphs(dpr: number): Json {
-  const r = (globalThis as any).gpuRenderer;
-  const payload = r?.prepared?.payload;
-  const atlas = r?.atlas;
-  if (!payload || !(payload.glyphs instanceof Float32Array)) return { error: "gpuRenderer.prepared.payload.glyphs is not readable" };
-  if (!(atlas?.glyphs instanceof Map)) return { error: "gpuRenderer.atlas.glyphs is not readable" };
-  if (payload.atlasGeneration !== atlas.generation) return { error: `atlas generation ${atlas.generation} != frame ${payload.atlasGeneration}` };
-  const view = r.view;
-  if (!view || !Number.isFinite(view.k)) return { error: "gpuRenderer.view is not readable" };
-  const byUv = new Map<string, [string, any]>();
-  for (const [key, glyph] of atlas.glyphs) byUv.set(`${glyph.u0},${glyph.v0}`, [key, glyph]);
-  const FLOATS = 15;
-  const data: Float32Array = payload.glyphs;
-  const out: Json[] = [];
-  let unknown = 0;
-  for (let i = 0; i + FLOATS <= data.length; i += FLOATS) {
-    const hit = byUv.get(`${data[i + 7]},${data[i + 8]}`);
-    if (!hit) {
-      unknown++;
-      continue;
-    }
-    const [key, glyph] = hit;
-    const parts = key.split("|");
-    const halo = Number(parts[1]);
-    if (halo !== 0) continue;
-    const char = parts.slice(2).join("|");
-    const h = data[i + 6];
-    if (!(h > 0)) continue;
-    const scale = glyph.height / h;
-    const shift = data[i + 4] - glyph.top / scale;
-    const angle = data[i + 2];
-    const wx = data[i] - Math.sin(angle) * shift;
-    const wy = data[i + 1] + Math.cos(angle) * shift;
-    out.push({ char, font: parts[0], x: (wx * view.k + view.x) * dpr, y: (wy * view.k + view.y) * dpr, angle: (angle * 180) / Math.PI });
+// text.ts centralBaselineShift, per raster font: (fontBoundingBoxAscent − fontBoundingBoxDescent) / 2 in raster px, from
+// the very font string text.ts measured (the atlas key's font is its rasterFont, px × scale). Dividing by the glyph's
+// scale gives text.ts's shift in world units. The font box is a font-level metric (Chromium takes it from the primary
+// font, not from the string), so the measured string does not matter.
+function fontCentres(fonts: string[]): Record<string, number> {
+  const g = globalThis as any;
+  const context = (g.__labelsMeasure ??= document.createElement("canvas").getContext("2d")) as CanvasRenderingContext2D;
+  const out: Record<string, number> = {};
+  for (const font of fonts) {
+    context.font = font;
+    const metrics = context.measureText("Hg");
+    out[font] = (metrics.fontBoundingBoxAscent - metrics.fontBoundingBoxDescent) / 2;
   }
-  return { glyphs: out, unknown, instances: data.length / FLOATS, view: { k: view.k, x: view.x, y: view.y } };
+  return out;
 }
 
 // ------------------------------------------------------------------ evidence
@@ -627,8 +632,23 @@ async function isolateLabels(page: Page, group: string | null) {
 
 async function stepThresholds(page: Page, blanks: Blanks, dir: string): Promise<Json> {
   const info = await page.evaluate(labelGroups);
-  const [kMin, kMax] = info.extent as [number, number];
   const result: Json = { hideLabels: info.hideLabels, extent: info.extent, cells: [] as Json[], groups: [] as Json[] };
+  try {
+    return await probeThresholds(page, blanks, dir, info, result);
+  } finally {
+    // the later steps run on the map as saved
+    if (result.hideLabelsSwitchedOn)
+      await page.evaluate(() => {
+        const w = globalThis as any;
+        w.hideLabels.checked = false;
+        w.invokeActiveZooming();
+      });
+    result.hideLabelsRestored = !!result.hideLabelsSwitchedOn;
+  }
+}
+
+async function probeThresholds(page: Page, blanks: Blanks, dir: string, info: Json, result: Json): Promise<Json> {
+  const [kMin, kMax] = info.extent as [number, number];
   if (!info.hideLabels) {
     // the rule under test is the automatic visibility toggle; a fixture saved with it off is switched on the way the
     // Options checkbox does it (its onchange is invokeActiveZooming)
@@ -728,24 +748,32 @@ async function stepThresholds(page: Page, blanks: Blanks, dir: string): Promise<
 async function stepGlyphs(page: Page, blanks: Blanks, dir: string): Promise<Json> {
   const info = await page.evaluate(labelGroups);
   const rules = new Map<string, GroupRule>((info.groups as Json[]).map(g => [g.id, { desired: g.desired, min: g.min, max: g.max, always: g.always, hideLabels: info.hideLabels }]));
-  const result: Json = { variants: {} as Json };
+  const result: Json = { hideLabels: info.hideLabels, variants: {} as Json };
   for (const variant of variants) {
     const changed = await page.evaluate(setVariant, variant);
-    const v: Json = { changed, cameras: [] as Json[], labels: [] as Json[] };
+    const v: Json = { changed, cameras: [] as Json[], labels: [] as Json[], skipped: [] as Json[] };
     result.variants[variant] = v;
     let total = 0;
     const analytic: number[] = [];
+    const along: number[] = [];
+    const normal: number[] = [];
     const angles: number[] = [];
+    const centralDelta: number[] = [];
     const shifts: number[] = [];
     const labelShifts: number[] = [];
     let unmatched = 0;
+    let missingGlyphs = 0;
+    const missingLabels: Json[] = [];
     let crops = 0;
     const shortfall: Json[] = [];
     const worst: Json[] = [];
     const sampledIds = new Set<string>();
+    // camera budget a zoom leaves unused carries over to the later zooms
+    let spare = 0;
     for (const [kIndex, k] of glyphKs.entries()) {
       // what an earlier zoom could not fill carries over to the later ones
       const perK = Math.ceil((sampleTarget - total) / (glyphKs.length - kIndex));
+      const limit = cameraBudget + spare;
       const candidates = (info.groups as Json[])
         .filter(g => g.display !== "none" && !labelHidden(rules.get(g.id)!, k))
         .flatMap(g => (g.anchors as Json[]).map(a => ({ id: a.id as string, at: a.at as [number, number] })))
@@ -754,12 +782,14 @@ async function stepGlyphs(page: Page, blanks: Blanks, dir: string): Promise<Json
       const sampledAtK = new Set<string>();
       let sampled = 0;
       let exhausted = false;
-      for (let cameraIndex = 0; cameraIndex < cameraBudget && sampled < perK; cameraIndex++) {
+      let used = 0;
+      for (let cameraIndex = 0; cameraIndex < limit && sampled < perK; cameraIndex++) {
         const next = candidates.find(c => !done.has(c.id));
         if (!next) {
           exhausted = true;
           break;
         }
+        used++;
         done.add(next.id);
         const cam: Json = { k, centre: next.at, sampled: 0 };
         v.cameras.push(cam);
@@ -777,6 +807,7 @@ async function stepGlyphs(page: Page, blanks: Blanks, dir: string): Promise<Json
           const state = await page.evaluate(svgLabels, { group: null, chars: true, dpr, ids: null });
           const gpuSide = await page.evaluate(gpuGlyphs, dpr);
           if (gpuSide.error) report.errors.push(`harness: ${gpuSide.error}`);
+          const centres: Record<string, number> = Array.isArray(gpuSide.glyphs) ? await page.evaluate(fontCentres, [...new Set((gpuSide.glyphs as Json[]).map(g => g.font as string))]) : {};
           const shots = await captureArms(page);
           const svg = decode(shots.svg);
           const gpu = decode(shots.gpu);
@@ -784,58 +815,94 @@ async function stepGlyphs(page: Page, blanks: Blanks, dir: string): Promise<Json
           const gpuInk = inkOf(gpu, blanks.gpu);
           const { width, height } = svg;
           let failedHere = false;
+          // whole-label registration: is the label on the GPU at all (and where, as a diagnostic)
+          const presence = (label: Json) => {
+            const whole = register(svgInk, gpuInk, width, height, clipBox(pad(label.box, 2), width, height) ?? label.box, 4);
+            const status = classifyRegistration(whole);
+            if (status === "missing" && whole) missingLabels.push({ id: label.id, k, group: label.group, native: label.native, svgInk: whole.svgInk, gpuInkAtShift: whole.gpuInkAtShift, flat: whole.flat });
+            return { whole, status };
+          };
           for (const label of state.labels as Json[]) {
             if (label.inside) done.add(label.id);
-            if (!label.inside || !label.chars?.length || sampled >= perK || sampledAtK.has(label.id)) continue;
+            if (!label.inside || sampled >= perK || sampledAtK.has(label.id)) continue;
+            if (label.charsSkipped) {
+              // not in the glyph sample (no character mapping), but still checked for presence and reported
+              sampledAtK.add(label.id);
+              const { whole, status } = presence(label);
+              if (status === "missing") failedHere = true;
+              v.skipped.push({ id: label.id, k, group: label.group, native: label.native, reason: label.charsSkipped, content: label.content, numberOfChars: label.numberOfChars, presence: status, labelShift: whole && status === "registered" ? Number(whole.shift.toFixed(3)) : null });
+              continue;
+            }
+            if (!label.chars?.length) continue;
             sampledAtK.add(label.id);
             sampled++;
             total++;
             cam.sampled++;
             sampledIds.add(label.id);
             const row: Json = { id: label.id, k, camera: cameraIndex, group: label.group, curved: label.curved, native: label.native, chars: label.chars.length, content: label.content, box: Object.fromEntries(Object.entries(label.box as Box).map(([key, n]) => [key, Math.round(n as number)])) };
-            if (label.charsSkipped) row.charsSkipped = label.charsSkipped;
-            // whole-label registration (diagnostic) and per character
-            const whole = register(svgInk, gpuInk, width, height, clipBox(pad(label.box, 2), width, height) ?? label.box, 4);
-            if (whole && whole.svgInk >= TOL.registerMinInk) {
+            if (label.reading) row.reading = label.reading;
+            const { whole, status: presenceStatus } = presence(label);
+            row.presence = presenceStatus;
+            if (whole && presenceStatus === "registered") {
               row.labelShift = Number(whole.shift.toFixed(3));
               labelShifts.push(whole.shift);
             }
             const charShifts: number[] = [];
+            let charsMissing = 0;
             for (const c of label.chars as Json[]) {
               if (c.empty) continue;
               const box = clipBox(pad(c.extent, 1), width, height);
               if (!box) continue;
               const reg = register(svgInk, gpuInk, width, height, box, 3);
-              if (!reg || reg.svgInk < TOL.registerMinInk) continue;
+              const status = classifyRegistration(reg);
+              if (status === "faint" || !reg) continue;
+              if (status === "missing") {
+                charsMissing++;
+                missingGlyphs++;
+                if (worst.length < 400) worst.push({ kind: "missing", label: label.id, k, char: c.char, i: c.i, svgInk: reg.svgInk, gpuInkAtShift: reg.gpuInkAtShift, native: label.native });
+                continue;
+              }
               charShifts.push(reg.shift);
               shifts.push(reg.shift);
               if (reg.shift > TOL.registerPx && worst.length < 400) worst.push({ kind: "pixel", label: label.id, k, char: c.char, i: c.i, dx: Number(reg.dx.toFixed(2)), dy: Number(reg.dy.toFixed(2)), edge: reg.edge, native: label.native });
             }
-            row.pixel = stats(charShifts);
+            row.pixel = { ...stats(charShifts), missing: charsMissing };
             if (label.native && Array.isArray(gpuSide.glyphs)) {
               const near = (gpuSide.glyphs as Json[]).filter(g => g.x >= label.box.x0 - 40 && g.x <= label.box.x1 + 40 && g.y >= label.box.y0 - 40 && g.y <= label.box.y1 + 40);
               const svgPoints = (label.chars as Json[]).filter(c => !c.empty);
               const radius = Math.max(4, 0.6 * label.fontPx * k * dpr);
-              // back to the nominal baseline: undo text.ts's central-baseline shift along each glyph's own normal
-              const shift = (label.centralShift ?? 0) * k * dpr;
+              // back to the nominal baseline: undo text.ts's own central-baseline shift (its raster font, its scale)
+              // along each glyph's normal
+              const central = label.baseline === "central";
               const nominal = (near as Json[]).map(g => {
                 const a = (g.angle * Math.PI) / 180;
-                return { ...g, x: g.x + Math.sin(a) * shift, y: g.y - Math.cos(a) * shift };
+                const shift = central ? ((centres[g.font] ?? 0) / g.scale) * gpuSide.view.k * dpr : 0;
+                return { ...g, shift, x: g.x + Math.sin(a) * shift, y: g.y - Math.cos(a) * shift } as Json;
               });
               const pairs = matchGlyphs(svgPoints, nominal as any, radius);
               const errors = pairs.map(p => p.distance);
               analytic.push(...errors);
-              for (const p of pairs) {
+              const components = pairs.map(p => alongNormal(nominal[p.j].x - svgPoints[p.i].x, nominal[p.j].y - svgPoints[p.i].y, nominal[p.j].angle));
+              along.push(...components.map(c => Math.abs(c.along)));
+              normal.push(...components.map(c => Math.abs(c.normal)));
+              if (central && pairs.length && label.centralShift1x !== undefined) {
+                // how far the 1x estimate the earlier harness used is from text.ts's own shift, in device px
+                const delta = nominal[pairs[0].j].shift - label.centralShift1x * k * dpr;
+                centralDelta.push(Math.abs(delta));
+                row.centralShift = { gpu: Number(nominal[pairs[0].j].shift.toFixed(3)), at1x: Number((label.centralShift1x * k * dpr).toFixed(3)) };
+              }
+              for (const [index, p] of pairs.entries()) {
                 const delta = Math.abs((((svgPoints[p.i].rotation - nominal[p.j].angle) % 360) + 540) % 360 - 180);
                 angles.push(delta);
-                if (p.distance > TOL.glyphPx && worst.length < 400) worst.push({ kind: "analytic", label: label.id, k, char: svgPoints[p.i].char, i: svgPoints[p.i].i, error: Number(p.distance.toFixed(3)), svg: [svgPoints[p.i].x, svgPoints[p.i].y].map(n => Number(n.toFixed(2))), gpu: [nominal[p.j].x, nominal[p.j].y].map((n: number) => Number(n.toFixed(2))), baseline: label.baseline });
+                if (p.distance > TOL.glyphPx && worst.length < 400) worst.push({ kind: "analytic", label: label.id, k, char: svgPoints[p.i].char, i: svgPoints[p.i].i, error: Number(p.distance.toFixed(3)), along: Number(components[index].along.toFixed(3)), normal: Number(components[index].normal.toFixed(3)), svg: [svgPoints[p.i].x, svgPoints[p.i].y].map(n => Number(n.toFixed(2))), gpu: [nominal[p.j].x, nominal[p.j].y].map((n: number) => Number(n.toFixed(2))), baseline: label.baseline });
               }
               const missed = svgPoints.length - pairs.length;
               unmatched += missed;
-              row.analytic = { ...stats(errors), unmatched: missed, baseline: label.baseline };
+              const mean = (values: number[]) => (values.length ? Number((values.reduce((a, b) => a + b, 0) / values.length).toFixed(3)) : null);
+              row.analytic = { ...stats(errors), unmatched: missed, baseline: label.baseline, meanAlong: mean(components.map(c => c.along)), meanNormal: mean(components.map(c => c.normal)) };
               if (missed) worst.push({ kind: "unmatched", label: label.id, k, count: missed, of: svgPoints.length });
             }
-            if ((row.analytic && (row.analytic.max > TOL.glyphPx || row.analytic.unmatched)) || (row.pixel.n && row.pixel.max > TOL.registerPx)) {
+            if ((row.analytic && (row.analytic.max > TOL.glyphPx || row.analytic.unmatched)) || (row.pixel.n && row.pixel.max > TOL.registerPx) || charsMissing || presenceStatus === "missing") {
               failedHere = true;
               if (crops < 24) {
                 crops++;
@@ -851,21 +918,30 @@ async function stepGlyphs(page: Page, blanks: Blanks, dir: string): Promise<Json
         log(`glyphs ${variant} k ${k} camera ${cameraIndex}: sampled ${cam.sampled}${cam.error ? ` (${cam.error})` : ""}`);
         write();
       }
-      if (sampled < perK) shortfall.push({ k, sampled, wanted: perK, exhausted });
+      spare = limit - used;
+      if (sampled < perK) shortfall.push({ k, sampled, wanted: perK, exhausted, cameras: used, cameraLimit: limit });
     }
     const pixelWithin = shifts.filter(s => s <= TOL.registerPx).length;
+    // a missing glyph is a glyph outside tolerance, never a 0 px shift
+    const pixelCounted = shifts.length + missingGlyphs;
     const nativeLabels = (v.labels as Json[]).filter(l => l.native).length;
+    const skippedByGroup: Record<string, number> = {};
+    for (const s of v.skipped as Json[]) skippedByGroup[s.group ?? "labels"] = (skippedByGroup[s.group ?? "labels"] ?? 0) + 1;
     v.summary = {
       labels: v.labels.length,
       distinctLabels: sampledIds.size,
       nativeLabels,
       compatLabels: v.labels.length - nativeLabels,
       straight: (v.labels as Json[]).filter(l => !l.curved).length,
-      analytic: { ...stats(analytic), unmatched, angleDeg: stats(angles) },
-      pixel: { ...stats(shifts), withinTol: shifts.length ? Number((pixelWithin / shifts.length).toFixed(4)) : null },
+      skippedLabels: v.skipped.length,
+      skippedByGroup,
+      missingLabels: missingLabels.length,
+      analytic: { ...stats(analytic), unmatched, along: stats(along), normal: stats(normal), angleDeg: stats(angles), centralShiftVs1x: stats(centralDelta) },
+      pixel: { ...stats(shifts), missing: missingGlyphs, withinTol: pixelCounted ? Number((pixelWithin / pixelCounted).toFixed(4)) : null },
       labelShift: stats(labelShifts)
     };
-    v.worst = worst.sort((a, b) => (b.error ?? b.count ?? Math.hypot(b.dx ?? 0, b.dy ?? 0)) - (a.error ?? a.count ?? Math.hypot(a.dx ?? 0, a.dy ?? 0))).slice(0, 40);
+    v.missingLabels = missingLabels.slice(0, 40);
+    v.worst = worst.sort((a, b) => (b.error ?? b.count ?? b.svgInk ?? Math.hypot(b.dx ?? 0, b.dy ?? 0)) - (a.error ?? a.count ?? a.svgInk ?? Math.hypot(a.dx ?? 0, a.dy ?? 0))).slice(0, 40);
     const failures: string[] = [];
     // a world with fewer (label, zoom) pairs on screen than the target is a fixture limit (noted); running out of
     // camera budget with labels left is a harness limit (fails)
@@ -875,11 +951,12 @@ async function stepGlyphs(page: Page, blanks: Blanks, dir: string): Promise<Json
       if (budget.length) failures.push(`sample ${v.labels.length} < ${sampleTarget} labels with candidates left at k ${budget.map(s => s.k).join(", ")} (camera budget)`);
       else v.note = `every on-screen label at k ${glyphKs.join("/")} sampled: ${v.labels.length} < ${sampleTarget} (${sampledIds.size} distinct labels)`;
     }
-    if (analytic.length && v.summary.analytic.max > TOL.glyphPx) failures.push(`analytic: ${analytic.filter(e => e > TOL.glyphPx).length}/${analytic.length} native glyphs off by > ${TOL.glyphPx} device px (max ${v.summary.analytic.max})`);
+    if (missingLabels.length) failures.push(`presence: ${missingLabels.length} on-screen labels have (almost) no GPU ink where the SVG draws them (${missingLabels.slice(0, 4).map(m => `${m.id}@k${m.k}`).join(", ")})`);
+    if (analytic.length && v.summary.analytic.max > TOL.glyphPx) failures.push(`analytic: ${analytic.filter(e => e > TOL.glyphPx).length}/${analytic.length} native glyphs off by > ${TOL.glyphPx} device px (max ${v.summary.analytic.max}; along the baseline p95 ${v.summary.analytic.along.p95}, normal p95 ${v.summary.analytic.normal.p95})`);
     if (unmatched) failures.push(`analytic: ${unmatched} native characters have no GPU glyph of the same character within reach`);
     if (variant === "native" && !analytic.length) failures.push("analytic: no native curved glyph was sampled");
-    if (shifts.length && pixelWithin / shifts.length < TOL.registerShare) failures.push(`pixel: ${shifts.length - pixelWithin}/${shifts.length} glyphs shifted > ${TOL.registerPx} device px (${((pixelWithin / shifts.length) * 100).toFixed(2)}% within, need ${TOL.registerShare * 100}%; p95 ${v.summary.pixel.p95}, max ${v.summary.pixel.max})`);
-    if (!shifts.length) failures.push("pixel: no glyph had enough ink to register");
+    if (pixelCounted && pixelWithin / pixelCounted < TOL.registerShare) failures.push(`pixel: ${pixelCounted - pixelWithin}/${pixelCounted} glyphs shifted > ${TOL.registerPx} device px or missing (${missingGlyphs} missing; ${((pixelWithin / pixelCounted) * 100).toFixed(2)}% within, need ${TOL.registerShare * 100}%; p95 ${v.summary.pixel.p95}, max ${v.summary.pixel.max})`);
+    if (!pixelCounted) failures.push("pixel: no glyph had enough ink to register");
     v.failures = failures;
     v.pass = failures.length === 0;
     log(`${v.pass ? "PASS" : "FAIL"} glyphs ${variant}: ${JSON.stringify(v.summary)}${v.pass ? "" : ` :: ${failures.join("; ")}`}`);
@@ -1030,20 +1107,26 @@ async function addFontViaDialog(page: Page, sw: FontSwitch) {
 }
 const groupFont = (page: Page, group: string) => page.evaluate(id => document.querySelector(`#labels #${CSS.escape(id)}`)?.getAttribute("font-family") ?? null, group);
 
-// Which labels of each group the GPU drew natively, and the labels layer's routing reasons.
-function routing(): Json {
+// Which labels of each group the GPU drew natively, and the labels layer's routing reasons. Per group: visible labels
+// by lane, hidden ones (not visible in the SVG) and the DOM total; for the `watch` groups, the visible label ids.
+function routing(watch: string[] = []): Json {
   const w = globalThis as any;
   const runs = w.gpuRenderer?.prepared?.runs;
   const compat = new Set<Element>();
   for (const run of Array.isArray(runs) ? runs : []) for (const e of run.elements ?? []) compat.add(e);
-  const groups: Record<string, { native: number; compat: number }> = {};
+  const groups: Record<string, { native: number; compat: number; hidden: number; total: number; ids?: string[] }> = {};
   for (const text of document.querySelectorAll("#labels text")) {
     const group = (text.closest("#labels g[data-size]") as Element | null)?.id ?? "labels";
-    if (!(text as any).checkVisibility({ visibilityProperty: true })) continue;
+    groups[group] ??= { native: 0, compat: 0, hidden: 0, total: 0 };
+    groups[group].total++;
+    if (!(text as any).checkVisibility({ visibilityProperty: true })) {
+      groups[group].hidden++;
+      continue;
+    }
     let native = !!text.querySelector("textPath");
     for (let e: Element | null = text; e && e.id !== "viewbox"; e = e.parentElement) if (compat.has(e)) native = false;
-    groups[group] ??= { native: 0, compat: 0 };
     groups[group][native ? "native" : "compat"]++;
+    if (watch.includes(group)) (groups[group].ids ??= []).push(text.id);
   }
   const status = w.rendererStatus?.();
   const atlasFonts = w.gpuRenderer?.atlas?.glyphs instanceof Map ? [...new Set([...w.gpuRenderer.atlas.glyphs.keys()].map((k: string) => k.split("|")[0]))] : null;
@@ -1066,7 +1149,7 @@ async function stepFonts(page: Page, blanks: Blanks, dir: string, world: string)
   await settleApp(page);
   await isolateLabels(page, null);
   await waitGpu(page);
-  const before = await page.evaluate(routing);
+  const before = await page.evaluate(routing, targets);
   result.before = before;
   // the same golden before any switch: what a switch adds or removes is the difference from this
   {
@@ -1084,7 +1167,7 @@ async function stepFonts(page: Page, blanks: Blanks, dir: string, world: string)
     const started = Date.now();
     const frozen = breakMode === "freeze";
     try {
-      const prior = await page.evaluate(routing);
+      const prior = await page.evaluate(routing, targets);
       if (frozen) await page.evaluate(freezeGpu, true);
       // the first target through the dialog (or the select), the second through the select, as a user would
       for (const [index, group] of targets.entries()) {
@@ -1125,7 +1208,7 @@ async function stepFonts(page: Page, blanks: Blanks, dir: string, world: string)
       cell.font = fontState;
       const status = await waitGpu(page);
       cell.renderer = status;
-      const after = await page.evaluate(routing);
+      const after = await page.evaluate(routing, targets);
       cell.routing = after;
       if (status.active !== "gpu") cell.failures.push(`GPU not active: ${status.fallbackReason ?? "no frame"}`);
       else if (status.timedOut) cell.failures.push("GPU frame did not settle within 90 s");
@@ -1139,6 +1222,28 @@ async function stepFonts(page: Page, blanks: Blanks, dir: string, world: string)
       // only the switched groups may change lane (one bad font costs only its own labels)
       for (const [group, counts] of Object.entries(prior.groups as Record<string, Json>))
         if (!targets.includes(group) && (after.groups[group]?.native ?? 0) !== counts.native) cell.failures.push(`#${group} (not switched) went from ${counts.native} to ${after.groups[group]?.native ?? 0} native labels`);
+      // the switched groups keep every label they showed: a label that leaves the lane count (native + compat) is a label
+      // the SVG stopped showing, which no lane check would see
+      for (const group of targets) {
+        const [was, now] = [prior.groups[group], after.groups[group]];
+        const [wasShown, nowShown] = [(was?.native ?? 0) + (was?.compat ?? 0), (now?.native ?? 0) + (now?.compat ?? 0)];
+        if (wasShown === nowShown) continue;
+        const left = (was?.ids ?? []).filter((id: string) => !(now?.ids ?? []).includes(id));
+        const detail = await page.evaluate(
+          ids =>
+            ids.map(id => {
+              const t = document.getElementById(id);
+              if (!t) return { id, inDom: false };
+              const path = t.querySelector("textPath");
+              const href = path?.getAttribute("href") || path?.getAttribute("xlink:href") || "";
+              const geometry = href.startsWith("#") ? (document.getElementById(href.slice(1)) as unknown as SVGPathElement | null) : null;
+              return { id, inDom: true, text: (t.textContent || "").slice(0, 60), visible: (t as any).checkVisibility({ visibilityProperty: true }), display: getComputedStyle(t).display, visibility: getComputedStyle(t).visibility, chars: (t as unknown as SVGTextElement).getNumberOfChars(), pathLength: geometry?.getTotalLength?.() ?? null, textLength: (t as unknown as SVGTextElement).getComputedTextLength() };
+            }),
+          left
+        );
+        cell.leftRouting = { ...(cell.leftRouting ?? {}), [group]: detail };
+        cell.failures.push(`routing: #${group} showed ${wasShown} labels (native + compat) before the switch and ${nowShown} after (${left.slice(0, 4).join(", ") || "ids unchanged"}; hidden ${was?.hidden ?? 0} -> ${now?.hidden ?? 0}, DOM ${was?.total ?? 0} -> ${now?.total ?? 0})`);
+      }
       // re-atlas: native labels of the switched group were laid out with the new face
       if (curved && after.groups[curved.id]?.native && !(after.atlasFonts ?? []).some((f: string) => f.includes(sw.family))) cell.failures.push(`re-atlas: ${after.groups[curved.id].native} native #${curved.id} labels but no atlas glyph uses ${sw.family} (atlas fonts ${JSON.stringify(after.atlasFonts)})`);
       const shots = await captureArms(page);

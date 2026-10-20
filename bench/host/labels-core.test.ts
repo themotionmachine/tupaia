@@ -2,8 +2,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  alongNormal,
+  classifyRegistration,
   decodeGlyphKey,
   glyphBaseline,
+  gpuGlyphs,
   inkCount,
   labelHidden,
   matchGlyphs,
@@ -103,6 +106,72 @@ test("register recovers an integer shift and reports no shift for equal windows"
   assert.equal(shifted.edge, false);
 });
 
+test("register calls an empty or far-displaced GPU window missing, never a 0 px shift", () => {
+  const glyph: [number, number][] = [];
+  for (let y = 8; y < 14; y++) for (let x = 10; x < 13; x++) glyph.push([x, y]);
+  glyph.push([13, 8], [14, 8], [15, 9]);
+  const [w, h] = [48, 24];
+  const svg = image(w, h, glyph);
+  const box = { x0: 8, y0: 6, x1: 18, y1: 16 };
+  // the GPU draws nothing: every shift scores alike
+  const empty = register(svg, new Uint8Array(w * h), w, h, box);
+  assert.ok(empty);
+  assert.equal(empty.gpuInk, 0);
+  assert.equal(empty.gpuInkAtShift, 0);
+  assert.equal(empty.flat, true);
+  assert.equal(classifyRegistration(empty), "missing");
+  // the GPU draws the glyph 15 px away, beyond the window and the search radius
+  const far = register(
+    svg,
+    image(
+      w,
+      h,
+      glyph.map(([x, y]) => [x + 15, y])
+    ),
+    w,
+    h,
+    box
+  );
+  assert.ok(far);
+  assert.equal(far.gpuInkAtShift, 0);
+  assert.equal(classifyRegistration(far), "missing");
+  // half the glyph gone: below the ink share at any shift
+  const half = register(
+    svg,
+    image(
+      w,
+      h,
+      glyph.filter(([, y]) => y >= 12)
+    ),
+    w,
+    h,
+    box
+  );
+  assert.ok(half);
+  assert.equal(classifyRegistration(half), "missing");
+  // the same glyph, and the glyph 2 px away, register
+  const same = register(svg, svg, w, h, box);
+  assert.equal(classifyRegistration(same), "registered");
+  const near = register(
+    svg,
+    image(
+      w,
+      h,
+      glyph.map(([x, y]) => [x + 2, y])
+    ),
+    w,
+    h,
+    box
+  );
+  assert.ok(near);
+  assert.equal(classifyRegistration(near), "registered");
+  assert.equal(near.gpuInkAtShift, near.svgInk);
+  assert.ok(near.shift > 1.5);
+  // too little SVG ink is not a verdict either way
+  assert.equal(classifyRegistration(register(image(w, h, [[10, 10]]), new Uint8Array(w * h), w, h, box)), "faint");
+  assert.equal(classifyRegistration(null), "faint");
+});
+
 test("inkCount and strayInk count only uncovered candidate ink", () => {
   const ref = image(10, 10, [[1, 1]]);
   const cand = image(10, 10, [
@@ -159,4 +228,58 @@ test("scaleBucket matches raster.ts", () => {
   assert.equal(scaleBucket(2), 2);
   assert.equal(scaleBucket(2.02), 4);
   assert.equal(scaleBucket(40), 16);
+});
+
+test("gpuGlyphs (the page-side reader) places glyphs where glyphBaseline does", () => {
+  const atlas = new Map([
+    ["normal 400 16px Georgia|0|A", { u0: 0, v0: 0, top: -16, height: 20 }],
+    ["normal 400 16px Georgia|4|round|4|A", { u0: 0.5, v0: 0, top: -18, height: 24 }],
+    ["normal 400 16px Georgia|0||", { u0: 0.25, v0: 0.25, top: -14, height: 18 }]
+  ]);
+  // GLYPH_FLOATS = 15: cx cy angle lx ly w h u0 v0 u1 v1 r g b a
+  const instances = [
+    [100, 50, 0, -4, -3, 6, 10, 0, 0, 0.1, 0.1, 0, 0, 0, 1],
+    [120, 60, Math.PI / 2, -4, -2, 6, 9, 0.25, 0.25, 0.3, 0.3, 0, 0, 0, 1],
+    [140, 70, 0.3, -4, -3, 6, 12, 0.5, 0, 0.6, 0.1, 1, 1, 1, 1], // halo pass: skipped
+    [160, 80, 0, -4, -3, 6, 10, 0.9, 0.9, 1, 1, 0, 0, 0, 1] // no atlas entry: unknown
+  ];
+  const g = globalThis as Record<string, unknown>;
+  g.gpuRenderer = { prepared: { payload: { glyphs: new Float32Array(instances.flat()), atlasGeneration: 3 } }, atlas: { glyphs: atlas, generation: 3 }, view: { k: 2, x: 10, y: -5 } };
+  try {
+    const out = gpuGlyphs(2);
+    assert.equal(out.error, undefined);
+    assert.equal(out.unknown, 1);
+    assert.equal(out.instances, 4);
+    assert.equal(out.glyphs.length, 2);
+    for (const [index, entry] of [
+      [0, "normal 400 16px Georgia|0|A"],
+      [1, "normal 400 16px Georgia|0||"]
+    ] as const) {
+      const f32 = Float32Array.from(instances[index]);
+      const glyph = atlas.get(entry)!;
+      const expected = glyphBaseline(f32, glyph)!;
+      const got = out.glyphs[index];
+      assert.equal(got.char, decodeGlyphKey(entry)!.char);
+      assert.equal(got.font, "normal 400 16px Georgia");
+      assert.ok(Math.abs(got.scale - glyph.height / f32[6]) < 1e-9);
+      assert.ok(Math.abs(got.x - (expected.x * 2 + 10) * 2) < 1e-6, `x ${got.x}`);
+      assert.ok(Math.abs(got.y - (expected.y * 2 - 5) * 2) < 1e-6, `y ${got.y}`);
+      assert.ok(Math.abs(got.angle - (f32[2] * 180) / Math.PI) < 1e-9);
+    }
+    // an atlas from another generation is a harness error, not an empty list
+    (g.gpuRenderer as { atlas: { generation: number } }).atlas.generation = 4;
+    assert.match(gpuGlyphs(2).error, /atlas generation/);
+  } finally {
+    delete g.gpuRenderer;
+  }
+});
+
+test("alongNormal splits an offset along the baseline and its normal", () => {
+  const flat = alongNormal(3, -2, 0);
+  assert.ok(Math.abs(flat.along - 3) < 1e-9 && Math.abs(flat.normal + 2) < 1e-9);
+  // a glyph turned 90°: its baseline runs down the screen, its normal (+ local y) points to -x
+  const turned = alongNormal(0, 4, 90);
+  assert.ok(Math.abs(turned.along - 4) < 1e-9 && Math.abs(turned.normal) < 1e-9);
+  const across = alongNormal(-1.5, 0, 90);
+  assert.ok(Math.abs(across.along) < 1e-9 && Math.abs(across.normal - 1.5) < 1e-9);
 });

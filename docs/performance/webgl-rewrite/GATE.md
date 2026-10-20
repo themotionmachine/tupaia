@@ -133,7 +133,7 @@ The runtimes are typical M1 Max wall times, without lock wait.
 | `golden` | shared | `bench/host/layer-golden.ts`: the per-layer golden (D1, D5). See "Per-layer golden" below. | ~3–4 min for all families at k {1,4}, dpr 2 |
 | `golden-selftest` | shared | Proves the golden can still fail and pass: `layers=ocean k=1` on the shared fixture must pass, and the same cell with `break=drop-batch` must fail on a metric gate after a batch was actually dropped. A harness error or a no-op break fails the check. `reading=` as for golden. | ~40 s |
 | `labels` | shared | `bench/host/labels.ts`: label fidelity (rows 15, 16, 41), SVG against GPU of one page, on `worlds=parity,shared`. `steps=` any of: `thresholds` (visible label set at ±0.01 k around every visibility threshold of every label group, one group shown at a time), `glyphs` (glyph positions on a 200-label sample: analytic for native curved labels from the GPU's own glyph instances against `getStartPositionOfChar`, pixel registration per character for every label), `advance` (measureText character positions against SVG per pinned font, text-rendering auto and optimizeSpeed), `fonts` (built-in, Google, font-URL, local and broken-URL font switches through the Style panel and its add-font dialog, with routing, re-atlas and a labels golden). See "Labels" below. | ~6-10 min |
-| `labels-selftest` | shared | Proves the label harness can still fail, on the parity fixture: a clean run, `break=freeze` (the renderer stops seeing DOM changes) that must trip the visible-set and re-atlas checks, and `break=measure` (measureText ×1.04) that must trip the advance and analytic glyph checks. Each of those detectors must pass in the clean run. | ~1-2 min |
+| `labels-selftest` | shared | Proves the label harness can still fail, on the parity fixture: a clean run, `break=freeze` (the renderer stops seeing DOM changes) that must trip the visible-set and re-atlas checks, `break=measure` (measureText ×1.04) that must trip the advance and analytic glyph checks, `break=shift` (GPU canvas moved 1 CSS px) that must trip pixel registration, and `break=drop` (the GPU arm's right half blanked) that must trip the presence check. Each of those detectors must pass in the clean run. | ~2-4 min |
 | `consumers` | shared | `bench/host/consumers.ts`: the document's consumers (REWRITE-PLAN rows 31-38 and 40), `?renderer=svg` against `?renderer=gpu` on the same world and build, on the parity fixture and the shared fixture (`worlds=parity,shared`). Text save (46 sections, SVG at index 5, identical between arms at a non-identity camera, I8 I9 I11 I12 I15), binary save and `ldb` lastMap and reload round trips (I14), cloud save/load/conflict/versions/restore against a mocked Worker (no network), SVG/PNG/JPEG/tiles exports, the `mesh` texture and the 3D view (mesh and satellite), the transform tool's 4x preview, the minimap (viewport rectangle and click target), the elevation profile, charts and emblem dialogs, the heightmap preview, and a hash of `window.pack`/`grid` that the renderer must not change (row 40). Raster output is compared exactly; a tiny difference counts as rasterizer noise only when the SVG handed to the rasterizer is byte-identical between arms (the bound is `RASTER_NOISE` in `consumers.ts`; `control=1` runs a second svg page instead of the gpu arm to measure it). The gpu arm must stay on the gpu path through every probe. `break=save-tamper\|export-tamper\|tamper` perturbs the gpu arm's save and/or PNG export; see `consumers-selftest`. Evidence: `consumers.json` (every check with its status and file) plus the saves, exports and screenshots of both arms under `<world>/{svg,gpu}/`. | ~15-25 min |
 | `consumers-selftest` | shared | Proves the consumers harness can still fail: runs the `save` and `export` steps on the parity fixture with `break=tamper` (the gpu arm's text save and PNG export are perturbed) and requires `save.arms-equal`, `save.svg-section-identical` and `export.png` to FAIL, with no harness error and no other unexpected failure. | ~6 min |
 | `lock-probe` | (takes it) | Acquires and releases the host lock in `mode=shared\|exclusive` (default exclusive) and launches nothing. Shows whether another job holds the lock, which slot you got, and how long you waited. | 0 s + wait |
@@ -269,13 +269,36 @@ PROOF-PLAN §4 "Labels" and "Fonts". Tolerances are in `TOL` (labels-core.ts), i
   the rule (otherwise the harness says so). `hideLabels` is switched on if the fixture saved it off.
 - **glyphs.** Variant `map` is the fixture as saved; variant `native` removes the text-shadow and edge spaces of the
   curved labels, which otherwise send every state label to compat (text.ts `text-shadow`, `whitespace`).
-  The analytic check reads the GPU's glyph instances back (`gpuRenderer.prepared.payload.glyphs` and atlas keys) and
-  undoes text.ts's central-baseline shift, which Chromium's position API does not include. A shape change in those
-  internals is a harness error. A world with fewer on-screen (label, zoom) pairs than the sample size is noted, not
-  failed. Each failing label gets a crop (SVG | GPU | heatmap) under `<world>/glyphs/<variant>/crops/`.
+  The analytic check reads the GPU's glyph instances back (`gpuRenderer.prepared.payload.glyphs` and atlas keys;
+  the reader is `gpuGlyphs` in labels-core.ts, unit-tested against `glyphBaseline`) and undoes text.ts's
+  central-baseline shift, which Chromium's position API does not include. The shift undone is text.ts's own: measured
+  on the glyph's raster font (px × scale) and divided by its scale, as text.ts does. Chromium rounds the font box per
+  font size, so the same shift measured at the 1x size differs by a fraction of a user unit that grows with k × dpr
+  (reported as `centralShiftVs1x`; the first build of this harness used the 1x value, which inflated its numbers).
+  Each error is also split along the glyph's baseline (advance, path sampling) and along its normal (baseline,
+  central shift, dy), so TEXT can tell the two apart. A shape change in those internals is a harness error.
+  Pixel registration finds, per character's extent box, the shift that best aligns the GPU ink with the SVG ink. A
+  window where the GPU ink at that shift is below half the SVG ink (or where every shift scores alike) is **missing**:
+  it counts against the within-1-px share, and a label whose whole box is missing fails the variant (`presence`).
+  Labels whose `getNumberOfChars` fits no white-space reading of their text are not in the glyph sample; they are
+  listed under `skipped` (with their group, and a presence verdict) and counted in the summary.
+  A world with fewer on-screen (label, zoom) pairs than the sample size is noted, not failed; camera budget a zoom
+  leaves unused carries over to the later zooms. Each failing label gets a crop (SVG | GPU | heatmap) under
+  `<world>/glyphs/<variant>/crops/`.
+- **thresholds** switch `hideLabels` on when the fixture saved it off, and switch it back before the later steps.
+- **advance** re-implements text.ts's layout model in the page (prefix widths at the raster bucket, `fontKerning`
+  off under optimizeSpeed) rather than reading what the GPU produced. It shows that model against SVG; it does not
+  prove that the shipped GPU path still uses that model, and `break=measure` only shows the comparison is not
+  vacuous. Under text-rendering auto the cause of the failures is known from the code: text.ts starts character i at
+  `width(prefix(i))`, which leaves out the kern between characters i−1 and i (prefixAdvances, text.ts, folds that kern
+  into `advance[i]` instead), while SVG moves character i by it. The error is per pair, not cumulative.
 - **fonts.** The fonts are served locally: `fonts.googleapis.com/css2` and the font-URL host answer from system font
-  files (macOS defaults, `LABELS_FONT_GOOGLE` / `LABELS_FONT_WEB` / `LABELS_FONT_LOCAL` override). The golden gates on
-  SSIM, over16, over44 (the D11 reading) and the GPU/SVG ink ratio ≥ 0.9; the conservative reading is reported. A
-  `before` cell measures the same golden before any switch, and each switch reports its change from it.
+  files (macOS defaults, `LABELS_FONT_GOOGLE` / `LABELS_FONT_WEB` / `LABELS_FONT_LOCAL` override). The built-in web
+  font (Amatic SC) and any other fonts.gstatic.com face come from the network, so this step is not hermetic. The
+  golden gates on SSIM, over16, over44 (the D11 reading) and `inkRatio` ≥ 0.9. `inkRatio` is golden-metrics.ts's
+  min/max of the two arms' ink pixel counts, so it does not say which arm paints more; the cell's `ink` field
+  (GPU/SVG) does. The conservative reading is reported. A `before` cell measures the same golden before any switch,
+  and each switch reports its change from it. Each switched group must keep the labels it showed (native + compat):
+  a label that leaves the count is reported with its SVG state.
 - Page chrome that changes between captures (`#tooltip`, `#renderModeIndicator`) is hidden by a sheet in `<head>`.
 

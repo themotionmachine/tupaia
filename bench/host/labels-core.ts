@@ -20,7 +20,11 @@ export const rn = (v: number, d = 0): number => {
 export const TOL = {
   glyphPx: 1, // analytic glyph midpoint, native labels
   registerPx: 1, // pixel registration shift per glyph, every label
-  registerShare: 0.99, // share of registered glyphs that must be within registerPx
+  registerShare: 0.99, // share of registered glyphs that must be within registerPx (a missing glyph counts as outside)
+  // a glyph (or label) window is drawn by the GPU only when the GPU ink inside it, read at the best shift, is at least
+  // this share of the SVG ink there. Below it, the window is "missing": every candidate shift scores alike on an empty
+  // GPU window, so the shift (0) means nothing and must not count as registered.
+  registerInkShare: 0.5,
   advancePx: 1, // cumulative measureText-vs-SVG advance over a whole string
   // visible set: a label counts as drawn by the GPU when its box holds at least this share of the SVG arm's ink
   presentInkShare: 0.5,
@@ -31,7 +35,8 @@ export const TOL = {
   inkDelta: 24,
   // a glyph window needs this many ink pixels in the SVG arm to be registered
   registerMinInk: 8,
-  // golden for the font switch: the D11 coverage floor (GPU ink at least ~0.9 of the SVG ink)
+  // golden for the font switch: golden-metrics.ts inkRatio is min/max of the two arms' ink pixel counts, so this floor
+  // holds the arms within ~10% of each other in either direction (it does not say which arm paints more)
   inkRatioMin: 0.9
 } as const;
 
@@ -164,8 +169,10 @@ export interface Registration {
   shift: number; // |(dx, dy)|
   svgInk: number;
   gpuInk: number;
+  gpuInkAtShift: number; // GPU ink pixels in the window moved by the best integer shift
   residual: number; // mean |Δ ink| per window pixel at the best integer shift
   edge: boolean; // the best integer shift is on the search border (the true shift may be larger)
+  flat: boolean; // every candidate shift scored the same (no GPU ink within reach): the shift carries no information
 }
 
 // Shift (dx, dy) in [-radius, radius]² minimising Σ (svg(x, y) − gpu(x + dx, y + dy))² over the window, refined to
@@ -190,10 +197,13 @@ export function register(svg: Uint8Array, gpu: Uint8Array, width: number, height
   };
   const grid = new Map<string, number>();
   let best = { dx: 0, dy: 0, s: Number.POSITIVE_INFINITY };
+  let [lowest, highest] = [Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY];
   for (let dy = -radius; dy <= radius; dy++)
     for (let dx = -radius; dx <= radius; dx++) {
       const s = score(dx, dy);
       grid.set(`${dx},${dy}`, s);
+      lowest = Math.min(lowest, s);
+      highest = Math.max(highest, s);
       // ties keep the smaller shift (scan order is not symmetric, so compare magnitudes)
       if (s < best.s || (s === best.s && Math.hypot(dx, dy) < Math.hypot(best.dx, best.dy))) best = { dx, dy, s };
     }
@@ -206,12 +216,14 @@ export function register(svg: Uint8Array, gpu: Uint8Array, width: number, height
   const dx = best.dx + parabola(at(best.dx - 1, best.dy), best.s, at(best.dx + 1, best.dy));
   const dy = best.dy + parabola(at(best.dx, best.dy - 1), best.s, at(best.dx, best.dy + 1));
   let residual = 0;
+  let gpuInkAtShift = 0;
   for (let y = w.y0; y < w.y1; y++)
     for (let x = w.x0; x < w.x1; x++) {
       const gx = x + best.dx;
       const gy = y + best.dy;
       const g = gx >= 0 && gx < width && gy >= 0 && gy < height ? gpu[gy * width + gx] : 0;
       residual += Math.abs(svg[y * width + x] - g);
+      if (g > TOL.inkDelta) gpuInkAtShift++;
     }
   return {
     dx,
@@ -219,9 +231,23 @@ export function register(svg: Uint8Array, gpu: Uint8Array, width: number, height
     shift: Math.hypot(dx, dy),
     svgInk: inkCount(svg, width, w),
     gpuInk: inkCount(gpu, width, w),
+    gpuInkAtShift,
     residual: residual / size,
-    edge: Math.abs(best.dx) === radius || Math.abs(best.dy) === radius
+    edge: Math.abs(best.dx) === radius || Math.abs(best.dy) === radius,
+    flat: highest === lowest
   };
+}
+
+// What a registration says about one window:
+// - "faint": too little SVG ink to register (not counted);
+// - "missing": the GPU has no ink there worth aligning (below registerInkShare of the SVG ink at the best shift, or a
+//   flat score): the GPU dropped or far-displaced the glyph, a failure, never a 0 px shift;
+// - "registered": `shift` is meaningful (still a failure above registerPx, and when `edge` the true shift may be
+//   larger than the search radius).
+export function classifyRegistration(reg: Registration | null, minInk: number = TOL.registerMinInk, share: number = TOL.registerInkShare): "faint" | "missing" | "registered" {
+  if (!reg || reg.svgInk < minInk) return "faint";
+  if (reg.flat || reg.gpuInkAtShift < share * reg.svgInk) return "missing";
+  return "registered";
 }
 
 // Atlas keys (src/gpu/text.ts GlyphAtlas.glyph): fill `${font}|0|${char}`, halo `${font}|${halo}|${join}|${miter}|${char}`.
@@ -245,6 +271,59 @@ export function glyphBaseline(instance: ArrayLike<number>, glyph: { top: number;
   const scale = glyph.height / h;
   const shift = ly - glyph.top / scale;
   return { x: cx - Math.sin(angle) * shift, y: cy + Math.cos(angle) * shift, angle };
+}
+
+// The GPU's own glyphs, read back from the prepared frame: each fill-pass instance's character (atlas key), its raster
+// font and scale, and its (dy-shifted) baseline midpoint in device px through the renderer's camera. It runs in the
+// page (labels.ts passes it to page.evaluate, which serialises it), so it is self-contained: the baseline math is
+// glyphBaseline's, inlined, and labels-core.test.ts runs this very function against glyphBaseline on a mock renderer.
+// A shape change in the renderer internals is a harness error, never a silent empty list.
+export function gpuGlyphs(dpr: number): Record<string, any> {
+  const r = (globalThis as any).gpuRenderer;
+  const payload = r?.prepared?.payload;
+  const atlas = r?.atlas;
+  if (!payload || !(payload.glyphs instanceof Float32Array)) return { error: "gpuRenderer.prepared.payload.glyphs is not readable" };
+  if (!(atlas?.glyphs instanceof Map)) return { error: "gpuRenderer.atlas.glyphs is not readable" };
+  if (payload.atlasGeneration !== atlas.generation) return { error: `atlas generation ${atlas.generation} != frame ${payload.atlasGeneration}` };
+  const view = r.view;
+  if (!view || !Number.isFinite(view.k)) return { error: "gpuRenderer.view is not readable" };
+  const byUv = new Map<string, [string, any]>();
+  for (const [key, glyph] of atlas.glyphs) byUv.set(`${glyph.u0},${glyph.v0}`, [key, glyph]);
+  const FLOATS = 15; // src/gpu/text.ts GLYPH_FLOATS
+  const data: Float32Array = payload.glyphs;
+  const out: { char: string; font: string; scale: number; x: number; y: number; angle: number }[] = [];
+  let unknown = 0;
+  for (let i = 0; i + FLOATS <= data.length; i += FLOATS) {
+    const hit = byUv.get(`${data[i + 7]},${data[i + 8]}`);
+    if (!hit) {
+      unknown++;
+      continue;
+    }
+    const [key, glyph] = hit;
+    const parts = key.split("|");
+    const halo = Number(parts[1]);
+    if (halo !== 0) continue;
+    const char = parts.slice(2).join("|");
+    // glyphBaseline, inlined
+    const h = data[i + 6];
+    if (!(h > 0) || !(glyph.height > 0)) continue;
+    const scale = glyph.height / h;
+    const shift = data[i + 4] - glyph.top / scale;
+    const angle = data[i + 2];
+    const wx = data[i] - Math.sin(angle) * shift;
+    const wy = data[i + 1] + Math.cos(angle) * shift;
+    out.push({ char, font: parts[0], scale, x: (wx * view.k + view.x) * dpr, y: (wy * view.k + view.y) * dpr, angle: (angle * 180) / Math.PI });
+  }
+  return { glyphs: out, unknown, instances: data.length / FLOATS, view: { k: view.k, x: view.x, y: view.y } };
+}
+
+// A position error (GPU minus SVG) split along a glyph's baseline direction and along its normal (+ toward the
+// glyph's local +y, below the baseline). An advance or path-sampling error is along; a baseline (dy, central shift)
+// error is normal.
+export function alongNormal(dx: number, dy: number, angleDeg: number): { along: number; normal: number } {
+  const a = (angleDeg * Math.PI) / 180;
+  const [c, s] = [Math.cos(a), Math.sin(a)];
+  return { along: dx * c + dy * s, normal: -dx * s + dy * c };
 }
 
 export interface Point {
