@@ -264,7 +264,7 @@ export const MEMORY_LIMITS = {
   /** ... and by this fraction of it */
   heapSlackFraction: 0.05,
   /** DOM nodes and listeners after the last cycle vs the warm-up cycle */
-  nodeSlackFraction: 0.05,
+  nodeSlackFraction: 0.005,
   nodeSlackAbs: 400,
   listenerSlackAbs: 60,
   /** tracked GPU bytes are deterministic for one world: allow this much drift */

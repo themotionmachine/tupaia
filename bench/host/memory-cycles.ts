@@ -24,7 +24,7 @@
 //   MEMORY_RESIZES    resizes                                                            default 12
 //   MEMORY_WARMUP     cycles discarded as warm-up before the baseline                    default 3
 //   MEMORY_STEPS     world,resize                                                        default world,resize
-//   MEMORY_BREAK      none | leak: self-test, every cycle retains 8 MB and 800 DOM nodes; the run must FAIL
+//   MEMORY_BREAK      none | leak: self-test, every cycle retains about 20 MB of heap objects and 800 DOM nodes; the run must FAIL
 // Output in GATE_OUT_DIR: memory.json (report; `failure` null on a pass).
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -114,7 +114,8 @@ try {
     breakMode === "leak"
       ? page.evaluate(() => {
           const w = globalThis as any;
-          (w.__leak ??= []).push(new Uint8Array(8 * 1024 * 1024).fill(7));
+          // JS heap objects (a typed array backing store is external memory and would not show in usedSize)
+          (w.__leak ??= []).push(Array.from({ length: 400000 }, (_, i) => ({ i, tag: "leak" })));
           const holder = document.createElement("div");
           for (let i = 0; i < 800; i++) holder.appendChild(document.createElement("span"));
           (w.__leakDom ??= []).push(holder);

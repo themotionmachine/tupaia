@@ -972,7 +972,10 @@ async function censusSelftestCheck(ctx: Ctx): Promise<Partial<Result>> {
   ];
   const problems: string[] = [];
   const summary: Json = {};
+  const only = String(ctx.args.only).split(",").filter(Boolean);
+  for (const name of only) if (!arms.some(a => a.name === name)) throw new UsageError(`only=${name}: one of ${arms.map(a => a.name).join(", ")}`);
   for (const arm of arms) {
+    if (only.length && !only.includes(arm.name)) continue;
     summary[arm.name] = {};
     for (const mode of ["clean", "broken"] as const) {
       const dir = join(ctx.dir, arm.name, mode);
@@ -1335,7 +1338,7 @@ const DEFS: Record<string, CheckDef> = {
     timeout: 14400,
     run: presetsCheck
   },
-  "census-selftest": { lock: "shared", keys: ["launcher"], timeout: 7200, run: censusSelftestCheck },
+  "census-selftest": { lock: "shared", keys: ["launcher", "only"], timeout: 7200, run: censusSelftestCheck },
   "consumers-selftest": { lock: "shared", keys: [], timeout: 1200, run: consumersSelftestCheck },
   "golden-selftest": { lock: "shared", keys: ["reading"], timeout: 600, run: goldenSelftestCheck },
   golden: {
