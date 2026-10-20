@@ -1226,19 +1226,20 @@ function layersOf(runs: readonly CompatRun[], viewbox: Element): string[] {
 // stylesheet state, and clean in the reuse tracker (compat-reuse.ts) with no reference to a non-definition element.
 // A clean run takes the previous texture (shared) and, while their bytes stay within the reused rasters, its settle
 // detail; every other previous detail is released now, as a full re-prepare does at its start.
-// Off by default, pending a decision: with the subtree rule and the world raster ladder (PERF W1), a route close on the
-// route-focus run (Metal, DPR 2, three route closes, single runs) keeps 4/6 world and 2/3 screen runs and the prepare
-// goes 2.9/5.4/5.8 -> 2.2/3.1/2.8 s (integration-20261019T210149-621Z -> 211754-900Z), and canonical passes with it
-// on, but no check yet compares a reused raster against SVG after an edit, and resume stays 5.5-8.1 s. The ladder is
-// part of reuse: off, world rasters fit the budget exactly, as before W1. Opt in with ?gpu-compat-reuse=1 or a build with
-// VITE_GPU_COMPAT_REUSE=1. The dirty-run telemetry (lastPrepare.reuse reasons) needs the flag too: off, the renderer
-// installs no tracker feed or outside-input watcher, and the default path matches the pre-reuse renderer.
+// On by default (COST W3), after bench/host/reuse-fidelity.ts (gate reuse-fidelity): per edit (zoom within a raster
+// bucket, a marker move, a layer toggle) and layer family, the frame that reused rasters across the edit is as close to
+// the SVG as a fresh prepare of the same state, current and refined; its self-test (a tracker blind to edits) fails.
+// A definition change dirties only the runs that paint through it (compat-reuse.ts definitionIds), so emblems generated
+// on zoom and a layer holding clip paths turned off no longer re-cut every run. The ladder is part of reuse: off, world
+// rasters fit the budget exactly, as before W1. Opt out with ?gpu-compat-reuse=0 or a build with
+// VITE_GPU_COMPAT_REUSE=0: the renderer then installs no tracker feed or outside-input watcher, and the dirty-run
+// telemetry (lastPrepare.reuse reasons) reads "reuse off".
 export function compatReuseEnabled(): boolean {
-  if (import.meta.env?.VITE_GPU_COMPAT_REUSE === "1") return true;
+  if (import.meta.env?.VITE_GPU_COMPAT_REUSE === "0") return false;
   try {
-    return new URLSearchParams(globalThis.location?.search ?? "").get("gpu-compat-reuse") === "1";
+    return new URLSearchParams(globalThis.location?.search ?? "").get("gpu-compat-reuse") !== "0";
   } catch {
-    return false;
+    return true;
   }
 }
 
