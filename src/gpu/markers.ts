@@ -1,6 +1,9 @@
 // Dynamic trade-marker pass. P1 transitional bridge: the original D3 controller still animates <g transform> groups
 // in #tradeAnimation; each GPU frame mirrors their current transforms into instanced RGBA quads, and the mutation
 // classifier keeps those transient updates from invalidating the static prepare (they only request a frame).
+// While the canvas presents the map the controller keeps the poses out of the SVG (renderers/caravan-poses.ts): they
+// are read from there, and the renderer redraws on their tick instead of on a record.
+import { caravanTransform } from "../renderers/caravan-poses";
 import type { GpuDevice, TrackedTexture } from "./device";
 import { type Affine, decodeSvg, multiply, parseTransform } from "./raster";
 
@@ -278,6 +281,12 @@ export function pixelRecords(records: ArrayLike<MutationLike>): MutationLike[] {
   return batch.filter(record => !ignored(record) && !neutral(record, batch) && !transient(record));
 }
 
+// Records less those of the live marker pass (caravan groups added, removed or ticking): those change neither a
+// prepared pixel nor the model, so the D13 net-change test (renderer.ts) must not count them. W3b PAINT.
+export function withoutMarkerRecords<T extends MutationLike>(records: ArrayLike<T>): T[] {
+  return Array.from(records).filter(record => !transient(record));
+}
+
 // "static" needs a full prepare; "overlay" only a refresh of the screen batches passed to `overlay`; "dynamic" only a
 // redraw of the marker pass; "none" changes no prepared pixel. Precedence: static > overlay > dynamic > none. Without
 // an `overlay` callback overlay changes stay static. The #viewbox transform is camera-owned, and records on nodes
@@ -338,8 +347,9 @@ const effect = (element: MarkerElementLike) =>
 
 // Why a live marker group cannot be mirrored exactly by the instanced pass (null when it can). The D3 controller
 // writes one <use> of a known symbol plus an invisible hit circle; anything else must show the SVG, not vanish.
-export function markerIssue(group: MarkerElementLike): string | null {
-  if (!parseTransform(group.getAttribute("transform"))) return "marker transform unparsable";
+// `transform` is the group's current pose (its attribute unless the controller holds a newer one).
+export function markerIssue(group: MarkerElementLike, transform = group.getAttribute("transform")): string | null {
+  if (!parseTransform(transform)) return "marker transform unparsable";
   const own = effect(group);
   if (own) return `marker group ${own}`;
   for (const child of Array.from(group.children)) {
@@ -393,9 +403,10 @@ export class TradeMarkers {
     const runs: MarkerRun[] = [];
     for (const group of root.children) {
       if (group.tagName !== "g" || group.getAttribute("display") === "none") continue;
-      this.issue = markerIssue(group);
+      const transform = caravanTransform(group);
+      this.issue = markerIssue(group, transform);
       if (this.issue) return null;
-      const outer = parseTransform(group.getAttribute("transform"))!;
+      const outer = parseTransform(transform)!;
       for (const use of group.children) {
         if (use.tagName !== "use") continue;
         const texture = this.texture(markerKind(use.getAttribute("href") ?? use.getAttribute("xlink:href"))!);

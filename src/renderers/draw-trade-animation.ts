@@ -2,6 +2,7 @@ import { curveCatmullRom, easeLinear, line } from "d3";
 import { lazy } from "@/lazy-loaders";
 import type { Point } from "../generators/voronoi";
 import { ensureEl, minmax } from "../utils";
+import { caravanDomPaused, liveGroups, livePose, recordPose, settlePose } from "./caravan-poses";
 import type { TradeBatch } from "./trade-animation";
 
 const lineGen = line<Point>().curve(curveCatmullRom.alpha(0.1));
@@ -12,9 +13,6 @@ const MARKER_SYMBOLS = {
 } as const;
 
 let symbolsReady: Promise<void> | null = null;
-// Every caravan group still in flight, wherever it was appended: a load replaces the container, so clear() cannot
-// reach groups drawn into the previous world through the current `tradeAnimation` selection
-const liveGroups = new Set<SVGGElement>();
 
 // Saves made before auto-update reused an existing container can carry two #tradeAnimation groups; keep the first
 export function keepSingleContainer(root: ParentNode): void {
@@ -28,9 +26,21 @@ export function stripTradeCaravans(root: ParentNode): void {
 }
 
 // prepareMapClone policy: only the GPU compat clone (attached across frames) drops caravans; user svg/png/jpeg/mesh
-// exports keep the mid-flight snapshot they always had
+// exports keep the mid-flight snapshot they always had, at the poses the GPU shows (paused writes left the cloned
+// attributes behind; the clone is a same-task deep copy, so its caravans are the live map's in document order)
 export function stripCloneCaravans(clone: ParentNode, type: string): void {
-  if (type === "gpu") stripTradeCaravans(clone);
+  if (type === "gpu") {
+    stripTradeCaravans(clone);
+    return;
+  }
+  if (!caravanDomPaused()) return;
+  const copies = Array.from(clone.querySelectorAll("#tradeAnimation > g"));
+  const live = Array.from(document.getElementById("map")?.querySelectorAll("#tradeAnimation > g") ?? []);
+  if (copies.length !== live.length) return;
+  copies.forEach((copy, i) => {
+    const pose = livePose(live[i]);
+    if (pose !== undefined) copy.setAttribute("transform", pose);
+  });
 }
 
 // Every #tradeAnimation of the live map, the canonical (first) one leading; never other layers or export clones
@@ -130,32 +140,38 @@ export async function draw(
     };
     const [sx, sy] = getSample(0);
 
+    const pose = (t: number): string => {
+      const pos = t * lastIdx;
+      const idx = Math.min(lastIdx - 1, Math.floor(pos));
+      const frac = pos - idx;
+      const [x0, y0] = getSample(idx);
+      const [x1, y1] = getSample(idx + 1);
+      const x = x0 + (x1 - x0) * frac;
+      const y = y0 + (y1 - y0) * frac;
+      const angle0 = Math.atan2(y1 - y0, x1 - x0);
+      let angle = angle0;
+      if (idx + 2 <= lastIdx) {
+        const [x2, y2] = getSample(idx + 2);
+        const angle1 = Math.atan2(y2 - y1, x2 - x1);
+        let delta = angle1 - angle0;
+        if (delta > Math.PI) delta -= 2 * Math.PI;
+        else if (delta < -Math.PI) delta += 2 * Math.PI;
+        angle = angle0 + delta * frac;
+      }
+      return `translate(${x}, ${y}) rotate(${(angle * 180) / Math.PI})`;
+    };
+
     group
       .attr("transform", `translate(${sx}, ${sy})`)
       .transition()
       .duration(length * segDuration)
       .ease(easeLinear)
-      .attrTween("transform", () => {
-        return t => {
-          const pos = t * lastIdx;
-          const idx = Math.min(lastIdx - 1, Math.floor(pos));
-          const frac = pos - idx;
-          const [x0, y0] = getSample(idx);
-          const [x1, y1] = getSample(idx + 1);
-          const x = x0 + (x1 - x0) * frac;
-          const y = y0 + (y1 - y0) * frac;
-          const angle0 = Math.atan2(y1 - y0, x1 - x0);
-          let angle = angle0;
-          if (idx + 2 <= lastIdx) {
-            const [x2, y2] = getSample(idx + 2);
-            const angle1 = Math.atan2(y2 - y1, x2 - x1);
-            let delta = angle1 - angle0;
-            if (delta > Math.PI) delta -= 2 * Math.PI;
-            else if (delta < -Math.PI) delta += 2 * Math.PI;
-            angle = angle0 + delta * frac;
-          }
-          return `translate(${x}, ${y}) rotate(${(angle * 180) / Math.PI})`;
-        };
+      // attrTween("transform"), except that a paused tick keeps the pose for the GPU (caravan-poses.ts)
+      .tween("pose", function (this: SVGGElement) {
+        return (t: number) => recordPose(this, pose(t));
+      })
+      .on("interrupt.pose", function (this: SVGGElement) {
+        settlePose(this);
       })
       .on("end", () => {
         group.remove();

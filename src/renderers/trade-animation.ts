@@ -2,6 +2,7 @@ import type { Burg } from "../generators/burgs-generator";
 import type { Deal } from "../generators/markets-generator";
 import type { Point } from "../generators/voronoi";
 import { ra } from "../utils";
+import { caravanTransform } from "./caravan-poses";
 import { clear, draw } from "./draw-trade-animation";
 
 export type TradeBatch = {
@@ -382,6 +383,11 @@ export class TradeAnimationModule {
 
   getDefaultOptions() {
     return DEFAULT_OPTIONS;
+  }
+
+  // A caravan group's current transform, including a pose the GPU mirrors while SVG writes are paused
+  transformOf(group: Element): string | null {
+    return caravanTransform(group);
   }
 }
 

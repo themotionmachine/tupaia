@@ -4,6 +4,7 @@
 // page (hooks, show/hide, which work it schedules), not what it draws. The decisions themselves are in
 // lifecycle.test.ts; these prove they are wired to the events that need them.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { caravanDomPaused, liveGroups, recordPose } from "../renderers/caravan-poses";
 import { EMBLEM_RULES } from "../renderers/emblems/styles";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -107,7 +108,7 @@ function mapSvg(): SVGSVGElement {
       <filter id="filter-sepia"><feColorMatrix values="0.393 0.769 0.189 0 0 0.349 0.686 0.168 0 0 0.272 0.534 0.131 0 0 0 0 0 1 0"/></filter>
       <filter id="blurry"><feGaussianBlur stdDeviation="5"/></filter>
     </defs>
-    <g id="viewbox" transform="translate(0 0) scale(1)"><g id="coordinates"><g id="coordinateGrid"></g></g><g id="rivers"></g></g>`;
+    <g id="viewbox" transform="translate(0 0) scale(1)"><g id="coordinates"><g id="coordinateGrid"></g></g><g id="rivers"></g><g id="tradeAnimation"></g></g>`;
   return svg;
 }
 
@@ -532,5 +533,152 @@ describe("[LIFE3] net change and definitions", () => {
       open();
       await settled();
     });
+  });
+});
+
+// W3b PAINT: a caravan tick written to the SVG re-layerizes the whole visible document in Chrome, under the canvas or
+// not; the poses stay in caravan-poses.ts while the frame covers the SVG, and are written back whenever it is shown.
+describe("[PAINT] trade caravan poses under the canvas", () => {
+  let group: SVGGElement;
+  const tick = (x: number) => recordPose(group, `translate(${x}, 0) rotate(0)`);
+  const pose = (x: number) => `translate(${x}, 0) rotate(0)`;
+  const openDialog = () => {
+    const dialog = document.createElement("div");
+    dialog.className = "ui-dialog";
+    document.body.append(dialog);
+    return dialog;
+  };
+  let open: () => void = () => {};
+  const gate = () => (pipeline.gate = new Promise(resolve => (open = resolve)));
+
+  beforeEach(() => {
+    group = document.createElementNS(SVG_NS, "g") as SVGGElement;
+    group.setAttribute("transform", "translate(0, 0)");
+    liveGroups.add(group);
+  });
+  afterEach(() => liveGroups.clear());
+
+  it("stay off the SVG while the frame shows, and the GPU redraws them", async () => {
+    expect(caravanDomPaused()).toBe(true);
+    const frames = renderer.telemetry().frames;
+    tick(1);
+    tick(2);
+    expect(group.getAttribute("transform")).toBe("translate(0, 0)");
+    await vi.waitFor(() => expect(renderer.telemetry().frames).toBeGreaterThan(frames));
+    expect(renderer.telemetry().caravans).toMatchObject({ paused: true, retargets: 0 });
+  });
+
+  it("an editor shows the SVG with every caravan at its pose, then live; closing it pauses them again", async () => {
+    tick(2);
+    const dialog = openDialog();
+    await vi.waitFor(() => expect(visible()).toBe(false));
+    expect(caravanDomPaused()).toBe(false);
+    expect(group.getAttribute("transform")).toBe(pose(2));
+    tick(3);
+    expect(group.getAttribute("transform")).toBe(pose(3));
+    dialog.style.display = "none";
+    await settled();
+    expect(caravanDomPaused()).toBe(true);
+  });
+
+  it("print and a canvas hidden from outside (a canonical preview) show live caravans at once", async () => {
+    tick(4);
+    window.dispatchEvent(new Event("beforeprint"));
+    expect(caravanDomPaused()).toBe(false);
+    expect(group.getAttribute("transform")).toBe(pose(4));
+    window.dispatchEvent(new Event("afterprint"));
+    await settled();
+    expect(caravanDomPaused()).toBe(true);
+    tick(5);
+    renderer.canvas.style.visibility = "hidden";
+    await Promise.resolve(); // the observer checkpoint, as HiddenEmblemCulling reveals at
+    expect(caravanDomPaused()).toBe(false);
+    expect(group.getAttribute("transform")).toBe(pose(5));
+    renderer.canvas.style.removeProperty("visibility");
+    await vi.waitFor(() => expect(caravanDomPaused()).toBe(true));
+  });
+
+  it("a hidden canvas waiting for its frame (resume hold) keeps them paused, for at most the stand-in time", async () => {
+    const dialog = openDialog();
+    await vi.waitFor(() => expect(visible()).toBe(false));
+    document.getElementById("rivers")!.setAttribute("opacity", "0.5"); // the edit
+    gate();
+    dialog.style.display = "none";
+    await vi.waitFor(() => expect(pipeline.prepares).toHaveLength(2));
+    expect(renderer.telemetry().hold.active).toBe(true);
+    expect(caravanDomPaused()).toBe(true); // the prepare that ends the hold runs without caravan writes
+    tick(7);
+    expect(group.getAttribute("transform")).toBe("translate(0, 0)");
+    const now = performance.now.bind(performance);
+    vi.spyOn(performance, "now").mockImplementation(() => now() + 16000);
+    await vi.waitFor(() => expect(caravanDomPaused()).toBe(false), { timeout: 1000 }); // the idle watch: expired
+    expect(group.getAttribute("transform")).toBe(pose(7));
+    vi.mocked(performance.now).mockRestore();
+    open();
+    await settled();
+    expect(caravanDomPaused()).toBe(true);
+  });
+
+  it("a replaced world keeps them paused until its first frame", async () => {
+    gate();
+    document.getElementById("map")!.remove();
+    document.body.prepend(mapSvg());
+    await vi.waitFor(() => expect(renderer.telemetry().hiddenReason).toBe("source replaced"));
+    expect(visible()).toBe(false);
+    expect(caravanDomPaused()).toBe(true);
+    renderer.worldReplaced(2);
+    await vi.waitFor(() => expect(pipeline.prepares).toHaveLength(2));
+    expect(renderer.telemetry().hiddenReason).toBe("not prepared");
+    expect(caravanDomPaused()).toBe(true);
+    open();
+    await settled();
+    expect(caravanDomPaused()).toBe(true);
+  });
+
+  it("caravans that moved, spawned and ended during an editor session are no change of the map (D13 net test)", async () => {
+    const nextFrames = () => new Promise(resolve => setTimeout(resolve, 60));
+    const layer = document.getElementById("tradeAnimation")!;
+    const spawn = (x: number) => {
+      const caravan = document.createElementNS(SVG_NS, "g");
+      caravan.setAttribute("transform", `translate(${x}, 0)`);
+      layer.append(caravan);
+      return caravan;
+    };
+    const ending = spawn(1);
+    const moving = spawn(2);
+    await nextFrames();
+    const rivers = document.getElementById("rivers")!;
+    const dialog = openDialog();
+    await vi.waitFor(() => expect(visible()).toBe(false));
+    rivers.setAttribute("opacity", "0.5"); // an editor preview, undone before the close: a revision, net nothing
+    moving.setAttribute("transform", "translate(3, 0) rotate(10)"); // the SVG animates while the editor is open
+    ending.remove();
+    spawn(4);
+    await nextFrames();
+    rivers.removeAttribute("opacity");
+    await nextFrames();
+    gate();
+    dialog.style.display = "none";
+    await vi.waitFor(() => expect(visible()).toBe(true)); // the last frame at once, no hold
+    expect(renderer.telemetry().hold).toMatchObject({
+      active: false,
+      holds: 0,
+      netUnchanged: 1,
+      net: { verdict: "unchanged" }
+    });
+    open();
+    await vi.waitFor(() => expect(renderer.telemetry().frameRevision).toBe(renderer.telemetry().revision));
+  });
+
+  it("dispose (SVG fallback) leaves every caravan at its pose, then live", () => {
+    tick(8);
+    renderer.dispose();
+    expect(caravanDomPaused()).toBe(false);
+    expect(group.getAttribute("transform")).toBe(pose(8));
+    tick(9);
+    expect(group.getAttribute("transform")).toBe(pose(9));
+    renderer = new GpuRenderer(document.getElementById("map") as unknown as SVGSVGElement, reason =>
+      fallBacks.push(reason)
+    );
   });
 });

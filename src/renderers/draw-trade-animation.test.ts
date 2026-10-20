@@ -2,9 +2,13 @@ import { afterEach, expect, it, vi } from "vitest";
 
 vi.mock("@/lazy-loaders", () => ({ lazy: {} }));
 
+import { caravanTransform, setCaravanDomPaused } from "./caravan-poses";
 import { clear, draw, keepSingleContainer, stripCloneCaravans } from "./draw-trade-animation";
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  setCaravanDomPaused(false);
+  vi.unstubAllGlobals();
+});
 
 // a d3-like selection where every call chains; node() and remove() reach the backing fake node
 function chain(node?: { remove(): void }): any {
@@ -89,6 +93,7 @@ class El {
   children: El[] = [];
   parentElement: El | null = null;
   interrupted = 0;
+  attrs = new Map<string, string>();
   constructor(
     public tagName: string,
     public id = "",
@@ -108,6 +113,12 @@ class El {
   all(): El[] {
     return this.children.flatMap(child => [child, ...child.all()]);
   }
+  getAttribute(name: string): string | null {
+    return this.attrs.get(name) ?? null;
+  }
+  setAttribute(name: string, value: string): void {
+    this.attrs.set(name, value);
+  }
   querySelector(): object {
     return {}; // marker symbols present: no fetch
   }
@@ -120,11 +131,22 @@ class El {
 }
 
 let ends: (() => void)[] = [];
+let tweens: ((this: El) => (t: number) => void)[] = [];
+let interrupts: ((this: El) => void)[] = [];
 
-// d3-like selection over El nodes; transition/attr/style calls chain, "end" handlers are kept so tests finish caravans
+// d3-like selection over El nodes; transition/style calls chain, attributes land on the nodes, and "end"/interrupt
+// handlers and tween factories are kept so tests can finish, interrupt and tick caravans
 function selection(nodes: El[]): any {
   const own: any = {
     node: () => nodes[0],
+    attr: (name: string, value: unknown) => {
+      for (const node of nodes) node.setAttribute(name, String(value));
+      return proxy;
+    },
+    tween: (_name: string, factory: (this: El) => (t: number) => void) => {
+      tweens.push(factory);
+      return proxy;
+    },
     append: (tag: string) => selection(nodes.map(node => node.add(new El(tag)))),
     select: (pick: () => El) => selection([pick()]),
     selectAll: (arg: string | (() => El[])) =>
@@ -145,6 +167,7 @@ function selection(nodes: El[]): any {
     },
     on: (event: string, handler: () => void) => {
       if (event === "end") ends.push(handler);
+      if (event === "interrupt.pose") interrupts.push(handler);
       return proxy;
     }
   };
@@ -170,7 +193,12 @@ function live(w: World, container: El = w.list[0], ...attached: El[]) {
   vi.stubGlobal("options", { trade: { animation: { markerSize: 4, duration: 250, landDurationModifier: 5 } } });
   vi.stubGlobal("document", {
     getElementById: (id: string) => (id === "map" ? w.map : { querySelector: () => ({}) }),
-    createElementNS: () => ({ setAttribute() {}, getTotalLength: () => 10, getPointAtLength: () => ({ x: 0, y: 0 }) }),
+    // a straight path along x: the sample at length l is (l, 0)
+    createElementNS: () => ({
+      setAttribute() {},
+      getTotalLength: () => 10,
+      getPointAtLength: (l: number) => ({ x: l, y: 0 })
+    }),
     // document-wide, like the harness guard: the live map plus anything else attached (export clones)
     querySelectorAll: (selector: string) => [w.map, ...attached].flatMap(root => root.querySelectorAll(selector))
   });
@@ -269,4 +297,39 @@ it("repeated load/migration: stale caravans are stopped and resumed caravans lan
   expect(caravans()).toHaveLength(0);
   clear();
   expect(bound()).toBe(third.list[0]);
+});
+
+it("GPU pause: ticks keep their pose off the DOM until resumed; exports copy and interrupts settle the live pose", async () => {
+  ends = [];
+  tweens = [];
+  interrupts = [];
+  const w = world();
+  live(w);
+  await draw(batch, segments);
+  const [group] = caravans();
+  expect(group.getAttribute("transform")).toBe("translate(0, 0)");
+  const tick = tweens[0].call(group);
+  tick(0.5); // SVG mode: written, as attrTween("transform") did
+  expect(group.getAttribute("transform")).toBe("translate(5, 0) rotate(0)");
+
+  setCaravanDomPaused(true); // the GPU canvas covers the SVG
+  tick(0.8);
+  expect(group.getAttribute("transform")).toBe("translate(5, 0) rotate(0)");
+  expect(caravanTransform(group as unknown as Element)).toBe("translate(8, 0) rotate(0)");
+
+  // a user export made meanwhile shows the caravan where the GPU drew it
+  const copy = world();
+  const copied = copy.list[0].add(new El("g"));
+  copied.setAttribute("transform", "translate(5, 0) rotate(0)");
+  stripCloneCaravans(copy.map as unknown as ParentNode, "png");
+  expect(copied.getAttribute("transform")).toBe("translate(8, 0) rotate(0)");
+
+  interrupts[0].call(group); // stop or a harness freeze: the group keeps the pose last drawn
+  expect(group.getAttribute("transform")).toBe("translate(8, 0) rotate(0)");
+
+  tick(0.9);
+  setCaravanDomPaused(false); // the SVG is shown again: the pose is written before the next tick
+  expect(group.getAttribute("transform")).toBe("translate(9, 0) rotate(0)");
+  ends.at(-1)!();
+  expect(caravans()).toHaveLength(0);
 });
