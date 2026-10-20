@@ -1221,6 +1221,24 @@ async function addFontViaDialog(page: Page, sw: FontSwitch) {
 }
 const groupFont = (page: Page, group: string) => page.evaluate(id => document.querySelector(`#labels #${CSS.escape(id)}`)?.getAttribute("font-family") ?? null, group);
 
+// Puts the switched groups' font-family attributes back as they were (null: removed) and waits for a GPU frame of it.
+async function restoreFonts(page: Page, targets: string[], original: (string | null)[]): Promise<{ ok: boolean; now: (string | null)[] }> {
+  await page.evaluate(
+    ({ targets, original }) =>
+      targets.forEach((id, i) => {
+        const group = document.querySelector(`#labels #${CSS.escape(id)}`);
+        if (!group) return;
+        if (original[i] === null) group.removeAttribute("font-family");
+        else group.setAttribute("font-family", original[i] as string);
+      }),
+    { targets, original }
+  );
+  await settleApp(page);
+  await waitGpu(page);
+  const now = await Promise.all(targets.map(id => groupFont(page, id)));
+  return { ok: now.every((family, i) => family === original[i]), now };
+}
+
 // Which labels of each group the GPU drew natively, and the labels layer's routing reasons. Per group: visible labels
 // by lane, hidden ones (not visible in the SVG) and the DOM total; for the `watch` groups, the visible label ids.
 function routing(watch: string[] = []): Json {
@@ -1255,6 +1273,9 @@ async function stepFonts(page: Page, blanks: Blanks, dir: string, world: string)
   const targets = [curved?.id, straight?.id].filter((id): id is string => !!id);
   result.targets = targets;
   if (!targets.length) return { ...result, failure: "no visible states or burg label group to switch" };
+  // the groups' own font-family, put back after the switches: the last switch leaves the broken face on them, and the
+  // steps after this one (zoom: its shadow probe takes the map's label face) must see the map as loaded
+  const original = await page.evaluate(ids => ids.map(id => document.querySelector(`#labels #${CSS.escape(id)}`)?.getAttribute("font-family") ?? null), targets);
   // native variant: state labels go native, so the switch exercises the glyph atlas as well as the compat lane
   result.variant = await page.evaluate(setVariant, "native");
   const camera = centerOn(1, ...((await page.evaluate(() => [(globalThis as any).graphWidth / 2, (globalThis as any).graphHeight / 2])) as [number, number]));
@@ -1397,9 +1418,11 @@ async function stepFonts(page: Page, blanks: Blanks, dir: string, world: string)
     write();
   }
   await page.evaluate(setVariant, "map");
+  result.restored = await restoreFonts(page, targets, original);
   const failing = (result.switches as Json[]).filter(c => !c.pass);
   result.summary = { switches: result.switches.length, pass: result.switches.length - failing.length, fail: failing.length };
   result.failure = failing.length ? `${failing.length}/${result.switches.length} font switches failed: ${failing.map(c => `${c.id} (${c.failures[0]})`).join("; ")}` : result.switches.length ? null : "no font switch ran";
+  if (!result.restored.ok) result.failure = [result.failure, `fonts not restored: ${JSON.stringify(result.restored.now)} (was ${JSON.stringify(original)})`].filter(Boolean).join("; ");
   return result;
 }
 
@@ -1512,7 +1535,13 @@ function shadowProbeState(args: { dpr: number; pad: number }): Json {
   const data = w.gpuRenderer?.prepared?.payload?.glyphs;
   let softCells = 0;
   if (data instanceof Float32Array) for (let i = 0; i + 18 <= data.length; i += 18) if (data[i + 14] < 0) softCells++;
-  return { ids, boxes, native, softCells };
+  // the probe's face: one that failed to load sends its texts to compat (text.ts fontReady), so the cell says so
+  const style = texts[0] ? getComputedStyle(texts[0]) : null;
+  let faceLoaded: boolean | null = null;
+  try {
+    faceLoaded = style ? document.fonts.check(`${style.fontSize} ${style.fontFamily}`, texts[0].textContent || "") : null;
+  } catch {}
+  return { ids, boxes, native, softCells, face: style?.fontFamily ?? null, faceLoaded };
 }
 
 // Per #labels text (svgLabels' ids): what the app may change on a zoom (shown, font size, position, transform, text).
@@ -1624,9 +1653,9 @@ async function stepZoom(page: Page, dir: string): Promise<Json> {
           cell.probe = await page.evaluate(shadowProbe, { at: centre, shadow: variant.value });
           const stable = await carriedView(cell, kPrepared, kViewed, centre);
           const probe = await page.evaluate(shadowProbeState, { dpr, pad: ZOOM_SHADOW_PAD });
-          cell.texts = { shown: probe.boxes.length, stable: probe.ids.filter((id: string) => stable.has(id)).length, native: probe.native, softCells: probe.softCells };
+          cell.texts = { shown: probe.boxes.length, stable: probe.ids.filter((id: string) => stable.has(id)).length, native: probe.native, softCells: probe.softCells, face: probe.face, faceLoaded: probe.faceLoaded };
           if (cell.texts.stable !== probe.ids.length) cell.failures.push(`the zoom restyled ${probe.ids.length - cell.texts.stable} probe texts: the pair does not test a carried frame`);
-          if (!probe.native || !probe.softCells) cell.failures.push(`the GPU drew no probe text natively with a shadow (native ${probe.native}, soft cells ${probe.softCells}): nothing to judge`);
+          if (!probe.native || !probe.softCells) cell.failures.push(`the GPU drew no probe text natively with a shadow (native ${probe.native}, soft cells ${probe.softCells}${probe.faceLoaded === false ? `; the probe face ${probe.face} is not loaded` : ""}): nothing to judge`);
           const shots = await captureArms(page);
           const svg = maskTo(decode(shots.svg), blanks.svg, probe.boxes);
           const gpu = maskTo(decode(shots.gpu), blanks.gpu, probe.boxes);
