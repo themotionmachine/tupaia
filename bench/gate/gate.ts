@@ -850,7 +850,8 @@ const DEFS: Record<string, CheckDef> = {
           "bench/host/fixtures/fixtures.test.ts",
           "bench/host/consumers-lib.test.ts",
           "bench/integration-fixture.test.ts",
-          "bench/host/editor-replay-core.test.ts"
+          "bench/host/editor-replay-core.test.ts",
+          "bench/host/labels-core.test.ts"
         ],
         {},
         null,
@@ -1110,6 +1111,86 @@ const DEFS: Record<string, CheckDef> = {
     timeout: 3600,
     run: goldenCheck
   },
+  // ---- LABELS (W2): label fidelity, rows 15, 16, 41 (bench/host/labels.ts). Self-contained block.
+  // Visible label set at ±0.01 k of every visibility threshold, glyph positions on a 200-label sample (analytic for
+  // native curved labels, pixel registration for every label), measureText vs SVG advance per pinned font, and font
+  // switches through the Style panel, each SVG against GPU of one page. `worlds=parity,shared` (default both).
+  labels: {
+    lock: "shared",
+    keys: ["worlds", "steps", "dpr", "sample", "keep", "break"],
+    spec: {
+      worlds: { type: "string", default: "parity,shared", check: text => { if (!text.split(",").every(w => w === "parity" || w === "shared")) throw new UsageError("worlds must be parity, shared or parity,shared"); } },
+      steps: { type: "string", default: "thresholds,glyphs,advance,fonts", check: text => { if (!text.split(",").every(s => ["thresholds", "glyphs", "advance", "fonts"].includes(s))) throw new UsageError("steps: thresholds,glyphs,advance,fonts"); } },
+      sample: { type: "int", default: 200 },
+      keep: { type: "enum", values: ["all", "fail"], default: "fail" },
+      break: { type: "enum", values: ["none", "freeze", "measure"], default: "none" }
+    },
+    timeout: 3600,
+    run: async ctx => {
+      const report = join(ctx.dir, "labels.json");
+      const maps = String(ctx.args.worlds).split(",").map(w => `${w}=${resolveNamedFixture(w)}`).join(",");
+      const env = { LABELS_MAPS: maps, LABELS_STEPS: String(ctx.args.steps), LABELS_DPR: String(ctx.args.dpr), LABELS_SAMPLE: String(ctx.args.sample), LABELS_KEEP: String(ctx.args.keep), LABELS_BREAK: String(ctx.args.break) };
+      return runScript(ctx, nodeScript("bench/host/labels.ts"), env, report, 3600, data => ({ failure: reportFailure(data), metrics: data && { summary: data.summary, break: data.args?.break, errors: data.errors?.slice(0, 4) } }));
+    }
+  },
+  // The label harness must still fail: on the parity fixture, a clean run and two broken ones. `freeze` stops the GPU
+  // from seeing DOM changes (a missed invalidation) and must trip the visible-set and re-atlas checks; `measure`
+  // scales measureText by 1.04 and must trip the advance and analytic glyph checks. Each detector must pass clean.
+  "labels-selftest": {
+    lock: "shared",
+    keys: [],
+    timeout: 2400,
+    run: async ctx => {
+      const scope = { LABELS_MAPS: `parity=${resolveNamedFixture("parity")}`, LABELS_DPR: "2", LABELS_KEEP: "fail", LABELS_GROUPS: "town", LABELS_VARIANTS: "native", LABELS_GLYPH_K: "1", LABELS_SAMPLE: "20", LABELS_FONTS: "builtin,broken", LABELS_ADVANCE_FAMILIES: "Georgia,Almendra SC" };
+      const runs: Record<string, Json> = {};
+      for (const [arm, extra] of [
+        ["clean", { LABELS_STEPS: "thresholds,glyphs,advance,fonts", LABELS_BREAK: "none" }],
+        ["freeze", { LABELS_STEPS: "thresholds,fonts", LABELS_BREAK: "freeze" }],
+        ["measure", { LABELS_STEPS: "glyphs,advance", LABELS_BREAK: "measure" }]
+      ] as const) {
+        const dir = join(ctx.dir, arm);
+        mkdirSync(dir, { recursive: true });
+        const code = await exec(nodeScript("bench/host/labels.ts"), ctx.env({ ...scope, ...extra, GATE_OUT_DIR: dir }), ctx.log, 1200, true);
+        runs[arm] = { code, data: readJson(join(dir, "labels.json")) };
+      }
+      const step = (arm: string, name: string): Json | undefined => runs[arm].data?.worlds?.parity?.steps?.[name];
+      const cells = (arm: string): Json[] => step(arm, "thresholds")?.cells ?? [];
+      const font = (arm: string, id: string): Json | undefined => (step(arm, "fonts")?.switches ?? []).find((c: Json) => c.id === id);
+      const has = (cell: Json | undefined, prefix: string) => (cell?.failures ?? []).some((f: string) => f.startsWith(prefix));
+      const advance = (arm: string, family: string): number | undefined => (step(arm, "advance")?.rows ?? []).find((r: Json) => r.family === family)?.maxCumPx;
+      const analytic = (arm: string): number | undefined => step(arm, "glyphs")?.variants?.native?.summary?.analytic?.p50;
+      const problems: string[] = [];
+      for (const [arm, run] of Object.entries(runs)) if (!run.data) problems.push(`${arm}: no report (exit ${run.code})`);
+      for (const arm of Object.keys(runs)) for (const e of runs[arm].data?.errors ?? []) if (String(e).includes("harness")) problems.push(`${arm}: ${String(e).slice(0, 160)}`);
+      if (!problems.length) {
+        const clean = cells("clean");
+        if (!clean.length || clean.some(c => !c.pass)) problems.push(`clean: town threshold probes should pass (${clean.map(c => `${c.key} ${c.pass ? "PASS" : c.failures[0]}`).join("; ")})`);
+        if (!cells("freeze").some(c => !c.pass && c.break === "freeze" && c.failures.some((f: string) => /missing on the GPU|GPU paints/.test(f)))) problems.push("freeze: no frozen threshold probe was caught by the visible-set check");
+        if (!font("clean", "builtin") || has(font("clean", "builtin"), "re-atlas") || has(font("clean", "builtin"), "harness")) problems.push(`clean: builtin switch should re-atlas (${font("clean", "builtin")?.failures?.[0] ?? "no cell"})`);
+        if (!has(font("freeze", "builtin"), "re-atlas")) problems.push("freeze: the builtin switch's missed re-atlas was not caught");
+        if (has(font("clean", "broken"), "broken font")) problems.push(`clean: broken font routing should pass (${font("clean", "broken")?.failures?.[0]})`);
+        for (const family of ["Georgia", "Almendra SC"]) {
+          const [c, b] = [advance("clean", family), advance("measure", family)];
+          if (!(c !== undefined && c <= 1)) problems.push(`clean: ${family} advance ${c} should be within 1 device px`);
+          if (!(b !== undefined && b > 1)) problems.push(`measure: ${family} advance ${b} should exceed 1 device px`);
+        }
+        const [ca, ba] = [analytic("clean"), analytic("measure")];
+        if (!(ca !== undefined && ca <= 1)) problems.push(`clean: analytic glyph p50 ${ca} should be within 1 device px`);
+        if (!(ba !== undefined && ba > 1)) problems.push(`measure: analytic glyph p50 ${ba} should exceed 1 device px`);
+      }
+      return {
+        exit_code: problems.length ? 1 : 0,
+        failure: problems.length ? problems.join(" | ") : null,
+        metrics: {
+          thresholds: { clean: cells("clean").map(c => `${c.key}:${c.pass ? "PASS" : "FAIL"}`), freeze: cells("freeze").map(c => `${c.key}:${c.pass ? "PASS" : "FAIL"}`) },
+          fonts: { clean: font("clean", "builtin")?.failures?.length ?? null, freeze: font("freeze", "builtin")?.failures?.filter((f: string) => f.startsWith("re-atlas")).length ?? null },
+          advance: { clean: advance("clean", "Georgia"), measure: advance("measure", "Georgia") },
+          analyticP50: { clean: analytic("clean"), measure: analytic("measure") }
+        }
+      };
+    }
+  },
+  // ---- end LABELS
   "paired-summary": {
     lock: null,
     keys: ["dpr", "dirs"],
