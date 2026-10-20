@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 // Straight <text> layout geometry (text.ts layoutStraight via layoutLabels): anchor offset, central baseline shift,
-// text-shadow offset in world units (shadow px * dpr / raster scale), and paint order (shadows under, then fill and
-// stroke in paint-order). A stubbed Canvas2D with fixed metrics stands in for fonts; happy-dom has no 2D context.
+// text-shadow cells in screen space (sigma and offset in device px for the glyph shader), and paint order (shadows
+// under, then fill and stroke in paint-order). A stubbed Canvas2D with fixed metrics stands in for fonts; happy-dom has no 2D context.
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { GLYPH_FLOATS, GlyphAtlas, layoutLabels, offCanvasShadowPaints } from "./text";
 
@@ -94,7 +94,17 @@ function text(content: string, x = 100, y = 50): SVGTextElement {
 function instances(batch: { instances: Float32Array; count: number }) {
   return Array.from({ length: batch.count }, (_, i) => {
     const f = [...batch.instances.slice(i * GLYPH_FLOATS, (i + 1) * GLYPH_FLOATS)];
-    return { cx: f[0], cy: f[1], lx: f[3], ly: f[4], w: f[5], h: f[6], color: f.slice(11) };
+    return {
+      cx: f[0],
+      cy: f[1],
+      angle: f[2],
+      lx: f[3],
+      ly: f[4],
+      w: f[5],
+      h: f[6],
+      color: f.slice(11, 15),
+      baseline: f.slice(15)
+    };
   });
 }
 
@@ -135,15 +145,17 @@ describe("[TEXT] layoutStraight geometry (stubbed metrics)", () => {
     expect(glyphs.every(g => g.cy === 50)).toBe(true);
   });
 
-  it("central baseline shifts by half the font box (ascent - descent) / 2, in world units", async () => {
-    // font box at 32 raster px: 28.8 up, 9.6 down -> (28.8 - 9.6) / 2 / 4 = 2.4 world units down
+  it("central baseline: the shader's per-zoom shift from the font box (ascent, descent per px * size), none baked", async () => {
+    // font box 0.9 / 0.3 em at 8px: ascent 7.2, descent 2.4 user units; mode 1 (a direct <text> child, not nested)
     const auto = (await layout("A", { dominantBaseline: "auto", textAnchor: "start" })).glyphs[0];
     const central = (await layout("A", { dominantBaseline: "central", textAnchor: "start" })).glyphs[0];
-    expect(central.ly - auto.ly).toBeCloseTo(2.4);
+    expect(central.ly).toBeCloseTo(auto.ly);
     expect(central.cy).toBe(auto.cy);
+    expect(auto.baseline).toEqual([0, 0, 0]);
+    expect(central.baseline).toEqual([7.2, 2.4, 1].map(v => expect.closeTo(v, 5)));
   });
 
-  it("offsets a shadow by its CSS px times dpr over the raster scale, and paints it under the text", async () => {
+  it("gives a shadow its offset and sigma in device px for the shader, and paints it under the text", async () => {
     const { glyphs } = await layout("A", {
       textAnchor: "start",
       dominantBaseline: "auto",
@@ -154,11 +166,21 @@ describe("[TEXT] layoutStraight geometry (stubbed metrics)", () => {
     // a shadow instance carries its alpha negated: the glyph shader's soft-cell flag (no coverage floor)
     expect(shadow.color).toEqual([157 / 255, 170 / 255, 201 / 255, -1].map(v => expect.closeTo(v, 5)));
     expect(fill.color).toEqual([0, 0, 0, 1]);
-    // 1px * dpr 2 / scale 4 = 0.5, 2px -> 1
-    expect(shadow.cx - fill.cx).toBeCloseTo(0.5);
-    expect(shadow.cy - fill.cy).toBeCloseTo(1);
+    // screen space: the offset in CSS px (the shader divides by k) and sigma 1px * dpr 2 / 2 in device px
+    expect([shadow.lx, shadow.ly]).toEqual([1, 2]);
+    expect(shadow.angle).toBeCloseTo(1);
+    // the anchor is the cell's top-left corner at the pen: no offset baked in, the same pen as the fill glyph
+    expect(shadow.cx).toBeCloseTo(fill.cx + fill.lx - (shadow.w - fill.w) / 2, 5);
+    expect(shadow.cy).toBeLessThan(fill.cy + fill.ly);
     // the shadow cell is the whole string blurred: wider than the glyph by the blur margin on each side
     expect(shadow.w).toBeGreaterThan(fill.w);
+  });
+
+  it("a shadow cell keeps the same world rect whatever its offset (the offset is applied per frame)", async () => {
+    const still = (await layout("A", { textShadow: "rgb(0, 0, 0) 0px 0px 2px" })).glyphs[0];
+    const moved = (await layout("A", { textShadow: "rgb(0, 0, 0) 3px -1px 2px" })).glyphs[0];
+    expect([moved.cx, moved.cy, moved.w, moved.h]).toEqual([still.cx, still.cy, still.w, still.h]);
+    expect([moved.lx, moved.ly]).toEqual([3, -1]);
   });
 
   it("a shadow list goes down last-first (CSS paints the first shadow on top)", async () => {
@@ -177,9 +199,10 @@ describe("[TEXT] layoutStraight geometry (stubbed metrics)", () => {
     const wide = (await layout("A", { textShadow: "rgb(255, 255, 255) 0px 0px 10px" })).glyphs[0];
     const narrow = (await layout("A", { textShadow: "rgb(255, 255, 255) 0px 0px 1px" })).glyphs[0];
     expect(wide.w).toBeGreaterThan(narrow.w);
-    // margin: (ceil(1.5 * blur) + PAD) atlas px at the cut scale, i.e. (6 + 3) / 0.8 = 11.25 world units per side
-    // around a 0.6 em = 4.8 world-unit ink box
-    expect(wide.w).toBeCloseTo(4.8 + 2 * 11.25, 0);
+    // margin: (ceil(3 * blur) + PAD) atlas px at the cut scale (6 sigma: the shader may widen the blur up to 2x), i.e.
+    // (12 + 3) / 0.8 = 18.75 world units per side around a 0.6 em = 4.8 world-unit ink box
+    expect(wide.w).toBeCloseTo(4.8 + 2 * 18.75, 0);
+    expect(wide.angle).toBeCloseTo(10);
   });
 
   it("paint-order stroke puts the halo pass under the fill pass", async () => {
@@ -203,6 +226,13 @@ describe("[TEXT] layoutStraight geometry (stubbed metrics)", () => {
     // 28.8 / 4 up, 9.6 / 4 down from the baseline
     expect(y0).toBeCloseTo(50 - 7.2);
     expect(y2).toBeCloseTo(50 + 2.4);
+  });
+
+  it("a central text's pick box carries the shift at the prepare's zoom (the text's CTM scale)", async () => {
+    const { batch } = await layout("AB", { textAnchor: "start", dominantBaseline: "central" });
+    const [, y0] = batch.boxes[0].corners;
+    // happy-dom's identity CTM, k = 1: (round(7.2) - round(2.4)) / 2 = 2.5 user units down
+    expect(y0).toBeCloseTo(50 + 2.5 - 7.2);
   });
 });
 

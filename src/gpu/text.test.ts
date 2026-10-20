@@ -3,10 +3,12 @@ import { layoutOnPath } from "./geometry";
 import {
   centralBaselineShift,
   centralNestedShift,
+  centralShiftAt,
   GLYPH_ATLAS,
   GLYPH_FLOATS,
   glyphAtlasRows,
   inkColor,
+  inkMismatch,
   kernedAdvances,
   kernOffsets,
   kernsBefore,
@@ -14,6 +16,9 @@ import {
   parseLength,
   presentAttribute,
   quad,
+  shapingAdvanceError,
+  shapingFeatures,
+  shapingReason,
   spacedAdvances,
   startOffsetLength,
   strokeBeforeFill,
@@ -397,5 +402,99 @@ describe("svgCharPositions", () => {
     } as unknown as SVGTextElement;
     expect(svgCharPositions(throwing, 1)).toBeNull();
     expect(svgCharPositions(fakeText([[0, 0]], [[0, 0]], [0]), 1)).toBeNull();
+  });
+});
+
+describe("shapingFeatures", () => {
+  it("turns ligatures and contextual alternates off where Chromium does: optimizeSpeed or any letter-spacing", () => {
+    expect(shapingFeatures("auto")).toBe("auto");
+    expect(shapingFeatures("geometricPrecision")).toBe("auto");
+    expect(shapingFeatures(undefined)).toBe("auto");
+    expect(shapingFeatures("optimizeSpeed")).toBe("optimizeSpeed");
+    expect(shapingFeatures("auto", 1.5)).toBe("optimizeSpeed");
+  });
+});
+
+describe("shapingAdvanceError", () => {
+  // own widths 10, "AV" kerns -2, "VA" -3 (text.test kernsBefore)
+  const width = (s: string) => [...s].length * 10 - (s.includes("AV") ? 2 : 0) - (s.includes("VA") ? 3 : 0);
+  const chars = [..."AVA"];
+
+  it("is 0 when the SVG reports the painted pens (GPOS kerning)", () => {
+    const reported = [
+      { start: 5, advance: 8 },
+      { start: 13, advance: 7 },
+      { start: 20, advance: 10 }
+    ];
+    expect(shapingAdvanceError(chars, width, reported, 30)).toBeCloseTo(0);
+  });
+
+  it("is 0 when the SVG reports split legacy kerns half a kern early (kernOffsets)", () => {
+    // painted 0, 8, 15; reported starts less half the leading kern: 0, 9, 16.5; advances own + (kern + next) / 2
+    const reported = [
+      { start: 0, advance: 9 },
+      { start: 9, advance: 7.5 },
+      { start: 16.5, advance: 8.5 }
+    ];
+    expect(shapingAdvanceError(chars, width, reported, 25)).toBeCloseTo(0);
+  });
+
+  it("measures a kern the widths cannot see (a space pair Canvas2D shapes word by word)", () => {
+    const plain = (s: string) => [...s].length * 10;
+    // SVG kerns ". W" by -3: W starts 3 early, and so does every later character and the end
+    const reported = [
+      { start: 0, advance: 10 },
+      { start: 10, advance: 7 },
+      { start: 17, advance: 10 },
+      { start: 27, advance: 10 }
+    ];
+    expect(shapingAdvanceError([..." .WA"].slice(1).concat("x"), plain, reported, 37)).toBeCloseTo(3);
+  });
+
+  it("skips characters the SVG does not render", () => {
+    const plain = (s: string) => [...s].length * 10;
+    expect(
+      shapingAdvanceError([..."abc"], plain, [{ start: 0, advance: 10 }, null, { start: 20, advance: 10 }], 30)
+    ).toBe(0);
+    expect(shapingAdvanceError([..."ab"], plain, [null, null], null)).toBe(0);
+  });
+});
+
+describe("inkMismatch", () => {
+  it("is the differing alpha over the first capture's alpha", () => {
+    const a = new Uint8ClampedArray([0, 0, 0, 200, 0, 0, 0, 100, 0, 0, 0, 0]);
+    const b = new Uint8ClampedArray([9, 9, 9, 200, 0, 0, 0, 40, 0, 0, 0, 30]);
+    expect(inkMismatch(a, a)).toBe(0);
+    expect(inkMismatch(a, b)).toBeCloseTo(90 / 300);
+    expect(inkMismatch(new Uint8ClampedArray(8), b)).toBe(0);
+  });
+});
+
+describe("shapingReason", () => {
+  it("finds no mismatch without SVG text layout or a readable canvas (a test DOM) and for blank text", () => {
+    expect(shapingReason("normal 400 32px Arial", "Office fluff")).toBe("");
+    expect(shapingReason("normal 400 32px Arial", " ")).toBe("");
+    expect(shapingReason("not a font", "abc")).toBe("");
+  });
+});
+
+describe("centralShiftAt", () => {
+  it("rounds ascent and descent at the scaled font to whole CSS px and halves the difference", () => {
+    // Georgia 12.59 px (box 0.917 / 0.219): k 1.3 -> round(15.01) - round(3.58) = 15 - 4 -> 5.5 CSS px
+    expect(centralShiftAt(0.917 * 12.59, 0.219 * 12.59, 1, 1.3) * 1.3).toBeCloseTo(5.5);
+    // k 1.5 -> round(17.32) - round(4.14) = 17 - 4 -> 6.5 CSS px
+    expect(centralShiftAt(0.917 * 12.59, 0.219 * 12.59, 1, 1.5) * 1.5).toBeCloseTo(6.5);
+  });
+
+  it("rounds a nested box's shift up to a whole CSS px, and is 0 for mode 0", () => {
+    expect(centralShiftAt(0.917 * 12.59, 0.219 * 12.59, 2, 1.5) * 1.5).toBeCloseTo(7);
+    expect(centralShiftAt(0.917 * 12.59, 0.219 * 12.59, 2, 1.3) * 1.3).toBeCloseTo(6);
+    expect(centralShiftAt(10, 2, 0, 1.5)).toBe(0);
+    expect(centralShiftAt(10, 2, 1, 0)).toBe(0);
+  });
+
+  it("rounds half up, as Skia does", () => {
+    // ascent 2.5, descent 0.5 CSS px at k 1: round -> 3 and 1
+    expect(centralShiftAt(2.5, 0.5, 1, 1)).toBe(1);
   });
 });

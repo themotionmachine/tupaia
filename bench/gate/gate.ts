@@ -1649,15 +1649,17 @@ const DEFS: Record<string, CheckDef> = {
     run: goldenCheck
   },
   // ---- LABELS (W2): label fidelity, rows 15, 16, 41 (bench/host/labels.ts). Self-contained block.
-  // Visible label set at ±0.01 k of every visibility threshold, glyph positions on a 200-label sample (analytic for
-  // native curved labels, pixel registration for every label), measureText vs SVG advance per pinned font, and font
-  // switches through the Style panel, each SVG against GPU of one page. `worlds=parity,shared` (default both).
+  // Visible label set at ±0.01 k of every visibility threshold, glyph positions on a 200-label sample (pixel
+  // registration for every label; the analytic position is info), measureText vs SVG advance per pinned font (judged on
+  // what text.ts keeps native; shaping it routes to compat is reported), font switches through the Style panel, and
+  // zoom (W3b: text-shadow goldens at non-power-of-two k, a frame carried within its raster bucket), each SVG against
+  // GPU of one page. `worlds=parity,shared` (default both).
   labels: {
     lock: "shared",
     keys: ["worlds", "steps", "dpr", "sample", "keep", "break"],
     spec: {
       worlds: { type: "string", default: "parity,shared", check: text => { if (!text.split(",").every(w => w === "parity" || w === "shared")) throw new UsageError("worlds must be parity, shared or parity,shared"); } },
-      steps: { type: "string", default: "thresholds,glyphs,advance,fonts", check: text => { if (!text.split(",").every(s => ["thresholds", "glyphs", "advance", "fonts"].includes(s))) throw new UsageError("steps: thresholds,glyphs,advance,fonts"); } },
+      steps: { type: "string", default: "thresholds,glyphs,advance,fonts,zoom", check: text => { if (!text.split(",").every(s => ["thresholds", "glyphs", "advance", "fonts", "zoom"].includes(s))) throw new UsageError("steps: thresholds,glyphs,advance,fonts,zoom"); } },
       sample: { type: "int", default: 200 },
       keep: { type: "enum", values: ["all", "fail"], default: "fail" },
       break: { type: "enum", values: ["none", "freeze", "measure", "shift", "drop"], default: "none" }
@@ -1725,7 +1727,8 @@ const DEFS: Record<string, CheckDef> = {
   },
   // The label harness must still fail: on the parity fixture, a clean run and four broken ones. `freeze` stops the GPU
   // from seeing DOM changes (a missed invalidation) and must trip the visible-set and re-atlas checks; `measure`
-  // scales measureText by 1.04 and must trip the advance and analytic glyph checks; `shift` moves the GPU canvas 1 CSS
+  // scales measureText by 1.04: the advance model must see the drift and text.ts's shaping check must route the
+  // pinned fonts' strings to compat (clean routes none of them); `shift` moves the GPU canvas 1 CSS
   // px and must trip pixel registration; `drop` blanks the right half of the GPU arm and must trip the presence check
   // (an empty GPU window is a missing glyph, never a 0 px shift). Each detector must pass clean.
   "labels-selftest": {
@@ -1753,7 +1756,7 @@ const DEFS: Record<string, CheckDef> = {
       const has = (cell: Json | undefined, prefix: string) => (cell?.failures ?? []).some((f: string) => f.startsWith(prefix));
       const glyphs = (arm: string): Json | undefined => step(arm, "glyphs")?.variants?.native;
       const advance = (arm: string, family: string): number | undefined => (step(arm, "advance")?.rows ?? []).find((r: Json) => r.family === family)?.maxCumPx;
-      const analytic = (arm: string): number | undefined => step(arm, "glyphs")?.variants?.native?.summary?.analytic?.p50;
+      const routed = (arm: string, family: string): number | undefined => (step(arm, "advance")?.rows ?? []).find((r: Json) => r.family === family)?.compat;
       const problems: string[] = [];
       for (const [arm, run] of Object.entries(runs)) if (!run.data) problems.push(`${arm}: no report (exit ${run.code})`);
       for (const arm of Object.keys(runs)) for (const e of runs[arm].data?.errors ?? []) if (String(e).includes("harness")) problems.push(`${arm}: ${String(e).slice(0, 160)}`);
@@ -1777,10 +1780,10 @@ const DEFS: Record<string, CheckDef> = {
           const [c, b] = [advance("clean", family), advance("measure", family)];
           if (!(c !== undefined && c <= 1)) problems.push(`clean: ${family} advance ${c} should be within 1 device px`);
           if (!(b !== undefined && b > 1)) problems.push(`measure: ${family} advance ${b} should exceed 1 device px`);
+          const [cr, br] = [routed("clean", family), routed("measure", family)];
+          if (cr !== 0) problems.push(`clean: ${family} should route no advance case to compat (${cr})`);
+          if (!(br !== undefined && br > 0)) problems.push(`measure: text.ts's shaping check should route ${family} to compat (${br} cases)`);
         }
-        const [ca, ba] = [analytic("clean"), analytic("measure")];
-        if (!(ca !== undefined && ca <= 1)) problems.push(`clean: analytic glyph p50 ${ca} should be within 1 device px`);
-        if (!(ba !== undefined && ba > 1)) problems.push(`measure: analytic glyph p50 ${ba} should exceed 1 device px`);
       }
       return {
         exit_code: problems.length ? 1 : 0,
@@ -1789,7 +1792,7 @@ const DEFS: Record<string, CheckDef> = {
           thresholds: { clean: cells("clean").map(c => `${c.key}:${c.pass ? "PASS" : "FAIL"}`), freeze: cells("freeze").map(c => `${c.key}:${c.pass ? "PASS" : "FAIL"}`) },
           fonts: { clean: font("clean", "builtin")?.failures?.length ?? null, freeze: font("freeze", "builtin")?.failures?.filter((f: string) => f.startsWith("re-atlas")).length ?? null },
           advance: { clean: advance("clean", "Georgia"), measure: advance("measure", "Georgia") },
-          analyticP50: { clean: analytic("clean"), measure: analytic("measure") },
+          routed: { clean: routed("clean", "Georgia"), measure: routed("measure", "Georgia") },
           pixel: Object.fromEntries(["clean", "shift", "drop"].map(arm => [arm, { p50: glyphs(arm)?.summary?.pixel?.p50, withinTol: glyphs(arm)?.summary?.pixel?.withinTol, missingGlyphs: glyphs(arm)?.summary?.pixel?.missing, missingLabels: glyphs(arm)?.summary?.missingLabels }]))
         }
       };

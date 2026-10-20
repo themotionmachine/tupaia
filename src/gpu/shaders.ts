@@ -509,7 +509,7 @@ void main() {
 // Label glyphs: instance (cx cy angle) + (lx ly w h) + uv + rgba; the atlas stores coverage in alpha. A negative
 // alpha marks a soft cell (a text-shadow's blurred mask, text.ts): drawn with |alpha| and no coverage floor.
 //
-// GLYPH (W3; this program only, the rest of the file is STROKE2's): the coverage is reconstructed with a Lanczos-3
+// GLYPH (W3; this program only, the rest of the file is STROKE's): the coverage is reconstructed with a Lanczos-3
 // filter, not bilinear. A curved label's glyph is an axis-aligned mask cut at the raster bucket and drawn rotated, at a
 // sub-texel offset, where Skia rasterizes the SVG glyph directly at its rotation and position. Bilinear sampling
 // smears every edge over about one more device px (a faint fringe: on the parity labels the GPU arm had ~20% more ink
@@ -517,6 +517,20 @@ void main() {
 // floor drops the faint ringing and fringe it leaves where Skia's own coverage is already zero. Where the bucket
 // oversamples the screen by more than 10% (zoom between powers of two), the mask is box-filtered over the pixel
 // footprint instead (four bilinear taps), which a fixed-size kernel would alias.
+//
+// GLYPH2 (W3b): two things Chromium does per zoom, which a glyph baked at the raster bucket cannot follow, are done
+// here per frame from u_k, the camera's CSS px per world unit (one uniform, set by the text pass):
+// - a central baseline (a_baseline = ascent, descent, mode; text.ts centralShiftAt is the reference copy): Chromium
+//   rounds the ascent and descent of the font scaled by k to whole CSS px, so the shift moves with k inside a bucket
+//   (up to 3.5 device px when baked at the prepare's zoom); mode 2 rounds a nested box's shift up to a whole CSS px;
+// - a text-shadow, which Chromium paints in CSS px whatever the user-space transform. A soft cell anchors its
+//   top-left corner at the text's pen, holds its Gaussian sigma in device px in the angle slot (soft cells are never
+//   rotated) and its offset in CSS px in (lx, ly). Its mask was blurred at the raster bucket, i.e. with sigma
+//   min(sigma, SHADOW_MASK_SIGMA) texels (text.ts cuts wider blurs at a reduced resolution), which on screen is
+//   sigma * (k * dpr / bucket) device px: narrower than CSS's whenever k * dpr is not the bucket. The fragment shader
+//   adds the missing Gaussian, sqrt(sigma^2 - shown^2) device px, as a weighted grid of bilinear taps clamped to the
+//   cell (text.ts gives the cell a 6-sigma margin, enough for the bucket's 2x).
+export const SHADOW_MASK_SIGMA = 2;
 export const glyph = {
   vs: `${header}
 in vec2 a_corner;
@@ -524,26 +538,47 @@ in vec3 a_anchor;
 in vec4 a_box;
 in vec4 a_uv;
 in vec4 a_color;
+in vec3 a_baseline;
 uniform mat3 u_matrix;
 uniform float u_atlasScale; // GLYPH_ATLAS / the uploaded atlas rows (text.ts glyphAtlasRows)
+uniform float u_k; // CSS px per world unit at the current camera
 out vec2 v_uv;
 out vec4 v_color;
 out float v_soft;
+flat out float v_sigma;
+flat out vec4 v_cell;
+float centralShift() {
+  if (a_baseline.z < 0.5) return 0.0;
+  float css = (floor(a_baseline.x * u_k + 0.5) - floor(a_baseline.y * u_k + 0.5)) * 0.5;
+  if (a_baseline.z > 1.5) css = ceil(css - 1e-3);
+  return css / u_k;
+}
 void main() {
-  vec2 local = a_box.xy + a_corner * a_box.zw;
-  float c = cos(a_anchor.z);
-  float s = sin(a_anchor.z);
-  vec2 world = a_anchor.xy + vec2(c * local.x - s * local.y, s * local.x + c * local.y);
+  vec2 world;
+  float shift = centralShift();
+  v_soft = a_color.a < 0.0 ? 1.0 : 0.0;
+  if (v_soft > 0.5) {
+    world = a_anchor.xy + a_corner * a_box.zw + (a_box.xy + vec2(0.0, shift * u_k)) / max(u_k, 1e-6);
+    v_sigma = a_anchor.z;
+  } else {
+    vec2 local = a_box.xy + a_corner * a_box.zw + vec2(0.0, shift);
+    float c = cos(a_anchor.z);
+    float s = sin(a_anchor.z);
+    world = a_anchor.xy + vec2(c * local.x - s * local.y, s * local.x + c * local.y);
+    v_sigma = 0.0;
+  }
   v_uv = mix(a_uv.xy, a_uv.zw, a_corner) * vec2(1.0, u_atlasScale);
+  v_cell = a_uv * vec4(1.0, u_atlasScale, 1.0, u_atlasScale);
   float alpha = abs(a_color.a);
   v_color = vec4(a_color.rgb * alpha, alpha);
-  v_soft = a_color.a < 0.0 ? 1.0 : 0.0;
   gl_Position = vec4((u_matrix * vec3(world, 1.0)).xy, 0.0, 1.0);
 }`,
   fs: `${header}
 in vec2 v_uv;
 in vec4 v_color;
 in float v_soft;
+flat in float v_sigma;
+flat in vec4 v_cell;
 uniform sampler2D u_atlas;
 out vec4 color;
 float lanczos3(float x) {
@@ -553,43 +588,74 @@ float lanczos3(float x) {
   float p = 3.14159265 * x;
   return 3.0 * sin(p) * sin(p / 3.0) / (p * p);
 }
+// the soft cell's coverage plus the Gaussian the bucket's mask lacks on screen (see the program's comment)
+float softCoverage(vec2 p, vec2 dx, vec2 dy, vec2 size) {
+  vec2 texel = 1.0 / size;
+  vec2 lo = v_cell.xy + 0.5 * texel;
+  vec2 hi = v_cell.zw - 0.5 * texel;
+  float perPx = max(length(dx), length(dy)); // atlas texels per device px
+  float shown = min(v_sigma, ${SHADOW_MASK_SIGMA.toFixed(1)}) / max(perPx, 1e-6); // the mask's sigma on screen, device px
+  float extra = sqrt(max(v_sigma * v_sigma - shown * shown, 0.0)) * perPx; // texels
+  if (extra < 0.35) return textureLod(u_atlas, clamp((p + 0.5) * texel, lo, hi), 0.0).a;
+  float spacing = max(1.0, 0.75 * extra);
+  int reach = int(min(4.0, ceil(3.0 * extra / spacing)));
+  float k = -0.5 * spacing * spacing / (extra * extra);
+  float sum = 0.0;
+  float weights = 0.0;
+  for (int j = -4; j <= 4; j++) {
+    if (j < -reach || j > reach) continue;
+    for (int i = -4; i <= 4; i++) {
+      if (i < -reach || i > reach) continue;
+      float w = exp(k * float(i * i + j * j));
+      sum += w * textureLod(u_atlas, clamp((p + 0.5 + vec2(i, j) * spacing) * texel, lo, hi), 0.0).a;
+      weights += w;
+    }
+  }
+  return sum / weights;
+}
 void main() {
-  ivec2 size = textureSize(u_atlas, 0);
-  vec2 p = v_uv * vec2(size) - 0.5;
+  ivec2 isize = textureSize(u_atlas, 0);
+  vec2 size = vec2(isize);
+  vec2 p = v_uv * size - 0.5;
   vec2 dx = dFdx(p);
   vec2 dy = dFdy(p);
-  float minify = max(length(dx), length(dy)); // atlas texels per device px
   float coverage = 0.0;
-  if (minify > 1.1) {
-    vec2 texel = 1.0 / vec2(size);
-    for (int i = 0; i < 4; i++) {
-      vec2 o = vec2(i == 1 || i == 3 ? 0.25 : -0.25, i >= 2 ? 0.25 : -0.25);
-      coverage += texture(u_atlas, (p + 0.5 + o.x * dx + o.y * dy) * texel).a;
-    }
-    coverage *= 0.25;
+  if (v_soft > 0.5) {
+    coverage = softCoverage(p, dx, dy, size);
   } else {
-    vec2 f = fract(p);
-    ivec2 base = ivec2(floor(p)) - 2;
-    float wx[6];
-    float wy[6];
-    float sx = 0.0;
-    float sy = 0.0;
-    for (int i = 0; i < 6; i++) {
-      wx[i] = lanczos3(f.x - float(i - 2));
-      wy[i] = lanczos3(f.y - float(i - 2));
-      sx += wx[i];
-      sy += wy[i];
+    float minify = max(length(dx), length(dy)); // atlas texels per device px
+    if (minify > 1.1) {
+      vec2 texel = 1.0 / size;
+      for (int i = 0; i < 4; i++) {
+        vec2 o = vec2(i == 1 || i == 3 ? 0.25 : -0.25, i >= 2 ? 0.25 : -0.25);
+        // explicit level 0: the atlas has no mipmaps, and derivatives inside non-uniform control flow are undefined
+        coverage += textureLod(u_atlas, (p + 0.5 + o.x * dx + o.y * dy) * texel, 0.0).a;
+      }
+      coverage *= 0.25;
+    } else {
+      vec2 f = fract(p);
+      ivec2 base = ivec2(floor(p)) - 2;
+      float wx[6];
+      float wy[6];
+      float sx = 0.0;
+      float sy = 0.0;
+      for (int i = 0; i < 6; i++) {
+        wx[i] = lanczos3(f.x - float(i - 2));
+        wy[i] = lanczos3(f.y - float(i - 2));
+        sx += wx[i];
+        sy += wy[i];
+      }
+      for (int j = 0; j < 6; j++) {
+        float row = 0.0;
+        for (int i = 0; i < 6; i++) row += wx[i] * texelFetch(u_atlas, clamp(base + ivec2(i, j), ivec2(0), isize - 1), 0).a;
+        coverage += wy[j] * row;
+      }
+      coverage /= sx * sy;
     }
-    for (int j = 0; j < 6; j++) {
-      float row = 0.0;
-      for (int i = 0; i < 6; i++) row += wx[i] * texelFetch(u_atlas, clamp(base + ivec2(i, j), ivec2(0), size - 1), 0).a;
-      coverage += wy[j] * row;
-    }
-    coverage /= sx * sy;
+    coverage = clamp(coverage, 0.0, 1.0);
+    if (coverage < 0.03) coverage = 0.0;
   }
-  coverage = clamp(coverage, 0.0, 1.0);
-  if (v_soft < 0.5 && coverage < 0.03) coverage = 0.0;
-  color = v_color * coverage;
+  color = v_color * clamp(coverage, 0.0, 1.0);
 }`
 };
 
