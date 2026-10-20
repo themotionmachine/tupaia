@@ -145,6 +145,14 @@ const ARG_SPEC: Record<string, Spec> = {
   break: { type: "enum", values: ["none", "drop-batch", "thin-stroke", "drop-icon"], default: "none" },
   // how the golden captures its GPU arm: canvas alone over an opaque cover (default), composite, or probe (both)
   gpu_arm: { type: "enum", values: ["canvas", "composite", "probe"], default: "canvas" },
+  // the SVG arm of a family shown as a perf bitmap of its vectors (burg icons, cell mesh): auto = per family, the form the
+  // GPU is built to reproduce (vector for burgs, the bitmap as shown for cells); the other is always reported (W3 REF)
+  svg_ref: { type: "enum", values: ["auto", "vector", "seen"], default: "auto" },
+  // ms between SVG-arm shots that must agree before it counts as settled (0 = one shot)
+  settle_ms: { type: "int", default: 400 },
+  // emblem COA symbols: pre = rendered before the first capture (default), lazy = left to the app, late = held back
+  // until the GPU frame is built and then returned (the lazy-COA race made deterministic; see `coa-race`)
+  coa: { type: "enum", values: ["pre", "lazy", "late"], default: "pre" },
   // extra page URL flags for the GPU arm, e.g. params=gpu-native-shapes=1 (gpu-* keys only, "+"-joined for several)
   params: { type: "string", default: "", check: text => { for (const kv of text.split("+").filter(Boolean)) if (!/^gpu-[a-z0-9-]+=[\w.-]*$/.test(kv)) throw new UsageError(`params entry ${kv} must be gpu-<flag>=<value>`); } },
   // census checks (bench/host/{toggle-census,resize-print,customization,memory-cycles}.ts); `break` is overridden per check
@@ -645,6 +653,14 @@ function resolveNamedFixture(name: string): string {
   return path;
 }
 
+// the W3 REF knobs of the golden: SVG reference form, SVG settle shots, how emblem COA symbols arrive
+const goldenRefEnv = (ctx: Ctx): Record<string, string> => ({
+  GOLDEN_SVG_REF: String(ctx.args.svg_ref),
+  GOLDEN_SETTLE_MS: String(ctx.args.settle_ms),
+  GOLDEN_PRECOA: ctx.args.coa === "pre" ? "1" : "0",
+  GOLDEN_COA_LATE: ctx.args.coa === "late" ? "1" : "0"
+});
+
 async function goldenCheck(ctx: Ctx): Promise<Partial<Result>> {
   const report = join(ctx.dir, "golden.json");
   const env: Record<string, string> = {
@@ -659,7 +675,8 @@ async function goldenCheck(ctx: Ctx): Promise<Partial<Result>> {
     GOLDEN_KEEP: String(ctx.args.keep),
     GOLDEN_BREAK: String(ctx.args.break),
     GOLDEN_GPU_ARM: String(ctx.args.gpu_arm),
-    GOLDEN_PARAMS: String(ctx.args.params ?? "")
+    GOLDEN_PARAMS: String(ctx.args.params ?? ""),
+    ...goldenRefEnv(ctx)
   };
   if (ctx.args.census) {
     const path = resolve(String(ctx.args.census));
@@ -700,6 +717,26 @@ async function goldenCheck(ctx: Ctx): Promise<Partial<Result>> {
   return result;
 }
 
+// The lazy-COA race, made deterministic (W3 REF). The app inserts each emblem's COA symbol into #coas (inside
+// svg#defElements, outside svg#map) only after fetching its charges, so a GPU prepare can precede it; the renderer
+// observes svg#map alone, so it never learns the symbols arrived and keeps a frame without emblems. The golden pre-renders
+// the symbols (`coa=pre`, its default), which is why it cannot see this. Here, per cell, the GPU frame is built with #coas
+// empty (current and refined, emblems absent) and the symbols are then put back, exactly what a late fetch does; the
+// emblems cell must then follow them. A renderer that does not fails with "empty in GPU arm" and a whole-frame gap, with
+// `coaLate.reprepared` false in the report. Expected to FAIL until the renderer observes #coas (LIFE3).
+async function coaRaceCheck(ctx: Ctx): Promise<Partial<Result>> {
+  Object.assign(ctx.args, { layers: "emblems", coastk: "", preset: "default", bg: "#ffffff", reading: "over44", keep: "all", break: "none", gpu_arm: "canvas", params: "", svg_ref: "auto", settle_ms: 400, coa: "late" });
+  const result = await goldenCheck(ctx);
+  const cells: Json[] = readJson(join(ctx.dir, "golden.json"))?.cells ?? [];
+  const problems: string[] = [];
+  if (!cells.length) problems.push("no emblems cell was captured");
+  for (const cell of cells) if (!cell.coaLate?.symbols) problems.push(`${cell.key}: the symbols were not held back (the check is vacuous)`);
+  const late = cells.map(c => ({ cell: c.key, pass: c.pass, symbols: c.coaLate?.symbols, reprepared: c.coaLate?.reprepared, inkSvg: c.metrics?.inkSvg, inkGpu: c.metrics?.inkGpu }));
+  const raced = result.failure && !problems.length ? `lazy-COA race: ${result.failure}` : null;
+  const failure = [raced, ...problems].filter(Boolean).join(" | ") || null;
+  return { ...result, exit_code: failure ? 1 : 0, failure, metrics: { ...result.metrics, late } };
+}
+
 // Re-proves that the golden harness can still tell pass from fail, on the shared fixture (so it does not wait for the
 // parity map), centred cameras, k 1, dpr 2:
 //   clean:       ocean, GOLDEN_SELFTEST_STROKE and GOLDEN_SELFTEST_ICON must pass, captured with GOLDEN_GPU_ARM=probe,
@@ -720,13 +757,16 @@ async function goldenSelftestCheck(ctx: Ctx): Promise<Partial<Result>> {
     { arm: "clean", layers: ["ocean", SELFTEST_STROKE, SELFTEST_ICON], brk: "none", gpuArm: "probe" },
     { arm: "drop-batch", layers: ["ocean"], brk: "drop-batch", gpuArm: "canvas" },
     { arm: "thin-stroke", layers: [SELFTEST_STROKE], brk: "thin-stroke", gpuArm: "canvas" },
-    { arm: "drop-icon", layers: [SELFTEST_ICON], brk: "drop-icon", gpuArm: "canvas" }
+    { arm: "drop-icon", layers: [SELFTEST_ICON], brk: "drop-icon", gpuArm: "canvas" },
+    // W3 REF: the burg icons are shown by the app as a blurry bitmap of their vectors; the golden must judge the GPU against
+    // the vector form (this cell passes) and still report the bitmap as shown (which fails the coverage gate at k 2)
+    { arm: "dense-ref", layers: ["burgs"], brk: "none", gpuArm: "canvas", parity: true, k: "2" }
   ];
   const arms: Record<string, Json> = {};
   for (const run of runs) {
     const dir = join(ctx.dir, run.arm);
     mkdirSync(dir, { recursive: true });
-    const env = { ...base, GATE_OUT_DIR: dir, GOLDEN_LAYERS: run.layers.join(","), GOLDEN_BREAK: run.brk, GOLDEN_GPU_ARM: run.gpuArm };
+    const env = { ...base, ...(run.parity ? { GOLDEN_MAP: resolveNamedFixture("parity"), GOLDEN_K: run.k ?? "1" } : {}), GATE_OUT_DIR: dir, GOLDEN_LAYERS: run.layers.join(","), GOLDEN_BREAK: run.brk, GOLDEN_GPU_ARM: run.gpuArm };
     const code = await exec(nodeScript("bench/host/layer-golden.ts"), ctx.env(env), ctx.log, DEFS["golden-selftest"].timeout, true);
     arms[run.arm] = { code, data: readJson(join(dir, "golden.json")) };
   }
@@ -755,6 +795,12 @@ async function goldenSelftestCheck(ctx: Ctx): Promise<Partial<Result>> {
   broken("drop-batch", "ocean", g => !(g.ssim && g.over16 && g[String(ctx.args.reading)]), "a dropped path");
   broken("thin-stroke", SELFTEST_STROKE, g => g.coverage === false && g.ssim && g.over16 && g[String(ctx.args.reading)], "a thinner stroke the whole-frame gates miss");
   broken("drop-icon", SELFTEST_ICON, g => g.coverage === false, "dropped icons");
+  const dense = arms["dense-ref"].data && cellOf("dense-ref", "burgs");
+  if (arms["dense-ref"].code !== 0 && !dense) problems.push(`dense-ref run exit ${arms["dense-ref"].code}, no burgs cell`);
+  else if (!dense) problems.push("dense-ref run captured no burgs cell");
+  else if (!dense.pass) problems.push(`dense-ref: burgs k=2 should pass against the vector form and failed: ${dense.failures?.[0] ?? "?"}`);
+  else if (dense.svgRef !== "vector") problems.push(`dense-ref: the burg reference was "${dense.svgRef}", not the vector form (the app shows a bitmap at k 2)`);
+  else if (!dense.otherRef || dense.otherRef.ref !== "seen" || dense.otherRef.pass) problems.push(`dense-ref: the bitmap as shown should fail coverage against the GPU's crisp icons and did not (${JSON.stringify(dense.otherRef ?? null)}): the check no longer separates blur from a real gap`);
   const metricsOf = (c: Json) =>
     c && {
       pass: c.pass,
@@ -1508,9 +1554,17 @@ const DEFS: Record<string, CheckDef> = {
   "corpus-selftest": { lock: "shared", keys: [], timeout: 900, run: corpusSelftestCheck },
   "consumers-selftest": { lock: "shared", keys: [], timeout: 1200, run: consumersSelftestCheck },
   "golden-selftest": { lock: "shared", keys: ["reading"], timeout: 900, run: goldenSelftestCheck },
+  // the lazy-COA race on its own (W3 REF); fails until the renderer follows #coas
+  "coa-race": {
+    lock: "shared",
+    keys: ["k", "dpr", "fixture"],
+    spec: { fixture: { type: "string", default: "parity" }, k: { type: "string", default: "2,4,8", check: listOf(text => { if (!parseZooms(text).length) throw new Error("k needs at least one zoom"); }) }, dpr: DPR_LIST },
+    timeout: 900,
+    run: coaRaceCheck
+  },
   golden: {
     lock: "shared",
-    keys: ["layers", "k", "coastk", "dpr", "preset", "fixture", "census", "bg", "reading", "keep", "break", "gpu_arm", "params"],
+    keys: ["layers", "k", "coastk", "dpr", "preset", "fixture", "census", "bg", "reading", "keep", "break", "gpu_arm", "params", "svg_ref", "settle_ms", "coa"],
     spec: { dpr: DPR_LIST },
     timeout: 3600,
     run: goldenCheck
@@ -1779,6 +1833,8 @@ const TIERS: Record<string, Array<[string, Args]>> = {
     ["golden-selftest", {}],
     // D5 gate scale: default preset, k {1,4}, dpr 2, every layer family, on the parity fixture (FIX packet)
     ["golden", { layers: "all", k: "1,4", dpr: "2", preset: "default", fixture: "parity", census: "tests/fixtures/parity/census-expectations.json" }],
+    // the lazy-COA race (emblems follow symbols that arrive after the GPU prepared); fails until the renderer observes #coas
+    ["coa-race", {}],
     // G-E editor replay (svg recorded, gpu and gpu-select replayed) and the document consumers (rows 31-38, 40)
     ["replay-selftest", {}],
     ["replay", {}],

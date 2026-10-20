@@ -198,11 +198,13 @@ export interface GoldenCellLike {
   census?: { native: number; compat: number; skipped: number } | null;
   metrics?: { ssim?: number; over16Fraction?: number; over44Fraction?: number } | null;
   /** the golden's per-gate verdicts of the cell (golden-metrics judgeCell) */
-  gates?: Partial<Record<"ssim" | "over16" | "over44" | "conservative" | "populated", boolean>>;
+  gates?: Partial<Record<"ssim" | "over16" | "over44" | "conservative" | "coverage" | "populated", boolean>>;
   renderer?: { active?: string; fallbackReason?: string };
 }
-/** The D1 gates a preset can induce a failure of (the reading's own changed-pixel gate is added by summarizePresets). */
-export const INDUCIBLE_GATES = ["ssim", "over16", "populated"] as const;
+/** The D1 + D11 gates a preset can induce a failure of: whole-frame SSIM and over16, "populated", and the per-layer
+ *  coverage gate (D11: the layer's own ink and over16-of-ink). The reading's own changed-pixel gate (over44 by default,
+ *  D11) is added by summarizePresets. */
+export const INDUCIBLE_GATES = ["ssim", "over16", "populated", "coverage"] as const;
 export interface PresetRow {
   preset: string;
   cells: number;
@@ -212,6 +214,9 @@ export interface PresetRow {
    *  preset for the same (family, k) and fails under this one: the preset caused it. Counted per gate, not per cell, so a
    *  layer that already fails some other gate under the baseline cannot hide a regression of a gate it used to pass. */
   induced: number;
+  /** the strictest reading of "induced": cells that pass every gate under the baseline preset (the cell passes) and fail
+   *  under this one. A subset of `induced`. */
+  inducedFromPass: number;
   /** induced cells per gate */
   inducedGates: Record<string, number>;
   /** native / compat / skipped element counts summed over the preset's cells */
@@ -231,7 +236,7 @@ const HARD = /^(GPU not active|GPU frame did not settle|harness:)/;
 const cellId = (c: GoldenCellLike) => `${c.family}/k${c.k}${/@/.test(c.key) ? c.key.slice(c.key.indexOf("@")) : ""}`;
 
 /** Aggregates one golden report (cells of several presets) by preset. `baseline` is the preset the induced count is relative to. */
-export function summarizePresets(cells: GoldenCellLike[], baseline = "default", reading: "conservative" | "over44" = "conservative"): { rows: PresetRow[]; byFamily: Record<string, Record<string, number | null>> } {
+export function summarizePresets(cells: GoldenCellLike[], baseline = "default", reading: "conservative" | "over44" = "over44"): { rows: PresetRow[]; byFamily: Record<string, Record<string, number | null>> } {
   const presets = [...new Set(cells.map(c => c.preset))];
   const base = new Map(cells.filter(c => c.preset === baseline).map(c => [cellId(c), c]));
   const rows = presets.map<PresetRow>(preset => {
@@ -247,6 +252,7 @@ export function summarizePresets(cells: GoldenCellLike[], baseline = "default", 
       return gates.filter(g => was.gates![g] === true && c.gates![g] === false);
     };
     const induced = preset === baseline ? [] : mine.filter(c => inducedBy(c).length);
+    const fromPass = induced.filter(c => !c.pass && base.get(cellId(c))?.pass);
     for (const c of induced) for (const g of inducedBy(c)) inducedGates[g] = (inducedGates[g] ?? 0) + 1;
     const sum = (key: "native" | "compat" | "skipped") => mine.reduce((n, c) => n + (c.census?.[key] ?? 0), 0);
     const native = sum("native");
@@ -258,6 +264,7 @@ export function summarizePresets(cells: GoldenCellLike[], baseline = "default", 
       pass: mine.length - failed.length,
       fail: failed.length,
       induced: induced.length,
+      inducedFromPass: fromPass.length,
       inducedGates,
       native,
       compat,
