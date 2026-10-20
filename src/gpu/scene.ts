@@ -208,6 +208,10 @@ export interface SceneOptions {
   // the parity golden regresses on precipitation (circles) and population (lines) because native edges are not
   // analytically antialiased like the SVG/compat raster, and layers of thousands of tiny primitives are mostly edge.
   nativeShapes?: boolean;
+  // The baked cell mesh as native strokes. Default off (opt in with ?gpu-native-cells=1): SVG shows the canonical
+  // mesh bitmap (cell-mesh-canvas.ts, <= 2 px per unit, smoothed when zoomed), so the native hairlines drew 0.17x its
+  // ink at k 4 and 1.7x at k 1 on the parity golden. Off, the image is a compat run (budgeted world raster + detail).
+  nativeCells?: boolean;
 }
 
 function reliefIcons(value: string | null): ReliefSprite[] | null {
@@ -251,14 +255,18 @@ export function materializedIcons(group: Element): ReliefSprite[] | null {
 export function buildScene(viewbox: Element, curveTolerance = 0.2, options: SceneOptions = {}): Scene {
   const maskRects = options.maskRects ?? flag("gpu-mask-rects") === "1";
   const nativeShapes = options.nativeShapes ?? flag("gpu-native-shapes") === "1";
-  return withCanonicalEmblemPaint(() => canonicalBuildScene(viewbox, curveTolerance, maskRects, nativeShapes));
+  const nativeCells = options.nativeCells ?? flag("gpu-native-cells") === "1";
+  return withCanonicalEmblemPaint(() =>
+    canonicalBuildScene(viewbox, curveTolerance, maskRects, nativeShapes, nativeCells)
+  );
 }
 
 function canonicalBuildScene(
   viewbox: Element,
   curveTolerance: number,
   maskRects: boolean,
-  nativeShapes: boolean
+  nativeShapes: boolean,
+  nativeCells: boolean
 ): Scene {
   const layers: Record<string, LayerReport> = {};
   // null unless a bench page installed globalThis.__gpuSceneCensus (scene-census.ts); read-only either way
@@ -409,6 +417,7 @@ function canonicalBuildScene(
         const parent = computed(element.parentElement!);
         const stroke = parseColor(parent.stroke, number(parent.strokeOpacity, 1));
         const width = number(parent.strokeWidth, 1);
+        if (stroke && width > 0 && !nativeCells) return compat(element, layer, "cell mesh bitmap", out);
         if (stroke && width > 0) out.push({ kind: "cells", element, layer, stroke, width });
         return report(layer, true);
       }

@@ -406,18 +406,6 @@ export function cellRings(key = ""): Subpath[] {
   return rings;
 }
 
-// The decoded canonical mesh image, kept for its href (an immutable data URL): a prepare per edit re-decoded a
-// multi-megapixel PNG otherwise. One entry: the mesh layer has one image.
-let meshDecoded: { href: string; image: Promise<HTMLImageElement | null> } | null = null;
-function meshImage(element: Element, href: string, maxTexture: number): Promise<HTMLImageElement | null> {
-  if (!href || meshDecoded?.href !== href) {
-    const image = cachedReliefImage(element, maxTexture);
-    meshDecoded = href ? { href, image } : null;
-    return image;
-  }
-  return meshDecoded.image;
-}
-
 function walkRings(graph: Graph): Subpath[] {
   const rings: Subpath[] = [];
   for (let i = 0; i < graph.cells.i.length; i++) {
@@ -660,23 +648,9 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
         }
         out.push(...pending);
       } else if (draw.kind === "cells") {
-        // SVG displays the canonical mesh bitmap (cell-mesh-canvas.ts: ≤2 px per unit, smoothed when zoomed), not the
-        // vectors: native hairlines drew 0.17× its ink at k 4 and 1.7× at k 1. Show the same pixels (viewport crops);
-        // the strokes remain the fallback when the bitmap cannot be decoded.
+        // opt-in native hairlines (?gpu-native-cells=1); by default scene.ts routes the mesh to compat, which shows the
+        // canonical mesh bitmap SVG displays
         const href = draw.element.getAttribute("href") || draw.element.getAttribute("xlink:href") || "";
-        const image = await meshImage(draw.element, href, device.maxTextureSize);
-        if (ctx.stale()) return false;
-        const rect: ImageBatch["rect"] = [
-          Number(draw.element.getAttribute("x") || 0),
-          Number(draw.element.getAttribute("y") || 0),
-          Number(draw.element.getAttribute("width")),
-          Number(draw.element.getAttribute("height"))
-        ];
-        if (image && rect.every(Number.isFinite) && rect[2] > 0 && rect[3] > 0) {
-          scene.layers[draw.layer].source = "canonical-raster-cache";
-          out.push(addWindow(image, meetImageRect(rect, image.naturalWidth, image.naturalHeight)));
-          continue;
-        }
         const rings = cellRings(href);
         const batch = stroke(rings, { stroke: draw.stroke, width: draw.width, dashes: [], dashOffset: 0 });
         if (batch?.count) out.push(batch);
