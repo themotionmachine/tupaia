@@ -84,8 +84,10 @@ try {
   const opened = await openPage(browser, served.origin, { dpr, renderer: "gpu", launcher, sink, label: "gpu" });
   const { page } = opened;
   report.adapter = opened.adapter;
-  // the reuse path whatever the build default (and the self-test's blind tracker): the renderer reads both at boot
-  const params = `&gpu-compat-reuse=1${breakMode === "none" ? "" : `&gpu-compat-reuse-break=${breakMode}`}`;
+  // the reuse path whatever the build default (and the self-test's blind tracker): the renderer reads both at boot.
+  // First details off (RES, prepare.ts firstDetails): they re-cut sharp runs (markers, emblems) at the view before the
+  // frame commits, which hides a reused base raster in the captured view though a pan within the bucket shows it.
+  const params = `&gpu-compat-reuse=1&gpu-first-detail=0${breakMode === "none" ? "" : `&gpu-compat-reuse-break=${breakMode}`}`;
   await page.goto(`${page.url()}${params}`);
   await page.evaluate(async () => {
     const ready = await (globalThis as any).__tupaia.call("ready", { timeoutMs: 120000 });

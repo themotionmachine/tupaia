@@ -183,9 +183,9 @@ Each tier runs its steps serially and stops at the first failure. Pass `keep_goi
 
 | Tier | Steps | Runtime |
 |---|---|---|
-| `quick` | typecheck → unit → build | ~15 s |
+| `quick` | typecheck → typecheck-bench → unit → build | ~25 s |
 | `browser` | build → *shared lock* → canonical → palette → picking → integration (short cohort) → golden-selftest → golden (D5 gate scale: all families, k 1,4, dpr 2, default preset, `fixture=parity`) → coa-race (fails until the renderer observes `#coas`) → replay-selftest → replay → consumers-selftest → consumers → **toggles → customization → resize-print** (wave 2 census) | the earlier steps' time (replay and consumers were added after the ~15–17 min first measured) plus ~16 min for the census steps (11, 3, 3) |
-| `nightly` | golden × 24, each under its own *shared slot* (released between steps): dpr {1,2} × the 12 built-in presets, each step all families at k {1,2,4,8} plus the coastline switch points 1.4/1.6/2.5/2.7 (`coastk`), `fixture=parity`, `keep=fail`. then `memory-cycles` and `census-selftest`. Always runs every step (`keep_going` is implied). | ~3.5–4.5 h (the two census steps add ~35 min) |
+| `nightly` | golden × 24, each under its own *shared slot* (released between steps): dpr {1,2} × the 12 built-in presets, each step all families at k {1,2,4,8} plus the coastline switch points 1.4/1.6/2.5/2.7 (`coastk`), `fixture=parity`, `keep=fail`; then `picking` at zoom 1 and at zoom 4 (`picking[k1]`, `picking[k4]`; the browser tier runs zoom 2; `phase=motion` gates nothing, so no tier runs it); then `memory-cycles`, `census-selftest`, `corpus-selftest` and `corpus`. Always runs every step (`keep_going` is implied), so a failing picking step is recorded without stopping the matrix. | ~3.5–4.5 h (the two census steps add ~35 min, the two picking steps ~5 min) |
 | `full` | *exclusive lock* → browser → fidelity → navigation → metrics (fresh) → paired blocks 1–5 at dpr 2 → paired-summary | ~45–50 min |
 
 **Where the census checks run, and why.** `toggles`, `customization` and `resize-print` are in `browser`: together
