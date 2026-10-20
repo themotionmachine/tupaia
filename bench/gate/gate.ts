@@ -1403,7 +1403,7 @@ const DEFS: Record<string, CheckDef> = {
     lock: "shared",
     keys: ["editors", "arms", "dpr", "launcher", "fixture"],
     spec: { fixture: { type: "string", default: "parity" } },
-    timeout: 900,
+    timeout: 3600, // 39 scripts × 3 arms, one fresh page per script
     run: ctx => replayCheck(ctx, {})
   },
   // The same replay, arms one after another under the exclusive lock: resume latency (current and refined frame) for PERF.
