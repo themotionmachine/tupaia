@@ -526,9 +526,27 @@ class Planimeter extends Measurer {
 
     const polygonArea = rn(Math.abs(d3.polygonArea(this.points)));
     const area = si(getArea(polygonArea)) + " " + getAreaUnit();
-    const c = polylabel([this.points], 1.0);
+    const c = planimeterLabelPoint(this.points);
     this.el.select("text").attr("x", c[0]).attr("y", c[1]).text(area);
   }
+}
+
+// tupaia: upstream FMG bug. libs/polylabel.min.js (polylabel 1.0) never returns for a degenerate ring: a zero-height or
+// zero-width bounding box (a horizontal or vertical planimeter stroke) gives it a cell size of 0, so its grid loop
+// never advances, and a zero-area ring (collinear points) gives it a NaN centroid, so its subdivision never reaches the
+// precision. Either hangs the page on the stroke's third point. A ring under a pixel across or under a square pixel
+// in area has no inside to label: its bounding-box center is used instead.
+function planimeterLabelPoint(points) {
+  let [x0, y0, x1, y1] = [Infinity, Infinity, -Infinity, -Infinity];
+  for (const [x, y] of points) {
+    x0 = Math.min(x0, x);
+    y0 = Math.min(y0, y);
+    x1 = Math.max(x1, x);
+    y1 = Math.max(y1, y);
+  }
+  const area = Math.abs(d3.polygonArea(points));
+  if (x1 - x0 >= 1 && y1 - y0 >= 1 && area >= 1) return polylabel([points], 1.0);
+  return [(x0 + x1) / 2, (y0 + y1) / 2];
 }
 
 function createDefaultRuler() {
