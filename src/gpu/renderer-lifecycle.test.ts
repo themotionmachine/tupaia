@@ -10,7 +10,8 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 const pipeline = vi.hoisted(() => ({
   prepares: [] as { svg: SVGSVGElement; revision: number }[],
   released: 0,
-  overlayRoots: [] as Element[][]
+  overlayRoots: [] as Element[][],
+  gate: null as Promise<void> | null // when set, prepareFrame waits on it, then honours ctx.stale() as the real one does
 }));
 
 vi.mock("./device", () => ({
@@ -64,8 +65,12 @@ vi.mock("./prepare", () => ({
     pipeline.overlayRoots.push(roots);
     return "full"; // no in-place world-overlay refresh yet: the lane hands it to a full prepare
   },
-  prepareFrame: async (svg: SVGSVGElement, ctx: { revision: number; bucket: number }) => {
+  prepareFrame: async (svg: SVGSVGElement, ctx: { revision: number; bucket: number; stale: () => boolean }) => {
     pipeline.prepares.push({ svg, revision: ctx.revision });
+    if (pipeline.gate) {
+      await pipeline.gate;
+      if (ctx.stale()) return null;
+    }
     return {
       frame: {},
       revision: ctx.revision,
@@ -121,6 +126,7 @@ beforeEach(async () => {
   pipeline.prepares.length = 0;
   pipeline.overlayRoots.length = 0;
   pipeline.released = 0;
+  pipeline.gate = null;
   document.body.innerHTML = "";
   document.body.append(mapSvg());
   fallBacks = [];
@@ -246,5 +252,123 @@ describe("[LIFE] GpuRenderer lifecycle wiring", () => {
     document.getElementById("rivers")!.setAttribute("opacity", "0.5");
     await vi.waitFor(() => expect(pipeline.prepares).toHaveLength(2));
     expect(pipeline.overlayRoots).toEqual([]);
+  });
+});
+
+// Decision D13 (W2 LIFE2): after a suspension that changed the model, the SVG stays on screen until the GPU frame
+// is current; after one that changed nothing, the last GPU frame returns at once.
+describe("[LIFE2] resume hold (D13)", () => {
+  const openDialog = () => {
+    const dialog = document.createElement("div");
+    dialog.className = "ui-dialog";
+    document.body.append(dialog);
+    return dialog;
+  };
+  const closeDialog = (dialog: HTMLElement) => (dialog.style.display = "none");
+  const nextFrames = () => new Promise(resolve => setTimeout(resolve, 60));
+  let open: () => void;
+  const gate = () => (pipeline.gate = new Promise(resolve => (open = resolve)));
+
+  it("an editor opened from Navigate that changed the map holds the SVG until the frame is current", async () => {
+    const dialog = openDialog();
+    await vi.waitFor(() => expect(visible()).toBe(false));
+    document.getElementById("rivers")!.setAttribute("opacity", "0.5"); // the edit
+    await nextFrames();
+    expect(pipeline.prepares).toHaveLength(1); // suspended: deferred to the close
+    gate();
+    closeDialog(dialog);
+    await vi.waitFor(() => expect(pipeline.prepares).toHaveLength(2));
+    await nextFrames();
+    expect(visible()).toBe(false); // never the frame from before the edit
+    expect(renderer.telemetry()).toMatchObject({ hiddenReason: "", hold: { active: true, holds: 1 } });
+    expect(renderer.intentProbe()).toMatchObject({ ready: false, current: false });
+    open();
+    await settled();
+    expect(renderer.telemetry()).toMatchObject({ frameRevision: 1, hold: { active: false, holds: 1 } });
+  });
+
+  it("an editor that changed nothing returns to the last GPU frame at once, with no prepare", async () => {
+    const dialog = openDialog();
+    await vi.waitFor(() => expect(visible()).toBe(false));
+    closeDialog(dialog);
+    await settled();
+    expect(pipeline.prepares).toHaveLength(1);
+    expect(renderer.telemetry().hold).toMatchObject({ active: false, holds: 0, skipped: 1 });
+  });
+
+  it("an edit applied in the same task as the close counts as made inside the editor", async () => {
+    const dialog = openDialog();
+    await vi.waitFor(() => expect(visible()).toBe(false));
+    gate();
+    document.getElementById("rivers")!.setAttribute("opacity", "0.5");
+    closeDialog(dialog);
+    await vi.waitFor(() => expect(pipeline.prepares).toHaveLength(2));
+    await nextFrames();
+    expect(visible()).toBe(false);
+    open();
+    await settled();
+  });
+
+  it("leaving a chosen Edit without changes returns at once; with changes it holds", async () => {
+    renderer.setIntent(true);
+    expect(visible()).toBe(false);
+    renderer.setIntent(false);
+    await settled();
+    expect(pipeline.prepares).toHaveLength(1);
+    renderer.setIntent(true);
+    document.getElementById("rivers")!.setAttribute("opacity", "0.5");
+    gate();
+    renderer.setIntent(false);
+    await vi.waitFor(() => expect(pipeline.prepares).toHaveLength(2));
+    await nextFrames();
+    expect(visible()).toBe(false);
+    open();
+    await settled();
+  });
+
+  it("motion during the hold does not abort the resume prepare (the SVG is what moves)", async () => {
+    const dialog = openDialog();
+    await vi.waitFor(() => expect(visible()).toBe(false));
+    document.getElementById("rivers")!.setAttribute("opacity", "0.5");
+    gate();
+    closeDialog(dialog);
+    await vi.waitFor(() => expect(pipeline.prepares).toHaveLength(2));
+    expect(renderer.camera({ scale: 1.2, x: 5, y: 5 })).toBe(false); // held: the SVG takes the camera
+    expect(renderer.telemetry().moving).toBe(true);
+    open();
+    await settled(); // committed and shown mid-gesture, no second prepare
+    expect(pipeline.prepares).toHaveLength(2);
+    expect(renderer.telemetry()).toMatchObject({ motionDeferrals: 0, frameRevision: 1 });
+    expect(renderer.camera({ scale: 1.3, x: 5, y: 5 })).toBe(true); // the GPU now takes the gesture
+    renderer.camera({ scale: 1.3, x: 5, y: 5, exact: true });
+  });
+
+  it("without a hold, motion still aborts a prepare that would replace the drawn frame", async () => {
+    gate();
+    document.getElementById("rivers")!.setAttribute("opacity", "0.5");
+    await vi.waitFor(() => expect(pipeline.prepares).toHaveLength(2));
+    renderer.camera({ scale: 1.2, x: 5, y: 5 });
+    open();
+    pipeline.gate = null;
+    await vi.waitFor(() => expect(renderer.telemetry().motionDeferrals).toBe(1));
+    expect(renderer.telemetry().frameRevision).toBe(0);
+    renderer.camera({ scale: 1.2, x: 5, y: 5, exact: true });
+    await vi.waitFor(() => expect(renderer.telemetry().frameRevision).toBe(1));
+  });
+
+  it("a change arriving during the hold extends it to the newer revision", async () => {
+    const dialog = openDialog();
+    await vi.waitFor(() => expect(visible()).toBe(false));
+    document.getElementById("rivers")!.setAttribute("opacity", "0.5");
+    gate();
+    closeDialog(dialog);
+    await vi.waitFor(() => expect(pipeline.prepares).toHaveLength(2));
+    document.getElementById("rivers")!.setAttribute("opacity", "0.6"); // supersedes the in-flight prepare
+    await vi.waitFor(() => expect(renderer.telemetry().revision).toBe(2));
+    expect(renderer.intentProbe().holdRevisions).toBe(1);
+    open();
+    pipeline.gate = null;
+    await settled();
+    expect(renderer.telemetry().frameRevision).toBe(2);
   });
 });

@@ -13,7 +13,8 @@
 //   - dispatchClick and editor-global call counts (more than recorded = double dispatch);
 //   - open editor dialogs; no camera move during any pointer action (drag, brush stroke), d3 zoom or GPU camera;
 //   - GPU arms: suspended with the canvas hidden while the editor is open, and resumed after the close. The resume is
-//     timed from the trusted close click to the first current GPU frame and to the first refined frame (D4).
+//     timed from the trusted close click to the first current GPU frame and to the first refined frame (D4). After a
+//     session that changed the model, no GPU frame older than the latest DOM revision may be on screen (D13).
 // Math.random is seeded per step in every arm (the relief brush scatters icons randomly). Each script starts from a
 // fresh load of the fixture, so scripts are independent.
 //
@@ -28,8 +29,9 @@
 //                     resume latency as a timing: `gate replay-resume`, exclusive lock)
 //   REPLAY_BREAK      none, or a comma list of model, dom, dispatch: self-test. At the first input step of every
 //                     replay arm it corrupts pack (a burg name), the model DOM (an attribute on #labels) and/or the
-//                     dispatch count (one extra dispatchClick); the run passes only if every replay arm of every
-//                     script is caught by each corresponding check
+//                     dispatch count (one extra dispatchClick); `stale` reveals the GPU canvas right after the close
+//                     input (as if the renderer showed its pre-edit frame, D13); the run passes only if every replay
+//                     arm of every script is caught by each corresponding check
 // Output in GATE_OUT_DIR: replay.json (report; `failure` null on a pass) and recording.json (the frozen svg actions).
 import { createHash } from "node:crypto";
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -68,7 +70,7 @@ const resumeLimit = Number(env.REPLAY_RESUME_MS || 60000);
 const breakMode = env.REPLAY_BREAK || "none";
 const parallel = (env.REPLAY_PARALLEL ?? "1") !== "0";
 const breaks = breakMode === "none" ? [] : breakMode.split(",").map(b => b.trim());
-if (breaks.some(b => !["model", "dom", "dispatch"].includes(b))) throw Error("REPLAY_BREAK must be none or a list of model, dom, dispatch");
+if (breaks.some(b => !["model", "dom", "dispatch", "stale"].includes(b))) throw Error("REPLAY_BREAK must be none or a list of model, dom, dispatch, stale");
 const mapPath = env.REPLAY_MAP ? resolve(env.REPLAY_MAP) : resolveFixture("parity").path;
 const mapText = readFileSync(mapPath, "utf8");
 const mapSha = createHash("sha256").update(readFileSync(mapPath)).digest("hex");
@@ -249,6 +251,11 @@ async function runStep(page: Page, arm: Arm, step: Step, index: number, frozen: 
     }
     case "close":
       await page.locator(`.ui-dialog:has(> ${step.dialog}) .ui-dialog-titlebar-close`).click();
+      if (breaks.includes("stale") && arm !== "svg")
+        await page.evaluate(() => {
+          const canvas = document.querySelector("canvas[data-gpu-renderer]") as HTMLCanvasElement | null;
+          if (canvas) canvas.style.display = "block"; // self-test: the pre-edit frame on screen (the renderer re-hides it)
+        });
       break;
     case "key":
       await page.keyboard.press(step.key);
@@ -360,7 +367,7 @@ try {
 // ------------------------------------------------------------------ verdicts
 const failures: string[] = [...harness];
 const breakCaught: Record<string, Record<string, boolean>> = {};
-const expectedCatch: Record<string, RegExp> = { model: /model differs/, dom: /model DOM differs/, dispatch: /double dispatch/ };
+const expectedCatch: Record<string, RegExp> = { model: /model differs/, dom: /model DOM differs/, dispatch: /double dispatch/, stale: /stale GPU frame visible/ };
 for (const script of scripts) {
   const rec = recording[script.name]?.steps;
   const row: any = { name: script.name, editor: script.editor, rows: script.rows, description: script.description, verdicts: {}, steps: {} };

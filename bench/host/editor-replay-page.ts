@@ -514,6 +514,18 @@ export function installReplay(config: { arm: string; editors: string[] }) {
   const refined = (g: any) => current(g) && !g.refinementPending && !g.moving;
   const frame = () => new Promise(done => requestAnimationFrame(done));
   const sleep = (ms: number) => new Promise(done => setTimeout(done, ms));
+  // D13 (LIFE2): after an editor that changed the model closes, a GPU frame older than the latest DOM revision must
+  // never be on screen. Every canvas style write (the only way it is revealed) and every frame the resume polls is
+  // checked against the renderer's revision; hits are kept with their time on the event clock.
+  rp.staleShows = [] as { at: number; frameRevision: number; revision: number; via: string }[];
+  rp.staleCheck = (via: string) => {
+    const g = status();
+    if (!g?.canvasVisible || g.frameRevision == null || g.frameRevision === g.revision) return;
+    if (rp.staleShows.length < 50) rp.staleShows.push({ at: performance.now(), frameRevision: g.frameRevision, revision: g.revision, via });
+  };
+  new MutationObserver(records => {
+    if (records.some(record => (record.target as HTMLElement).dataset?.gpuRenderer !== undefined)) rp.staleCheck("reveal");
+  }).observe(document.documentElement, { subtree: true, attributes: true, attributeFilter: ["style"] });
   // Polled once per animation frame from the close input: the first current frame, then the first refined one.
   rp.resume = async (limitMs: number) => {
     const t0 = w.__rp.lastClickAt ?? performance.now();
@@ -523,6 +535,7 @@ export function installReplay(config: { arm: string; editors: string[] }) {
     while (performance.now() - t0 < limitMs) {
       const g = status();
       if (w.rendererStatus?.()?.active !== "gpu") break;
+      rp.staleCheck("frame");
       const now = performance.now();
       if (currentAt == null && current(g)) currentAt = now;
       if (refined(g)) {
@@ -533,7 +546,10 @@ export function installReplay(config: { arm: string; editors: string[] }) {
       await frame();
     }
     const g = status();
+    const stale = rp.staleShows.filter((entry: { at: number }) => entry.at >= t0);
     return {
+      staleShown: stale.length,
+      staleFirst: stale.length ? { ...stale[0], at: Math.round(stale[0].at - t0) } : null,
       currentMs: currentAt == null ? null : Math.round(currentAt - t0),
       refinedMs: refinedAt == null ? null : Math.round(refinedAt - t0),
       timedOut: refinedAt == null,

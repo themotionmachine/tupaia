@@ -16,7 +16,14 @@ import {
 
 export interface IntentRenderer {
   setIntent(edit: boolean): void;
-  intentProbe(): { editor: string; ready: boolean; current?: boolean; lost: boolean };
+  intentProbe(): {
+    editor: string;
+    ready: boolean;
+    current?: boolean;
+    lost: boolean;
+    holdMs?: number;
+    holdRevisions?: number;
+  };
 }
 
 export type ChangeSource = "key" | "esc" | "click" | "palette" | "api";
@@ -121,7 +128,15 @@ export function installRenderMode(host: Host): RenderModeApi {
     const renderer = host.renderer();
     if (!renderer) return { intent, editor: "", ready: false, available: host.gpuActive() };
     const probe = renderer.intentProbe();
-    return { intent, editor: probe.editor, ready: probe.ready, current: probe.current ?? true, available: true };
+    return {
+      intent,
+      editor: probe.editor,
+      ready: probe.ready,
+      current: probe.current ?? true,
+      available: true,
+      holdMs: probe.holdMs ?? 0,
+      holdRevisions: probe.holdRevisions ?? 0
+    };
   }
 
   // Pushes the intent to a renderer that lacks it: a change, or a renderer that appeared after the request.
