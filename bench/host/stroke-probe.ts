@@ -184,12 +184,16 @@ function profile(image: DecodedPng, yCentre: number, xa: number, xb: number, rad
   const along: number[] = [];
   const across = new Array(radius * 2 + 1).fill(0);
   const yc = Math.round(yCentre);
+  const at = (x: number, y: number) => (y < 0 || y >= image.height ? 0 : coverage(image, x, y));
   for (let x = xa; x < xb; x++) {
+    // the page background is not pure white (and differs per arm), so each column's ink is measured against the
+    // rows just outside its window
+    const background = (at(x, yc - radius - 1) + at(x, yc + radius + 1)) / 2;
     let mass = 0;
     for (let dy = -radius; dy <= radius; dy++) {
       const y = yc + dy;
       if (y < 0 || y >= image.height) continue;
-      const c = coverage(image, x, y);
+      const c = coverage(image, x, y) - background;
       mass += c;
       across[dy + radius] += c;
     }
