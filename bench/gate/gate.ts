@@ -443,6 +443,14 @@ function smokeMetrics(check: string, data: Json): Json {
     diff: data.diff && Object.fromEntries(Object.entries(pick(data.diff, ["changedFraction", "over16Fraction", "maxDelta", "meanMaxChannelDelta"])!).map(([k, v]) => [k, round(v, 6)])),
     refinementWaitMs: data.refinementWaitMs
   };
+  if (data.animation) {
+    const a = data.animation;
+    const crops: Json[] = a.pixelCheck?.crops ?? [];
+    metrics.animation = {
+      ...pick(a, ["tradeLayerOn", "markerCount", "domMarkers", "gpuMarkers", "moved", "gpuFrameAdvance", "skipped", "failures"]),
+      pixel: a.pixelCheck && (a.pixelCheck.skipped ? { skipped: a.pixelCheck.skipped } : { crops: a.pixelCheck.cropCount, minIou: round(a.pixelCheck.minIou, 3), inkRatios: crops.map(c => round(c.inkRatio, 3)) })
+    };
+  }
   if (data.lifecycle) metrics.heapGrowthBytes = data.lifecycle.heapGrowthBytes;
   if (data.contextRestore) metrics.contextRestore = { supported: data.contextRestore.supported, restored: data.contextRestore.restored?.state ?? null };
   if (data.hatchMotion) {
