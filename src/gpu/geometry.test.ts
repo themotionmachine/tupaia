@@ -16,6 +16,7 @@ import {
   JOIN,
   joinCode,
   layoutOnPath,
+  mayWindDeep,
   normalizeDashes,
   outsideView,
   packEnd,
@@ -491,10 +492,35 @@ describe("appendFillEdges", () => {
     expect(appendFillEdges([{ points: [0, 0, 2, 0, 4, 0], closed: true }], out, false)).toBe(0);
   });
 
+  it("orients a ring that touches another at a vertex from an edge midpoint, not the shared vertex", () => {
+    // a reversed (hole) triangle whose first vertex lies on the outer square's boundary
+    const hole: Subpath = { points: [10, 4, 7, 2, 7, 6], closed: true };
+    const inside = (x: number, y: number) =>
+      x > 0 && x < 10 && y > 0 && y < 10 && !(x > 7 && Math.abs(y - 4) < (2 * (10 - x)) / 3);
+    const out = new F32();
+    expect(appendFillEdges([square(0, 0, 10), hole], out, false)).toBe(7);
+    leftInside(out.view(), inside);
+  });
+
   it("counts winding numbers with the shoelace orientation", () => {
     const ring = square(0, 0, 4).points;
     expect(windingNumber(2, 2, ring)).toBe(1);
     expect(windingNumber(5, 2, ring)).toBe(0);
     expect(windingNumber(2, 2, square(0, 0, 4, false).points)).toBe(-1);
+  });
+});
+
+describe("mayWindDeep", () => {
+  const square = (x: number, y: number, s: number, ccw = true): Subpath => ({
+    points: ccw ? [x, y, x + s, y, x + s, y + s, x, y + s] : [x, y, x, y + s, x + s, y + s, x + s, y],
+    closed: true
+  });
+  it("flags 8 stacked rings of one orientation, not 7, not 8 apart, not alternating ones", () => {
+    const stack = (n: number, step = 0.1) => Array.from({ length: n }, (_, i) => square(i * step, i * step, 10));
+    expect(mayWindDeep(stack(8))).toBe(true);
+    expect(mayWindDeep(stack(7))).toBe(false);
+    expect(mayWindDeep(stack(8, 20))).toBe(false);
+    expect(mayWindDeep(Array.from({ length: 14 }, (_, i) => square(i, i, 30 - 2 * i, i % 2 === 0)))).toBe(false);
+    expect(mayWindDeep(stack(8), 8, 3)).toBe(true); // out of work: conservative
   });
 });

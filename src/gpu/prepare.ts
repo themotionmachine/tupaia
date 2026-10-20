@@ -59,6 +59,7 @@ import {
   appendStrokeCaps,
   capCode,
   F32,
+  mayWindDeep,
   normalizeDashes,
   pathBounds
 } from "./geometry";
@@ -534,7 +535,8 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
       evenOdd,
       bounds: pathBounds(subpaths),
       edgeFirst,
-      edgeCount: appendFillEdges(subpaths, edges, evenOdd)
+      edgeCount: appendFillEdges(subpaths, edges, evenOdd),
+      deepWinding: !evenOdd && mayWindDeep(subpaths)
     };
   };
 

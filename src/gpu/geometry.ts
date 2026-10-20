@@ -375,7 +375,7 @@ export function unpackEnd(value: number): { code: number; angle: number } {
 
 // Fill anti-aliasing edges (framegraph fringe pass): every boundary edge of a fill, oriented so the filled side is on
 // its left ((-dy, dx) normal), 4 floats each. Which side is filled comes from the winding number on each side of a
-// ring (its own orientation plus the winding of the other rings at one of its vertices), so holes, islands and
+// ring (its own orientation plus the winding of the other rings at the midpoint of its first edge), so holes, islands and
 // even-odd fills orient correctly as long as rings do not cross. Edges with fill on both sides or neither (nested
 // same-direction nonzero rings) are internal and omitted. Past `maxWork` point-in-ring steps the other rings are
 // ignored (each ring's own orientation decides), which is still right for nonzero fills with reversed holes.
@@ -400,8 +400,13 @@ export function appendFillEdges(subpaths: Subpath[], out: F32, evenOdd: boolean,
   const filled = (w: number) => (evenOdd ? (w & 1) !== 0 : w !== 0);
   for (let r = 0; r < rings.length; r++) {
     const { p, n, area } = rings[r];
-    const x = p[0],
-      y = p[1];
+    // the midpoint of the ring's first edge: a vertex is often shared with a touching ring, where the winding of the
+    // other ring is ambiguous; an edge midpoint is ambiguous only on an edge the rings share
+    let e = 0;
+    while (e < n - 1 && p[e * 2] === p[e * 2 + 2] && p[e * 2 + 1] === p[e * 2 + 3]) e++;
+    const f = (e + 1) % n;
+    const x = (p[e * 2] + p[f * 2]) / 2,
+      y = (p[e * 2 + 1] + p[f * 2 + 1]) / 2;
     let around = 0;
     if (rings.length > 1 && work <= maxWork)
       for (let o = 0; o < rings.length; o++) {
@@ -428,6 +433,50 @@ export function appendFillEdges(subpaths: Subpath[], out: F32, evenOdd: boolean,
     }
   }
   return count;
+}
+
+// Whether a nonzero fill's winding might reach `depth` (8: past the 3-bit stencil counter, framegraph.ts windingBits).
+// Necessary condition for that: `depth` rings of one orientation that all overlap at one point, so each of them has
+// bounding boxes overlapping `depth - 1` others of its orientation. Conservative: true when the count runs past
+// `maxWork` box tests.
+export function mayWindDeep(subpaths: Subpath[], depth = 8, maxWork = 2_000_000): boolean {
+  const boxes: [number[], number[]] = [[], []];
+  for (const { points } of subpaths) {
+    const n = points.length >> 1;
+    if (n < 3) continue;
+    let area = 0,
+      x0 = Infinity,
+      y0 = Infinity,
+      x1 = -Infinity,
+      y1 = -Infinity;
+    for (let i = 0, j = n - 1; i < n; j = i++) {
+      area += points[j * 2] * points[i * 2 + 1] - points[i * 2] * points[j * 2 + 1];
+      x0 = Math.min(x0, points[i * 2]);
+      y0 = Math.min(y0, points[i * 2 + 1]);
+      x1 = Math.max(x1, points[i * 2]);
+      y1 = Math.max(y1, points[i * 2 + 1]);
+    }
+    if (area !== 0) boxes[area > 0 ? 0 : 1].push(x0, y0, x1, y1);
+  }
+  let work = 0;
+  for (const list of boxes) {
+    const count = list.length / 4;
+    if (count < depth) continue;
+    const order = Array.from({ length: count }, (_, i) => i).sort((a, b) => list[a * 4] - list[b * 4]);
+    const overlaps = new Uint32Array(count);
+    for (let a = 0; a < count; a++) {
+      const i = order[a] * 4;
+      for (let b = a + 1; b < count; b++) {
+        const j = order[b] * 4;
+        if (list[j] > list[i + 2]) break;
+        if (++work > maxWork) return true;
+        if (list[j + 1] <= list[i + 3] && list[i + 1] <= list[j + 3]) {
+          if (++overlaps[order[a]] >= depth - 1 || ++overlaps[order[b]] >= depth - 1) return true;
+        }
+      }
+    }
+  }
+  return false;
 }
 
 // Nonzero winding number of a closed ring around (x, y): +1 for each counter-clockwise turn in the shoelace sense.

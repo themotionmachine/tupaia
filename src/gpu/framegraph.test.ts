@@ -8,7 +8,8 @@ import {
   type GroupBatch,
   STENCIL,
   type StrokeBatch,
-  strokeDashes
+  strokeDashes,
+  windingBits
 } from "./framegraph";
 
 const buffer = {} as TrackedBuffer;
@@ -172,5 +173,14 @@ describe("stencil layout", () => {
     expect(passes(1 << STENCIL.idShift, 1)).toBe(false);
     expect(passes((3 << STENCIL.idShift) | 5, 4)).toBe(true);
     expect(passes(STENCIL.hidden, STENCIL.ids)).toBe(false);
+  });
+});
+
+describe("windingBits", () => {
+  it("counts even-odd in one bit, nonzero mod 8 below the ids, and a deep nonzero fill mod 128 over the ids", () => {
+    expect(windingBits({ evenOdd: true, deepWinding: true })).toBe(0x01);
+    expect(windingBits({ evenOdd: false })).toBe(STENCIL.winding);
+    expect(windingBits({ evenOdd: false, deepWinding: true })).toBe(0x7f);
+    expect(windingBits({ evenOdd: false, deepWinding: true }) & STENCIL.hidden).toBe(0);
   });
 });

@@ -1,7 +1,8 @@
 // DOM-ordered passes over prepared batches: stencil-then-cover fills, instanced strokes/sprites/glyphs, compat
 // images, and opacity/mask groups composited from an offscreen target. Camera changes only touch uniforms.
 // Stencil layout (STENCIL below): bit 0x80 = group mask, set where a masked group's content is hidden; bits 0x78 = the
-// id of the last anti-aliased batch that drew the pixel (first fragment wins within a batch); bits 0x07 = fill winding.
+// id of the last batch that marked the pixel (a translucent stroke or an anti-aliased fill: first fragment wins within
+// the batch); bits 0x07 = fill winding (0x7F for a deepWinding fill, which clears the ids under it first).
 // Every test that draws colour requires the mask bit clear, so unmasked targets (bit never set) share the same tests.
 import { TARGET_BUDGET, targetSamples } from "./budget";
 import { type Camera, screenToClip, type Viewport, visibleWorld, worldScissor, worldToClip } from "./camera";
@@ -24,6 +25,8 @@ export interface FillBatch {
   // boundary edges in Frame.edges (geometry.ts appendFillEdges) for the anti-aliasing fringe; absent: no fringe
   edgeFirst?: number;
   edgeCount?: number;
+  // nonzero fill with 8 or more subpaths of one orientation: winding may reach 8, past the 3-bit counter
+  deepWinding?: boolean;
 }
 export interface StrokeBatch {
   bounds?: Rect4 | null;
@@ -125,8 +128,15 @@ export function emptyOnView(frame: Frame, batch: Batch, visible: Rect4, pad: num
 }
 
 const shaders = { fill, fringe, stroke, sprite, glyph, image, marker };
+// Stencil bits that count a fill's winding: bit 0x01 for even-odd, else mod 8 in 0x07, or mod 128 in 0x7F (id bits
+// borrowed, cleared first, no fringe) for a nonzero fill whose subpaths might stack 8 deep (prepare.ts deepWinding).
+export function windingBits(fill: Pick<FillBatch, "evenOdd" | "deepWinding">): number {
+  return fill.evenOdd ? 0x01 : fill.deepWinding ? STENCIL.winding | STENCIL.id : STENCIL.winding;
+}
 type Kind = keyof typeof shaders;
 const FLOAT = 4;
+// Coverage floors of a translucent stroke's passes, highest first (framegraph stroke).
+export const TRANSLUCENT_BANDS = [1, 0.75, 0.5, 0.25, 0] as const;
 export const STENCIL = { hidden: 0x80, id: 0x78, winding: 0x07, idShift: 3, ids: 15 } as const;
 
 // Fill edge anti-aliasing is on wherever the target has no MSAA (the DPR >= 2 canvas and every group target there);
@@ -147,6 +157,7 @@ export class FrameGraph {
   readonly passes = {
     composites: 0,
     fringes: 0,
+    translucentStrokes: 0,
     idClears: 0,
     stencilClears: 0,
     maskFills: 0,
@@ -282,7 +293,7 @@ export class FrameGraph {
     return [color[0] * a, color[1] * a, color[2] * a, a];
   }
 
-  // Winding into bits 0x07 (mod 8; even-odd: bit 0x01) with color writes off; the caller then covers the same
+  // Winding into windingBits (mod 8 in 0x07; even-odd: bit 0x01) with color writes off; the caller then covers the same
   // triangles. Hidden pixels of a masked group keep winding 0 unless the fan builds the mask itself.
   private stencilFan(frame: Frame, fill: FillBatch, everywhere = false): TrackedProgram {
     const gl = this.device.gl;
@@ -296,7 +307,7 @@ export class FrameGraph {
       state.stencilMask(0x01);
       state.stencilOp(gl.KEEP, gl.KEEP, gl.INVERT);
     } else {
-      state.stencilMask(STENCIL.winding);
+      state.stencilMask(windingBits(fill));
       state.stencilOpSeparate(gl.FRONT, gl.KEEP, gl.KEEP, gl.INCR_WRAP);
       state.stencilOpSeparate(gl.BACK, gl.KEEP, gl.KEEP, gl.DECR_WRAP);
     }
@@ -309,18 +320,41 @@ export class FrameGraph {
     if (!frame.fans || !fill.count) return;
     const gl = this.device.gl;
     const state = this.state;
+    const deep = !fill.evenOdd && !!fill.deepWinding;
+    if (deep) this.clearIds(fill.bounds);
     this.stencilFan(frame, fill);
-    const winding = fill.evenOdd ? 0x01 : STENCIL.winding;
-    if (this.fillAa && !this.multisampled && frame.edges && fill.edgeCount) this.fringe(frame, fill, winding);
+    const winding = windingBits(fill);
+    if (!deep && this.fillAa && !this.multisampled && frame.edges && fill.edgeCount) {
+      this.antialiasedFill(frame, fill, winding);
+      return;
+    }
     const program = this.use("fill");
     this.attribute(program, "a_position", frame.fans, 2, 2, 0, 0);
     // pixel centres inside the fill (winding set: visible ones only, see stencilFan); every covered fragment, drawn or
     // not, resets its winding bits
     state.stencilFunc(gl.NOTEQUAL, 0, winding);
-    state.stencilMask(STENCIL.winding);
+    state.stencilMask(winding);
     state.stencilOp(gl.ZERO, gl.ZERO, gl.ZERO);
     this.paint(program, fill, this.patternMatrix);
     gl.drawArrays(gl.TRIANGLES, fill.first, fill.count);
+  }
+
+  // Zero the batch-id bits under a fill whose winding borrows them (deepWinding), keeping the mask bit.
+  private clearIds(bounds: Rect4 | null | undefined): void {
+    const gl = this.device.gl;
+    const scissor = bounds
+      ? worldScissor(bounds, this.camera, this.viewport, gl.drawingBufferWidth, gl.drawingBufferHeight)
+      : null;
+    if (bounds && !scissor) return;
+    if (scissor) {
+      gl.enable(gl.SCISSOR_TEST);
+      gl.scissor(scissor[0], scissor[1], scissor[2], scissor[3]);
+    }
+    this.state.stencilMask(STENCIL.id);
+    gl.clearStencil(0);
+    gl.clear(gl.STENCIL_BUFFER_BIT);
+    if (scissor) gl.disable(gl.SCISSOR_TEST);
+    this.passes.idClears++;
   }
 
   private paint(program: TrackedProgram, fill: FillBatch, matrix: Float32Array): void {
@@ -378,31 +412,37 @@ export class FrameGraph {
     return ++this.id;
   }
 
-  // The anti-aliasing fringe of a fill (shaders.ts `fringe`), between its stencil and cover passes. Pixel centres
-  // outside the fill take the first edge's partial coverage (marked with the batch id); centres inside within half a
-  // pixel of an edge take theirs and clear their winding so the cover skips them.
-  private fringe(frame: Frame, fill: FillBatch, winding: number): void {
+  // A fill with its anti-aliasing fringe (shaders.ts `fringe`), after the stencil pass. Every pixel centre the fill
+  // draws is marked with this batch's id: first the inside fringe (centres inside the fill within half a pixel of an
+  // edge take that edge's coverage, the first edge winning by clearing the winding), then the cover (the rest of the
+  // inside at full coverage), then the outside fringe, which draws only centres this batch has not marked (so none
+  // inside the fill, whatever the edge orientation near reflex vertices or touching rings), again first edge wins.
+  private antialiasedFill(frame: Frame, fill: FillBatch, winding: number): void {
     const gl = this.device.gl;
     const state = this.state;
     const id = this.nextId(fill.bounds) << STENCIL.idShift;
-    const program = this.use("fringe");
-    this.attribute(program, "a_corner", this.strip, 2, 2, 0, 0);
-    this.attribute(program, "a_edge", frame.edges!, 4, 4, fill.edgeFirst! * 4, 1);
+    const fringe = this.use("fringe");
+    this.attribute(fringe, "a_corner", this.strip, 2, 2, 0, 0);
+    this.attribute(fringe, "a_edge", frame.edges!, 4, 4, fill.edgeFirst! * 4, 1);
     const px = this.pxPerWorld();
-    state.uniform1f(program.uniforms.u_pad, 1 / px);
-    state.uniform1f(program.uniforms.u_pxPerWorld, px);
-    this.paint(program, fill, this.patternMatrixFringe);
-    // outside: visible (mask bit clear) and not yet drawn by this batch (id below the current one); winding untouched
+    state.uniform1f(fringe.uniforms.u_pad, 1 / px);
+    state.uniform1f(fringe.uniforms.u_pxPerWorld, px);
+    this.paint(fringe, fill, this.patternMatrixFringe);
+    // inside (winding set, hence visible): REPLACE writes the id and zeroes the winding
+    state.stencilFunc(gl.NOTEQUAL, id, winding);
+    state.stencilMask(STENCIL.id | winding);
+    state.stencilOp(gl.KEEP, gl.KEEP, gl.REPLACE);
+    state.uniform1i(fringe.uniforms.u_inside, 1);
+    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, fill.edgeCount!);
+    const cover = this.use("fill");
+    this.attribute(cover, "a_position", frame.fans!, 2, 2, 0, 0);
+    this.paint(cover, fill, this.patternMatrix);
+    gl.drawArrays(gl.TRIANGLES, fill.first, fill.count);
+    // outside: visible (mask bit clear) and not drawn by this batch (id below the current one); winding untouched
+    this.use("fringe");
     state.stencilFunc(gl.GREATER, id, STENCIL.hidden | STENCIL.id);
     state.stencilMask(STENCIL.id);
-    state.stencilOp(gl.KEEP, gl.KEEP, gl.REPLACE);
-    state.uniform1i(program.uniforms.u_inside, 0);
-    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, fill.edgeCount!);
-    // inside (winding set, hence visible): the first edge wins by clearing the winding
-    state.stencilFunc(gl.NOTEQUAL, 0, winding);
-    state.stencilMask(STENCIL.winding);
-    state.stencilOp(gl.KEEP, gl.KEEP, gl.ZERO);
-    state.uniform1i(program.uniforms.u_inside, 1);
+    state.uniform1i(fringe.uniforms.u_inside, 0);
     gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, fill.edgeCount!);
     this.passes.fringes++;
   }
@@ -432,12 +472,27 @@ export class FrameGraph {
     state.uniform1f(program.uniforms.u_dashOn, dash.on);
     state.uniform1f(program.uniforms.u_dashOffset, dash.offset);
     state.uniform1f(program.uniforms.u_dashCap, dash.cap);
-    // Joins overlap: the first fragment per pixel wins (this batch's id), so nothing blends twice, opaque or not.
+    // Joins are split at their bisectors in the shader, so segments of one path overlap only where the path crosses
+    // itself (or its subpaths cross each other). An opaque stroke blends there: src-over of two opaque partial
+    // coverages a and b gives 1 - (1 - a)(1 - b), the union for uncorrelated edges, and a full-coverage pixel stays
+    // full. A translucent one must not blend twice (SVG fills one coverage mask per path), so each pixel takes one
+    // fragment, marked with this batch's id; drawing in bands of decreasing coverage (TRANSLUCENT_BANDS) makes that the
+    // largest coverage within 0.25, so a faint edge pixel of one segment never blocks the body of a crossing one.
+    state.uniform1f(program.uniforms.u_minCoverage, 0);
+    if (stroke.color[3] >= 1) {
+      this.plain();
+      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, stroke.count);
+      return;
+    }
     const id = this.nextId(stroke.bounds) << STENCIL.idShift;
     state.stencilFunc(gl.GREATER, id, STENCIL.hidden | STENCIL.id);
     state.stencilMask(STENCIL.id);
     state.stencilOp(gl.KEEP, gl.KEEP, gl.REPLACE);
-    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, stroke.count);
+    for (const band of TRANSLUCENT_BANDS) {
+      state.uniform1f(program.uniforms.u_minCoverage, band);
+      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, stroke.count);
+    }
+    this.passes.translucentStrokes++;
   }
 
   private discs = new Map<number, { radius: number; scale: number }>();
@@ -584,7 +639,7 @@ export class FrameGraph {
         this.stencilFan(frame, fill, true);
         this.state.colorMask(false);
         // passes where the winding is set (ref & mask is 0) and replaces the whole value: 0 visible, 0x80 hidden
-        this.state.stencilFunc(gl.NOTEQUAL, white ? 0 : STENCIL.hidden, fill.evenOdd ? 0x01 : STENCIL.winding);
+        this.state.stencilFunc(gl.NOTEQUAL, white ? 0 : STENCIL.hidden, windingBits(fill));
         this.state.stencilMask(0xff);
         this.state.stencilOp(gl.KEEP, gl.KEEP, gl.REPLACE);
         gl.drawArrays(gl.TRIANGLES, fill.first, fill.count);

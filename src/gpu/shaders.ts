@@ -28,8 +28,13 @@ void main() {
 // Coverage is analytic in device pixels (box filter, CPU mirrors in geometry.ts): the band profile across the stroke,
 // butt and square ends filtered along it, round caps and round joins as discs, miter and bevel joins as the
 // intersection of the two segments' extended bands (clipped at the bevel line past the miter limit 4), and dashes as
-// the on-fraction of the pixel footprint along the path (round dash caps as discs around each dash end). Where quads
-// overlap (joins) the stencil keeps the first fragment per pixel (framegraph.ts), so nothing blends twice.
+// the on-fraction of the pixel footprint along the path (round dash caps as discs around each dash end). A join is
+// split between its two segments at the bisector through the vertex (normal dIn + dOut): each pixel centre takes its
+// coverage from the one segment on its side, so neither the inner overlap of the two bodies nor the outer wedge is
+// drawn twice, and an earlier segment's partial edge pixel never lands inside the next segment's body. Overlaps left
+// (self-crossings, subpaths that cross, very short segments at sharp turns) blend for opaque strokes and are resolved
+// by the stencil for translucent ones (framegraph.ts stroke), which draw in passes of decreasing u_minCoverage (a
+// fragment below it is discarded).
 export const stroke = {
   vs: `${header}
 in vec2 a_corner;
@@ -90,8 +95,10 @@ uniform float u_pxPerWorld;
 // geometry.ts discProfile: the area-preserving band radius and scale for discs of the stroke's half width (device px)
 uniform float u_discRadius;
 uniform float u_discScale;
+uniform float u_minCoverage;
 out vec4 color;
 const float PI = 3.141592653589793;
+const float BISECTOR_SLACK = 0.05;
 float strip(float d, float h) { return clamp(min(d + 0.5, h) - max(d - 0.5, -h), 0.0, 1.0); }
 float span(float x, float lo, float hi) { return clamp(min(x + 0.5, hi) - max(x - 0.5, lo), 0.0, 1.0); }
 float disc(float r) { return strip(r, u_discRadius) * u_discScale; }
@@ -104,6 +111,10 @@ float join(vec2 q, vec2 dIn, vec2 dOut, float code, float h) {
   float tipLength = length(tip);
   if ((code == 5.0 || c < 0.25) && tipLength > 1e-6) cov = min(cov, clamp(h * c - dot(q, tip / tipLength) + 0.5, 0.0, 1.0));
   return cov;
+}
+// signed distance of q from the line through the origin with normal n (positive on n's side); none for n = 0
+float beyond(vec2 q, vec2 n) {
+  return dot(n, n) > 1e-6 ? dot(q, normalize(n)) : 1e9;
 }
 float dashOnLength(float t) {
   float k = floor(t / u_dashPeriod);
@@ -136,26 +147,46 @@ void main() {
   float len = v_segment.x * px;
   float c0 = v_segment.y;
   float c1 = v_segment.z;
+  // The neighbouring segment's side of a join bisector is its pixel, body and wedge alike. Both segments keep centres
+  // within BISECTOR_SLACK device px of it: they interpolate their local frames from different quads, and a centre on
+  // the bisector must not be discarded by both. Both draw that sliver: an opaque stroke draws 1 - sqrt(1 - cov) there,
+  // which src-over of the two fragments composes back to cov (the two coverages agree on the bisector by symmetry); a
+  // translucent stroke keeps the first fragment (stencil). A reversal (dIn = -dOut) has no bisector: both keep it.
+  float s0 = c0 >= 3.0 ? beyond(vec2(x, y), v_neighbours.xy + vec2(1.0, 0.0)) : 1e9;
+  float s1 = c1 >= 3.0 ? beyond(vec2(len - x, -y), vec2(1.0, 0.0) + v_neighbours.zw) : 1e9;
+  if (min(s0, s1) < -BISECTOR_SLACK) discard;
+  bool shared = abs(s0) <= BISECTOR_SLACK || abs(s1) <= BISECTOR_SLACK;
   float cov;
   if (x < 0.0 && c0 >= 2.0) {
     vec2 q = vec2(x, y);
-    if (c0 == 2.0) cov = disc(length(q));
-    else {
-      // inside the previous segment's own body: it draws this pixel
-      if (dot(v_neighbours.xy, q) < 0.0) discard;
-      cov = join(q, v_neighbours.xy, vec2(1.0, 0.0), c0, h);
-    }
+    cov = c0 == 2.0 ? disc(length(q)) : join(q, v_neighbours.xy, vec2(1.0, 0.0), c0, h);
   } else if (x > len && c1 >= 2.0) {
     vec2 q = vec2(x - len, y);
-    if (c1 == 2.0) cov = disc(length(q));
-    else {
-      if (dot(v_neighbours.zw, q) > 0.0) discard;
-      cov = join(q, vec2(1.0, 0.0), v_neighbours.zw, c1, h);
-    }
+    cov = c1 == 2.0 ? disc(length(q)) : join(q, vec2(1.0, 0.0), v_neighbours.zw, c1, h);
   } else {
     float lo = c0 == 1.0 ? 0.0 : c0 == 0.0 ? -h : -1e9;
     float hi = c1 == 1.0 ? len : c1 == 0.0 ? len + h : 1e9;
     cov = strip(abs(y), h) * span(x, lo, hi);
+  }
+  // On the inner side of a join the neighbour's band, past the bisector, covers part of a pixel within half a pixel of
+  // it (the inner corner pixel most): add its box-filtered share (band coverage within the bisector's half-plane) as a
+  // union. On the outer side the neighbour's half of the wedge is the join itself, which cov already holds.
+  if (c0 >= 3.0 && y * v_neighbours.y < 0.0) {
+    vec2 dIn = v_neighbours.xy;
+    vec2 n = dIn + vec2(1.0, 0.0);
+    if (dot(n, n) > 1e-6) {
+      float t = min(strip(abs(dIn.x * y - dIn.y * x), h), clamp(0.5 - dot(vec2(x, y), normalize(n)), 0.0, 1.0));
+      cov = cov + t - cov * t;
+    }
+  }
+  if (c1 >= 3.0 && y * v_neighbours.w > 0.0) {
+    vec2 dOut = v_neighbours.zw;
+    vec2 n = vec2(1.0, 0.0) + dOut;
+    vec2 q = vec2(x - len, y);
+    if (dot(n, n) > 1e-6) {
+      float t = min(strip(abs(dOut.x * q.y - dOut.y * q.x), h), clamp(0.5 + dot(q, normalize(n)), 0.0, 1.0));
+      cov = cov + t - cov * t;
+    }
   }
   if (u_dashCount > 0) {
     float t = v_distance + u_dashOffset;
@@ -176,7 +207,8 @@ void main() {
     }
     cov = min(cov, dash);
   }
-  if (cov <= 0.0) discard;
+  if (shared && u_color.a >= 1.0) cov = 1.0 - sqrt(max(0.0, 1.0 - cov));
+  if (cov <= 0.0 || cov < u_minCoverage) discard;
   color = u_color * cov;
 }`
 };
