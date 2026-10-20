@@ -28,12 +28,17 @@ export class TradeAnimationModule {
   private generation = 0;
   private cachedBatches: TradeBatch[] | null = null;
   private pathCache = new Map<string, TradePath | null>();
+  // The pack.cells the caravans were started for. A rebuild (generate, load, resample) replaces it before the app
+  // restarts or syncs the animation (drawLayers, the load's sync): a caravan finishing in between must not spawn on
+  // the half-built world, with a path cached from the previous map and random draws in a seeded generation.
+  private world: unknown = null;
 
   start(): void {
     if (!layerIsOn("toggleTrade")) return;
     this.stop();
     const batches = this.getDealBatches(pack.deals);
     if (!batches.length) return;
+    this.world = pack.cells;
     this.cachedBatches = batches;
     this.topUp();
   }
@@ -58,6 +63,10 @@ export class TradeAnimationModule {
 
   private topUp(): void {
     if (!layerIsOn("toggleTrade") || !this.cachedBatches) return;
+    if (pack.cells !== this.world) {
+      this.stop();
+      return;
+    }
     const target = options.trade.animation.concurrent ?? DEFAULT_OPTIONS.concurrent;
     while (this.activeCount < target) {
       if (!this.spawnOne(this.cachedBatches)) break;
