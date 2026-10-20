@@ -156,17 +156,133 @@ export function normalizeGpu(desc: ChainDesc | null, hitId: string, depth = 0): 
   if (ids[1] === "rivers") return { kind: "river", id: el.id, branch: "rivers" };
   if (within("routes")) return { kind: "route", id: el.id, branch: "routes" };
   if (within("terrain")) return { kind: "relief", id: el.id, branch: "terrain" };
-  if (within("emblems")) return { kind: "emblem", id: "", branch: "emblems" };
+  if (ids[2] === "emblems") return { kind: "emblem", id: ids[1], branch: "emblems" };
   if (ids[1] === "ice") return { kind: "ice", id: el.id, branch: "ice" };
   if (within("coastline")) return { kind: "coastline", id: el.id, branch: "coastline" };
   if (within("lakes")) return { kind: "lake", id: el.id, branch: "lakes" };
+  // positional, as clicked(): the regiment <g> is the painted leaf's parent, under g#army under #armies
+  if (ids[3] === "armies") return { kind: "regiment", id: ids[1], branch: "armies" };
+  if (ids[2] === "markets") return { kind: "market", id: "", branch: "markets" };
+  if (ids[2] === "goodsIcons" || ids[1] === "goodsCells") return { kind: "goods", id: "", branch: "goodsIcons" };
   return { kind: "none", id: hitId, branch: "non-selectable" };
 }
 
-// Kinds whose ids identify the same object on both sides. Relief compares only as raw data (GPU boxes are keyed by
-// symbol href, the click selects a <use> instance), and the rest have no GPU index entries to compare.
-export const COMPARABLE: Kind[] = ["burg", "label", "marker", "river", "route"];
+// Kinds whose ids identify the same object on both sides in the raw index (reported only, D3). Relief compares only as
+// raw data (GPU boxes are keyed by symbol href, the click selects a <use> instance).
+export const COMPARABLE: Kind[] = ["burg", "label", "marker", "river", "route", "ice", "regiment"];
+// D3 (PHASE1-PLAN): the gate is the semantic outcome (window.gpuSelect against clicked()), for every cohort with at
+// least MIN_COHORT meaningful samples. These cohorts must reach that size on the REQUIRED_WORLDS (packet PICK, W3);
+// an insufficient required cohort fails the run instead of passing quietly. Routes are gated wherever n>=MIN_COHORT
+// but not required: on the parity fixture the goods data layer covers almost every route.
+export const REQUIRED: Kind[] = ["burg", "label", "marker", "river", "ice", "regiment"];
+export const REQUIRED_WORLDS = ["parity", "shared"];
+export const MIN_COHORT = 50;
+export const MIN_RATE = 0.995;
+// Edge band (disclosed, like the cell border band): a sample whose SVG outcome changes within EDGE_BAND_PX CSS px of it
+// sits on a hit boundary that Blink itself only approximates (Skia's stroke hit outline is off the true offset curve by
+// up to ~0.09 world units on curved routes and rivers; the index flattens curves to 0.01). Such samples are excluded
+// from the cohort gate and reported separately, with a strict all-samples tally beside the gate.
+export const EDGE_BAND_PX = 0.25;
+export const EDGE_RING = 8; // probe directions on the band circle
+
+// What clicked()'s DOM branches make of one probe hit; canvas fallbacks collapse to one key (they are not vector edges).
+export function ringKey(desc: ChainDesc | null): string {
+  if (!desc) return "outside";
+  const dom = domBranch(desc);
+  return dom ? dom.kind + ":" + dom.id : "fallback";
+}
+
+// `ring` lists only the probe hits whose element differs from the centre's (null when all match).
+export function inEdgeBand(centre: ChainDesc | null, ring: (ChainDesc | null)[] | null | undefined): boolean {
+  if (!ring?.length) return false;
+  const key = ringKey(centre);
+  return ring.some(desc => ringKey(desc) !== key);
+}
+
+/** @deprecated protocol v2's raw-index gate; kept for readers of old reports */
 export const GATED: Kind[] = ["burg", "label", "marker"];
+
+export type CohortStatus = "pass" | "fail" | "insufficient" | "rejected" | "reported";
+export interface CohortVerdict {
+  n: number; // expected + extra + wrongInto: every sample where either side names this kind
+  agree: number;
+  rate: number | null;
+  required: boolean;
+  status: CohortStatus;
+}
+
+// Per-cohort verdicts for one world. `settled` false (motion probe) reports without gating; an invalid run (scene
+// changed, GPU not ready, camera misaligned) rejects every cohort. Failures name the cohorts that sink the world.
+export function cohortGate(
+  kinds: Record<string, KindTally>,
+  opts: { valid: boolean; settled: boolean; required: readonly string[] }
+): { cohorts: Record<string, CohortVerdict>; failures: string[] } {
+  const cohorts: Record<string, CohortVerdict> = {};
+  const failures: string[] = [];
+  const names = [...new Set([...opts.required, ...Object.keys(kinds)])].filter(kind => kind !== "none");
+  for (const kind of names) {
+    const t = kinds[kind];
+    const n = t ? t.expected + t.extra + t.wrongInto : 0;
+    const agree = t?.agree ?? 0;
+    const rate = n ? agree / n : null;
+    const required = opts.required.includes(kind);
+    const status: CohortStatus = !opts.valid
+      ? "rejected"
+      : !opts.settled
+        ? "reported"
+        : n < MIN_COHORT
+          ? "insufficient"
+          : agree / n >= MIN_RATE
+            ? "pass"
+            : "fail";
+    cohorts[kind] = { n, agree, rate, required, status };
+    if (status === "rejected") continue;
+    if (status === "fail") failures.push(`${kind} ${agree}/${n} = ${((100 * agree) / n).toFixed(2)}% < ${MIN_RATE * 100}%`);
+    if (status === "insufficient" && required) failures.push(`${kind} n=${n} < ${MIN_COHORT}`);
+  }
+  if (!opts.valid) failures.push("rejected: scene changed or GPU not ready during sampling");
+  return { cohorts, failures };
+}
+
+// Camera centres (world units) for one world at zoom k: the primary centre first, then up to `max` views in all, each
+// centred where the most not-yet-visible elements of the scarcest required kind sit, until every kind shows `need`
+// elements (or all it has). Deterministic: candidates are scanned in inventory order. A view is a viewport-sized
+// window shrunk by `margin` CSS px, clamped inside the map.
+export function planViews(
+  inventory: Record<string, [number, number][]>,
+  primary: [number, number],
+  k: number,
+  opts: { width: number; height: number; mapWidth: number; mapHeight: number; need: number; max: number; margin?: number; kinds: readonly string[] }
+): [number, number][] {
+  const hw = opts.width / 2 / k,
+    hh = opts.height / 2 / k,
+    m = (opts.margin ?? 20) / k;
+  const clamp = (v: number, half: number, size: number) => (size <= 2 * half ? size / 2 : Math.min(size - half, Math.max(half, v)));
+  const inView = (c: [number, number], p: [number, number]) =>
+    Math.abs(p[0] - c[0]) <= hw - m && Math.abs(p[1] - c[1]) <= hh - m;
+  const views: [number, number][] = [primary];
+  const seen = (kind: string) => (inventory[kind] ?? []).filter(p => views.some(v => inView(v, p)));
+  const deficit = (kind: string) => Math.min(opts.need, (inventory[kind] ?? []).length) - seen(kind).length;
+  const stuck = new Set<string>(); // no window shows any more of it (elements off the map)
+  while (views.length < opts.max) {
+    const short = opts.kinds.filter(kind => !stuck.has(kind) && deficit(kind) > 0);
+    if (!short.length) break;
+    const kind = short.reduce((a, b) => (deficit(b) > deficit(a) ? b : a));
+    const hidden = (list: [number, number][]) => list.filter(p => !views.some(v => inView(v, p)));
+    let best: [number, number] | null = null,
+      score = 0;
+    for (const p of hidden(inventory[kind] ?? []).slice(0, 400)) {
+      const c: [number, number] = [clamp(p[0], hw, opts.mapWidth), clamp(p[1], hh, opts.mapHeight)];
+      let s = 0;
+      for (const other of short)
+        s += (other === kind ? 1 : 0.1) * hidden(inventory[other] ?? []).filter(q => inView(c, q)).length;
+      if (s > score) [best, score] = [c, s];
+    }
+    if (best) views.push(best);
+    else stuck.add(kind);
+  }
+  return views;
+}
 
 export type Outcome = "agree" | "missing" | "extra" | "wrong" | "agree-none";
 
@@ -222,7 +338,15 @@ export const DIAGNOSTIC_CLASSES = [
   "label",
   "route",
   "coastline",
-  "ice"
+  "ice",
+  "river",
+  "regiment",
+  "emblem",
+  "goods",
+  "market",
+  "lake",
+  "relief",
+  "other"
 ] as const;
 export function diagnosticClass(expected: Selection, actual: Selection): (typeof DIAGNOSTIC_CLASSES)[number] | null {
   const outcome = compareSelections(expected, actual);
@@ -232,8 +356,9 @@ export function diagnosticClass(expected: Selection, actual: Selection): (typeof
   if (actual.branch === "burgLabels") return "burgLabel-wrongInto";
   if (actual.kind === "marker") return "marker";
   if (expected.kind === "label" || actual.kind === "label") return "label";
-  for (const kind of ["route", "coastline", "ice"] as const) if (expected.kind === kind || actual.kind === kind) return kind;
-  return null;
+  for (const kind of ["route", "coastline", "ice", "river", "regiment", "emblem", "goods", "market", "lake", "relief"] as const)
+    if (expected.kind === kind || actual.kind === kind) return kind;
+  return "other";
 }
 export function selectDiagnostics<T extends { expected: Selection; actual: Selection }>(rows: T[], per = 5) {
   const out: Record<string, T[]> = Object.fromEntries(DIAGNOSTIC_CLASSES.map(name => [name, []]));
