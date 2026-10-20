@@ -2,21 +2,28 @@ import { describe, expect, it } from "vitest";
 import { layoutOnPath } from "./geometry";
 import {
   centralBaselineShift,
+  centralNestedShift,
   GLYPH_ATLAS,
   GLYPH_FLOATS,
   glyphAtlasRows,
+  inkColor,
+  kernedAdvances,
+  kernOffsets,
+  kernsBefore,
   letterSpacingPx,
   parseLength,
-  prefixAdvances,
   presentAttribute,
   quad,
   spacedAdvances,
   startOffsetLength,
   strokeBeforeFill,
+  svgCharPositions,
   textPathTargetId,
   unsupportedContent,
   unsupportedStroke,
-  unsupportedStyle
+  unsupportedStyle,
+  wholeRun,
+  wholeRunWidth
 } from "./text";
 
 const XLINK = "http://www.w3.org/1999/xlink";
@@ -28,15 +35,64 @@ function attributes(map: Record<string, string>, namespaced: Record<string, stri
   };
 }
 
-describe("prefixAdvances", () => {
-  it("derives per-character advances from prefix widths so kerning is kept", () => {
-    expect(prefixAdvances("ab", s => s.length * 10)).toEqual([10, 10]);
-    expect(prefixAdvances("AV", s => (s === "AV" ? 18 : s.length * 10))).toEqual([10, 8]);
+describe("kernedAdvances", () => {
+  it("is each character's own width without kerning", () => {
+    expect(kernedAdvances("ab", s => [...s].length * 10)).toEqual([10, 10]);
+  });
+
+  it("moves the second character of a kern pair, as SVG does, and keeps the total width", () => {
+    // "AV" kerns by -2: SVG starts V at 8 (A's advance becomes 8), and V keeps its own 10
+    const width = (s: string) => [...s].length * 10 - (s.includes("AV") ? 2 : 0);
+    expect(kernedAdvances("AV", width)).toEqual([8, 10]);
+    expect(kernedAdvances("xAVx", width)).toEqual([10, 8, 10, 10]);
+    expect(kernedAdvances("xAVx", width).reduce((a, b) => a + b)).toBe(width("xAVx"));
   });
 
   it("iterates code points, not UTF-16 units", () => {
-    expect(prefixAdvances("😀a", s => [...s].length * 7)).toEqual([7, 7]);
-    expect(prefixAdvances("", () => 1)).toEqual([]);
+    expect(kernedAdvances("😀a", s => [...s].length * 7)).toEqual([7, 7]);
+    expect(kernedAdvances("", () => 1)).toEqual([]);
+  });
+});
+
+describe("kernsBefore", () => {
+  it("is the kern between each code point and the one before it", () => {
+    const width = (s: string) => [...s].length * 10 - (s.includes("AV") ? 2 : 0) - (s.includes("VA") ? 3 : 0);
+    expect(kernsBefore("AVA", width)).toEqual([0, -2, -3]);
+    expect(kernsBefore("ab", s => [...s].length * 10)).toEqual([0, 0]);
+    expect(kernsBefore("😀A", s => [...s].length * 7)).toEqual([0, 0]);
+  });
+});
+
+describe("kernOffsets", () => {
+  // "AVA": own widths 10, kerns A|V -2 and V|A -4
+  const own = [10, 10, 10];
+  const kerns = [0, -2, -4];
+
+  it("moves a reported start by half its leading kern when the SVG split the kerns (legacy kern table)", () => {
+    const reported = [10 - 1, 10 + (-2 - 4) / 2, 10 - 2];
+    expect(kernOffsets(reported, own, kerns)).toEqual([0, -1, -2]);
+  });
+
+  it("leaves reported starts alone when the SVG kerned on the first advance (GPOS)", () => {
+    expect(kernOffsets([8, 6, 10], own, kerns)).toEqual([0, 0, 0]);
+  });
+
+  it("adds letter-spacing to both readings and skips characters the SVG did not place", () => {
+    expect(kernOffsets([9 + 3, null, 8 + 3], own, kerns, 3)).toEqual([0, -1, -2]);
+    expect(kernOffsets([10, 10, 10], own, [0, 0, 0])).toEqual([0, 0, 0]);
+  });
+});
+
+describe("wholeRun", () => {
+  it("swaps spaces for no-break spaces so Canvas2D shapes across them, when the font gives both the same width", () => {
+    const same = (s: string) => s.length * 5;
+    expect(wholeRun("Ty. Wavy", same)).toBe("Ty.\u00a0Wavy");
+    expect(wholeRunWidth(s => (s.length > 1 && s.includes(" ") ? 999 : s.length))("a b")).toBe(3);
+  });
+
+  it("keeps spaces when the no-break space is a different glyph", () => {
+    const differs = (s: string) => (s === "\u00a0" ? 7 : s.length * 5);
+    expect(wholeRun("a b", differs)).toBe("a b");
   });
 });
 
@@ -262,5 +318,84 @@ describe("glyphAtlasRows", () => {
     expect(glyphAtlasRows(new Float32Array(0))).toBe(0);
     // the count bounds the scan (a payload's array may be longer than its instances)
     expect(glyphAtlasRows(instances(10, 900), 1)).toBe(11);
+  });
+});
+
+describe("inkColor", () => {
+  it("is the paint colour without its alpha, clamped, for the atlas mask's luminance", () => {
+    expect(inkColor([62 / 255, 62 / 255, 75 / 255, 0.4])).toBe("rgb(62,62,75)");
+    expect(inkColor([1.2, -0.1, 0.5, 1])).toBe("rgb(255,0,128)");
+  });
+});
+
+describe("centralNestedShift", () => {
+  it("rounds a half-CSS-px central shift up to a whole CSS px (Chromium's nested central baseline)", () => {
+    // Almendra SC 22 px at k 1: extent says 7.5, painted 8; at k 2: 7.5 user units = 15 CSS px, painted as is
+    expect(centralNestedShift(7.5, 1)).toBe(8);
+    expect(centralNestedShift(7.5, 2)).toBe(7.5);
+    // k 1.5, 14 px: 5 user units = 7.5 CSS px -> 8 CSS px
+    expect(centralNestedShift(5, 1.5)).toBeCloseTo(8 / 1.5, 9);
+    // whole CSS px (k 1.25: 4.8 user units = 6 CSS px) and float noise stay put
+    expect(centralNestedShift(4.8, 1.25)).toBeCloseTo(4.8, 9);
+    expect(centralNestedShift(6.0000001, 1)).toBe(6);
+  });
+});
+
+describe("svgCharPositions", () => {
+  const point = (x: number, y: number) => ({ x, y });
+  function fakeText(starts: [number, number][], ends: [number, number][], rotations: number[]) {
+    return {
+      getNumberOfChars: () => starts.length,
+      getStartPositionOfChar: (i: number) => point(...starts[i]),
+      getEndPositionOfChar: (i: number) => point(...ends[i]),
+      getRotationOfChar: (i: number) => rotations[i]
+    } as unknown as SVGTextElement;
+  }
+
+  it("reads start, end, advance and angle per addressable character", () => {
+    const text = fakeText(
+      [
+        [10, 20],
+        [16, 20]
+      ],
+      [
+        [16, 20],
+        [16, 26]
+      ],
+      [0, 90]
+    );
+    const out = svgCharPositions(text, 2)!;
+    expect(out[0]).toEqual({ x: 10, y: 20, ex: 16, ey: 20, advance: 6, angle: 0 });
+    expect(out[1]!.advance).toBe(6);
+    expect(out[1]!.angle).toBeCloseTo(Math.PI / 2);
+  });
+
+  it("marks a character the SVG does not render (reported at the origin with no advance)", () => {
+    const text = fakeText(
+      [
+        [0, 0],
+        [16, 20]
+      ],
+      [
+        [0, 0],
+        [22, 20]
+      ],
+      [0, 0]
+    );
+    expect(svgCharPositions(text, 2)).toEqual([null, { x: 16, y: 20, ex: 22, ey: 20, advance: 6, angle: 0 }]);
+  });
+
+  it("is null without SVG layout: no API, another character count, a throwing query, or nothing placed", () => {
+    expect(svgCharPositions({} as SVGTextElement, 1)).toBeNull();
+    const text = fakeText([[1, 1]], [[2, 1]], [0]);
+    expect(svgCharPositions(text, 2)).toBeNull();
+    const throwing = {
+      ...text,
+      getStartPositionOfChar: () => {
+        throw new Error("IndexSizeError");
+      }
+    } as unknown as SVGTextElement;
+    expect(svgCharPositions(throwing, 1)).toBeNull();
+    expect(svgCharPositions(fakeText([[0, 0]], [[0, 0]], [0]), 1)).toBeNull();
   });
 });

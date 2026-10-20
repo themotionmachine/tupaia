@@ -151,7 +151,8 @@ describe("[TEXT] layoutStraight geometry (stubbed metrics)", () => {
     });
     expect(glyphs).toHaveLength(2);
     const [shadow, fill] = glyphs;
-    expect(shadow.color).toEqual([157 / 255, 170 / 255, 201 / 255, 1].map(v => expect.closeTo(v, 5)));
+    // a shadow instance carries its alpha negated: the glyph shader's soft-cell flag (no coverage floor)
+    expect(shadow.color).toEqual([157 / 255, 170 / 255, 201 / 255, -1].map(v => expect.closeTo(v, 5)));
     expect(fill.color).toEqual([0, 0, 0, 1]);
     // 1px * dpr 2 / scale 4 = 0.5, 2px -> 1
     expect(shadow.cx - fill.cx).toBeCloseTo(0.5);
@@ -176,9 +177,9 @@ describe("[TEXT] layoutStraight geometry (stubbed metrics)", () => {
     const wide = (await layout("A", { textShadow: "rgb(255, 255, 255) 0px 0px 10px" })).glyphs[0];
     const narrow = (await layout("A", { textShadow: "rgb(255, 255, 255) 0px 0px 1px" })).glyphs[0];
     expect(wide.w).toBeGreaterThan(narrow.w);
-    // margin: (ceil(1.5 * blur) + PAD) atlas px at the cut scale, i.e. (6 + 2) / 0.8 = 10 world units per side
+    // margin: (ceil(1.5 * blur) + PAD) atlas px at the cut scale, i.e. (6 + 3) / 0.8 = 11.25 world units per side
     // around a 0.6 em = 4.8 world-unit ink box
-    expect(wide.w).toBeCloseTo(4.8 + 2 * 10, 0);
+    expect(wide.w).toBeCloseTo(4.8 + 2 * 11.25, 0);
   });
 
   it("paint-order stroke puts the halo pass under the fill pass", async () => {

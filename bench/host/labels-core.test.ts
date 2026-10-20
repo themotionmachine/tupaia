@@ -185,9 +185,10 @@ test("inkCount and strayInk count only uncovered candidate ink", () => {
 });
 
 test("decodeGlyphKey reads fill and halo keys, including a | character", () => {
-  assert.deepEqual(decodeGlyphKey('normal 400 40px "Almendra SC"|0|N'), { font: 'normal 400 40px "Almendra SC"', halo: 0, char: "N" });
-  assert.deepEqual(decodeGlyphKey("normal 400 8px Georgia|0||"), { font: "normal 400 8px Georgia", halo: 0, char: "|" });
-  assert.deepEqual(decodeGlyphKey("normal 400 8px Georgia|4.4|round|4|a"), { font: "normal 400 8px Georgia", halo: 4.4, char: "a" });
+  assert.deepEqual(decodeGlyphKey('normal 400 40px "Almendra SC"|0|rgb(62,62,75)|N'), { font: 'normal 400 40px "Almendra SC"', halo: 0, ink: "rgb(62,62,75)", char: "N" });
+  assert.deepEqual(decodeGlyphKey("normal 400 8px Georgia|0|rgb(0,0,0)||"), { font: "normal 400 8px Georgia", halo: 0, ink: "rgb(0,0,0)", char: "|" });
+  assert.deepEqual(decodeGlyphKey("normal 400 8px Georgia|4.4|round|4|rgb(255,255,255)|a"), { font: "normal 400 8px Georgia", halo: 4.4, ink: "rgb(255,255,255)", char: "a" });
+  assert.equal(decodeGlyphKey("normal 400 8px Georgia|0|A"), null);
   assert.equal(decodeGlyphKey("bad"), null);
 });
 
@@ -232,9 +233,9 @@ test("scaleBucket matches raster.ts", () => {
 
 test("gpuGlyphs (the page-side reader) places glyphs where glyphBaseline does", () => {
   const atlas = new Map([
-    ["normal 400 16px Georgia|0|A", { u0: 0, v0: 0, top: -16, height: 20 }],
+    ["normal 400 16px Georgia|0|rgb(0,0,0)|A", { u0: 0, v0: 0, top: -16, height: 20 }],
     ["normal 400 16px Georgia|4|round|4|A", { u0: 0.5, v0: 0, top: -18, height: 24 }],
-    ["normal 400 16px Georgia|0||", { u0: 0.25, v0: 0.25, top: -14, height: 18 }]
+    ["normal 400 16px Georgia|0|rgb(0,0,0)||", { u0: 0.25, v0: 0.25, top: -14, height: 18 }]
   ]);
   // GLYPH_FLOATS = 15: cx cy angle lx ly w h u0 v0 u1 v1 r g b a
   const instances = [
@@ -252,8 +253,8 @@ test("gpuGlyphs (the page-side reader) places glyphs where glyphBaseline does", 
     assert.equal(out.instances, 4);
     assert.equal(out.glyphs.length, 2);
     for (const [index, entry] of [
-      [0, "normal 400 16px Georgia|0|A"],
-      [1, "normal 400 16px Georgia|0||"]
+      [0, "normal 400 16px Georgia|0|rgb(0,0,0)|A"],
+      [1, "normal 400 16px Georgia|0|rgb(0,0,0)||"]
     ] as const) {
       const f32 = Float32Array.from(instances[index]);
       const glyph = atlas.get(entry)!;
