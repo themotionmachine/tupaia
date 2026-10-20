@@ -1001,7 +1001,11 @@ const DEFS: Record<string, CheckDef> = {
       return runScript(ctx, nodeScript("bench/host/stroke-probe.ts"), { PROBE_DPR: String(ctx.args.dpr), PROBE_K: String(ctx.args.k) }, report, 600, data => ({
         failure: reportFailure(data),
         metrics: data && {
-          cells: (data.cells ?? []).map((c: Json) => `d${c.dpr} k${c.k}: ${(c.lines as Json[]).filter(l => l.pass).length}/${(c.lines as Json[]).length}`),
+          cells: (data.cells ?? []).map((c: Json) => {
+            const n = (list: unknown, status: string) => ((list as Json[] | undefined) ?? []).filter(l => l.status === status).length;
+            return `d${c.dpr} k${c.k}: lines ${n(c.lines, "pass")} pass ${n(c.lines, "fail")} fail ${n(c.lines, "not comparable")} n/c, joins ${n(c.joins, "pass")}/${((c.joins as Json[] | undefined) ?? []).length}`;
+          }),
+          worstJoinNotches: Math.max(0, ...(data.cells ?? []).flatMap((c: Json) => ((c.joins as Json[] | undefined) ?? []).map(l => Number(l.notches) || 0))),
           worstWidthDeltaPx: Math.max(0, ...(data.cells ?? []).flatMap((c: Json) => (c.lines as Json[]).map(l => Math.abs(Number(l.widthDeltaPx) || 0)))),
           worstPhasePx: Math.max(0, ...(data.cells ?? []).flatMap((c: Json) => (c.lines as Json[]).map(l => Math.abs(Number(l.phasePx) || 0))))
         }
