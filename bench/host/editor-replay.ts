@@ -246,7 +246,13 @@ async function runStep(page: Page, arm: Arm, step: Step, index: number, frozen: 
       break;
     }
     case "button":
-      await page.click(step.css ?? `#${step.id}`);
+      if (step.dom)
+        await page.evaluate(selector => {
+          const el = document.querySelector(selector) as HTMLElement | null;
+          if (!el) throw Error(`no button ${selector}`);
+          el.click();
+        }, step.css ?? `#${step.id}`);
+      else await page.click(step.css ?? `#${step.id}`);
       break;
     case "drag": {
       hitKey = await aim(step.target);

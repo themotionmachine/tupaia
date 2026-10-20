@@ -278,7 +278,7 @@ export function installReplay(config: { arm: string; editors: string[] }) {
       }
       for (const el of lists)
         if (live(el)) {
-          const kids = [...el.children].filter(kid => !kid.matches("[data-dense-zoom]"));
+          const kids = [...el.children].filter(kid => !kid.matches("[data-dense-zoom]") && !EXCLUDED.has(kid.id));
           out.push(`${pathOf(el)} children=${kids.length} #${hashText(normHtml(kids.map(zoomFree).join("")))}`);
         }
       for (const el of texts) if (live(el)) out.push(`${pathOf(el)} text#${hashText(el.textContent ?? "")}`);
@@ -343,6 +343,18 @@ export function installReplay(config: { arm: string; editors: string[] }) {
     };
   };
   rp.unseed = () => (Math.random = native);
+  // The heightmap brush drops every move whose event time stamp is not a multiple of 5 ms ("slow down the edit":
+  // `~~d3.event.sourceEvent.timeStamp % 5 != 0`), so which cells a stroke edits depends on the wall clock. During a
+  // step, mousemove time stamps read as multiples of 5 in every arm (all moves of a stroke count; the moves themselves
+  // are the same frozen points). Other events, and every trusted click's stamp the resume timer uses, are untouched.
+  const stamp = Object.getOwnPropertyDescriptor(Event.prototype, "timeStamp")!;
+  Object.defineProperty(MouseEvent.prototype, "timeStamp", {
+    configurable: true,
+    get(this: MouseEvent) {
+      const t = stamp.get!.call(this) as number;
+      return this.type === "mousemove" && w.__rp?.step ? Math.round(t / 5) * 5 : t;
+    }
+  });
 
   // ---------------------------------------------------------------- targets
   const branchOf = (el: Element | null) => {

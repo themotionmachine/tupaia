@@ -63,8 +63,9 @@ export type Step =
   | ({ op: "input"; value?: string | number; checked?: boolean; event?: "input" | "change"; uiOnly?: boolean; note?: string } & Control)
   // Click a button: by id, or by a Playwright selector (e.g. `.ui-dialog-buttonset button:has-text("Keep")`).
   // `mustChange`: the recording must show the click changed the model or the model DOM (an undo that undoes nothing
-  // proves nothing).
-  | ({ op: "button"; expect?: Expect; mustChange?: boolean; note?: string } & Control)
+  // proves nothing). `dom`: click through the DOM (el.click()) instead of a pointer click, for a control in the
+  // collapsed options panel that no pointer can reach (the heightmap editor's template and image buttons).
+  | ({ op: "button"; expect?: Expect; mustChange?: boolean; dom?: boolean; note?: string } & Control)
   // node drag or brush stroke: mouse down on the target, move through `path` (client px offsets from the start), up.
   // The camera must not move at any point of it (PROOF-PLAN §5 "no camera pan during a brush stroke").
   | { op: "drag"; target: Target; path: [number, number][]; brush?: boolean; note?: string }
