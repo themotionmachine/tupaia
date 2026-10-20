@@ -1180,7 +1180,8 @@ const DEFS: Record<string, CheckDef> = {
           "bench/integration-fixture.test.ts",
           "bench/host/editor-replay-core.test.ts",
           "bench/host/census-core.test.ts",
-          "bench/host/labels-core.test.ts"
+          "bench/host/labels-core.test.ts",
+          "bench/host/reuse-fidelity-core.test.ts"
         ],
         {},
         null,
@@ -1535,6 +1536,47 @@ const DEFS: Record<string, CheckDef> = {
       const maps = String(ctx.args.worlds).split(",").map(w => `${w}=${resolveNamedFixture(w)}`).join(",");
       const env = { LABELS_MAPS: maps, LABELS_STEPS: String(ctx.args.steps), LABELS_DPR: String(ctx.args.dpr), LABELS_SAMPLE: String(ctx.args.sample), LABELS_KEEP: String(ctx.args.keep), LABELS_BREAK: String(ctx.args.break) };
       return runScript(ctx, nodeScript("bench/host/labels.ts"), env, report, 3600, data => ({ failure: reportFailure(data), metrics: data && { summary: data.summary, break: data.args?.break, errors: data.errors?.slice(0, 4) } }));
+    }
+  },
+  // COST (W3): a compat raster reused across an edit against the SVG (bench/host/reuse-fidelity.ts). Per edit and layer
+  // family, the frame that reused the family's rasters across the edit and a forced fresh prepare of the same state are
+  // each measured GPU against SVG; the reused one must be as close (the toggle census on-state margins). Cells where no
+  // raster of the family was reused are INFO; an edit that no family reused across fails.
+  "reuse-fidelity": {
+    lock: "shared",
+    keys: ["edits", "families", "dpr", "launcher", "break"],
+    spec: {
+      edits: { type: "string", default: "zoom,move,toggle" },
+      families: { type: "string", default: "" },
+      break: { type: "enum", values: ["none", "stale"], default: "none" }
+    },
+    timeout: 3600,
+    run: async ctx => {
+      const report = join(ctx.dir, "reuse-fidelity.json");
+      const env = { REUSE_EDITS: String(ctx.args.edits), REUSE_FAMILIES: String(ctx.args.families), REUSE_DPR: String(ctx.args.dpr), REUSE_LAUNCHER: String(ctx.args.launcher), REUSE_BREAK: String(ctx.args.break), REUSE_MAP: resolveNamedFixture("parity") };
+      return runScript(ctx, nodeScript("bench/host/reuse-fidelity.ts"), env, report, 3600, data => ({ failure: reportFailure(data), metrics: data && { summary: data.summary, failing: (data.checks ?? []).filter((c: Json) => c.status === "FAIL").map((c: Json) => c.id).slice(0, 8), exercised: (data.checks ?? []).filter((c: Json) => /\.exercised$/.test(c.id)).map((c: Json) => `${c.id}: ${c.detail}`) } }));
+    }
+  },
+  // The reuse check must still fail: with the reuse tracker blind to edits (?gpu-compat-reuse-break=stale) the markers
+  // family keeps its raster from before the move edit and must fail; the emblems family (untouched) must still pass.
+  "reuse-fidelity-selftest": {
+    lock: "shared",
+    keys: ["launcher"],
+    timeout: 1200,
+    run: async ctx => {
+      const report = join(ctx.dir, "reuse-fidelity.json");
+      const env = { REUSE_EDITS: "move", REUSE_FAMILIES: "markers,emblems", REUSE_DPR: "2", REUSE_LAUNCHER: String(ctx.args.launcher), REUSE_BREAK: "stale", REUSE_MAP: resolveNamedFixture("parity") };
+      const code = await exec(nodeScript("bench/host/reuse-fidelity.ts"), ctx.env({ ...env, GATE_OUT_DIR: ctx.dir }), ctx.log, 1200, true);
+      const data = readJson(report);
+      const status = (id: string) => (data?.checks ?? []).find((c: Json) => c.id === id)?.status;
+      const problems: string[] = [];
+      if (!data) problems.push(`no report (exit ${code})`);
+      else {
+        if (status("reuse.move.markers") !== "FAIL") problems.push(`reuse.move.markers should FAIL with a blind tracker (got ${status("reuse.move.markers")})`);
+        if (status("reuse.move.emblems") !== "PASS") problems.push(`reuse.move.emblems should still PASS (got ${status("reuse.move.emblems")})`);
+        if ((data.checks ?? []).some((c: Json) => c.id === "run.harness")) problems.push("harness error");
+      }
+      return { exit_code: problems.length ? 1 : 0, failure: problems.length ? problems.join(" | ") : null, metrics: { markers: status("reuse.move.markers"), emblems: status("reuse.move.emblems"), summary: data?.summary } };
     }
   },
   // The label harness must still fail: on the parity fixture, a clean run and four broken ones. `freeze` stops the GPU
