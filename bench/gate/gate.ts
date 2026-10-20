@@ -1062,13 +1062,14 @@ const DEFS: Record<string, CheckDef> = {
     timeout: 1200,
     run: ctx => replayCheck(ctx, { REPLAY_ARMS: "svg,gpu,gpu-select", REPLAY_PARALLEL: "0" })
   },
-  // The replay must still fail: corrupt pack, the model DOM and the dispatch count on the replay arm; each must be caught.
+  // The replay must still fail: corrupt pack, the model DOM and the dispatch count on the replay arm, and reveal the GPU
+  // canvas right after the close (a stale pre-edit frame, D13); each must be caught.
   "replay-selftest": {
     lock: "shared",
     keys: ["launcher", "fixture"],
     spec: { fixture: { type: "string", default: "parity" } },
     timeout: 600,
-    run: ctx => replayCheck(ctx, { REPLAY_EDITORS: "label", REPLAY_ARMS: "svg,gpu", REPLAY_BREAK: "model,dom,dispatch" })
+    run: ctx => replayCheck(ctx, { REPLAY_EDITORS: "label", REPLAY_ARMS: "svg,gpu", REPLAY_BREAK: "model,dom,dispatch,stale" })
   },
   timing: { lock: "exclusive", keys: ["arm", "headless", "trace"], timeout: 900, run: ctx => timing(ctx, "bench/navigation.ts") },
   profile: { lock: "exclusive", keys: ["arm", "headless", "trace"], timeout: 900, run: ctx => timing(ctx, "bench/profile-navigation.ts") },
