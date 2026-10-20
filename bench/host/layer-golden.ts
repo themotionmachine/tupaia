@@ -640,24 +640,27 @@ const showCanvas = (page: Page, value: string | null) =>
   }, value);
 
 // One SVG-arm shot (the canvas must be hidden already) that waits for the reference to hold still: shots GOLDEN_SETTLE_MS
-// apart repeat until two in a row differ by at most SETTLE_NOISE_PX pixels (at most 6 shots). Chromium's own raster is
+// apart repeat until two in a row differ by at most SETTLE_NOISE_PX pixels (at most 10 shots). Chromium's own raster is
 // not bit-stable shot to shot: 9 px of one emblem frame flickered between identical-DOM shots (measured), so exact
 // equality would fail good cells. A reference still changing after that (a lazy raster, a refinement) is reported as not
 // settled, with where, and fails the cell as a harness error.
 const SETTLE_NOISE_PX = 64;
+const SETTLE_SHOTS = 10;
 async function shootSvg(page: Page): Promise<{ png: Buffer; shots: number; settled: boolean; moving?: string }> {
   let png = await page.screenshot({ animations: "disabled" });
   if (settleMs === 0) return { png, shots: 1, settled: true };
   let moving: string | undefined;
-  for (let shots = 2; shots <= 6; shots++) {
-    await page.waitForTimeout(settleMs);
+  // patient on a loaded host: five shots settleMs apart, then up to five more 1.5 s apart (a 12-20 load average made the
+  // page lag by seconds in the presets run) before the reference counts as moving
+  for (let shots = 2; shots <= SETTLE_SHOTS; shots++) {
+    await page.waitForTimeout(shots <= 5 ? settleMs : 1500);
     const next = await page.screenshot({ animations: "disabled" });
     const change = next.equals(png) ? { n: 0, where: "" } : describeChange(png, next);
     png = next;
     if (change.n <= SETTLE_NOISE_PX) return { png, shots, settled: true };
     moving = change.where;
   }
-  return { png, shots: 6, settled: false, moving };
+  return { png, shots: SETTLE_SHOTS, settled: false, moving };
 }
 // how many pixels two shots of the SVG arm differ in, and "N px differ in x0,y0-x1,y1" (device px)
 function describeChange(a: Buffer, b: Buffer): { n: number; where: string } {

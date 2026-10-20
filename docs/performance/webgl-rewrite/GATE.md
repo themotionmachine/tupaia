@@ -265,7 +265,7 @@ Arguments:
   bitmap's blur (ink ratio 0.21-0.63, every cell k 1-4), not the icons; against the vectors every burgs cell passes
   (SSIM 1.0000, over16 0.000 %). `golden-selftest` keeps this honest (arm `dense-ref`).
 - **Settled SVG arm.** Each SVG shot is repeated `settle_ms` later until two agree within 64 px (Chromium's own raster
-  flickers about 9 px between identical-DOM shots), at most 6 shots; a reference that keeps changing fails the cell as
+  flickers about 9 px between identical-DOM shots), at most 10 shots, the last five 1.5 s apart; a reference that keeps changing fails the cell as
   a harness error with the bounding box of the change.
 - **Verdict per cell (D1, D11).**
   - SSIM ≥ 0.95, over16 ≤ 1 %, and "≤ 0.5 % at Δ ≤ 44", all on the isolated layer's whole frame.
