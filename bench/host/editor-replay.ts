@@ -85,7 +85,8 @@ for (const name of names) {
 const EDITOR_GLOBALS = [
   ...new Set([
     ...scripts.map(s => s.editor),
-    "editBurg", "editLabel", "editRoute", "editMarker", "editReliefIcon", "editRiver", "editIce", "editLake", "editCoastline", "editRegiment", "editEmblem"
+    "editBurg", "editLabel", "editRoute", "editMarker", "editReliefIcon", "editRiver", "editIce", "editLake", "editCoastline", "editRegiment", "editEmblem",
+    "editHeightmap", "editBiomes", "editStates", "editProvinces", "editCultures", "editReligions", "editZones", "editDiplomacy"
   ])
 ];
 
@@ -227,17 +228,34 @@ async function runStep(page: Page, arm: Arm, step: Step, index: number, frozen: 
       await page.mouse.click(point!.x, point!.y);
       break;
     }
+    case "open": {
+      // the Tools panel's own listener (tools.js) dispatches on the button's id; a script click, not a pointer action
+      await page.evaluate(id => {
+        const el = document.getElementById(id);
+        if (!el) throw Error(`no Tools button #${id}`);
+        el.click();
+      }, step.button);
+      break;
+    }
     case "input": {
-      await page.evaluate(({ id, value, event }) => {
-        const el = document.getElementById(id) as HTMLInputElement | null;
-        if (!el) throw Error(`no input #${id}`);
-        el.value = String(value);
-        el.dispatchEvent(new Event(event ?? "input", { bubbles: true }));
-      }, { id: step.id, value: step.value, event: step.event });
+      await page.evaluate(({ selector, value, checked, event }) => {
+        const el = document.querySelector(selector) as HTMLInputElement | null;
+        if (!el) throw Error(`no input ${selector}`);
+        if (checked !== undefined) el.checked = checked;
+        if (value !== undefined) el.value = String(value);
+        el.dispatchEvent(new Event(event ?? (checked !== undefined ? "change" : "input"), { bubbles: true }));
+      }, { selector: step.css ?? `#${step.id}`, value: step.value, checked: step.checked, event: step.event });
       break;
     }
     case "button":
-      await page.click(`#${step.id}`);
+      if (step.dom)
+        await page.evaluate(selector => {
+          const el = document.querySelector(selector) as HTMLElement | SVGElement | null;
+          if (!el) throw Error(`no button ${selector}`);
+          if (el instanceof HTMLElement) el.click();
+          else el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window })); // SVG elements have no click()
+        }, step.css ?? `#${step.id}`);
+      else await page.click(step.css ?? `#${step.id}`);
       break;
     case "drag": {
       hitKey = await aim(step.target);
@@ -250,7 +268,7 @@ async function runStep(page: Page, arm: Arm, step: Step, index: number, frozen: 
       break;
     }
     case "close":
-      await page.locator(`.ui-dialog:has(> ${step.dialog}) .ui-dialog-titlebar-close`).click();
+      await (step.via ? page.locator(step.via) : page.locator(`.ui-dialog:has(> ${step.dialog}) .ui-dialog-titlebar-close`)).click();
       if (breaks.includes("stale") && arm !== "svg")
         await page.evaluate(() => {
           const canvas = document.querySelector("canvas[data-gpu-renderer]") as HTMLCanvasElement | null;
@@ -261,6 +279,10 @@ async function runStep(page: Page, arm: Arm, step: Step, index: number, frozen: 
       await page.keyboard.press(step.key);
       break;
   }
+  // an editor that loads lazily (states, cultures, religions) opens a moment after its Tools button: wait for the dialog
+  // the script says opens, in every arm
+  if ((step.op === "click" || step.op === "open" || step.op === "button") && step.expect?.dialog)
+    await page.waitForFunction(id => (globalThis as any).__rp.dialogs().includes(id), step.expect.dialog, { timeout: 30000 });
   let resume: Resume | undefined;
   if (step.op === "close" && arm !== "svg") resume = await page.evaluate(limit => (globalThis as any).__rp.resume(limit), resumeLimit);
   // a display change is always followed by a camera step, which waits for the GPU frame itself

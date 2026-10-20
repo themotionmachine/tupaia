@@ -1102,6 +1102,7 @@ export class GpuRenderer {
     const generation = this.generation;
     const revision = this.revision;
     const job = { generation, revision, hadFrame: !!this.prepared };
+    let sourceChanged = false; // the prepare gave up on a DOM change that bumped no revision (prepareFrame's sourceChanged)
     const record: NonNullable<GpuTelemetry["lastPrepare"]> = {
       reason: this.prepareReason,
       hadFrame: job.hadFrame,
@@ -1152,6 +1153,10 @@ export class GpuRenderer {
         camera: { ...this.view },
         atlas: this.atlas,
         stale,
+        sourceChanged: () => {
+          sourceChanged = true;
+          this.revision++; // the cached scene and export clone predate the change
+        },
         mark: step => {
           record.phases[step] = Math.round(performance.now() - started);
           if (recovering) this.recovery.prepareStep(recovering, step);
@@ -1203,7 +1208,7 @@ export class GpuRenderer {
       done(`${record.reason} ${record.outcome}`);
       this.preparing = false;
       // a newer world, restored context or DOM revision arrived while this job ran
-      const behind = generation !== this.generation || this.revision !== revision || !this.prepared;
+      const behind = generation !== this.generation || this.revision !== revision || !this.prepared || sourceChanged;
       if (behind && !this.device.lost && !this.device.disposed && !this.prepareTimer) {
         // a frame under an open editor waits for its close (resume); a frame-less renderer still prepares now
         if (this.prepared && this.editorReason()) this.suspendWanted = true;

@@ -76,8 +76,38 @@ describe("validateScript", () => {
     const errors = validateScript(bad).join("\n");
     assert.match(errors, /camera k/);
     assert.match(errors, /drag needs a path/);
-    assert.match(errors, /no click step expects #burgEditor/);
+    assert.match(errors, /no click, open or button step expects #burgEditor/);
     assert.match(errors, /last step must close/);
+  });
+  it("accepts the Tools-panel open op, selector controls and a close via another button", () => {
+    const tools: EditorScript = {
+      ...script,
+      steps: [
+        { op: "open", button: "editBurgsButton", expect: { editor: "editBurg", dialog: "#burgEditor" } },
+        { op: "input", css: "#burgsBody .name", value: "x" },
+        { op: "input", id: "check", checked: true, uiOnly: true },
+        { op: "button", css: '.ui-dialog-buttonset button:has-text("Keep")', mustChange: true },
+        { op: "close", dialog: "#burgEditor", via: "#exitCustomization" }
+      ]
+    };
+    assert.deepEqual(validateScript(tools), []);
+  });
+  it("rejects a control with both or neither of id and css, an input with no value, a bad open button", () => {
+    const bad = {
+      ...script,
+      steps: [
+        { op: "open", button: "#editBurgsButton", expect: { dialog: "#burgEditor" } },
+        { op: "input", id: "a", css: "#a", value: "x" },
+        { op: "input", id: "b" },
+        { op: "button" },
+        { op: "close", dialog: "#burgEditor" }
+      ]
+    } as unknown as EditorScript;
+    const errors = validateScript(bad).join("\n");
+    assert.match(errors, /open needs a Tools button id/);
+    assert.match(errors, /step 1: input needs exactly one of id or css/);
+    assert.match(errors, /step 2: input needs a value or checked/);
+    assert.match(errors, /step 3: button needs exactly one of id or css/);
   });
   it("accepts every shipped editor script", async () => {
     const dir = join(import.meta.dirname, "editor-scripts");
@@ -125,6 +155,15 @@ describe("checkGpuStep", () => {
     assert.match(checkGpuStep(step({ gpu: gpu({ active: "svg", fallbackReason: "lost" }) }), "gpu", 1000).join(), /fell back: lost/);
     assert.deepEqual(checkGpuStep(step(), "svg", 1000), []);
   });
+  it("fails a GPU arm that never reached a current frame with no editor open (settledMs null)", () => {
+    const idle = (over = {}) => step({ op: "camera", dialogs: [], gpu: gpu({ state: "active", suspendedReason: null, canvasVisible: true, settledMs: 120, ...over }) });
+    assert.deepEqual(checkGpuStep(idle(), "gpu", 1000), []);
+    assert.match(checkGpuStep(idle({ settledMs: null }), "gpu", 1000).join(), /never reached a current frame/);
+    // a display step does not wait for the GPU (the camera step after it does)
+    assert.deepEqual(checkGpuStep({ ...idle({ settledMs: null }), op: "display" }, "gpu", 1000), []);
+    // with an editor open the suspended/hidden checks speak for it
+    assert.deepEqual(checkGpuStep(step({ gpu: gpu({ settledMs: null }) }), "gpu", 1000), []);
+  });
   it("requires a measured, refined resume after the close", () => {
     const closed = (resume: any) => step({ op: "close", dialogs: [], gpu: gpu({ state: "active", suspendedReason: null, canvasVisible: true }), resume });
     assert.deepEqual(checkGpuStep(closed({ currentMs: 900, refinedMs: 1500, timedOut: false, prepares: 1, lastPrepareMs: 800 }), "gpu", 60000), []);
@@ -155,6 +194,14 @@ describe("checkRecording / judgeArm", () => {
     assert.match(out, /expected one editBurg call, got 0/);
     assert.match(out, /expected #burgEditor open/);
     assert.match(out, /changed nothing/);
+  });
+  it("counts a canvas repaint as a change, and holds a mustChange button to it", () => {
+    const undo: EditorScript = { ...script, steps: [...script.steps.slice(0, 3), { op: "button", id: "undo", mustChange: true }, script.steps[3]] };
+    const base = recorded.slice(0, 3);
+    const none = [...base, step({ index: 3, op: "button", calls: {}, hitKey: undefined, domDelta: [], domDeltaCount: 0 }), { ...recorded[3], index: 4 }];
+    assert.match(checkRecording(undo, none).join(), /step 3 button: changed nothing/);
+    const painted = [...base, { ...none[3], canvasChanged: ["canvas #temp>canvas:0"] }, { ...recorded[3], index: 4 }];
+    assert.deepEqual(checkRecording(undo, painted), []);
   });
   it("judges a replay arm step by step and keeps the resume", () => {
     const resume = { currentMs: 1200, refinedMs: 2000, timedOut: false, prepares: 1, lastPrepareMs: 1000 };

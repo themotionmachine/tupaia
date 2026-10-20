@@ -119,6 +119,11 @@ export function installReplay(config: { arm: string; editors: string[] }) {
       }
     }
     out.notes = hashValue(w.notes ?? null);
+    // Model that lives in top-level `let`s of the classic main.js (global bindings, not window properties), outside
+    // pack/grid: the biomes editor renames and adds biomes in biomesData, the world configurator sets the climate and
+    // map position in options, the namesbase editor edits nameBases.
+    for (const name of ["biomesData", "options", "mapCoordinates", "nameBases"])
+      out[name] = hashValue((0, eval)(`typeof ${name} === 'undefined' ? null : ${name}`));
     return out;
   };
 
@@ -179,10 +184,38 @@ export function installReplay(config: { arm: string; editors: string[] }) {
     return parts.join(">");
   };
   rp.pathOf = pathOf;
+  // Pixels of the 2d canvases inside svg#map (the manual-assignment paint overlay, the heightmap editor's #heights):
+  // outerHTML does not carry them, so an undo that only repaints one would be invisible to the DOM hash. The
+  // renderer's own canvas lives outside svg#map; dense-zoom overlays are presentation.
+  rp.canvasHashes = () => {
+    const out: Record<string, string> = {};
+    const root = mapRoot();
+    if (!root) return out;
+    for (const canvas of root.querySelectorAll("canvas")) {
+      if (inOverlay(canvas)) continue;
+      const key = "canvas " + pathOf(canvas);
+      try {
+        const context = (canvas as HTMLCanvasElement).getContext("2d");
+        if (!context) {
+          out[key] = "not-2d";
+          continue;
+        }
+        const h = hasher();
+        h.int(canvas.width);
+        h.int(canvas.height);
+        h.bytes(context.getImageData(0, 0, canvas.width, canvas.height).data);
+        out[key] = h.done();
+      } catch (error) {
+        out[key] = "unreadable";
+      }
+    }
+    return out;
+  };
   rp.domHashes = () => {
     const out: Record<string, string> = {};
     const root = mapRoot();
     if (!root) return out;
+    Object.assign(out, rp.canvasHashes());
     const attrs = [...root.attributes].map(a => a.name + "=" + a.value).sort();
     out["svg#map@attrs"] = hashText(attrs.join("\n"));
     for (const child of root.children) {
@@ -247,7 +280,7 @@ export function installReplay(config: { arm: string; editors: string[] }) {
       }
       for (const el of lists)
         if (live(el)) {
-          const kids = [...el.children].filter(kid => !kid.matches("[data-dense-zoom]"));
+          const kids = [...el.children].filter(kid => !kid.matches("[data-dense-zoom]") && !EXCLUDED.has(kid.id));
           out.push(`${pathOf(el)} children=${kids.length} #${hashText(normHtml(kids.map(zoomFree).join("")))}`);
         }
       for (const el of texts) if (live(el)) out.push(`${pathOf(el)} text#${hashText(el.textContent ?? "")}`);
@@ -312,6 +345,18 @@ export function installReplay(config: { arm: string; editors: string[] }) {
     };
   };
   rp.unseed = () => (Math.random = native);
+  // The heightmap brush drops every move whose event time stamp is not a multiple of 5 ms ("slow down the edit":
+  // `~~d3.event.sourceEvent.timeStamp % 5 != 0`), so which cells a stroke edits depends on the wall clock. During a
+  // step, mousemove time stamps read as multiples of 5 in every arm (all moves of a stroke count; the moves themselves
+  // are the same frozen points). Other events, and every trusted click's stamp the resume timer uses, are untouched.
+  const stamp = Object.getOwnPropertyDescriptor(Event.prototype, "timeStamp")!;
+  Object.defineProperty(MouseEvent.prototype, "timeStamp", {
+    configurable: true,
+    get(this: MouseEvent) {
+      const t = stamp.get!.call(this) as number;
+      return this.type === "mousemove" && w.__rp?.step ? Math.round(t / 5) * 5 : t;
+    }
+  });
 
   // ---------------------------------------------------------------- targets
   const branchOf = (el: Element | null) => {
@@ -624,6 +669,7 @@ export function beginStep(arg: { index: number; seed: number }) {
     camera: rp.camera(),
     gpuView: rp.gpuView(),
     cameraMoves: 0,
+    canvases: rp.canvasHashes(),
     stop: rp.track(),
     telemetry: rp.telemetry(),
     model: rp.lastModel ?? rp.modelHashes()
@@ -639,6 +685,8 @@ export function endStep() {
   const domDelta: string[] = step.stop();
   const model = rp.modelHashes();
   rp.lastModel = model;
+  const canvases = rp.canvasHashes();
+  const canvasChanged = [...new Set([...Object.keys(canvases), ...Object.keys(step.canvases)])].filter(k => canvases[k] !== step.canvases[k]).sort();
   const after = rp.telemetry();
   const routes: Record<string, number> = {};
   for (const key of Object.keys(after)) if (after[key] !== (step.telemetry[key] ?? 0)) routes[key] = after[key] - (step.telemetry[key] ?? 0);
@@ -651,6 +699,7 @@ export function endStep() {
     // a delta list can be long (a brush touches hundreds of elements): kept whole for the comparison
     domDelta,
     domDeltaCount: domDelta.length,
+    canvasChanged,
     calls: { ...rp.calls },
     dialogs: rp.dialogs(),
     errors: [...rp.errors],

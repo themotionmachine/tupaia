@@ -43,17 +43,35 @@ export type Target =
   | { css: string; nth?: number | "middle" | "last" } // any element under svg#map, e.g. "#controlPoints circle"
   | { point: Focus; offset?: [number, number] }; // a map point (creator modes, brushes): no element required
 
+export interface Expect {
+  editor?: string;
+  dialog?: string;
+}
+
+/** A form control or button: its element id, or a selector (`css`). Exactly one of the two. */
+export type Control = { id: string; css?: undefined } | { css: string; id?: undefined };
+
 export type Step =
   // layer visibility through the bridge's display tool (MCP names, e.g. "goods"): view state, the same in every arm
   | { op: "display"; on?: string[]; off?: string[]; note?: string }
   | { op: "camera"; k: number; focus: Focus; note?: string }
-  | { op: "click"; target: Target; expect?: { editor?: string; dialog?: string }; note?: string }
-  | { op: "input"; id: string; value: string | number; event?: "input" | "change"; note?: string }
-  | { op: "button"; id: string; note?: string }
+  | { op: "click"; target: Target; expect?: Expect; note?: string }
+  // Open an editor from the Tools panel by clicking its button (#editStatesButton): the editors with no map target.
+  | { op: "open"; button: string; expect?: Expect; note?: string }
+  // Set a form control (by id, or any selector under the page) and fire its event. `checked` drives a checkbox.
+  // `uiOnly`: the control sets editor state that no model/DOM/canvas change shows by itself (a brush size)
+  | ({ op: "input"; value?: string | number; checked?: boolean; event?: "input" | "change"; uiOnly?: boolean; note?: string } & Control)
+  // Click a button: by id, or by a Playwright selector (e.g. `.ui-dialog-buttonset button:has-text("Keep")`).
+  // `mustChange`: the recording must show the click changed the model or the model DOM (an undo that undoes nothing
+  // proves nothing). `dom`: click through the DOM (el.click()) instead of a pointer click, for a control in the
+  // collapsed options panel that no pointer can reach (the heightmap editor's template and image buttons).
+  | ({ op: "button"; expect?: Expect; mustChange?: boolean; dom?: boolean; note?: string } & Control)
   // node drag or brush stroke: mouse down on the target, move through `path` (client px offsets from the start), up.
   // The camera must not move at any point of it (PROOF-PLAN §5 "no camera pan during a brush stroke").
   | { op: "drag"; target: Target; path: [number, number][]; brush?: boolean; note?: string }
-  | { op: "close"; dialog: string; note?: string }
+  // Close the editor: the dialog's titlebar close button, or `via` (a selector) for an editor that ends otherwise
+  // (heightmap: #exitCustomization). The resume is measured from this click.
+  | { op: "close"; dialog: string; via?: string; note?: string }
   | { op: "key"; key: string; note?: string };
 
 export interface EditorScript {
@@ -69,7 +87,7 @@ export interface EditorScript {
   steps: Step[];
 }
 
-const OPS = new Set(["display", "camera", "click", "input", "button", "drag", "close", "key"]);
+const OPS = new Set(["display", "camera", "click", "open", "input", "button", "drag", "close", "key"]);
 
 export function validateScript(script: EditorScript): string[] {
   const errors: string[] = [];
@@ -83,14 +101,19 @@ export function validateScript(script: EditorScript): string[] {
     if (!OPS.has(step.op)) return at(i, `unknown op ${step.op}`);
     if (step.op === "camera" && !(step.k >= 1 && step.k <= 20)) at(i, "camera k must be within the app's 1..20");
     if (step.op === "display" && !(step.on?.length || step.off?.length)) at(i, "display needs on or off layers");
-    if (step.op === "click" && step.expect?.dialog === script.dialog) opened = true;
+    if ((step.op === "click" || step.op === "open" || step.op === "button") && step.expect?.dialog === script.dialog) opened = true;
+    if (step.op === "open" && !/^[A-Za-z][\w-]*$/.test(step.button ?? "")) at(i, "open needs a Tools button id");
+    if (step.op === "input" || step.op === "button") {
+      if (!!step.id === !!step.css) at(i, `${step.op} needs exactly one of id or css`);
+      if (step.op === "input" && step.value === undefined && step.checked === undefined) at(i, "input needs a value or checked");
+    }
     if (step.op === "drag") {
       if (!step.path?.length) at(i, "drag needs a path");
       else if (step.path.some(p => !Array.isArray(p) || p.length !== 2 || !p.every(Number.isFinite))) at(i, "drag path entries are [dx, dy]");
     }
     if (step.op === "close" && !/^#[\w-]+$/.test(step.dialog)) at(i, 'close needs a dialog "#id"');
   });
-  if (!opened) errors.push(`${script.name}: no click step expects ${script.dialog} to open`);
+  if (!opened) errors.push(`${script.name}: no click, open or button step expects ${script.dialog} to open`);
   const last = script.steps?.[script.steps.length - 1];
   if (last && last.op !== "close") errors.push(`${script.name}: the last step must close the editor (the resume is measured there)`);
   return errors;
@@ -148,6 +171,8 @@ export interface StepObservation {
   /** Net model-DOM changes of the step: attribute values, child lists and text, by element path. */
   domDelta: string[];
   domDeltaCount: number;
+  /** 2d canvases inside svg#map whose pixels this step changed (their hashes are part of `dom`). */
+  canvasChanged?: string[];
   /** Calls during the step: dispatchClick and each editor global. */
   calls: Record<string, number>;
   /** Editor dialogs open after the step. */
@@ -210,6 +235,10 @@ export function checkGpuStep(step: StepObservation, arm: Arm, resumeLimitMs: num
   const gpu = step.gpu;
   if (!gpu) return [`${tag}: no GPU state recorded`];
   if (gpu.active !== "gpu") return [`${tag}: GPU fell back: ${gpu.fallbackReason}`];
+  // The renderer must reach a current frame after every action that leaves no editor open (camera moves, the close):
+  // null = rp.settle gave up. A display step is skipped: it never waits (the camera step after it does).
+  if (!step.dialogs.length && step.op !== "display" && gpu.settledMs === null)
+    out.push(`${tag}: the GPU never reached a current frame (settle gave up) with no editor open`);
   if (step.dialogs.length) {
     if (!gpu.suspendedReason) out.push(`${tag}: editor open but the GPU is not suspended`);
     if (gpu.canvasVisible) {
@@ -262,11 +291,12 @@ export function checkRecording(script: EditorScript, steps: StepObservation[]): 
     const tag = `${script.name} step ${i} ${step.op}`;
     if (step.cameraMoves) out.push(`${tag}: camera moved in the svg recording`);
     for (const error of step.errors) out.push(`${tag}: page error in the svg recording: ${error}`);
-    if (spec?.op === "click" && spec.expect?.editor && (step.calls[spec.expect.editor] ?? 0) !== 1)
+    const opens = spec?.op === "click" || spec?.op === "open" || spec?.op === "button";
+    if (opens && spec.expect?.editor && (step.calls[spec.expect.editor] ?? 0) !== 1)
       out.push(`${tag}: expected one ${spec.expect.editor} call, got ${step.calls[spec.expect.editor] ?? 0}`);
-    if (spec?.op === "click" && spec.expect?.dialog && !step.dialogs.includes(spec.expect.dialog))
+    if (opens && spec.expect?.dialog && !step.dialogs.includes(spec.expect.dialog))
       out.push(`${tag}: expected ${spec.expect.dialog} open, open: [${step.dialogs}]`);
-    if (spec && (spec.op === "drag" || spec.op === "input") && !step.domDeltaCount && !step.modelChanged.length)
+    if (spec && (spec.op === "drag" || (spec.op === "input" && !spec.uiOnly) || (spec.op === "button" && spec.mustChange)) && !step.domDeltaCount && !step.modelChanged.length && !step.canvasChanged?.length)
       out.push(`${tag}: changed nothing (a no-op step proves nothing)`);
   });
   const last = steps[steps.length - 1];
