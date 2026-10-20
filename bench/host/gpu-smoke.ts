@@ -60,6 +60,7 @@ try {
   const markerCount=after.poses.length;
   const animation:any={tradeLayerOn:after.tradeOn,markerCount,domMarkers:counted.domMarkers,gpuMarkers:counted.gpuMarkers,countSamples:countSamples.length,moved:JSON.stringify(before.poses)!==JSON.stringify(after.poses),gpuFrameAdvance:after.frames-before.frames,frozenForFidelity:true,failures:[] as string[]};
   if(markerCount===0)animation.skipped="no live trade markers in the fixture (nothing to assert)";
+  else if(!after.tradeOn)animation.skipped="trade layer is toggled off; hidden marker groups are not mirrored (nothing to assert)";
   else{
     if(!animation.moved)animation.failures.push("markers present but no pose changed in 150 ms");
     if(animation.gpuFrameAdvance<=0)animation.failures.push("GPU frame counter did not advance while markers animated");
@@ -69,8 +70,8 @@ try {
   report.animation=animation;
   await page.evaluate(()=>{(globalThis as any).d3.select("#tradeAnimation").selectAll("*").interrupt();return new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));});
   // World positions of up to 3 distinct frozen markers (land first, then water) for the zoomed pixel check below.
-  (report as any).markerTargets=await page.evaluate(()=>{const seen=new Set<string>(),out:any[]=[];for(const g of [...document.querySelectorAll("#tradeAnimation > g:not([display=none])")] as Element[]){const u=g.querySelector(":scope > use"),m=/translate\(\s*([-\d.e]+)[ ,]+([-\d.e]+)\s*\)/.exec(g.getAttribute("transform")||"");if(!u||!m)continue;const key=(u.getAttribute("href")||"")+Math.round(Number(m[1]))+","+Math.round(Number(m[2]));if(seen.has(key))continue;seen.add(key);out.push({kind:u.getAttribute("href"),x:Number(m[1]),y:Number(m[2])});}
-    const water=out.filter(t=>/water/.test(t.kind)),land=out.filter(t=>/land/.test(t.kind));return [...land.slice(0,2),...water.slice(0,1),...land.slice(2),...water.slice(1)].slice(0,3);});
+  (report as any).markerTargets=await page.evaluate(minSep=>{const out:any[]=[];for(const g of [...document.querySelectorAll("#tradeAnimation > g:not([display=none])")] as Element[]){const u=g.querySelector(":scope > use"),m=/translate\(\s*([-\d.e]+)[ ,]+([-\d.e]+)\s*\)/.exec(g.getAttribute("transform")||"");if(!u||!m)continue;const px=Number(m[1]),py=Number(m[2]);if(out.some(o=>Math.hypot(o.x-px,o.y-py)<minSep))continue;out.push({kind:u.getAttribute("href"),x:Number(m[1]),y:Number(m[2])});}
+    const water=out.filter(t=>/water/.test(t.kind)),land=out.filter(t=>/land/.test(t.kind));return [...land.slice(0,2),...water.slice(0,1),...land.slice(2),...water.slice(1)].slice(0,3);},96/Number(process.env.SMOKE_MARKER_ZOOM||14));
  }
 
  (report as any).reliefReference=await page.evaluate(async()=>({camera:{k:(0,eval)("scale"),x:(0,eval)("viewX"),y:(0,eval)("viewY")},images:await Promise.all([...document.querySelectorAll("#terrain image")].map(async(e:any)=>{const src=e.getAttribute("href");const image=new Image();if(src){image.src=src;try{await image.decode();}catch{}}return {attributes:e.getAttributeNames().filter((n:string)=>n!=="href"&&n!=="data-relief"),worldWidth:e.getAttribute("width"),worldHeight:e.getAttribute("height"),naturalWidth:image.naturalWidth,naturalHeight:image.naturalHeight,hidden:e.hasAttribute("data-zoom-hidden"),dense:e.hasAttribute("data-relief-viewport")};}))}));
@@ -105,9 +106,14 @@ try {
  // same arm with the trade layer hidden (SVG vs SVG, GPU vs GPU, so map-wide GPU/SVG differences are not ink). The GPU ink mask must overlap the SVG
  // ink mask (IoU), so a missing, misplaced or wrongly sized marker cannot hide in a clean crop. Runs last: it moves the camera.
  const targets=((report as any).markerTargets||[]) as {kind:string,x:number,y:number}[];
- if(targets.length&&report.animation&&!report.failure){
+ if(report.animation&&(!targets.length||report.failure||(report.animation as any).skipped)){
+  (report.animation as any).pixelCheck={skipped:report.failure?"earlier smoke failure: "+String(report.failure).slice(0,200):(report.animation as any).skipped||"no frozen marker targets"};
+ }
+ if(targets.length&&report.animation&&!report.failure&&!(report.animation as any).skipped){
   const anim=report.animation as any;
+  const statusFailures:string[]=[];
   const k=Number(process.env.SMOKE_MARKER_ZOOM||14);
+  const gpuStatus=()=>page.evaluate(()=>{const s=(globalThis as any).rendererStatus?.();return {active:s?.active,fallbackReason:s?.fallbackReason,canvasVisible:!!s?.gpu?.canvasVisible,state:s?.gpu?.state};});
   const gpuSettled=()=>page.waitForFunction(()=>{const s=(globalThis as any).rendererStatus?.();return s?.active!=="gpu"||(s.gpu?.canvasVisible&&!s.gpu?.pending&&!s.gpu?.refinementPending);},{},{timeout:30000});
   const shot=async(clip:any)=>(await page.screenshot({clip,animations:"disabled"})).toString("base64");
   const masks=(images:string[])=>page.evaluate(async images=>{const px=[];let w=0;for(const data of images){const i=new Image();i.src="data:image/png;base64,"+data;await i.decode();const c=document.createElement("canvas");w=c.width=i.width;c.height=i.height;const x=c.getContext("2d")!;x.drawImage(i,0,0);px.push(x.getImageData(0,0,c.width,c.height).data);}
@@ -119,6 +125,7 @@ try {
   for(const t of targets){
     await page.evaluate(async({x,y,k})=>{const w=globalThis as any;w.d3.select("#map").call((0,eval)("zoom").transform,w.d3.zoomIdentity.translate(640-x*k,360-y*k).scale(k));await w.__tupaia.settle();await Promise.all([w.reliefRenderReady,w.burgRenderReady]);},{x:t.x,y:t.y,k});
     await page.waitForTimeout(100);await gpuSettled();
+    const statusAtShot=await gpuStatus();
     const clip={x:640-48,y:360-48,width:96,height:96};
     const gpuShot=await shot(clip);
     await page.evaluate(()=>{(document.querySelector("canvas[data-gpu-renderer]") as HTMLCanvasElement).style.visibility="hidden";});
@@ -127,14 +134,17 @@ try {
     const svgBare=await shot(clip);
     await page.evaluate(()=>{(document.querySelector("canvas[data-gpu-renderer]") as HTMLCanvasElement).style.visibility="";});
     await page.waitForTimeout(100);await gpuSettled();
+    const statusAtBare=await gpuStatus();
     const gpuBare=await shot(clip);
     await page.evaluate(()=>{(document.querySelector("#tradeAnimation") as SVGElement).style.removeProperty("display");});
     await page.waitForTimeout(100);await gpuSettled();
-    results.push({target:t,zoom:k,...(await masks([gpuShot,svgShot,svgBare,gpuBare]))});
+    for(const [when,st] of [["shot",statusAtShot],["bare",statusAtBare]] as const)if(st.active!=="gpu"||!st.canvasVisible)statusFailures.push(`GPU not active/visible at marker crop (${when}) at ${t.x.toFixed(1)},${t.y.toFixed(1)} k=${k}: ${JSON.stringify(st)}`);
+    results.push({target:t,zoom:k,gpuStatus:{shot:statusAtShot,bare:statusAtBare},...(await masks([gpuShot,svgShot,svgBare,gpuBare]))});
   }
   const th={minSvgInkPixels:200,minIou:Number(process.env.SMOKE_MARKER_MIN_IOU||0.6),inkRatio:[0.6,1.6]};
   anim.pixelCheck={cropCount:results.length,minIou:Math.min(...results.map(r=>r.iou??0)),threshold:th,crops:results};
   const bad=results.filter(r=>r.svgInk<th.minSvgInkPixels||(r.iou??0)<th.minIou||(r.inkRatio??0)<th.inkRatio[0]||(r.inkRatio??0)>th.inkRatio[1]);
+  anim.failures.push(...statusFailures);
   if(bad.length)anim.failures.push(`${bad.length}/${results.length} zoomed marker crops disagree SVG vs GPU (iou<${th.minIou}, ink ratio outside ${th.inkRatio.join("..")}, or SVG shows <${th.minSvgInkPixels} ink px)`);
  }
  if(report.animation&&(report.animation as any).failures?.length)report.failure??="trade animation: "+(report.animation as any).failures.join("; ");

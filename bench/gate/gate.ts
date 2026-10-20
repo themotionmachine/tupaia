@@ -433,7 +433,7 @@ function smokeMetrics(check: string, data: Json): Json {
     const crops: Json[] = a.pixelCheck?.crops ?? [];
     metrics.animation = {
       ...pick(a, ["tradeLayerOn", "markerCount", "domMarkers", "gpuMarkers", "moved", "gpuFrameAdvance", "skipped", "failures"]),
-      pixel: a.pixelCheck && { crops: a.pixelCheck.cropCount, minIou: round(a.pixelCheck.minIou, 3), inkRatios: crops.map(c => round(c.inkRatio, 3)) }
+      pixel: a.pixelCheck && (a.pixelCheck.skipped ? { skipped: a.pixelCheck.skipped } : { crops: a.pixelCheck.cropCount, minIou: round(a.pixelCheck.minIou, 3), inkRatios: crops.map(c => round(c.inkRatio, 3)) })
     };
   }
   if (data.lifecycle) metrics.heapGrowthBytes = data.lifecycle.heapGrowthBytes;
