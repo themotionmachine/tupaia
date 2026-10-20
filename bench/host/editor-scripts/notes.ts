@@ -4,6 +4,7 @@
 // editor), toggle the pin option, remove the note (confirmation dialog; the editor shows the next note), close.
 // `notes` is a top-level let of main.js and is hashed through its binding (editor-replay-page.ts modelHashes).
 import type { EditorScript } from "../editor-replay-core.ts";
+import { CLUTTER } from "./common.ts";
 
 const script: EditorScript = {
   name: "notes",
@@ -12,6 +13,9 @@ const script: EditorScript = {
   rows: [29, 30],
   description: "open from Tools, pick marker9's note, rename, type a legend, pin, remove, close",
   steps: [
+    // decluttered like the other editor scripts: the D12 resume goal is judged on these, not on the every-layer map
+    { op: "display", off: CLUTTER },
+    { op: "display", off: ["zones", "states", "provinces", "religions", "cultures"] },
     { op: "open", button: "editNotesButton", expect: { editor: "editNotes", dialog: "#notesEditor" } },
     { op: "input", id: "notesSelect", value: "marker9", event: "change", uiOnly: true, note: "show marker9's note (the editor only fills its fields)" },
     { op: "input", id: "notesName", value: "Replay Dungeon", note: "rename the note" },

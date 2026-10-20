@@ -11,6 +11,10 @@ const script: EditorScript = {
   rows: [29, 30],
   description: "open from Tools, distance unit and scale, temperature scale, height exponent, population rates, restore, close",
   steps: [
+    // decluttered like the other editor scripts (the D12 resume goal is judged on these), but the temperature overlay
+    // stays on: the temperature scale change redraws it
+    { op: "display", off: ["goods", "markets", "precipitation", "population", "military"] },
+    { op: "display", off: ["zones", "states", "provinces", "religions", "cultures"] },
     { op: "open", button: "editUnitsButton", expect: { editor: "editUnits", dialog: "#unitsEditor" } },
     { op: "input", id: "distanceUnitInput", value: "km", event: "change", note: "kilometers (the scale bar label)" },
     { op: "input", id: "distanceScaleInput", value: 7, event: "change", note: "7 km per pixel (the scale bar length)" },
