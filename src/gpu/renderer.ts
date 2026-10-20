@@ -33,7 +33,7 @@ import {
 import { classify, pixelRecords, TRADE_LAYER, TradeMarkers } from "./markers";
 import { describeMutation, MOTION_IDLE, prepareStale, prepareStart, settleAction } from "./motion";
 import { NetChange } from "./net-change";
-import { type PickHit, resolveLeaf } from "./pick";
+import { type PickHit, resolveLeaf, worldLocation } from "./pick";
 import {
   BudgetError,
   type CompatReuse,
@@ -461,8 +461,8 @@ export class GpuRenderer {
     const overlay = this.prepared.overlays.pick(x, y, tolerance);
     if (overlay) return overlay;
     const [wx, wy] = screenToWorld(this.view, x, y);
-    // one CSS px in world units: the pointer square Chrome hit-tests text cells with (HitShape.square)
-    const hit = this.prepared.pick.pick(wx, wy, tolerance / this.view.k, undefined, 1 / this.view.k);
+    // Blink's hit-test location box in world space: the box Chrome hit-tests text cells with (HitShape.square)
+    const hit = this.prepared.pick.pick(wx, wy, tolerance / this.view.k, undefined, worldLocation(this.view, x, y));
     profile.indexMs += performance.now() - checked;
     return hit;
   }

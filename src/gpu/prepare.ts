@@ -42,9 +42,9 @@ import {
   compatShapes,
   compatShapesBatch,
   dashHitRings,
-  PICK_TOLERANCE,
   pickDepth,
   pickId,
+  pickTolerance,
   rasterHits,
   sensitivity,
   strokeHitRings,
@@ -493,6 +493,8 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
   const viewbox = svg.querySelector("#viewbox");
   if (!viewbox) throw new Error("missing #viewbox");
   const payloadAt = payloadKey(ctx, picking);
+  // hit geometry chord error: a fixed fraction of a CSS px up to this bucket's largest zoom (compat-pick.ts)
+  const hitTolerance = pickTolerance(ctx.bucket, ctx.screen.dpr, ctx.camera.k);
   // the generation this prepare lays labels out at; a clear while it runs makes the frame's atlas unretainable
   const atlasGeneration = ctx.atlas.generation;
   const retained =
@@ -563,7 +565,8 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
   ) => {
     if (reasons.length < 16 && !reasons.includes(reason)) reasons.push(reason);
     if (picking && layer !== null)
-      for (const shape of shapes ?? compatShapes(element as unknown as CompatRoot, viewbox as SVGGraphicsElement))
+      for (const shape of shapes ??
+        compatShapes(element as unknown as CompatRoot, viewbox as SVGGraphicsElement, hitTolerance))
         pick.addShape(layer, shape);
     const last = runs[runs.length - 1];
     // world runs merge while adjacent; each screen root keeps its own alpha-cropped raster (corner controls would
@@ -673,7 +676,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
         // Hit geometry is flattened at the compat pick tolerance, not the paint tolerance: a 0.2-unit chord error is
         // comparable to a thin route's half width (dashed strokes: see strokeHitRings).
         let hitPaths: Subpath[] | null = null;
-        const hitRings = () => (hitPaths ??= flattenPath(draw.d, PICK_TOLERANCE).filter(s => s.points.length >= 2));
+        const hitRings = () => (hitPaths ??= flattenPath(draw.d, hitTolerance).filter(s => s.points.length >= 2));
         // dashed: the on-dashes themselves are the rings (open, capped), so the pick's own dash pass is off
         const dashed = normalizeDashes(style.dashes).length > 0;
         const dashRings = () => dashHitRings(draw.d, style.dashes, style.dashOffset, viewScale);
@@ -873,7 +876,11 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
         }
         // hit areas are the DOM text's character cells (SVG hit testing), not the glyph-ink quads painted here
         if (picking)
-          for (const shape of compatShapes(draw.element as unknown as CompatRoot, viewbox as SVGGraphicsElement))
+          for (const shape of compatShapes(
+            draw.element as unknown as CompatRoot,
+            viewbox as SVGGraphicsElement,
+            hitTolerance
+          ))
             pick.addShape(draw.layer, shape);
         glyphs.push(batch.instances);
         const last = out[out.length - 1];
@@ -900,7 +907,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
         else out.push(...children);
       } else {
         const shapes = picking
-          ? compatShapesBatch(draw.elements as unknown as CompatRoot[], viewbox as SVGGraphicsElement)
+          ? compatShapesBatch(draw.elements as unknown as CompatRoot[], viewbox as SVGGraphicsElement, hitTolerance)
           : [];
         draw.elements.forEach((element, i) => {
           compat(element, draw.reason, out, draw.layer, false, shapes[i]);

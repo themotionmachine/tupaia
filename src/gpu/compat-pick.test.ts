@@ -401,6 +401,58 @@ describe("compatShapes <use> of a viewBox <svg>", () => {
   });
 });
 
+describe("compatShapes <use> of a viewBox <svg>: paint, transforms and clip units (PICK2)", () => {
+  // viewBox 0 0 100 100 into a 10x10 use at the world origin: content unit u maps to 0.1 u in the world
+  const useOf = (ref: string, id: string) =>
+    el("use", id, [], {
+      attrs: { href: `#${ref}`, x: "0", y: "0", width: "10", height: "10" },
+      bbox: { x: 0, y: 0, width: 10, height: 10 },
+      ctm: at(0, 0)
+    });
+  const svg = (id: string, children: Fake[]) => {
+    const node = el("svg", id, children);
+    node.attrs.viewBox = "0 0 100 100";
+    return node;
+  };
+
+  it("honours child transforms, pointer-events, stroke-only paint and inherited fill:none", () => {
+    svg("coaP1", [
+      el("g", "", [el("rect", "", [], { attrs: { x: "0", y: "0", width: "50", height: "50" } })], {
+        attrs: { transform: "translate(50 0)" }
+      }),
+      el("rect", "", [], { attrs: { x: "0", y: "50", width: "50", height: "50", "pointer-events": "none" } }),
+      el("rect", "", [], {
+        attrs: { x: "50", y: "50", width: "50", height: "50", fill: "none", stroke: "black", "stroke-width": "4" }
+      }),
+      el("g", "", [el("rect", "", [], { attrs: { x: "0", y: "0", width: "40", height: "40" } })], {
+        attrs: { style: "fill: none" }
+      })
+    ]);
+    const pick = index(el("g", "emblems", [useOf("coaP1", "useP1")]));
+    expect(pick.pick(7, 2, 0)?.id).toBe("useP1"); // the translated rect
+    expect(pick.pick(2, 2, 0)).toBeNull(); // the fill:none group (inherited from its <g> style)
+    expect(pick.pick(2, 7, 0)).toBeNull(); // pointer-events none
+    expect(pick.pick(7.5, 7.5, 0)).toBeNull(); // inside a stroke-only rect
+    expect(pick.pick(5.1, 7.5, 0)?.id).toBe("useP1"); // on its stroke (half width 2 content units = 0.2)
+  });
+
+  it("maps clipPathUnits=objectBoundingBox through the clipped content's bounding box", () => {
+    el("clipPath", "clipP2", [el("rect", "", [], { attrs: { x: "0", y: "0", width: "0.5", height: "1" } })], {
+      attrs: { clipPathUnits: "objectBoundingBox" }
+    });
+    svg("coaP2", [
+      el("g", "", [el("rect", "", [], { attrs: { x: "20", y: "0", width: "80", height: "100" } })], {
+        attrs: { "clip-path": "url(#clipP2)" }
+      })
+    ]);
+    const pick = index(el("g", "emblems", [useOf("coaP2", "useP2")]));
+    // content bbox x 20..100: the clip keeps 20..60 (world 2..6)
+    expect(pick.pick(4, 5, 0)?.id).toBe("useP2");
+    expect(pick.pick(1, 5, 0)).toBeNull();
+    expect(pick.pick(7, 5, 0)).toBeNull();
+  });
+});
+
 describe("compatShapes <use> of a plain shape (coastline, lakes)", () => {
   afterEach(() => vi.unstubAllGlobals());
   // #sea_island > <use href=#feature_N> of a bare <path> in defs: a stroke-only outline (pointer-events auto, fill

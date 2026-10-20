@@ -97,6 +97,14 @@ const TARGET = 120; // targeted samples per generator kind per world, spread ove
 // river click there, and about half of those fall in the edge band of a thin river polygon
 const TARGET_BY_KIND: Record<string, number> = { river: 1200 };
 const PER_ELEMENT_BY_KIND: Record<string, number> = { river: 24 };
+// PICK2 cohort plan for every zoom: when a view shows fewer than FEW elements of a kind, each may take up to
+// FEW_MULTIPLIER times its per-element cap (shared ice at k 4 showed 3 sheets x 12 = 30 < 50), and every other river
+// sample is drawn from the river's interior, at least INTERIOR_MARGIN CSS px past the edge band from its outline (parity
+// at k 1: 158 of 195 river samples fell in the 0.25 px band, leaving 37 < 50 gated).
+const FEW = 10;
+const FEW_MULTIPLIER = 4;
+const INTERIOR_KINDS = ["river"];
+const INTERIOR_MARGIN = 0.1;
 const PER_ELEMENT = 12; // at most this many targeted samples on one element
 const NEED_VISIBLE = 10; // planViews: elements of each required kind the views should show between them
 const JITTER = 2; // CSS px
@@ -165,6 +173,7 @@ const report: any = {
     edgeRing: EDGE_RING,
     perElement: PER_ELEMENT,
     perElementByKind: PER_ELEMENT_BY_KIND,
+    cohortPlan: { few: FEW, fewMultiplier: FEW_MULTIPLIER, interiorKinds: INTERIOR_KINDS, interiorMarginPx: INTERIOR_MARGIN },
     maxViews,
     jitterPx: JITTER,
     gpuTolerancePx: TOLERANCE,
@@ -419,7 +428,7 @@ try {
   // what the earlier views left; `used` lists element keys earlier views already sampled.
   const targets = (seed: number, quota: Record<string, number>, used: Record<string, string[]>) =>
     page.evaluate(
-      ({ seed, quota, used, perElement, perElementByKind, jitter }) => {
+      ({ seed, quota, used, perElement, perElementByKind, jitter, few, fewMultiplier, interiorKinds, interiorPx }) => {
         const w = globalThis as any;
         let a = seed >>> 0;
         const random = () => {
@@ -442,6 +451,25 @@ try {
             const lx = b.x + random() * b.width,
               ly = b.y + random() * b.height;
             if (element.isPointInFill(new DOMPoint(lx, ly))) return screen(element, lx, ly);
+          }
+          return null;
+        };
+        // a fill point whose whole circle of radius `px` CSS px (8 directions) is in the fill too, so its sample sits
+        // outside the edge band of its own outline; null when none is found (a river narrower than the circle)
+        const interiorPoint = (element: any, px: number): Point | null => {
+          const b = element.getBBox();
+          const m = element.getScreenCTM();
+          const r = px / Math.sqrt(Math.abs(m.a * m.d - m.b * m.c));
+          for (let k = 0; k < 240; k++) {
+            const lx = b.x + random() * b.width,
+              ly = b.y + random() * b.height;
+            if (!element.isPointInFill(new DOMPoint(lx, ly))) continue;
+            let all = true;
+            for (let j = 0; j < 8 && all; j++) {
+              const angle = (j * Math.PI) / 4;
+              all = element.isPointInFill(new DOMPoint(lx + r * Math.cos(angle), ly + r * Math.sin(angle)));
+            }
+            if (all) return screen(element, lx, ly);
           }
           return null;
         };
@@ -526,13 +554,15 @@ try {
             .map(([, entry]) => entry);
           available[kind] = candidates.length;
           if (want <= 0 || !candidates.length) continue;
-          const per = Math.max(kind === "burg" ? 2 : 1, Math.min(perElementByKind[kind] ?? perElement, Math.ceil(want / candidates.length)));
+          const cap = (perElementByKind[kind] ?? perElement) * (candidates.length < few ? fewMultiplier : 1);
+          const per = Math.max(kind === "burg" ? 2 : 1, Math.min(cap, Math.ceil(want / candidates.length)));
+          const interior = interiorKinds.includes(kind);
           let made = 0;
           for (const [key, element] of candidates) {
             if (made >= want) break;
             let any = false;
             for (let n = 0; n < per && made < want; n++) {
-              const p = kinds[kind].point(element, n);
+              const p = (interior && n % 2 === 1 ? interiorPoint(element, interiorPx) : null) ?? kinds[kind].point(element, n);
               if (!p || !inside(p)) continue;
               points.push({ x: p.x, y: p.y, source: kind === "burg" ? (n ? "burg-jitter" : "burg-center") : kind + "-target" });
               made++;
@@ -544,7 +574,18 @@ try {
         const mapRect = document.getElementById("map")!.getBoundingClientRect();
         return { points, keys, available, mapOffset: [mapRect.x, mapRect.y] as [number, number] };
       },
-      { seed, quota, used, perElement: PER_ELEMENT, perElementByKind: PER_ELEMENT_BY_KIND, jitter: JITTER }
+      {
+        seed,
+        quota,
+        used,
+        perElement: PER_ELEMENT,
+        perElementByKind: PER_ELEMENT_BY_KIND,
+        jitter: JITTER,
+        few: FEW,
+        fewMultiplier: FEW_MULTIPLIER,
+        interiorKinds: INTERIOR_KINDS,
+        interiorPx: edgeBand + INTERIOR_MARGIN
+      }
     );
 
   // One view: camera, targeted (and, on the primary view, uniform) points, guarded passes A-C, cells, sample rows.
