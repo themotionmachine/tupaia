@@ -94,6 +94,41 @@ describe("classifyElement", () => {
     expect(classifyElement(sea, 1)).toEqual({ kind: "coastline", id: "", branch: "coastline" });
   });
 
+  it("names the regiment <g> clicked() edits for every leaf of a regiment (rect, text, image)", () => {
+    const regiment = chain(["svg", "map"], ["g", "viewbox"], ["g", "armies"], ["g", "army3"], ["g", "regiment3-2"]);
+    // an anonymous leaf is indexed under the regiment <g> (depth 1); editRegiment("#" + parent.id) opens regiment3-2
+    expect(classifyElement(regiment, 1)).toEqual({ kind: "regiment", id: "regiment3-2", branch: "armies" });
+    const rect = chain(
+      ["svg", "map"],
+      ["g", "viewbox"],
+      ["g", "armies"],
+      ["g", "army3"],
+      ["g", "regiment3-2"],
+      ["rect", ""]
+    );
+    expect(classifyElement(rect)).toEqual({ kind: "regiment", id: "regiment3-2", branch: "armies" });
+    // the army group itself is not a regiment target (clicked() needs great.id === "armies")
+    expect(classifyElement(chain(["g", "armies"], ["g", "army3"]), 1)).toBeNull();
+  });
+
+  it("names the emblem group clicked() reads (parent of the painted <use>)", () => {
+    const group = chain(["svg", "map"], ["g", "viewbox"], ["g", "emblems"], ["g", "burgEmblems"]);
+    expect(classifyElement(group, 1)).toEqual({ kind: "emblem", id: "burgEmblems", branch: "emblems" });
+    const use = chain(["g", "viewbox"], ["g", "emblems"], ["g", "provinceEmblems"], ["use", "provinceCOA4"]);
+    expect(classifyElement(use)).toEqual({ kind: "emblem", id: "provinceEmblems", branch: "emblems" });
+  });
+
+  it("follows clicked()'s market and goods branches", () => {
+    const market = chain(["g", "viewbox"], ["g", "markets"], ["g", "", { "data-id": "4" }], ["text", ""]);
+    expect(classifyElement(market)).toEqual({ kind: "market", id: "4", branch: "markets" });
+    const marketPath = chain(["g", "viewbox"], ["g", "markets"], ["g", "", { "data-id": "4" }], ["path", ""]);
+    expect(classifyElement(marketPath)).toBeNull();
+    expect(classifyElement(chain(["g", "goodsIcons"], ["g", ""], ["use", ""]))?.branch).toBe("goodsIcons");
+    expect(classifyElement(chain(["g", "goodsCells"], ["path", ""]))?.branch).toBe("goodsCells");
+    const burgs = chain(["g", "goodsBurgs"], ["g", "", { "data-id": "9" }], ["text", ""]);
+    expect(classifyElement(burgs)).toEqual({ kind: "market", id: "9", branch: "goodsBurgs" });
+  });
+
   it("returns null for layers clicked() has no branch for", () => {
     expect(classifyElement(chain(["g", "regions"], ["g", "statesBody"], ["path", "state1"]))).toBeNull();
   });

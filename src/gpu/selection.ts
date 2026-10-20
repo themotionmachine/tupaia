@@ -22,6 +22,8 @@ export type SelectionKind =
   | "coastline"
   | "lake"
   | "regiment"
+  | "market"
+  | "goods"
   | "none";
 
 // A relief glyph before commit (relief-canvas.ts ReliefPeek): its index in the raster data and its href@x,y key.
@@ -86,6 +88,10 @@ export function classifyElement(element: Element, depth = 0): Classified | null 
     }
     return "";
   };
+  // clicked()'s positional reads: chain[i] is the painted leaf's i-th ancestor; below `depth` it is anonymous and not
+  // at hand (the leaf's own tag is unknown then, and selectAt re-classifies the live leaf).
+  const at = (i: number) => (i < depth ? null : ancestorAt(element, i - depth));
+  const leafTag = depth ? "" : element.tagName.toLowerCase();
   if (within("burgLabels")) return { kind: "burg", id: dataId(), branch: "burgLabels" };
   if (within("burgIcons")) return { kind: "burg", id: dataId(), branch: "burgIcons" };
   if (within("labels")) return { kind: "label", id: element.closest("text")?.id ?? "", branch: "labels" };
@@ -93,11 +99,21 @@ export function classifyElement(element: Element, depth = 0): Classified | null 
   if (ids[1] === "rivers") return { kind: "river", id: leafId, branch: "rivers" };
   if (within("routes")) return { kind: "route", id: leafId, branch: "routes" };
   if (within("terrain")) return { kind: "relief", id: leafId, branch: "terrain" };
-  if (within("emblems")) return { kind: "emblem", id: element.parentElement?.id ?? "", branch: "emblems" };
+  // editEmblem() when grand.id === "emblems"; the selection names the leaf's parent group (burgEmblems, ...)
+  if (ids[2] === "emblems") return { kind: "emblem", id: ids[1], branch: "emblems" };
   if (ids[1] === "ice") return { kind: "ice", id: leafId, branch: "ice" };
   if (within("coastline")) return { kind: "coastline", id: leafId, branch: "coastline" };
   if (within("lakes")) return { kind: "lake", id: leafId, branch: "lakes" };
-  if (within("armies")) return { kind: "regiment", id: element.parentElement?.id ?? "", branch: "armies" };
+  // clicked() order after the markers branch: markets (not their paths), goods icons and cells, goods burgs, armies
+  if (ids[2] === "markets" && leafTag !== "path")
+    return { kind: "market", id: at(1)?.getAttribute("data-id") ?? "", branch: "markets" };
+  if (ids[2] === "goodsIcons") return { kind: "goods", id: "", branch: "goodsIcons" };
+  if (ids[1] === "goodsCells") return { kind: "goods", id: "", branch: "goodsCells" };
+  if (ids[2] === "goodsBurgs")
+    return { kind: "market", id: at(1)?.getAttribute("data-id") ?? "", branch: "goodsBurgs" };
+  // editRegiment("#" + parent.id) when great.id === "armies": the regiment <g> is the leaf's parent, whatever the leaf
+  // (rect, number or icon text, image). The indexed element of an anonymous leaf is that <g> itself (depth 1).
+  if (ids[3] === "armies") return { kind: "regiment", id: ids[1], branch: "armies" };
   return null;
 }
 
