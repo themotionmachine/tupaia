@@ -255,12 +255,14 @@ async function runStep(page: Page, arm: Arm, step: Step, index: number, frozen: 
     }
     case "button":
       if (step.dom)
-        await page.evaluate(selector => {
-          const el = document.querySelector(selector) as HTMLElement | SVGElement | null;
-          if (!el) throw Error(`no button ${selector}`);
-          if (el instanceof HTMLElement) el.click();
-          else el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window })); // SVG elements have no click()
-        }, step.css ?? `#${step.id}`);
+        // resolved by Playwright, so Playwright-only selectors (:has-text) work here too; clicked through the DOM
+        await page
+          .locator(step.css ?? `#${step.id}`)
+          .first()
+          .evaluate(el => {
+            if (el instanceof HTMLElement) el.click();
+            else el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window })); // SVG elements have no click()
+          }, undefined, { timeout: 5000 });
       else await page.click(step.css ?? `#${step.id}`);
       break;
     case "drag": {
