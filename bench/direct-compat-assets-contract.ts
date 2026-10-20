@@ -32,6 +32,12 @@ try{result=await page.evaluate(async({rules})=>{
  const percentage=make('<defs>'+asset(1,'<rect width="100%" height="100%" fill="red"/>')+asset(2,'')+'</defs><g style="width:100%;--paint:url(%23burgCOA1)"><use href="#burgCOA1"/></g>');const up=isolate(percentage);assertions.percentGeometryIsNotMalformedEncoding=!!percentage.querySelector("#burgCOA1")&&!percentage.querySelector("#burgCOA2");up();
  const styleOwner=make('<defs>'+asset(1,'<defs><style>'+rules+'</style></defs>')+asset(2,'')+'</defs>');const us=isolate(styleOwner);assertions.styleOwnerRetained=!!styleOwner.querySelector("#burgCOA1")&&!styleOwner.querySelector("#burgCOA2");us();
  const neutral=make('<style>#armies text {stroke: none; fill: #fff; text-shadow: 0 0 4px #000; dominant-baseline: central; text-anchor: middle; font-family: Helvetica; fill-opacity: 1;}#armies text.regimentIcon {font-size: .8em;}</style><style>.viewport-culled{display:none!important;pointer-events:none!important}</style><defs>'+asset(1,'')+'</defs>');const un=isolate(neutral);assertions.knownAppStylesAllowClosure=!neutral.querySelector("#burgCOA1");un();
+ // the candidate graph is cached per root (W4 RESUME): a second cut of the same root whose outside content now names
+ // another COA retains that one, and the cut after restores exactly
+ const cached=make('<defs>'+asset(1,'<rect width="40" height="40" fill="red"/>')+asset(2,'<use href="#burgCOA3"/>')+asset(3,'<rect width="40" height="40" fill="blue"/>')+'</defs><use id="pick" href="#burgCOA1"/>');
+ const cachedOriginal=cached.outerHTML;let uc=isolate(cached);assertions.cachedFirst=!!cached.querySelector("#burgCOA1")&&!cached.querySelector("#burgCOA2")&&!cached.querySelector("#burgCOA3");uc();
+ cached.querySelector("#pick")!.setAttribute("href","#burgCOA2");uc=isolate(cached);assertions.cachedFollowsOutside=!cached.querySelector("#burgCOA1")&&!!cached.querySelector("#burgCOA2")&&!!cached.querySelector("#burgCOA3");uc();
+ cached.querySelector("#pick")!.setAttribute("href","#burgCOA1");assertions.cachedExactRestore=cached.outerHTML===cachedOriginal;
  const unknownStyle=make('<style>svg:nth-child(2){fill:red}</style><defs>'+asset(1,'')+asset(2,'')+'</defs>');assertions.unknownStylesFailClosed=unchanged(unknownStyle);
  const escaped=make('<defs>'+asset(1,'')+asset(2,'')+'</defs><g style="fill:url(#bur'+'\\67COA1)"/>');assertions.escapedReferenceFailClosed=unchanged(escaped);
  const smil=make('<defs>'+asset(1,'<animate attributeName="opacity" dur="1s"/>')+asset(2,'')+'</defs>');assertions.smilFailClosed=unchanged(smil);
