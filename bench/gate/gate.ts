@@ -140,7 +140,9 @@ const ARG_SPEC: Record<string, Spec> = {
   // "conservative" is the repo convention (P2-FIDELITY-MEASUREMENT.md); over44 is an unapproved, looser opt-in
   reading: { type: "enum", values: ["conservative", "over44"], default: "conservative" },
   keep: { type: "enum", values: ["all", "fail"], default: "all" },
-  break: { type: "enum", values: ["none", "drop-batch"], default: "none" }
+  break: { type: "enum", values: ["none", "drop-batch"], default: "none" },
+  // extra page URL flags for the GPU arm, e.g. params=gpu-native-shapes=1 (gpu-* keys only, "+"-joined for several)
+  params: { type: "string", default: "", check: text => { for (const kv of text.split("+").filter(Boolean)) if (!/^gpu-[a-z0-9-]+=[\w.-]*$/.test(kv)) throw new UsageError(`params entry ${kv} must be gpu-<flag>=<value>`); } }
 };
 // golden takes a list of device pixel ratios (D5 nightly runs 1,2)
 const DPR_LIST: Spec = {
@@ -634,7 +636,8 @@ async function goldenCheck(ctx: Ctx): Promise<Partial<Result>> {
     GOLDEN_BG: String(ctx.args.bg),
     GOLDEN_READING: String(ctx.args.reading),
     GOLDEN_KEEP: String(ctx.args.keep),
-    GOLDEN_BREAK: String(ctx.args.break)
+    GOLDEN_BREAK: String(ctx.args.break),
+    GOLDEN_PARAMS: String(ctx.args.params ?? "")
   };
   if (ctx.args.census) {
     const path = resolve(String(ctx.args.census));
@@ -987,6 +990,24 @@ const DEFS: Record<string, CheckDef> = {
       }));
     }
   },
+  // bench/host/stroke-probe.ts: synthetic probe lines, SVG vs GPU stroke width, dash pitch/phase and dot shape (STROKE)
+  "stroke-probe": {
+    lock: "shared",
+    keys: ["dpr", "k"],
+    spec: { dpr: { type: "string", default: "1,2", check: text => { if (!text.split(",").every(d => d === "1" || d === "2")) throw new UsageError("dpr must be 1, 2 or 1,2"); } } },
+    timeout: 600,
+    run: ctx => {
+      const report = join(ctx.dir, "stroke-probe.json");
+      return runScript(ctx, nodeScript("bench/host/stroke-probe.ts"), { PROBE_DPR: String(ctx.args.dpr), PROBE_K: String(ctx.args.k) }, report, 600, data => ({
+        failure: reportFailure(data),
+        metrics: data && {
+          cells: (data.cells ?? []).map((c: Json) => `d${c.dpr} k${c.k}: ${(c.lines as Json[]).filter(l => l.pass).length}/${(c.lines as Json[]).length}`),
+          worstWidthDeltaPx: Math.max(0, ...(data.cells ?? []).flatMap((c: Json) => (c.lines as Json[]).map(l => Math.abs(Number(l.widthDeltaPx) || 0)))),
+          worstPhasePx: Math.max(0, ...(data.cells ?? []).flatMap((c: Json) => (c.lines as Json[]).map(l => Math.abs(Number(l.phasePx) || 0))))
+        }
+      }));
+    }
+  },
   "boundary-before": { lock: null, keys: [], timeout: 60, run: ctx => boundary(ctx, true) },
   "boundary-after": { lock: null, keys: [], timeout: 60, run: ctx => boundary(ctx, false) },
   picking: {
@@ -1105,7 +1126,7 @@ const DEFS: Record<string, CheckDef> = {
   "golden-selftest": { lock: "shared", keys: ["reading"], timeout: 600, run: goldenSelftestCheck },
   golden: {
     lock: "shared",
-    keys: ["layers", "k", "coastk", "dpr", "preset", "fixture", "census", "bg", "reading", "keep", "break"],
+    keys: ["layers", "k", "coastk", "dpr", "preset", "fixture", "census", "bg", "reading", "keep", "break", "params"],
     spec: { dpr: DPR_LIST },
     timeout: 3600,
     run: goldenCheck

@@ -21,6 +21,7 @@
 //   GOLDEN_KEEP      all | fail: keep PNGs for every cell or only failing ones   default all
 //   GOLDEN_CENSUS    census expectations JSON (same shape as the census.json this writes)
 //   GOLDEN_BREAK     none | drop-batch: self-test only, deliberately drops the GPU arm's bottom-most fill/stroke batch
+//   GOLDEN_PARAMS    extra gpu-* URL flags for the page, "+"-joined (e.g. gpu-native-shapes=1)  default none
 //   GOLDEN_CAMERAS   fixture | centered: which camera frames a cell. "fixture" (default when GOLDEN_MAP is the parity
 //                    fixture) uses the manifest's recorded presets; "centered" centres the whole map at k
 //
@@ -57,6 +58,8 @@ const bg = env.GOLDEN_BG || "#ffffff";
 const reading = (env.GOLDEN_READING || "conservative") as Reading;
 const keep = env.GOLDEN_KEEP || "all";
 const breakMode = env.GOLDEN_BREAK || "none";
+const urlParams = (env.GOLDEN_PARAMS || "").split("+").filter(Boolean);
+if (urlParams.some(kv => !/^gpu-[a-z0-9-]+=[\w.-]*$/.test(kv))) throw Error("GOLDEN_PARAMS entries must be gpu-<flag>=<value>");
 if (!/^#[\da-f]{6}$/i.test(bg)) throw Error(`GOLDEN_BG must be #rrggbb, got ${bg}`);
 if (!["over44", "conservative"].includes(reading)) throw Error(`GOLDEN_READING must be conservative|over44`);
 if (!["all", "fail"].includes(keep)) throw Error(`GOLDEN_KEEP must be all|fail`);
@@ -161,7 +164,7 @@ const report = {
   schema: 1,
   runStartedUtc: new Date().toISOString(),
   fixture: { path: mapPath, sha256: mapSha },
-  args: { layers: families.map(f => f.name), k: zooms, coastk: coastZooms, dpr: dprs, preset: presets, bg, reading, keep, break: breakMode, cameras: cameraMode, parity: !!parity },
+  args: { layers: families.map(f => f.name), k: zooms, coastk: coastZooms, dpr: dprs, preset: presets, bg, reading, keep, break: breakMode, params: urlParams, cameras: cameraMode, parity: !!parity },
   census: env.GOLDEN_CENSUS || null,
   diagnosticBreak: breakMode !== "none" ? `${breakMode}: the GPU arm is deliberately broken; this run is expected to FAIL` : null,
   errors: [] as string[],
@@ -224,7 +227,7 @@ async function openContext(dpr: number): Promise<{ context: BrowserContext; page
     if (["warning", "error"].includes(m.type()) && report.warnings.length < 80) report.warnings.push(m.text().slice(0, 1000));
   });
   page.on("dialog", d => d.dismiss());
-  await page.goto(`${origin}/?local&seed=7319&width=1280&height=720&renderer=gpu`);
+  await page.goto(`${origin}/?local&seed=7319&width=1280&height=720&renderer=gpu${urlParams.map(kv => `&${kv}`).join("")}`);
   await page.evaluate(async () => {
     const ready = await (globalThis as any).__tupaia.call("ready", { timeoutMs: 120000 });
     if (!ready.ok) throw Error(JSON.stringify(ready));
