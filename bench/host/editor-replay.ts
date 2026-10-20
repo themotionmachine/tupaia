@@ -25,6 +25,7 @@
 //   REPLAY_DPR        1 | 2                                                                default 2
 //   REPLAY_LAUNCHER   metal | swiftshader (bench/host/launcher.ts)                         default metal
 //   REPLAY_RESUME_MS  limit for a resume / GPU settle                                       default 60000
+//   REPLAY_TRACE      1: log every step as it starts (a hung step shows as the last line)
 //   REPLAY_PARALLEL   1 (default): the replay arms run side by side after the recording; 0: one after another (the
 //                     resume latency as a timing: `gate replay-resume`, exclusive lock)
 //   REPLAY_BREAK      none, or a comma list of model, dom, dispatch: self-test. At the first input step of every
@@ -168,6 +169,10 @@ async function loadFixture(page: Page, arm: Arm): Promise<void> {
   await page.evaluate(async () => {
     const rp = (globalThis as any).__rp;
     rp.stopTrade();
+    // loadMap's "Map is successfully loaded" main tip clears on a timer. While it shows, FMG's hover handler skips
+    // showMapTooltip (so an emblem under the pointer is not raised); whether the timer already fired depends on the
+    // arm's load time. Clear it so hover side effects are the same in every arm.
+    (globalThis as any).clearMainTip?.();
     rp.lastModel = null;
     await rp.settle(0);
   });
@@ -194,6 +199,7 @@ const setCamera = (page: Page, camera: { k: number; x: number; y: number }) =>
 
 async function runStep(page: Page, arm: Arm, step: Step, index: number, frozen: Frozen): Promise<StepObservation> {
   const t0 = Date.now();
+  if (env.REPLAY_TRACE) log(`${arm} step ${index} ${step.op}${step.note ? " (" + step.note + ")" : ""}`);
   await page.evaluate(beginStep, { index, seed: 7919 * (index + 1) });
   let point: { x: number; y: number } | undefined;
   let hitKey: string | null | undefined;
@@ -284,7 +290,9 @@ async function runStep(page: Page, arm: Arm, step: Step, index: number, frozen: 
   if ((step.op === "click" || step.op === "open" || step.op === "button") && step.expect?.dialog)
     await page.waitForFunction(id => (globalThis as any).__rp.dialogs().includes(id), step.expect.dialog, { timeout: 30000 });
   let resume: Resume | undefined;
-  if (step.op === "close" && arm !== "svg") resume = await page.evaluate(limit => (globalThis as any).__rp.resume(limit), resumeLimit);
+  // a close that leaves another editor open (a script with two dialogs) has nothing to resume to: only the last one is timed
+  if (step.op === "close" && arm !== "svg" && !(await page.evaluate(() => (globalThis as any).__rp.dialogs().length)))
+    resume = await page.evaluate(limit => (globalThis as any).__rp.resume(limit), resumeLimit);
   // a display change is always followed by a camera step, which waits for the GPU frame itself
   await page.evaluate(limit => (globalThis as any).__rp.settle(limit), step.op === "display" ? 0 : resumeLimit);
   if (breaks.length && arm !== "svg" && step.op === "input" && !(page as any).__broken) {

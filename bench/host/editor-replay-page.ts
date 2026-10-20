@@ -126,6 +126,16 @@ export function installReplay(config: { arm: string; editors: string[] }) {
       out[name] = hashValue((0, eval)(`typeof ${name} === 'undefined' ? null : ${name}`));
     return out;
   };
+  // More model that lives in top-level `let`s of main.js (EDIT-B): `notes` (window.notes is the #notes element, so the
+  // notes array was never hashed), the placed measurers (`rulers`), and the units the units editor sets.
+  const modelHashesBase = rp.modelHashes;
+  rp.modelHashes = () => {
+    const out: Record<string, string> = modelHashesBase();
+    out.notes = hashValue((0, eval)("typeof notes === 'undefined' ? null : notes"));
+    for (const name of ["rulers", "distanceScale", "populationRate", "urbanization", "urbanDensity"])
+      out[`let ${name}`] = hashValue((0, eval)(`typeof ${name} === 'undefined' ? null : ${name}`));
+    return out;
+  };
 
   // ---------------------------------------------------------------- model DOM
   // Renderer-owned or animated state that is not model: the camera transform the GPU writes to #viewbox, the transient
