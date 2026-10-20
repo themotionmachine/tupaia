@@ -29,6 +29,7 @@ import {
   scaleRaster,
   stampedClone
 } from "./compat";
+import { type Box, measureBounds, newWindowStats, rasterizeWindowed, type WindowStats } from "./compat-bounds";
 import {
   type CompatRoot,
   compatShapes,
@@ -137,6 +138,9 @@ interface CompatRun {
   detailMeta?: { request: string; size: [number, number] | null; fit: number };
   // world run: the ladder level its raster is at (compat.ts ladderScale); a reused raster must be at the frame's level
   level?: number;
+  // world run: the world box its live geometry reaches (compat-bounds.ts measureBounds; null: unbounded), measured once
+  // per frame at the frame's revision
+  bounds?: Box | null;
 }
 
 // Per-prepare compat reuse (telemetry). `reasons` counts dirty runs by why they were dirty (at most 8 distinct).
@@ -155,6 +159,8 @@ export interface CompatReuse {
   reasons: Record<string, number>;
   ms: number; // evaluation cost (style state, tracker, references)
   retained: boolean; // restored from a frame's retained CPU payload (retainFrame): no scene walk or conversion
+  // the layers (#viewbox children, or root overlay ids) whose frame draws a raster reused from the previous frame
+  keptLayers: string[];
 }
 
 // Hit shapes of a root overlay in the root <svg>'s user space (SVG-local CSS px: #map has no viewBox).
@@ -182,6 +188,9 @@ export interface Prepared {
     reuse?: CompatReuse;
     // last settle refinement: details kept from an identical earlier request, details cut, export clone cut
     refine?: { kept: number; rasterized: number; cloned: boolean };
+    // how the world runs of the prepare (and of the last refinement) were cut (compat-bounds.ts)
+    windows?: WindowStats;
+    refineWindows?: WindowStats;
   };
   styleKey?: string; // stylesheet state its rasters were cut under (compat-reuse.ts styleState)
   runs: CompatRun[];
@@ -946,6 +955,30 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
     };
     if (runs.some(run => !adopted.has(run))) await cloneNow();
     ctx.mark?.("clone");
+    // World runs are cut over their own window of the world raster (compat-bounds.ts), screen runs over the viewport.
+    const windowStats = newWindowStats();
+    const cutRun = async (
+      run: CompatRun,
+      source: SVGSVGElement,
+      clones: Element[],
+      region: Region,
+      w: number,
+      h: number,
+      cssScale: number
+    ) => {
+      if (run.screen) return cropRaster(await rasterizeRun(source, clones, region, w, h, true, cssScale), region);
+      if (run.bounds === undefined) measureBounds([run], viewbox);
+      return rasterizeWindowed({
+        clone: source,
+        clones,
+        full: region,
+        width: w,
+        height: h,
+        cssScale,
+        stats: windowStats,
+        bounds: run.bounds ?? null
+      });
+    };
     const rasterize = async (run: CompatRun): Promise<boolean> => {
       const source = await cloneNow();
       if (ctx.stale()) return false;
@@ -971,14 +1004,16 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
       // raster px per live CSS px: a world raster is cut at `ratio` px per unit for CSS px per unit ≈ bucket / dpr
       // (the reuse key holds the bucket, not the exact zoom); a screen raster at dpr px per CSS px
       const cssScale = run.screen ? ctx.screen.dpr : (ratio * ctx.screen.dpr) / ctx.bucket;
-      const canvas = await rasterizeRun(source, resolved as Element[], region, w, h, run.screen, cssScale);
-      if (ctx.stale()) return false;
+      const cropped = await cutRun(run, source, resolved as Element[], region, w, h, cssScale);
+      if (ctx.stale()) {
+        if (cropped) cropped.canvas.width = cropped.canvas.height = 0;
+        return false;
+      }
       run.stamp = cloneStamp;
       if (!run.screen) {
         run.level = level;
         cut.push(run);
       }
-      const cropped = cropRaster(canvas, region);
       if (cropped) held.push({ run, ...cropped }); // fully transparent: slot keeps texture null and draws nothing
       return true;
     };
@@ -1030,6 +1065,11 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
     // World rasters in run order at the current level. Whenever their bytes exceed the room, the level steps down to
     // one that fits under LADDER_HEADROOM of it: every held fresh raster is resampled to it (scaleRaster), later runs
     // are cut at it, and a kept raster (a GPU texture, which cannot shrink) is cut again at it after the queue.
+    // one measurement pass (label culling off) for every world run that may be cut
+    measureBounds(
+      worldRuns.filter(run => !adopted.has(run)),
+      viewbox
+    );
     const queue = [...worldRuns];
     for (let i = 0; i < queue.length; i++) {
       const run = queue[i];
@@ -1074,6 +1114,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
       canvas.width = canvas.height = 0;
     }
     report.worldKept = kept.size;
+    report.keptLayers = layersOf([...kept, ...[...adopted.keys()].filter(run => run.screen)], viewbox);
     ctx.mark?.("world");
 
     const upload = (label: string, data: Float32Array) => {
@@ -1149,7 +1190,8 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
         reasons,
         resolution,
         level,
-        reuse: report
+        reuse: report,
+        windows: windowStats
       },
       styleKey: reuse.style?.key,
       runs,
@@ -1166,6 +1208,18 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
     release();
     throw error;
   }
+}
+
+// The #viewbox child (or root overlay) each run's first element belongs to, deduplicated: which layers draw reused rasters.
+function layersOf(runs: readonly CompatRun[], viewbox: Element): string[] {
+  const ids = new Set<string>();
+  for (const run of runs) {
+    let node: Element | null = run.elements[0] ?? null;
+    while (node?.parentElement && node.parentElement !== viewbox && node.parentElement !== viewbox.parentElement)
+      node = node.parentElement;
+    if (node) ids.add(node.id || node.tagName);
+  }
+  return [...ids];
 }
 
 // Pairs this prepare's compat runs with the previous frame's: same elements in the same order, same raster key, same
@@ -1204,7 +1258,8 @@ function adoptRuns(device: GpuDevice, svg: SVGSVGElement, runs: CompatRun[], pre
     structural: "",
     reasons: {},
     ms: 0,
-    retained: false
+    retained: false,
+    keptLayers: []
   };
   const count = (reason: string) => {
     const keys = Object.keys(report.reasons);
@@ -1377,6 +1432,8 @@ export async function refineCompat(
   const report: { id: string; density: number }[] = [];
   prepared.compat.detail = report;
   prepared.compat.refine = stats;
+  const windowStats = newWindowStats();
+  prepared.compat.refineWindows = windowStats;
   let refined = false;
   for (const run of runs) {
     const element = run.elements[0];
@@ -1409,18 +1466,23 @@ export async function refineCompat(
     }
     const resolved = resolveManyInClone(run.elements, clone);
     if (resolved.some(item => typeof item === "string")) return false;
-    // the detail is cut at device density: dpr raster px per live CSS px
-    const canvas = await rasterizeRun(
+    // the detail is cut at device density: dpr raster px per live CSS px, over the run's window of the visible raster
+    const viewbox = element.closest?.("#viewbox"); // absent on partial test elements
+    if (viewbox) measureBounds([run], viewbox);
+    let cropped = await rasterizeWindowed({
       clone,
-      resolved as Element[],
-      visible,
-      pixels.width,
-      pixels.height,
-      false,
-      ctx.screen?.dpr ?? 1 // absent in partial test contexts
-    );
-    if (ctx.stale()) return false;
-    let cropped = cropRaster(canvas, visible);
+      clones: resolved as Element[],
+      full: visible,
+      width: pixels.width,
+      height: pixels.height,
+      cssScale: ctx.screen?.dpr ?? 1, // absent in partial test contexts
+      stats: windowStats,
+      bounds: run.bounds ?? null
+    });
+    if (ctx.stale()) {
+      if (cropped) cropped.canvas.width = cropped.canvas.height = 0;
+      return false;
+    }
     // Check the alpha-cropped allocation, not a hypothetical full viewport. Sparse labels and markers can fit
     // even when an uncropped viewport would exceed the budget. A run that cannot fit is downscaled into the remaining
     // headroom while that still beats the base raster's density, else it keeps the base.
