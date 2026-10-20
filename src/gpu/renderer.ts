@@ -30,7 +30,7 @@ import {
 } from "./editor-dispatch";
 import { HiddenEmblemCulling } from "./emblem-culling";
 import { FrameGraph } from "./framegraph";
-import { refineGlyphs, wantsFineGlyphs } from "./glyph-fine";
+import { fineGlyphsAt, refineGlyphs, wantsFineGlyphs } from "./glyph-fine";
 import { GpuFrameTimer, type TimingTelemetry, timingRequested } from "./gpu-timer";
 import {
   BACKDROP_ALPHA,
@@ -1494,7 +1494,10 @@ export class GpuRenderer {
       );
     if (!this.active()) return;
     // GLYPHZ: label glyphs at the exact device scale between powers of two (glyph-fine.ts), beside the compat refinement
-    if (wantsFineGlyphs(prepared, this.view.k * this.viewport.dpr)) void this.refineGlyphs(prepared);
+    // (also run to free a fine set cut for another scale, e.g. after zooming back onto the bucket's own scale)
+    const scale = this.view.k * this.viewport.dpr;
+    if (wantsFineGlyphs(prepared, scale) || (prepared.frame.fineGlyphs && !fineGlyphsAt(prepared.frame, scale)))
+      void this.refineGlyphs(prepared);
     if (action === "none") return;
     if (this.refineHold) {
       this.refineHeld = true;
