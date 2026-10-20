@@ -4,7 +4,7 @@
 // id of the last batch that marked the pixel (a banded stroke or an anti-aliased fill: first fragment wins within
 // the batch); bits 0x07 = fill winding (0x7F for a deepWinding fill, which clears the ids under it first).
 // Every test that draws colour requires the mask bit clear, so unmasked targets (bit never set) share the same tests.
-import { msaaFlag, TARGET_BUDGET, targetSamples } from "./budget";
+import { groupSamples, msaaFlag } from "./budget";
 import { type Camera, screenToClip, type Viewport, visibleWorld, worldScissor, worldToClip } from "./camera";
 import type { GpuDevice, TrackedBuffer, TrackedProgram, TrackedTarget, TrackedTexture } from "./device";
 import {
@@ -120,6 +120,12 @@ export interface Frame {
   atlas: TrackedTexture | null;
 }
 
+// The frame draws a masked group somewhere in its tree: the framegraph then holds a mask coverage attachment beside the
+// group target (maskCoverage), which the steady share reserves (prepare.ts, budget.ts targetReserve `masked`).
+export function hasMaskedGroup(batches: readonly Batch[]): boolean {
+  return batches.some(batch => batch.kind === "group" && (!!batch.mask || hasMaskedGroup(batch.children)));
+}
+
 // True only when a batch provably writes no on-screen pixel: a fill/stroke with known bounds wholly outside the view
 // (the same conservative test batches() culls with) or with nothing to draw, an empty sprite/glyph run, or a group whose
 // children are all empty or whose mask sets no on-view bit. Images and markers are never assumed empty.
@@ -203,7 +209,9 @@ export class FrameGraph {
   private square: TrackedBuffer;
   private group: TrackedTarget | null = null;
   // a single-sample group's mask coverage (maskCoverage), on the group target's depth/stencil buffer
-  private mask: { texture: TrackedTexture; framebuffer: WebGLFramebuffer } | null = null;
+  private mask: TrackedTarget | null = null;
+  // the frame the mask was last kept for: a frame without masked groups gives the mask back (hasMaskedGroup)
+  private maskFrame: Frame | null = null;
   private world = new Float32Array(9);
   private patternMatrix = new Float32Array(9);
   private screen = new Float32Array(9);
@@ -257,6 +265,12 @@ export class FrameGraph {
     this.drawBatches.submitted = this.drawBatches.culled = 0;
     for (const key of Object.keys(this.passes) as (keyof FrameGraph["passes"])[]) this.passes[key] = 0;
     this.markerInstances = markers;
+    // The steady share reserves the mask only for a frame that has masked groups (prepare.ts, targetReserve): once a
+    // frame without any is on screen, the mask a previous one drew is released rather than held outside the budget.
+    if (frame !== this.maskFrame) {
+      this.maskFrame = frame;
+      if (!frame || !hasMaskedGroup(frame.batches)) this.releaseMask();
+    }
     if (markers) {
       const data = markers.data.subarray(0, markers.count * MARKER_FLOATS);
       if (this.markerBuffer) this.device.updateBuffer(this.markerBuffer, data);
@@ -697,9 +711,8 @@ export class FrameGraph {
     }
     this.passes.composites++;
     if (batch.mask && batch.opacity >= 1) this.passes.opaqueMasked++;
-    const samples = this.hardwareMsaa
-      ? targetSamples(width, height, this.device.maxSamples, TARGET_BUDGET, this.viewport.dpr)
-      : 0;
+    // the sample policy the steady share reserves with (budget.ts targetReserve)
+    const samples = groupSamples(width, height, this.device.maxSamples, this.viewport.dpr, this.hardwareMsaa);
     let target = this.group;
     if (!target || target.width !== width || target.height !== height || target.samples !== samples) {
       this.device.release(target);
@@ -770,25 +783,15 @@ export class FrameGraph {
   // A luminance mask drawn as SVG draws it: its white and black items, in document order, as anti-aliased fills (fringe
   // and all) over transparent black, into a colour texture the composite multiplies the group by (red = luminance). A
   // stencil mask is binary, so without hardware samples its edges were aliased, and hardware samples sit off SVG's
-  // (budget.ts canvasAntialias). The texture shares the group target's depth/stencil buffer (cleared after it), so it
-  // costs one RGBA8 texture.
+  // (budget.ts canvasAntialias). Only the red channel is read and the blend (ONE, ONE_MINUS_SRC_ALPHA) never reads the
+  // destination alpha, so it is an R8 attachment on the group target's depth/stencil buffer (cleared after it):
+  // 1 B/px, tracked as a target the steady share reserves (device.ts coverage, budget.ts screenTargetBytes).
   private maskCoverage(frame: Frame, mask: NonNullable<GroupBatch["mask"]>, group: TrackedTarget): WebGLTexture {
     const gl = this.device.gl;
-    if (!this.mask || this.mask.texture.width !== group.width || this.mask.texture.height !== group.height) {
+    if (!this.mask || this.mask.depthStencil !== group.depthStencil) {
       this.releaseMask();
-      const texture = this.device.texture("group mask", { width: group.width, height: group.height, data: null });
-      gl.bindTexture(gl.TEXTURE_2D, null); // texture() leaves it bound on unit 0: a feedback loop once attached
-      const framebuffer = gl.createFramebuffer()!;
-      gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
-      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture.handle, 0);
-      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_STENCIL_ATTACHMENT, gl.RENDERBUFFER, group.depthStencil);
-      this.mask = { texture, framebuffer };
-      if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
-        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-        this.releaseMask();
-        throw new Error("Incomplete framebuffer group mask");
-      }
-      this.state.reset();
+      this.mask = this.device.coverage("group mask", group);
+      this.state.reset(); // allocation binds outside the cache
     }
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.mask.framebuffer);
     gl.clearColor(0, 0, 0, 0);
@@ -802,13 +805,11 @@ export class FrameGraph {
       if (!frame.fans || !fill.count || this.maskCulled(fill)) continue;
       this.fill(frame, { ...fill, color: white ? MASK_WHITE : MASK_BLACK, tile: null });
     }
-    return this.mask.texture.handle;
+    return this.mask.texture;
   }
 
   private releaseMask(): void {
-    if (!this.mask) return;
-    if (!this.device.lost) this.device.gl.deleteFramebuffer(this.mask.framebuffer);
-    this.device.release(this.mask.texture);
+    this.device.release(this.mask);
     this.mask = null;
   }
 

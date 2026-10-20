@@ -75,7 +75,14 @@ import {
   sharedReleaser
 } from "./compat-reuse";
 import type { GpuDevice, TextureSource, TrackedBuffer, TrackedTexture } from "./device";
-import type { Batch, FillBatch, Frame, ImageBatch, StrokeBatch } from "./framegraph";
+import {
+  type Batch,
+  type FillBatch,
+  type Frame,
+  hasMaskedGroup,
+  type ImageBatch,
+  type StrokeBatch
+} from "./framegraph";
 import {
   aliasedShape,
   analyticShape,
@@ -398,8 +405,9 @@ export function frameBytes(prepared: Pick<Prepared, "runs" | "windows" | "payloa
 }
 
 // Tracked bytes no frame owns: the renderer's own allocations (trade-marker sprite textures and instance buffer, the
-// unit-quad buffers), measured as the tracked total minus the group target and the frame on screen. Read at the start
-// of a prepare, before it allocates anything.
+// unit-quad buffers), measured as the tracked total minus the per-screen targets (the group target and its mask
+// coverage, both reserved by targetReserve) and the frame on screen. Read at the start of a prepare, before it allocates
+// anything.
 export function residentBytes(
   memory: { total: number; targets: number },
   previous: Pick<Prepared, "runs" | "windows" | "payload" | "frame"> | null | undefined
@@ -1068,10 +1076,12 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
       "fill edges": vertices.edges.length * 4,
       glyphs: glyphCount * GLYPH_FLOATS * 4
     };
-    // the group target this backing store gets (framegraph composite), not the flat TARGET_BUDGET cap, plus the
-    // resident allocations and the explicit slack (steadyReserve)
+    // the per-screen targets this backing store gets (framegraph composite: the group target, and the mask coverage
+    // beside it when the frame has masked groups), not the flat TARGET_BUDGET cap, plus the resident allocations and
+    // the explicit slack (steadyReserve)
     const { width: cssWidth, height: cssHeight, dpr } = ctx.screen;
-    const reserveTarget = targetReserve(cssWidth * dpr, cssHeight * dpr, device.maxSamples ?? 0, dpr);
+    const masked = hasMaskedGroup(batches);
+    const reserveTarget = targetReserve(cssWidth * dpr, cssHeight * dpr, device.maxSamples ?? 0, dpr, masked);
     const reserved = steadyReserve(reserveTarget, resident);
     const allowance = (spent: number) => compatAllowance(tracked(), owned(), spent, undefined, undefined, reserved);
     const owned = () => textures.reduce((sum, texture) => sum + texture.bytes, 0) + windows.bytes;
