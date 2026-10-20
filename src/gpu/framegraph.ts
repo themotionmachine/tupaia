@@ -13,6 +13,7 @@ import { MARKER_FLOATS, type MarkerInstances } from "./markers";
 import { hatchUvAtZoom } from "./raster";
 import type { Rgba } from "./scene";
 import { fill, fringe, glyph, image, marker, sprite, stroke } from "./shaders";
+import { GLYPH_ATLAS } from "./text";
 
 export interface FillBatch {
   bounds?: Rect4 | null;
@@ -543,6 +544,8 @@ export class FrameGraph {
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, frame.atlas.handle);
     this.state.uniform1i(program.uniforms.u_atlas, 0);
+    // the atlas texture holds only the rows the instances use (prepare.ts); their uvs are normalized by the full atlas
+    this.state.uniform1f(program.uniforms.u_atlasScale, GLYPH_ATLAS / frame.atlas.height);
     this.plain();
     gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, batch.count);
   }

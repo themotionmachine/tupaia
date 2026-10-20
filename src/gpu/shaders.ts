@@ -308,6 +308,7 @@ in vec4 a_box;
 in vec4 a_uv;
 in vec4 a_color;
 uniform mat3 u_matrix;
+uniform float u_atlasScale; // GLYPH_ATLAS / the uploaded atlas rows (text.ts glyphAtlasRows)
 out vec2 v_uv;
 out vec4 v_color;
 void main() {
@@ -315,7 +316,7 @@ void main() {
   float c = cos(a_anchor.z);
   float s = sin(a_anchor.z);
   vec2 world = a_anchor.xy + vec2(c * local.x - s * local.y, s * local.x + c * local.y);
-  v_uv = mix(a_uv.xy, a_uv.zw, a_corner);
+  v_uv = mix(a_uv.xy, a_uv.zw, a_corner) * vec2(1.0, u_atlasScale);
   v_color = vec4(a_color.rgb * a_color.a, a_color.a);
   gl_Position = vec4((u_matrix * vec3(world, 1.0)).xy, 0.0, 1.0);
 }`,

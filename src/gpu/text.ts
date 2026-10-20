@@ -6,7 +6,21 @@ import { flattenPath } from "./svg-path";
 
 export const GLYPH_FLOATS = 15; // cx cy angle lx ly w h u0 v0 u1 v1 r g b a
 const ATLAS = 2048;
+export const GLYPH_ATLAS = ATLAS; // atlas edge in px; glyph uvs are normalized by it
 const PAD = 2;
+
+// Atlas rows the glyph instances sample: the shelves fill from the top, so everything below the lowest cell bottom
+// (v1) is empty. One more row keeps the transparent gutter under that cell, so linear filtering at the cell edge reads
+// what it reads in the full atlas. The GPU copy holds only these rows (a 2048 x 2048 RGBA atlas is 16 MiB whatever its
+// glyph count) and the shader rescales v by GLYPH_ATLAS / rows.
+export function glyphAtlasRows(
+  instances: ArrayLike<number>,
+  count = Math.floor(instances.length / GLYPH_FLOATS)
+): number {
+  let bottom = 0;
+  for (let i = 0; i < count; i++) bottom = Math.max(bottom, instances[i * GLYPH_FLOATS + 10]);
+  return count ? Math.min(ATLAS, Math.max(1, Math.ceil(bottom * ATLAS - 1e-6) + 1)) : 0;
+}
 
 interface Glyph {
   u0: number;

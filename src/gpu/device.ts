@@ -128,19 +128,23 @@ export class GpuDevice {
   texture(
     label: string,
     source: TextureSource,
-    options: { repeat?: boolean; mipmap?: boolean; premultiply?: boolean } = {}
+    // rows: upload only the source's top rows (a WebGL2 sub-rectangle upload; the texture is that tall)
+    options: { repeat?: boolean; mipmap?: boolean; premultiply?: boolean; rows?: number } = {}
   ): TrackedTexture {
     this.usable();
     const gl = this.gl;
     const sized = source as { width?: number; height?: number; naturalWidth?: number; naturalHeight?: number };
     const width = sized.width || sized.naturalWidth || 0;
-    const height = sized.height || sized.naturalHeight || 0;
+    const full = sized.height || sized.naturalHeight || 0;
+    const height = options.rows !== undefined ? Math.max(1, Math.min(full, Math.ceil(options.rows))) : full;
     const handle = gl.createTexture()!;
     gl.bindTexture(gl.TEXTURE_2D, handle);
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, options.premultiply ?? true);
     try {
       if ("data" in source)
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, source.data);
+      else if (height < full)
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, source);
       else gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
     } catch (error) {
       gl.deleteTexture(handle);

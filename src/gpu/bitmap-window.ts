@@ -1,6 +1,8 @@
 // Bounded viewport cache for immutable decoded images (cached path/relief PNGs): uploads only the source pixels around
 // the visible camera, copied 1:1 (never resampled), so GPU memory stays bounded while pixels stay exact.
 // Owns only the GPU textures it creates; source images and their world rects are never modified.
+// A source may carry a sharper detail image over part of it (the dense-zoom relief viewport): it is cropped to the same
+// window and counted in the same budget, and the slot's detail covers only the cropped part (framegraph imageSource).
 import { type Camera, type Viewport, visibleWorld } from "./camera";
 import type { GpuDevice, TrackedTexture } from "./device";
 import type { ImageBatch } from "./framegraph";
@@ -16,11 +18,33 @@ export interface CropPlan {
   rect: Rect4; // [x, y, width, height]
 }
 
+// A sharper image over part of a source: drawn instead of the source where it covers the whole view.
+export interface WindowDetail {
+  image: HTMLImageElement;
+  rect: Rect4; // world rect its pixels are laid out over
+  covers: Rect4; // world rect in which it stands in for the source (its element's box: beyond `rect` is transparent)
+}
+
 interface Source {
   image: HTMLImageElement;
   rect: Rect4;
   slot: ImageBatch;
   texture: TrackedTexture | null;
+  detail: WindowDetail | null;
+  detailTexture: TrackedTexture | null;
+}
+
+// The part of `detail.covers` a crop of its image stands in for: the crop's rect, except on a side where the crop
+// reaches the image edge, which extends to the covered box's edge (the element's transparent margin is still covered).
+export function detailCovers(detail: WindowDetail, plan: CropPlan): Rect4 {
+  const { naturalWidth: width, naturalHeight: height } = detail.image;
+  const [cx, cy, cw, ch] = detail.covers;
+  const [px, py, pw, ph] = plan.rect;
+  const x0 = plan.sx === 0 ? Math.min(cx, px) : px;
+  const y0 = plan.sy === 0 ? Math.min(cy, py) : py;
+  const x1 = plan.sx + plan.sw >= width ? Math.max(cx + cw, px + pw) : px + pw;
+  const y1 = plan.sy + plan.sh >= height ? Math.max(cy + ch, py + ph) : py + ph;
+  return [x0, y0, x1 - x0, y1 - y0];
 }
 
 const MAX_ATTEMPTS = 16; // margin halving: 640 css px reaches 0 in 11 steps
@@ -53,10 +77,15 @@ export class BitmapWindows {
     private maxBytes = 80 << 20
   ) {}
 
-  add(image: HTMLImageElement, rect: Rect4, opacity = 1): ImageBatch {
+  add(image: HTMLImageElement, rect: Rect4, opacity = 1, detail: WindowDetail | null = null): ImageBatch {
     if (this.disposed) throw new Error("BitmapWindows disposed");
     const slot: ImageBatch = { kind: "image", opacity, texture: null, rect: [...rect], screen: false, detail: null };
-    this.sources.push({ image, rect: [...rect], slot, texture: null });
+    const copy = detail && {
+      image: detail.image,
+      rect: [...detail.rect] as Rect4,
+      covers: [...detail.covers] as Rect4
+    };
+    this.sources.push({ image, rect: [...rect], slot, texture: null, detail: copy, detailTexture: null });
     this.token++; // an in-flight job never saw this source: supersede it
     this.window = null;
     return slot;
@@ -64,7 +93,7 @@ export class BitmapWindows {
 
   get bytes(): number {
     let total = 0;
-    for (const source of this.sources) total += source.texture?.bytes ?? 0;
+    for (const source of this.sources) total += (source.texture?.bytes ?? 0) + (source.detailTexture?.bytes ?? 0);
     return total;
   }
 
@@ -97,31 +126,43 @@ export class BitmapWindows {
     if (!chosen) return false;
 
     const canvases: (HTMLCanvasElement | null)[] = [];
+    const detailCanvases: (HTMLCanvasElement | null)[] = [];
     const created: TrackedTexture[] = [];
     const live = () => token === this.token && !this.disposed && !stale?.();
     try {
       for (let i = 0; i < sources.length; i++) {
         const plan = chosen.plans[i];
         canvases.push(plan && copyPixels(sources[i].image, plan));
+        const detailPlan = chosen.details[i];
+        detailCanvases.push(detailPlan && copyPixels(sources[i].detail!.image, detailPlan));
       }
       await Promise.resolve(); // let a newer refresh/release supersede before allocating GPU memory
       if (!live()) return false;
-      const textures = canvases.map((canvas, i) => {
+      const upload = (canvas: HTMLCanvasElement | null, label: string) => {
         if (!canvas) return null;
-        const texture = this.device.texture(`bitmap-window-${i}`, canvas);
+        const texture = this.device.texture(label, canvas);
         created.push(texture);
         return texture;
-      });
+      };
+      const textures = canvases.map((canvas, i) => upload(canvas, `bitmap-window-${i}`));
+      const details = detailCanvases.map((canvas, i) => upload(canvas, `bitmap-window-${i} detail`));
       if (!live()) {
         for (const texture of created) this.device.release(texture);
         return false;
       }
       sources.forEach((source, i) => {
-        const old = source.texture;
+        const old = [source.texture, source.detailTexture];
         source.texture = textures[i];
         source.slot.texture = textures[i];
         source.slot.rect = chosen.plans[i]?.rect ?? [...source.rect];
-        if (old) this.device.release(old);
+        // no detail crop (none, outside the window or dropped to fit): the source alone, as before the detail existed
+        const detailPlan = chosen.details[i];
+        source.detailTexture = details[i];
+        source.slot.detail =
+          detailPlan && details[i]
+            ? { texture: details[i], rect: detailPlan.rect, covers: detailCovers(source.detail!, detailPlan) }
+            : null;
+        for (const texture of old) if (texture) this.device.release(texture);
       });
       this.window = chosen.window;
       this.committedMargin = chosen.margin;
@@ -130,7 +171,7 @@ export class BitmapWindows {
       for (const texture of created) this.device.release(texture);
       throw error;
     } finally {
-      for (const canvas of canvases) if (canvas) canvas.width = canvas.height = 0;
+      for (const canvas of [...canvases, ...detailCanvases]) if (canvas) canvas.width = canvas.height = 0;
     }
   }
 
@@ -140,7 +181,9 @@ export class BitmapWindows {
     this.window = null;
     for (const source of this.sources) {
       this.device.release(source.texture);
-      source.texture = source.slot.texture = null;
+      this.device.release(source.detailTexture);
+      source.texture = source.slot.texture = source.detailTexture = null;
+      source.slot.detail = null;
     }
   }
 
@@ -150,22 +193,30 @@ export class BitmapWindows {
     this.sources = [];
   }
 
-  // Largest margin (halving down to 0) whose summed RGBA crop bytes fit `budget`; null when even visible-only doesn't.
+  // Largest margin (halving down to 0) whose summed RGBA crop bytes, details included, fit `budget`. When even the
+  // visible-only crops do not fit with their details, the visible-only crops without details (each slot draws its
+  // source, as it does before a detail image exists); null when those do not fit either.
   private choose(sources: Source[], camera: Camera, viewport: Viewport, budget: number) {
     const max = this.device.maxTextureSize;
+    const plan = (image: HTMLImageElement, rect: Rect4, window: Rect4) =>
+      cropPlan(rect, image.naturalWidth, image.naturalHeight, window);
+    const crops = (window: Rect4, margin: number, withDetails: boolean) => {
+      const plans = sources.map(s => plan(s.image, s.rect, window));
+      const details = sources.map(s => (withDetails && s.detail ? plan(s.detail.image, s.detail.rect, window) : null));
+      let bytes = 0;
+      for (const item of [...plans, ...details]) {
+        if (!item) continue;
+        bytes += item.sw * item.sh * 4;
+        if (item.sw > max || item.sh > max) return null;
+      }
+      return bytes <= budget ? { window, plans, details, margin } : null;
+    };
     let margin = Math.max(0, this.marginCss);
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
       const window = visibleWorld(camera, viewport, margin);
-      const plans = sources.map(s => cropPlan(s.rect, s.image.naturalWidth, s.image.naturalHeight, window));
-      let bytes = 0;
-      let fits = true;
-      for (const plan of plans) {
-        if (!plan) continue;
-        bytes += plan.sw * plan.sh * 4;
-        if (plan.sw > max || plan.sh > max) fits = false;
-      }
-      if (fits && bytes <= budget) return { window, plans, margin };
-      if (margin === 0) return null;
+      const chosen = crops(window, margin, true);
+      if (chosen) return chosen;
+      if (margin === 0) return sources.some(s => s.detail) ? crops(window, 0, false) : null;
       margin = margin < 2 || attempt >= MAX_ATTEMPTS - 2 ? 0 : margin / 2;
     }
     return null;

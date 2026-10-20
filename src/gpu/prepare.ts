@@ -2,7 +2,7 @@
 // atlases, compat rasters (DOM-ordered slots) and the CPU pick index. Async with a staleness check after every
 // await: a superseded job releases what it allocated and returns null.
 import type { ReliefSprite } from "../renderers/relief-canvas";
-import { BitmapWindows } from "./bitmap-window";
+import { BitmapWindows, type WindowDetail } from "./bitmap-window";
 import {
   compatAllowance,
   fitScale,
@@ -74,7 +74,7 @@ import { buildScene, type Draw, type LayerReport, type Scene, type ShapeStyle } 
 import { cloneLayers, type SceneCache, type SceneKey } from "./scene-cache";
 import { createSlicer, slicePolicy } from "./slice";
 import { flattenPath, type Subpath } from "./svg-path";
-import { GLYPH_FLOATS, type GlyphAtlas, layoutLabels } from "./text";
+import { GLYPH_FLOATS, type GlyphAtlas, glyphAtlasRows, layoutLabels } from "./text";
 
 export interface PrepareContext {
   device: GpuDevice;
@@ -236,7 +236,7 @@ interface WindowSource {
   image: HTMLImageElement;
   rect: [number, number, number, number];
   opacity?: number;
-  detail: ImageBatch["detail"]; // the relief viewport's sharper canonical image (a recipe texture), at commit
+  detail: WindowDetail | null; // the relief viewport's sharper canonical image, cropped with the window
 }
 
 interface Payload {
@@ -316,7 +316,6 @@ export function complete(retained: RetainedFrame): boolean {
     else if (batch.kind === "sprites") ok &&= retained.recipes.has(batch.texture);
     else if (batch.kind === "image") ok &&= slots.has(batch);
   });
-  for (const item of retained.windows) if (item.detail?.texture) ok &&= retained.recipes.has(item.detail.texture);
   return ok;
 }
 
@@ -325,16 +324,18 @@ export function complete(retained: RetainedFrame): boolean {
 export function rehydrate(
   retained: RetainedFrame,
   make: (label: string, source: TextureSource, options?: Recipe["options"]) => TrackedTexture,
-  addWindow: (image: HTMLImageElement, rect: [number, number, number, number], opacity?: number) => ImageBatch
+  addWindow: (
+    image: HTMLImageElement,
+    rect: [number, number, number, number],
+    opacity?: number,
+    detail?: WindowDetail | null
+  ) => ImageBatch
 ): { runs: CompatRun[]; batches: Batch[] } {
   const textures = new Map<TrackedTexture, TrackedTexture>();
   for (const [old, recipe] of retained.recipes) textures.set(old, make(recipe.label, recipe.source, recipe.options));
   const slots = new Map<ImageBatch, ImageBatch>();
   for (const item of retained.windows) {
-    const slot = addWindow(item.image, item.rect, item.opacity);
-    const detail = item.detail;
-    if (detail?.texture)
-      slot.detail = { texture: textures.get(detail.texture)!, rect: [...detail.rect], covers: [...detail.covers] };
+    const slot = addWindow(item.image, item.rect, item.opacity, item.detail);
     slots.set(item.slot, slot);
   }
   const runs = retained.runs.map(run => {
@@ -387,9 +388,10 @@ export function retainFrame(
   if (glyphCount && atlasCopy) copy = atlasCanvas;
   else if (glyphCount) {
     if (!atlasCanvas || atlasCanvas !== live.canvas || live.generation !== atlasGeneration) return null;
+    // only the rows the instances sample (the upload takes no more); uvs stay normalized by the full atlas
     copy = document.createElement("canvas");
     copy.width = atlasCanvas.width;
-    copy.height = atlasCanvas.height;
+    copy.height = Math.min(atlasCanvas.height, glyphAtlasRows(prepared.payload.glyphs, glyphCount));
     const context = copy.getContext("2d");
     if (!context) return null;
     context.drawImage(atlasCanvas, 0, 0);
@@ -491,9 +493,14 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
     textures.push(texture);
     return texture;
   };
-  const addWindow = (image: HTMLImageElement, rect: [number, number, number, number], opacity?: number) => {
-    const slot = windows.add(image, rect, opacity);
-    windowSources.push({ slot, image, rect: [...rect], opacity, detail: null });
+  const addWindow = (
+    image: HTMLImageElement,
+    rect: [number, number, number, number],
+    opacity?: number,
+    detail: WindowDetail | null = null
+  ) => {
+    const slot = windows.add(image, rect, opacity, detail);
+    windowSources.push({ slot, image, rect: [...rect], opacity, detail });
     return slot;
   };
   const runs: CompatRun[] = [];
@@ -735,14 +742,9 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
         const width = Number(draw.element.getAttribute("width"));
         const height = Number(draw.element.getAttribute("height"));
         if (cached && width > 0 && height > 0) {
-          const slot = addWindow(
-            cached,
-            meetImageRect(
-              [Number(draw.element.getAttribute("x") || 0), Number(draw.element.getAttribute("y") || 0), width, height],
-              cached.naturalWidth,
-              cached.naturalHeight
-            )
-          );
+          // The dense-zoom relief viewport image is a sharper copy of the visible part: a detail of the same window,
+          // cropped and budgeted with it (at most the padded viewport image, which is twice the visible area).
+          let sharper: WindowDetail | null = null;
           const viewport = draw.element.parentElement?.querySelector("image[data-relief-viewport]");
           if (viewport) {
             const detail = await cachedReliefImage(viewport, device.maxTextureSize);
@@ -753,15 +755,23 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
               Number(viewport.getAttribute("width")),
               Number(viewport.getAttribute("height"))
             ];
-            if (detail && rect.every(Number.isFinite) && rect[2] > 0 && rect[3] > 0) {
-              const sharper = make("canonical relief viewport", detail);
-              slot.detail = {
-                texture: sharper,
+            if (detail && rect.every(Number.isFinite) && rect[2] > 0 && rect[3] > 0)
+              sharper = {
+                image: detail,
                 rect: meetImageRect(rect, detail.naturalWidth, detail.naturalHeight),
                 covers: rect
               };
-            }
           }
+          const slot = addWindow(
+            cached,
+            meetImageRect(
+              [Number(draw.element.getAttribute("x") || 0), Number(draw.element.getAttribute("y") || 0), width, height],
+              cached.naturalWidth,
+              cached.naturalHeight
+            ),
+            undefined,
+            sharper
+          );
           scene.layers[draw.layer].source = "canonical-raster-cache";
           addHits();
           out.push(slot);
@@ -867,8 +877,20 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
     if (retained) glyphCount = retained.glyphCount;
     const atlasCanvas = retained ? retained.atlas : ctx.atlas.canvas;
 
+    if (!glyphData) {
+      glyphData = new Float32Array(glyphCount * GLYPH_FLOATS);
+      let offset = 0;
+      for (const chunk of glyphs) {
+        glyphData.set(chunk, offset);
+        offset += chunk.length;
+      }
+    }
+    // the glyph atlas uploads only the rows its instances sample (glyphAtlasRows)
+    const atlasRows =
+      glyphCount && atlasCanvas ? Math.min(atlasCanvas.height, glyphAtlasRows(glyphData, glyphCount)) : 0;
+
     // Still to upload after the compat rasters: glyph atlas and vertex data (≈ CPU arrays).
-    const glyphBytes = glyphCount && atlasCanvas ? atlasCanvas.width * atlasCanvas.height * 4 : 0;
+    const glyphBytes = atlasCanvas ? atlasCanvas.width * atlasRows * 4 : 0;
     const vertexBytes =
       (vertices.fans.length +
         vertices.segments.length +
@@ -1060,17 +1082,9 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
       buffers.push(buffer);
       return buffer;
     };
-    if (!glyphData) {
-      glyphData = new Float32Array(glyphCount * GLYPH_FLOATS);
-      let offset = 0;
-      for (const chunk of glyphs) {
-        glyphData.set(chunk, offset);
-        offset += chunk.length;
-      }
-    }
     let atlas: TrackedTexture | null = null;
     if (glyphCount && atlasCanvas) {
-      atlas = device.texture("glyph atlas", atlasCanvas);
+      atlas = device.texture("glyph atlas", atlasCanvas, { rows: atlasRows });
       textures.push(atlas);
     }
     const tree = [...before, ...batches, ...after];
@@ -1111,7 +1125,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
       atlasCopy: !!retained,
       atlasGeneration: ctx.atlas.generation === atlasGeneration ? atlasGeneration : -1,
       recipes,
-      windows: windowSources.map(item => ({ ...item, detail: item.slot.detail && { ...item.slot.detail } }))
+      windows: windowSources.map(item => ({ ...item }))
     };
     const overlays = indexOverlays(runs, ctx.screen);
     // tracker entries older than every raster this frame or the previous one still draws can no longer matter

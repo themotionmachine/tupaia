@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { BitmapWindows, cropPlan } from "./bitmap-window";
+import { BitmapWindows, cropPlan, detailCovers } from "./bitmap-window";
 import type { GpuDevice, TrackedTexture } from "./device";
 
 const draws: { smoothing: boolean; args: unknown[] }[] = [];
@@ -44,6 +44,7 @@ function fakeDevice(failAt = -1) {
   return { device: device as unknown as GpuDevice, live, raw: device };
 }
 
+type Rect4 = [number, number, number, number];
 const image = (w: number, h: number) => ({ naturalWidth: w, naturalHeight: h }) as HTMLImageElement;
 const view = { width: 100, height: 100, dpr: 1 };
 const at = (x: number, y = 0) => ({ k: 1, x, y });
@@ -209,6 +210,73 @@ describe("BitmapWindows", () => {
     expect(await windows.refresh(at(0), view, undefined, 1000)).toBe(false);
     expect(raw.texture).toHaveBeenCalledTimes(1);
     expect(windows.covers(at(0), view)).toBe(true); // a rejected refresh keeps the committed window
+  });
+});
+
+// The dense-zoom relief viewport image: a sharper image over part of a source. It used to be uploaded whole as its own
+// texture outside every budget (27.6 MiB at 1280x720 DPR 2, twice the view; 42 MiB in a 1512x982 window), which pushed
+// the parity world's compat share under MIN_COMPAT_BUDGET and the frame back to SVG.
+describe("BitmapWindows detail", () => {
+  // 1000 px over the world [0, 1000]; the detail is 4 px per unit over [400, 600] in an element box [390, 610]
+  const detail = () => ({
+    image: image(800, 800),
+    rect: [400, 400, 200, 200] as Rect4,
+    covers: [390, 390, 220, 220] as Rect4
+  });
+
+  it("crops the detail with the source window, counts it in bytes and covers only the crop", async () => {
+    const { device, live } = fakeDevice();
+    const windows = new BitmapWindows(device, 10);
+    const slot = windows.add(image(1000, 1000), [0, 0, 1000, 1000], 1, detail());
+    expect(slot.detail).toBeNull(); // nothing uploaded before the first refresh
+    // view [450, 550] + 10: the detail crop is [440, 560] (+1 px gutter at 4 px per unit), inside the image
+    expect(await windows.refresh(at(-450, -450), view)).toBe(true);
+    expect(slot.texture).toMatchObject({ width: 122, height: 122 });
+    expect(slot.detail?.texture).toMatchObject({ width: 482, height: 482 });
+    expect(slot.detail?.rect).toEqual([439.75, 439.75, 120.5, 120.5]);
+    expect(slot.detail?.covers).toEqual([439.75, 439.75, 120.5, 120.5]);
+    expect(windows.bytes).toBe(122 * 122 * 4 + 482 * 482 * 4);
+    expect(live.size).toBe(2);
+    // the next refresh swaps both and releases both old textures; release drops the detail with the source
+    await windows.refresh(at(-460, -460), view);
+    expect(live.size).toBe(2);
+    windows.release();
+    expect(live.size).toBe(0);
+    expect(slot.detail).toBeNull();
+  });
+
+  it("covers the element's transparent margin on a side where the crop reaches the image edge", () => {
+    const d = detail();
+    // the whole image: the element box
+    expect(detailCovers(d, { sx: 0, sy: 0, sw: 800, sh: 800, rect: [400, 400, 200, 200] })).toEqual([
+      390, 390, 220, 220
+    ]);
+    // left part only: the right side stops at the crop
+    expect(detailCovers(d, { sx: 0, sy: 0, sw: 400, sh: 800, rect: [400, 400, 100, 200] })).toEqual([
+      390, 390, 110, 220
+    ]);
+  });
+
+  it("shrinks the margin to fit the detail, then drops the detail before leaving the view uncovered", async () => {
+    const { device } = fakeDevice();
+    // margin 10 with the detail needs 122² * 4 + 482² * 4 = 988832 bytes; margin 0 with it 102² * 4 + 402² * 4
+    const tight = new BitmapWindows(device, 10, 700000);
+    const slot = tight.add(image(1000, 1000), [0, 0, 1000, 1000], 1, detail());
+    expect(await tight.refresh(at(-450, -450), view)).toBe(true);
+    expect(tight.margin).toBe(0);
+    expect(slot.detail?.texture).toMatchObject({ width: 402, height: 402 });
+    // too small for any detail: the source alone (what the slot draws before a detail image exists), not uncovered
+    const small = new BitmapWindows(device, 10, 100000);
+    const alone = small.add(image(1000, 1000), [0, 0, 1000, 1000], 1, detail());
+    expect(await small.refresh(at(-450, -450), view)).toBe(true);
+    expect(alone.texture).toMatchObject({ width: 102, height: 102 });
+    expect(alone.detail).toBeNull();
+    expect(small.bytes).toBe(102 * 102 * 4);
+    // a detail outside the window has no crop and no detail
+    const away = new BitmapWindows(device, 10);
+    const far = away.add(image(1000, 1000), [0, 0, 1000, 1000], 1, detail());
+    expect(await away.refresh(at(0), view)).toBe(true);
+    expect(far.detail).toBeNull();
   });
 });
 

@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import { layoutOnPath } from "./geometry";
 import {
   centralBaselineShift,
+  GLYPH_ATLAS,
+  GLYPH_FLOATS,
+  glyphAtlasRows,
   letterSpacingPx,
   parseLength,
   prefixAdvances,
@@ -236,4 +239,28 @@ it("central baseline uses scaled font ascent/descent and rejects unavailable met
   expect(centralBaselineShift("central", { fontBoundingBoxAscent: NaN, fontBoundingBoxDescent: 5 }, 1)).toBeNull();
   expect(centralBaselineShift("middle", { fontBoundingBoxAscent: 18, fontBoundingBoxDescent: 5 }, 1)).toBeNull();
   expect(unsupportedStyle({ dominantBaseline: "central" })).toBe("");
+});
+
+describe("glyphAtlasRows", () => {
+  // instances whose cells end at the given bottom rows (v1 is normalized by the full atlas)
+  const instances = (...bottoms: number[]) => {
+    const data = new Float32Array(bottoms.length * GLYPH_FLOATS);
+    bottoms.forEach((bottom, i) => {
+      data[i * GLYPH_FLOATS + 10] = bottom / GLYPH_ATLAS;
+    });
+    return data;
+  };
+
+  it("keeps the rows down to the lowest cell bottom plus its transparent gutter row", () => {
+    expect(glyphAtlasRows(instances(20, 57, 31))).toBe(58);
+    // a few hundred glyphs on the parity fixture used ~90-350 rows: the GPU copy is that, not the 16 MiB full atlas
+    expect(GLYPH_ATLAS * glyphAtlasRows(instances(350)) * 4).toBeLessThan(3 << 20);
+  });
+
+  it("never exceeds the atlas and is 0 without instances", () => {
+    expect(glyphAtlasRows(instances(GLYPH_ATLAS))).toBe(GLYPH_ATLAS);
+    expect(glyphAtlasRows(new Float32Array(0))).toBe(0);
+    // the count bounds the scan (a payload's array may be longer than its instances)
+    expect(glyphAtlasRows(instances(10, 900), 1)).toBe(11);
+  });
 });

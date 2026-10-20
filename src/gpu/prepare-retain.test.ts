@@ -21,7 +21,7 @@ const image = (rect: [number, number, number, number], screen = false): ImageBat
 function frame() {
   const pattern = texture("pattern hatch");
   const reliefAtlas = texture("relief atlas");
-  const viewport = texture("canonical relief viewport");
+  const viewport = { naturalWidth: 30, naturalHeight: 30 } as HTMLImageElement;
   const fill: FillBatch = {
     kind: "fill",
     first: 0,
@@ -64,8 +64,7 @@ function frame() {
     atlasGeneration: 0,
     recipes: new Map([
       [pattern, { label: "pattern hatch", source: { width: 4, height: 4 } as never, options: { repeat: true } }],
-      [reliefAtlas, { label: "relief atlas", source: { width: 4, height: 4 } as never, options: { mipmap: true } }],
-      [viewport, { label: "canonical relief viewport", source: { width: 4, height: 4 } as never, options: {} }]
+      [reliefAtlas, { label: "relief atlas", source: { width: 4, height: 4 } as never, options: { mipmap: true } }]
     ]),
     windows: [
       {
@@ -74,7 +73,7 @@ function frame() {
         rect: [0, 0, 10, 10] as [number, number, number, number],
         opacity: 0.8,
         detail: {
-          texture: viewport,
+          image: viewport,
           rect: [2, 2, 3, 3] as [number, number, number, number],
           covers: [2, 2, 3, 3] as [number, number, number, number]
         }
@@ -86,12 +85,12 @@ function frame() {
     ],
     atlas: null
   } satisfies RetainedFrame;
-  return { retained, old: new Set([pattern, reliefAtlas, viewport]), slots: new Set([window, run, screen]) };
+  return { retained, old: new Set([pattern, reliefAtlas]), slots: new Set([window, run, screen]), viewport };
 }
 
 function rebuild(retained: RetainedFrame) {
   const made: { label: string; options: unknown; texture: TrackedTexture }[] = [];
-  const windows: { rect: number[]; opacity?: number; slot: ImageBatch }[] = [];
+  const windows: { rect: number[]; opacity?: number; detail?: unknown; slot: ImageBatch }[] = [];
   const result = rehydrate(
     retained,
     (label, _source, options) => {
@@ -99,9 +98,9 @@ function rebuild(retained: RetainedFrame) {
       made.push({ label, options, texture: fresh });
       return fresh;
     },
-    (_image, rect, opacity) => {
+    (_image, rect, opacity, detail) => {
       const slot: ImageBatch = { kind: "image", opacity, texture: null, rect: [...rect], screen: false, detail: null };
-      windows.push({ rect, opacity, slot });
+      windows.push({ rect, opacity, detail, slot });
       return slot;
     }
   );
@@ -134,23 +133,26 @@ describe("retained frame (context-loss restore without a scene walk)", () => {
     const { made } = rebuild(retained);
     expect(made.map(item => [item.label, item.options])).toEqual([
       ["pattern hatch", { repeat: true }],
-      ["relief atlas", { mipmap: true }],
-      ["canonical relief viewport", {}]
+      ["relief atlas", { mipmap: true }]
     ]);
   });
 
   it("copies the batch tree onto the new textures and slots only", () => {
-    const { retained, old, slots } = frame();
+    const { retained, old, slots, viewport } = frame();
     const { batches, made, windows, runs } = rebuild(retained);
     const { textures, images } = reach(batches);
     for (const dead of old) expect(textures.has(dead)).toBe(false);
     for (const dead of slots) expect(images.has(dead)).toBe(false);
     expect(textures).toEqual(new Set(made.map(item => item.texture)));
-    // the window slot came from the bitmap windows again, with its relief viewport detail on the new texture
+    // the window slot came from the bitmap windows again, with its relief viewport detail image: the windows crop
+    // and upload it with the source (no texture of its own until they do)
     expect(windows).toHaveLength(1);
-    expect(windows[0]).toMatchObject({ rect: [0, 0, 10, 10], opacity: 0.8 });
-    expect(windows[0].slot.detail?.texture).toBe(made[2].texture);
-    expect(windows[0].slot.detail?.covers).toEqual([2, 2, 3, 3]);
+    expect(windows[0]).toMatchObject({
+      rect: [0, 0, 10, 10],
+      opacity: 0.8,
+      detail: { image: viewport, rect: [2, 2, 3, 3], covers: [2, 2, 3, 3] }
+    });
+    expect(windows[0].slot.detail).toBeNull();
     // the same object appears where the old one was, in DOM order, and the group keeps its mask and opacity
     expect(batches[1]).toBe(windows[0].slot);
     const group = batches[3] as GroupBatch;
@@ -181,9 +183,6 @@ describe("retained frame (context-loss restore without a scene walk)", () => {
     const stray = frame().retained;
     stray.batches = [...stray.batches, image([0, 0, 1, 1])];
     expect(complete(stray)).toBe(false);
-    const detail = frame().retained;
-    detail.recipes.delete([...detail.recipes.keys()][2]);
-    expect(complete(detail)).toBe(false);
   });
 
   it("retains on loss only while the glyph atlas still holds the frame's glyphs", () => {
