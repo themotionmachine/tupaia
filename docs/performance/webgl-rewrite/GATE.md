@@ -418,7 +418,9 @@ PROOF-PLAN §4 "Labels" and "Fonts". Tolerances are in `TOL` (labels-core.ts), i
   A label that leaves the count is reported with its SVG state; when the app itself hid it in the SVG (on shared, the
   state label "Takeet Union of Caucuses" gets `display: none` after the Amatic SC and Baskerville switches, most
   likely from the viewport culling in src/renderers/label-culling.ts as its box changes with the face) it is a note,
-  since both arms follow the SVG; otherwise it fails.
+  since both arms follow the SVG; otherwise it fails. After the switches the step puts the switched groups'
+  `font-family` back as loaded (`restored`; a mismatch fails the step): the last switch leaves the broken face on
+  them, and the `zoom` step's probe takes the map's label face, so it would otherwise be a compat run there.
 - **zoom** (W3b GLYPH2): cameras between powers of two, which the other steps never use (their k·dpr is a raster
   bucket). Both parts view a frame **carried** within its bucket: prepared at one zoom, shown at another with the
   renderer blind to mutations (what a gesture shows until it settles; the frame identity must hold), rescaleLabels
@@ -427,7 +429,7 @@ PROOF-PLAN §4 "Labels" and "Fonts". Tolerances are in `TOL` (labels-core.ts), i
   in the map's label face; `#labels` hidden meanwhile) with a visible shadow on both arms (glow
   `rgb(200,30,30) 0 0 4px`, offset `3px 2px 2px`), carried 1.1→1.9, 1.9→1.1, 2.2→3 plus a fresh prepare at 1.5. The
   probe's padded boxes are judged as a golden (D1 SSIM/over16/over44 and D11 coverage); a cell where the GPU drew no
-  probe text natively with a shadow fails. `carry`: pairs 1.1↔1.9 and 2.3→3.7 on the `native` variant; the GPU's
+  probe text natively with a shadow fails (and names the probe face when it is not loaded). `carry`: pairs 1.1↔1.9 and 2.3→3.7 on the `native` variant; the GPU's
   own glyph instances (native curved labels) are pixel-registered (same TOL as glyphs, plus the normal component;
   labels the zoom restyled are left out). Info, not gated: the labels golden against a fresh prepare of the same
   view (`CARRY_MARGIN`; compat runs carry a raster of the prepared zoom until the settle refines it) and the fresh
