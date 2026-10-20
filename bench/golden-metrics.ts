@@ -54,9 +54,14 @@ export const COVERAGE = { inkRatioMin: 0.9, over16OfInkMax: 0.2, slackPx: 16 } a
 // 0.18 of a level at its strongest; its ink differed 12 % between arms while 93 % of the pixels agreed and no pixel
 // differed by more than 1). The cell is then judged for coverage on the SAME layer lifted to full opacity (the family
 // root's opacity forced to 1 in the page, both arms recaptured), where the footprint is plain. Nothing is loosened:
+//   - a layer that paints nothing in either arm (contrast 0) is not faint, it is empty or quiet as before;
 //   - a layer louder than maxContrast, in either arm, never takes this path (a GPU that paints a faint layer at full
 //     strength is far over maxContrast in its own arm, so the plain gates judge it);
-//   - the lifted capture is judged by the unchanged COVERAGE rule (ink ratio, over16 of ink);
+//   - the lifted capture is judged by the unchanged COVERAGE ink rule (the footprint, the part that was rounding noise)
+//     and the empty check; over16-of-ink and the whole-frame gates stay on the plain capture, because lifting scales a
+//     colour difference by 1/opacity (ice: up to 125x, and a vignette forced to opacity 1 already shows maxΔ 163 against
+//     the SVG that is invisible at its real 0.3), so a colour gate on the lifted capture would flag differences nobody
+//     can see; the lifted over16-of-ink is still reported (cell.faint.liftedMetrics);
 //   - a lift that does not reveal the layer (contrast still ≤ maxContrast: white on white, or the opacity sits on
 //     children) falls back to the plain judgement, so those cells are exactly as strict as before;
 //   - the whole-frame gates (SSIM, over16, over44) always read the plain capture.
@@ -89,7 +94,9 @@ export interface CellMetrics {
   contrast: number;
 }
 
-export const isFaint = (m: Pick<CellMetrics, "contrast">): boolean => m.contrast <= FAINT.maxContrast;
+// Contrast 0 is not faint: neither arm paints a single pixel of the layer (opacity 0, hidden by the file, nothing to
+// draw). That is the corpus's "quiet" layer and the golden's empty class, and there is nothing to lift.
+export const isFaint = (m: Pick<CellMetrics, "contrast">): boolean => m.contrast > 0 && m.contrast <= FAINT.maxContrast;
 
 const delta = (a: ArrayLike<number>, b: ArrayLike<number>, i: number) =>
   Math.max(Math.abs(a[i] - b[i]), Math.abs(a[i + 1] - b[i + 1]), Math.abs(a[i + 2] - b[i + 2]));
@@ -207,7 +214,9 @@ export function judgeCell(input: CellInput, reading: Reading = DEFAULT_READING):
   if (svgEmpty) failures.push(`empty in SVG arm (ink ${c.inkSvg} px, ${input.domDrawables} drawables)`);
   if (gpuEmpty) failures.push(`empty in GPU arm (ink ${c.inkGpu} px, ${routed} routed)`);
   const populated = !svgEmpty && !gpuEmpty;
-  const cover = coverageOf(c);
+  // the footprint rule reads the lifted capture; over16-of-ink always reads the plain one (see FAINT: lifted, a
+  // sub-code-value colour difference would be scaled by 1/opacity, up to ~125x for ice, into a failure nobody can see)
+  const cover = { ink: coverageOf(c).ink, over16: coverageOf(m).over16 };
   const gates = {
     ssim: m.ssim >= D1.ssimMin,
     over16: m.over16Fraction <= D1.over16Max,
@@ -228,7 +237,7 @@ export function judgeCell(input: CellInput, reading: Reading = DEFAULT_READING):
   const at = lifted ? " at full opacity" : "";
   if (populated && !gates.coverageInk)
     failures.push(`coverage${at}: ink ${c.inkGpu} GPU vs ${c.inkSvg} SVG px (ratio ${c.inkRatio.toFixed(3)} < ${COVERAGE.inkRatioMin})`);
-  if (populated && !gates.coverageOver16) failures.push(`coverage${at}: over16 is ${pct(c.over16OfInk)} of the layer's ink (max ${pct(COVERAGE.over16OfInkMax)})`);
+  if (populated && !gates.coverageOver16) failures.push(`coverage: over16 is ${pct(m.over16OfInk)} of the layer's ink (max ${pct(COVERAGE.over16OfInkMax)})`);
   if (input.expected) {
     const drift = censusDrift(input.expected, input.census);
     if (drift.length) {

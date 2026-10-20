@@ -318,18 +318,21 @@ Arguments:
       emblems k 1/2 55–61 %.
   - **Faint layers (W4 FAINT).** Ink is "differs from the blank by any code value", which is a footprint only while the
     layer is much louder than the 8-bit rounding of the two arms. A cell whose strongest pixel against its own blank
-    (`metrics.contrast`, the larger of the two arms) is at most `FAINT.maxContrast` (3) code values is below that floor:
+    (`metrics.contrast`, the larger of the two arms) is 1 to `FAINT.maxContrast` (3) code values is below that floor (0 is a
+    layer neither arm paints at all: empty or quiet as before, nothing to lift):
     which pixels reach a whole value is a rounding accident of Chrome's SVG compositor and the GPU, so the ink count
     measures the rounding. The runner then lifts the family root to opacity 1 (inline style, both arms read it, one
-    GPU re-prepare), recaptures both arms at the same camera and judges the **empty check and the D11 coverage rule**
-    on that capture (`cell.faint`, PNGs `*-lifted-{svg,gpu,diff}.png`, a note on the cell); SSIM, over16 and over44
-    still read the plain capture. Nothing is loosened: the rule is the unchanged COVERAGE numbers; a layer louder than 3
+    GPU re-prepare), recaptures both arms at the same camera and judges the **empty check and the D11 ink (footprint) rule**
+    on that capture (`cell.faint`, PNGs `*-lifted-{svg,gpu,diff}.png`, a note on the cell); SSIM, over16, over44 and
+    over16-of-ink still read the plain capture (lifting scales a colour difference by 1/opacity, up to ~125x for ice,
+    so a colour gate there would flag differences nobody can see; the lifted over16-of-ink is reported, not gated). Nothing is loosened: the rule is the unchanged COVERAGE numbers; a layer louder than 3
     in either arm never takes the path (a GPU that paints a faint layer at full strength is judged plain); a lift that
     reveals nothing (still ≤ 3: white on white, opacity on children) falls back to the plain judgement; a GPU that does
     not re-prepare after the lift is a harness failure. What it cannot see: a faint layer's own opacity being wrong by
     less than the 8-bit floor (both arms ≤ 3 code values from the blank), which no 8-bit capture can show. Measured:
     legacy-v1.99 ice (group opacity 0.008, contrast 2) had 3164 SVG against 3618 GPU ink px plain (0.875), with 93 % of
-    the changed pixels at Δ 1; lifted, both arms have the same 149 208 ink px (1.000), over16 of ink 0.37 %.
+    the changed pixels at Δ 1; lifted, both arms have the same 149 208 ink px (1.000), over16 of ink 0.37 %. `faint=<opacity>` on `gate golden`
+    (self-test knob) forces that opacity on each captured family so a normal layer becomes a faint one.
   - Each cell gets a `class`: `pass`, `coverage` (only the coverage gate failed), `gap` (a whole-frame gate failed),
     `empty`, `census` (routing drift only) or `harness`. `summary.table` is the per-layer table.
   - A family that paints nothing in either arm fails: an empty layer is a failure, not a pass. Each arm's ink is
@@ -365,8 +368,8 @@ Arguments:
     - goods with `break=drop-icon` (every 4th leaf draw batch dropped: a quarter of the resource icons) fails the
       coverage gate (its whole-frame gates fail too).
     - the same three layers at opacity 0.008 (`GOLDEN_FAINT`, contrast 2: below the 8-bit rounding floor, like
-      legacy-v1.99 ice): rulers and goods pass on the lifted capture; rulers with `break=thin-stroke` and goods with
-      `break=drop-icon` fail the coverage gate on the lifted capture (`at full opacity`) while every plain
+      legacy-v1.99 ice): rulers, goods and the scaleBar screen overlay (refreshed in place, no prepare) pass on the lifted capture; rulers with `break=thin-stroke` and goods with
+      `break=drop-icon` fail the coverage ink rule on the lifted capture (`at full opacity`) while every plain
       whole-frame gate passes, so a real gap in a faint layer is still caught.
     A break that changes nothing, or a failure on a harness error instead of a metric, fails the self-test. The
     breaks only touch the GPU frame; use them only to show the harness can fail.

@@ -240,6 +240,7 @@ test("faint: the contrast is the layer's strongest pixel over both arms, and a n
   assert.equal(loud.contrast, 215);
   assert.equal(isFaint(loud), false);
   assert.equal(measureCell(white, white, white).contrast, 0);
+  assert.equal(isFaint(measureCell(white, white, white)), false, "nothing painted in either arm is empty or quiet, not faint");
 });
 
 test("faint: rounding alone moves the plain ink ratio below the floor and the lifted capture judges the layer", () => {
@@ -265,9 +266,11 @@ test("faint: a real gap on a faint layer still fails, on the lifted capture", ()
   // dropped icons
   const dropped = judgeFaint(svgFaint, gpuFaint, [image(BW, BH, icons(() => true)), image(BW, BH, icons(i => i % 3 !== 0))]);
   assert.equal(dropped.gates.coverageInk, false);
-  // a colour shift on the lifted layer
+  // a colour shift on the lifted layer is NOT judged: lifting scales colour by 1/opacity, and over16-of-ink reads the plain capture
   const tinted = image(BW, BH, (x, y) => (x % 200 < 3 && y < BH / 2 ? [80, 100, 140] : strokes(3)(x, y)));
-  assert.equal(judgeFaint(svgFaint, gpuFaint, [image(BW, BH, strokes(3)), tinted]).gates.coverageOver16, false);
+  const shifted = judgeFaint(svgFaint, gpuFaint, [image(BW, BH, strokes(3)), tinted]);
+  assert.equal(shifted.gates.coverageOver16, true);
+  assert.equal(shifted.pass, true, shifted.failures.join());
   // the layer missing from the GPU arm altogether
   const gone = judgeFaint(svgFaint, image(BW, BH, () => [255, 255, 255]), [image(BW, BH, strokes(6)), bigWhite]);
   assert.equal(gone.pass, false);
@@ -298,11 +301,17 @@ test("faint: a lifted capture never rescues a normal layer", () => {
   assert.equal(withLift.faint, null);
 });
 
-test("faint: an opacity-0.008 layer that paints nothing in 8 bits is judged populated by its lifted capture", () => {
+test("faint: a faint layer with almost no 8-bit ink is judged populated by its lifted capture; an unpainted one is not lifted", () => {
   const lifted = [image(BW, BH, strokes(6)), image(BW, BH, strokes(6))];
-  const v = judgeFaint(bigWhite, bigWhite, lifted); // no plain ink at all
+  const sparse = image(BW, BH, (x, y) => (x < 3 && y < 3 ? [254, 254, 254] : [255, 255, 255])); // 9 px of ink: the SVG's rounding
+  const v = judgeFaint(sparse, bigWhite, lifted);
   assert.equal(v.pass, true, v.failures.join());
-  assert.equal(judgeFaint(bigWhite, bigWhite, null).pass, false, "without a lift the same cell is empty");
+  assert.equal(judgeFaint(sparse, bigWhite, null).pass, false, "without a lift the GPU arm is empty");
+  // painted by neither arm: no lift is used even if one is passed, and the cell is empty as before
+  const none = judgeFaint(bigWhite, bigWhite, lifted);
+  assert.equal(none.pass, false);
+  assert.equal(none.faint, null);
+  assert.match(none.failures.join(), /empty in SVG arm/);
   // no DOM drawables: nothing to lift, empty stands
   assert.match(judgeCell({ metrics: measureCell(bigWhite, bigWhite, bigWhite), census: counts, domDrawables: 0 }).failures.join(), /empty in SVG arm/);
 });

@@ -59,8 +59,9 @@
 //                    layer becomes a FAINT one (golden-metrics.ts FAINT) and the lifted capture is exercised on a layer whose
 //                    footprint is known. Unset = the page's own opacities.
 //   FAINT layers: a cell whose strongest pixel (either arm) is at most FAINT.maxContrast code values from its blank is
-//                    recaptured with the family root lifted to opacity 1 (both arms, same camera) and its coverage is judged
-//                    there (golden-metrics.ts); the plain capture keeps the whole-frame gates. cell.faint records both.
+//                    recaptured with the family root lifted to opacity 1 (both arms, same camera) and its empty check and
+//                    coverage ink rule are judged there (golden-metrics.ts); the plain capture keeps the whole-frame gates
+//                    and over16-of-ink. cell.faint records both.
 //   GOLDEN_PARAMS    extra gpu-* URL flags for the page, "+"-joined (e.g. gpu-native-shapes=1)  default none
 //   GOLDEN_CAMERAS   fixture | centered: which camera frames a cell. "fixture" (default when GOLDEN_MAP is the parity
 //                    fixture) uses the manifest's recorded presets; "centered" centres the whole map at k
@@ -838,9 +839,16 @@ async function captureLifted(
   if (!set.found) return { metrics: null, problem: `lift: no #${family.id} to lift` };
   try {
     await settleApp(page);
-    const deadline = Date.now() + 20000;
-    while ((await gpuStamp(page)) === before && Date.now() < deadline) await page.waitForTimeout(100);
-    if ((await gpuStamp(page)) === before) return { metrics: null, problem: `lift: the GPU renderer did not prepare again after #${family.id} was set to opacity 1 (stamp ${before})` };
+    if (family.root) {
+      // a screen overlay (a child of svg#map: vignette, scaleBar, legend) is refreshed in place, one timer hop after the
+      // style edit, without a prepare (renderer.ts mutated(): the lane never bumps the revision), so there is no stamp to
+      // wait for; the capture below still refuses a frame that changes under it
+      await page.waitForTimeout(400);
+    } else {
+      const deadline = Date.now() + 20000;
+      while ((await gpuStamp(page)) === before && Date.now() < deadline) await page.waitForTimeout(100);
+      if ((await gpuStamp(page)) === before) return { metrics: null, problem: `lift: the GPU renderer did not prepare again after #${family.id} was set to opacity 1 (stamp ${before})` };
+    }
     const status = await waitGpu(page);
     if (status.active !== "gpu" || status.timedOut) return { metrics: null, problem: `lift: GPU ${status.timedOut ? "frame did not settle" : `not active (${status.fallbackReason ?? "no frame"})`}` };
     let dropped: unknown;

@@ -150,6 +150,9 @@ const ARG_SPEC: Record<string, Spec> = {
   // the SVG arm of a family shown as a perf bitmap of its vectors (burg icons, cell mesh): auto = per family, the form the
   // GPU is built to reproduce (vector for burgs, the bitmap as shown for cells); the other is always reported (W3 REF)
   svg_ref: { type: "enum", values: ["auto", "vector", "seen"], default: "auto" },
+  // self-test knob: force this opacity on every captured family's root in both arms, so a normal layer becomes a FAINT one
+  // (golden-metrics.ts FAINT); empty = the page's own opacities
+  faint: { type: "string", default: "", check: text => { if (text && !(Number(text) > 0 && Number(text) <= 1)) throw new UsageError("faint must be an opacity in (0, 1]"); } },
   // ms between SVG-arm shots that must agree before it counts as settled (0 = one shot)
   settle_ms: { type: "int", default: 400 },
   // emblem COA symbols: pre = rendered before the first capture (default), lazy = left to the app, late = held back
@@ -689,6 +692,7 @@ async function goldenCheck(ctx: Ctx): Promise<Partial<Result>> {
     GOLDEN_BREAK: String(ctx.args.break),
     GOLDEN_GPU_ARM: String(ctx.args.gpu_arm),
     GOLDEN_PARAMS: String(ctx.args.params ?? ""),
+    GOLDEN_FAINT: String(ctx.args.faint ?? ""),
     ...goldenRefEnv(ctx)
   };
   if (ctx.args.census) {
@@ -765,7 +769,7 @@ async function coaRaceCheck(ctx: Ctx): Promise<Partial<Result>> {
 //                coverage gate (its whole-frame gates fail too: a quarter of goods is 4 % of the frame).
 //   faint-*:     W4 FAINT. The same layers at opacity SELFTEST_FAINT (GOLDEN_FAINT: 2 code values at most, below the
 //                8-bit rounding floor, like legacy-v1.99 ice). faint-clean must pass with the coverage judged on the
-//                lifted (opacity 1) capture; faint-thin-stroke and faint-drop-icon must FAIL that coverage, on the lifted
+//                lifted (opacity 1) capture (rulers, goods and the scaleBar screen overlay); faint-thin-stroke and faint-drop-icon must FAIL that coverage, on the lifted
 //                capture ("at full opacity"), while every plain whole-frame gate passes: a real gap in a faint layer is
 //                still caught, and only because the lift makes its footprint measurable.
 // A broken arm that breaks nothing, or fails on a harness error instead of a metric, fails the self-test.
@@ -774,6 +778,8 @@ async function coaRaceCheck(ctx: Ctx): Promise<Partial<Result>> {
 const SELFTEST_STROKE = "rulers";
 const SELFTEST_ICON = "goods";
 const SELFTEST_FAINT = "0.008";
+// a screen overlay (a child of svg#map, refreshed in place without a prepare): the faint lift must wait for it differently
+const SELFTEST_OVERLAY = "scaleBar";
 async function goldenSelftestCheck(ctx: Ctx): Promise<Partial<Result>> {
   const base = { GOLDEN_MAP: ctx.map(), GOLDEN_K: "1", GOLDEN_DPR: "2", GOLDEN_PRESET: "default", GOLDEN_READING: String(ctx.args.reading), GOLDEN_KEEP: "all" };
   const runs = [
@@ -784,7 +790,7 @@ async function goldenSelftestCheck(ctx: Ctx): Promise<Partial<Result>> {
     // W3 REF: the burg icons are shown by the app as a blurry bitmap of their vectors; the golden must judge the GPU against
     // the vector form (this cell passes) and still report the bitmap as shown (which fails the coverage gate at k 2)
     { arm: "dense-ref", layers: ["burgs"], brk: "none", gpuArm: "canvas", parity: true, k: "2" },
-    { arm: "faint-clean", layers: [SELFTEST_STROKE, SELFTEST_ICON], brk: "none", gpuArm: "canvas", faint: SELFTEST_FAINT },
+    { arm: "faint-clean", layers: [SELFTEST_STROKE, SELFTEST_ICON, SELFTEST_OVERLAY], brk: "none", gpuArm: "canvas", faint: SELFTEST_FAINT },
     { arm: "faint-thin-stroke", layers: [SELFTEST_STROKE], brk: "thin-stroke", gpuArm: "canvas", faint: SELFTEST_FAINT },
     { arm: "faint-drop-icon", layers: [SELFTEST_ICON], brk: "drop-icon", gpuArm: "canvas", faint: SELFTEST_FAINT }
   ];
@@ -1688,7 +1694,7 @@ const DEFS: Record<string, CheckDef> = {
   },
   golden: {
     lock: "shared",
-    keys: ["layers", "k", "coastk", "dpr", "preset", "fixture", "census", "bg", "reading", "keep", "break", "gpu_arm", "params", "svg_ref", "settle_ms", "coa"],
+    keys: ["layers", "k", "coastk", "dpr", "preset", "fixture", "census", "bg", "reading", "keep", "break", "gpu_arm", "params", "svg_ref", "settle_ms", "coa", "faint"],
     spec: { dpr: DPR_LIST },
     timeout: 3600,
     run: goldenCheck
