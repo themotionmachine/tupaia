@@ -1,7 +1,7 @@
 // Cultures editor (REWRITE-PLAN §5 rows 1 and 29, regions): open it from the Tools panel, rename a culture, change an
 // expansionism value and a type, then the manual assignment brush (customization 4, painting polygons into the #temp
 // staging group): two strokes, undo the last (temp.innerHTML restored from the history), paint again, apply
-// (pack.cells.culture and burg.culture change), close.
+// (pack.cells.culture and burg.culture change), then the add mode (customization 9), close.
 import type { EditorScript } from "../editor-replay-core.ts";
 import { CLUTTER } from "./common.ts";
 
@@ -13,7 +13,7 @@ const script: EditorScript = {
   editor: "editCultures",
   dialog: "#culturesEditor",
   rows: [2, 29],
-  description: "open the cultures editor, rename, expansionism, type, brush two strokes, undo one, apply, close",
+  description: "open the cultures editor, rename, expansionism, type, brush two strokes, undo one, apply, add a culture by click, close",
   steps: [
     { op: "display", off: CLUTTER },
     // the border sits left of the screen centre: the editor dialog takes the right half of the map
@@ -30,6 +30,9 @@ const script: EditorScript = {
     { op: "button", id: "culturesManuallyUndo", mustChange: true, note: "undo stroke 2" },
     { op: "drag", target: { point: { world: [389, 355] }, offset: [0, 24] }, path: [[20, 8], [40, 16]], brush: true, note: "stroke 3" },
     { op: "button", id: "culturesManuallyApply", mustChange: true, note: "apply the assignment" },
+    // add mode (customization 9): a map click on a land cell adds a culture centred there
+    { op: "button", id: "culturesAdd", note: "add mode (customization 9)" },
+    { op: "click", target: { point: { world: [395, 360] } }, note: "click a land cell: a new culture" },
     { op: "close", dialog: "#culturesEditor" }
   ]
 };

@@ -1,7 +1,7 @@
 // Religions editor (REWRITE-PLAN §5 rows 3 and 29, regions): open it from the Tools panel, rename a religion, change
 // its type and deity, then the manual assignment brush (customization 7, polygons staged in #temp) twice: a stroke
 // that "do not overwrite existing" stops, one that is cancelled (the #temp group is removed, pack.cells.religion
-// untouched), and one that is applied (pack.cells.religion changes), close. The religions editor has no undo button.
+// untouched), and one that is applied (pack.cells.religion changes), then the add mode (customization 8), close. The religions editor has no undo button.
 import type { EditorScript } from "../editor-replay-core.ts";
 import { CLUTTER } from "./common.ts";
 
@@ -13,7 +13,7 @@ const script: EditorScript = {
   editor: "editReligions",
   dialog: "#religionsEditor",
   rows: [3, 29],
-  description: "open the religions editor, rename, type, deity, protected brush, brush then cancel, brush then apply, close",
+  description: "open the religions editor, rename, type, deity, protected brush, brush then cancel, brush then apply, add a religion by click, close",
   steps: [
     { op: "display", off: CLUTTER },
     // the border sits left of the screen centre: the editor dialog takes the right half of the map
@@ -35,6 +35,9 @@ const script: EditorScript = {
     { op: "button", css: '#religionsBody div.states[data-id="17"]', note: "select religion 17 again" },
     { op: "drag", target: { point: { world: [549, 232] } }, path: [[24, -20], [48, -40], [72, -56]], brush: true, note: "stroke, to be applied" },
     { op: "button", id: "religionsManuallyApply", mustChange: true, note: "apply the assignment" },
+    // add mode (customization 8): a map click on a land cell adds a religion centred there
+    { op: "button", id: "religionsAdd", note: "add mode (customization 8)" },
+    { op: "click", target: { point: { world: [549, 232] }, offset: [-60, 60] }, note: "click a land cell: a new religion" },
     { op: "close", dialog: "#religionsEditor" }
   ]
 };

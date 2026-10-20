@@ -119,9 +119,11 @@ export function installReplay(config: { arm: string; editors: string[] }) {
       }
     }
     out.notes = hashValue(w.notes ?? null);
-    // biomesData is a top-level `let` of the classic main.js (a global binding, not a window property): the biomes
-    // editor renames, adds and recolours biomes there, outside pack/grid
-    out.biomesData = hashValue((0, eval)("typeof biomesData === 'undefined' ? null : biomesData"));
+    // Model that lives in top-level `let`s of the classic main.js (global bindings, not window properties), outside
+    // pack/grid: the biomes editor renames and adds biomes in biomesData, the world configurator sets the climate and
+    // map position in options, the namesbase editor edits nameBases.
+    for (const name of ["biomesData", "options", "mapCoordinates", "nameBases"])
+      out[name] = hashValue((0, eval)(`typeof ${name} === 'undefined' ? null : ${name}`));
     return out;
   };
 

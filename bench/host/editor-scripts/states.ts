@@ -1,7 +1,8 @@
 // States editor (REWRITE-PLAN §5 rows 1 and 29, regions): open it from the Tools panel, rename a capital, change an
 // expansionism value, then the manual assignment brush (customization 2, painting into the #temp overlay): two
 // strokes, undo the last stroke (statesManuallyUndo resets the overlay from its snapshot), paint again, apply
-// (pack.cells.state, burg.state and provinces change), close.
+// (pack.cells.state, burg.state and provinces change), then the add mode (customization 3: a map click founds a
+// state with a new capital burg), close.
 import type { EditorScript } from "../editor-replay-core.ts";
 import { CLUTTER } from "./common.ts";
 
@@ -13,7 +14,7 @@ const script: EditorScript = {
   editor: "editStates",
   dialog: "#statesEditor",
   rows: [1, 29],
-  description: "open the states editor, rename a capital, expansionism, brush two strokes, undo one, apply, close",
+  description: "open the states editor, rename a capital, expansionism, brush two strokes, undo one, apply, add a state by click, close",
   steps: [
     { op: "display", off: CLUTTER },
     { op: "camera", k: 8, focus: { world: BORDER } },
@@ -28,6 +29,9 @@ const script: EditorScript = {
     { op: "button", id: "statesManuallyUndo", mustChange: true, note: "undo stroke 2" },
     { op: "drag", target: { point: { world: BORDER }, offset: [50, 118] }, path: [[12, 0], [24, 4], [36, 6]], brush: true, note: "stroke 3" },
     { op: "button", id: "statesManuallyApply", mustChange: true, note: "apply the assignment" },
+    // add mode (customization 3): a map click on a land cell without a burg founds a state (burg, emblem, diplomacy)
+    { op: "button", id: "statesAdd", note: "add mode (customization 3)" },
+    { op: "click", target: { point: { world: [548.6, 255.9] } }, note: "click a land cell: a new state" },
     { op: "close", dialog: "#statesEditor" }
   ]
 };

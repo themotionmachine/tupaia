@@ -248,9 +248,10 @@ async function runStep(page: Page, arm: Arm, step: Step, index: number, frozen: 
     case "button":
       if (step.dom)
         await page.evaluate(selector => {
-          const el = document.querySelector(selector) as HTMLElement | null;
+          const el = document.querySelector(selector) as HTMLElement | SVGElement | null;
           if (!el) throw Error(`no button ${selector}`);
-          el.click();
+          if (el instanceof HTMLElement) el.click();
+          else el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window })); // SVG elements have no click()
         }, step.css ?? `#${step.id}`);
       else await page.click(step.css ?? `#${step.id}`);
       break;
