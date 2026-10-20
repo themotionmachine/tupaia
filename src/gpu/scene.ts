@@ -126,6 +126,7 @@ type Styles = Pick<
   vectorEffect?: string;
   strokeLinejoin?: string;
   strokeLinecap?: string;
+  strokeMiterlimit?: string;
   display?: string;
   visibility?: string;
 };
@@ -144,6 +145,7 @@ function attributeStyles(element: Element, parent: Styles): Styles {
     strokeDashoffset: own("stroke-dashoffset", parent.strokeDashoffset),
     strokeLinejoin: own("stroke-linejoin", parent.strokeLinejoin || "miter"),
     strokeLinecap: own("stroke-linecap", parent.strokeLinecap || "butt"),
+    strokeMiterlimit: own("stroke-miterlimit", parent.strokeMiterlimit || "4"),
     opacity: own("opacity", "1"),
     filter: own("filter", "none"),
     clipPath: own("clip-path", "none"),
@@ -167,6 +169,9 @@ function shapeStyle(cs: Styles, unfilled = false): ShapeStyle | string {
   const dashes = parseDashes(cs.strokeDasharray);
   if (!dashes) return "stroke-dasharray";
   if (cs.vectorEffect && cs.vectorEffect !== "none") return "vector-effect";
+  // the stroke shader's miter limit is the SVG default 4 (shaders.ts `stroke`)
+  if (stroke && (cs.strokeLinejoin || "miter") === "miter" && number(cs.strokeMiterlimit, 4) !== 4)
+    return "stroke-miterlimit";
   const evenOdd = cs.fillRule === "evenodd";
   return {
     fill,

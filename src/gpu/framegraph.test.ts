@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest";
 import type { TrackedBuffer, TrackedTexture } from "./device";
-import { type Batch, emptyOnView, type FillBatch, type Frame, type GroupBatch, type StrokeBatch } from "./framegraph";
+import {
+  type Batch,
+  emptyOnView,
+  type FillBatch,
+  type Frame,
+  type GroupBatch,
+  STENCIL,
+  type StrokeBatch,
+  strokeDashes,
+  windingBits
+} from "./framegraph";
 
 const buffer = {} as TrackedBuffer;
 const frame: Frame = {
@@ -109,5 +119,68 @@ describe("emptyOnView", () => {
     expect(empty(fill(on), { ...frame, fans: null })).toBe(true);
     expect(empty(stroke(on), { ...frame, segments: null })).toBe(true);
     expect(empty(group([fill(on)], [{ fill: fill(on), white: true }]), { ...frame, fans: null })).toBe(true);
+  });
+});
+
+describe("strokeDashes", () => {
+  const dashed = (pattern: number[], cap: number, width = 1, offset = 0): StrokeBatch => {
+    const dashes = new Float32Array(8);
+    dashes.set(pattern);
+    return {
+      ...stroke(null),
+      width,
+      dashes,
+      dashCount: pattern.length,
+      dashPeriod: 0,
+      dashOffset: offset,
+      dashCap: cap
+    };
+  };
+
+  it("passes butt and round patterns through with their on-length", () => {
+    const butt = strokeDashes(dashed([2, 2], 1));
+    expect([butt.count, butt.period, butt.on, butt.cap, butt.offset]).toEqual([2, 4, 2, 1, 0]);
+    const dots = strokeDashes(dashed([0, 2, 0, 2], 2, 0.5));
+    expect([dots.count, dots.period, dots.on, dots.cap]).toEqual([4, 4, 0, 2]);
+  });
+
+  it("draws square dash caps as extended butt dashes, solid when the gaps close", () => {
+    const square = strokeDashes(dashed([2, 2], 0, 0.7, 1));
+    expect(square.cap).toBe(1);
+    expect(square.period).toBeCloseTo(4, 6);
+    expect(square.on).toBeCloseTo(2.7, 6);
+    expect(square.offset).toBeCloseTo(1 + 0.35, 6);
+    expect(strokeDashes(dashed([1, 0.5], 0, 1)).count).toBe(0);
+  });
+
+  it("is solid without a pattern", () => {
+    expect(strokeDashes(stroke(null)).count).toBe(0);
+  });
+});
+
+describe("stencil layout", () => {
+  it("keeps the mask bit, the batch ids and the winding apart, ids above winding so one GREATER test reads both", () => {
+    expect(STENCIL.hidden & STENCIL.id).toBe(0);
+    expect(STENCIL.id & STENCIL.winding).toBe(0);
+    expect(STENCIL.hidden | STENCIL.id | STENCIL.winding).toBe(0xff);
+    expect(STENCIL.ids << STENCIL.idShift).toBe(STENCIL.id);
+    // first-wins: a pixel passes GREATER(id << shift, hidden | id) only when visible and drawn by an earlier id
+    const passes = (value: number, id: number) => {
+      const ref = id << STENCIL.idShift;
+      return ref > (value & (STENCIL.hidden | STENCIL.id));
+    };
+    expect(passes(0, 1)).toBe(true);
+    expect(passes(1 << STENCIL.idShift, 1)).toBe(false);
+    expect(passes((3 << STENCIL.idShift) | 5, 4)).toBe(true);
+    expect(passes(STENCIL.hidden, STENCIL.ids)).toBe(false);
+  });
+});
+
+describe("windingBits", () => {
+  it("counts even-odd in one bit, nonzero mod 8 below the ids, and a deep nonzero fill mod 128 over the ids", () => {
+    expect(windingBits({ evenOdd: true, deepWinding: true })).toBe(0x01);
+    expect(windingBits({ evenOdd: false })).toBe(STENCIL.winding);
+    expect(windingBits({ evenOdd: false, deepWinding: true })).toBe(0x7f);
+    expect(windingBits({ evenOdd: false, deepWinding: true }) & STENCIL.hidden).toBe(0);
   });
 });

@@ -1,20 +1,35 @@
 import { describe, expect, it } from "vitest";
 import {
   appendFan,
+  appendFillEdges,
   appendSegments,
   appendStrokeCaps,
   capCode,
   cumulativeLengths,
+  dashAlongCoverage,
   dashCovered,
+  dashGap,
   dashOn,
+  dashOnLength,
+  discCoverage,
   F32,
+  hasSharedSegments,
+  JOIN,
+  joinCode,
   layoutOnPath,
+  mayWindDeep,
   normalizeDashes,
   outsideView,
+  packEnd,
   pathBounds,
   polylineLength,
   sampleAt,
-  strokeEdgeCoverage
+  spanCoverage,
+  squareCapDashes,
+  stripCoverage,
+  strokeEdgeCoverage,
+  unpackEnd,
+  windingNumber
 } from "./geometry";
 import type { Subpath } from "./svg-path";
 
@@ -333,8 +348,194 @@ it("uses butt ends and round internal joins, with caps aligned past zero-length 
   const out = new F32(),
     caps = new F32();
   expect(appendStrokeCaps(paths, caps, "round", "butt")).toBe(appendSegments(paths, out));
-  expect([...caps.view()]).toEqual([1, 2, 2, 1]);
+  const codes = (view: Float32Array) => [...view].map(v => unpackEnd(v).code);
+  expect(codes(caps.view())).toEqual([1, JOIN.round, JOIN.round, 1]);
+  // each join carries the neighbouring segment's direction: the second segment heads +y, the first +x
+  expect(unpackEnd(caps.view()[1]).angle).toBeCloseTo(Math.PI / 2, 5);
+  expect(unpackEnd(caps.view()[2]).angle).toBeCloseTo(0, 5);
   const closed = new F32();
   appendStrokeCaps([{ points: [0, 0, 3, 0, 3, 4], closed: true }], closed, "round", "butt");
-  expect([...closed.view()]).toEqual([2, 2, 2, 2, 2, 2]);
+  expect(codes(closed.view())).toEqual([3, 3, 3, 3, 3, 3]);
+  const miter = new F32();
+  appendStrokeCaps([{ points: [0, 0, 3, 0, 3, 4], closed: false }], miter, "miter", "square");
+  expect(codes(miter.view())).toEqual([0, JOIN.miter, JOIN.miter, 0]);
+  const bevel = new F32();
+  appendStrokeCaps([{ points: [0, 0, 3, 0, 3, 4], closed: false }], bevel, "bevel", "round");
+  expect(codes(bevel.view())).toEqual([2, JOIN.bevel, JOIN.bevel, 2]);
+});
+
+describe("analytic stroke coverage (CPU mirror of the stroke shader)", () => {
+  it("integrates a band's profile to its width, including bands thinner than a pixel", () => {
+    for (const h of [0.1, 0.25, 0.5, 0.7, 1, 2.5]) {
+      let sum = 0;
+      // pixel centres at every 1/64 px offset across the band: mean coverage per unit length = band width
+      for (let i = -400; i <= 400; i++) sum += stripCoverage(Math.abs(i / 64), h) / 64;
+      expect(sum).toBeCloseTo(2 * h, 3);
+    }
+    expect(stripCoverage(0, 2)).toBe(1);
+    expect(stripCoverage(2, 2)).toBeCloseTo(0.5, 12);
+    expect(stripCoverage(2.5, 2)).toBe(0);
+    expect(stripCoverage(0, 0.25)).toBeCloseTo(0.5, 12);
+  });
+
+  it("filters butt ends along the path and keeps a disc's area for small round caps", () => {
+    expect(spanCoverage(0, 0, 10)).toBeCloseTo(0.5, 12);
+    expect(spanCoverage(0.25, 0, 0.5)).toBeCloseTo(0.5, 12);
+    expect(spanCoverage(-1, 0, 10)).toBe(0);
+    for (const h of [0.2, 0.35, 0.5, 1.5]) {
+      let sum = 0;
+      for (let x = -40; x <= 40; x++)
+        for (let y = -40; y <= 40; y++) sum += discCoverage(Math.hypot(x / 16, y / 16), h) / 256;
+      // every disc keeps its area pi h^2, smaller than a pixel or not
+      expect(sum / (Math.PI * h * h)).toBeGreaterThan(0.97);
+      expect(sum / (Math.PI * h * h)).toBeLessThan(1.03);
+    }
+  });
+
+  it("box-filters dashes along the path, sub-pixel patterns averaging to the duty cycle", () => {
+    const pattern = [2, 2];
+    expect(dashOnLength(0, pattern)).toBe(0);
+    expect(dashOnLength(3, pattern)).toBe(2);
+    expect(dashOnLength(9, pattern)).toBe(5);
+    expect(dashOnLength(-1, pattern)).toBe(0);
+    expect(dashOnLength(-3, pattern)).toBe(-1);
+    // 4 px per unit: dash 8 px, gap 8 px; the pixel centred on the dash end is half covered
+    expect(dashAlongCoverage(1, pattern, 4)).toBe(1);
+    expect(dashAlongCoverage(3, pattern, 4)).toBe(0);
+    expect(dashAlongCoverage(2, pattern, 4)).toBeCloseTo(0.5, 6);
+    // 0.25 px per unit: the 4-unit period spans one pixel, every pixel averages the 50% duty
+    for (const t of [0, 0.7, 1.9, 3.3]) expect(dashAlongCoverage(t, pattern, 0.25)).toBeCloseTo(0.5, 6);
+  });
+
+  it("measures the distance to the nearest dash, treating zero-length dashes as round-cap dot centres", () => {
+    const dots = [0, 2, 0, 2];
+    expect(dashGap(0.5, dots)).toBeCloseTo(0.5, 12);
+    expect(dashGap(1.5, dots)).toBeCloseTo(0.5, 12);
+    expect(dashGap(2, dots)).toBeCloseTo(0, 12);
+    expect(dashGap(5, [1, 3])).toBeCloseTo(0, 12);
+    expect(dashGap(6, [1, 3])).toBeCloseTo(1, 12);
+  });
+
+  it("turns square dash caps into extended butt dashes, merging dashes whose gap closes", () => {
+    const sea = squareCapDashes([1, 2], 0.25);
+    expect(sea.solid).toBe(false);
+    expect(sea.dashes).toEqual([1.5, 1.5]);
+    // the extended first dash starts ext before the original one
+    expect(sea.shift).toBeCloseTo(0.25, 12);
+    expect(squareCapDashes([1, 0.4], 0.25)).toEqual({ dashes: [], shift: 0, solid: true });
+    const merged = squareCapDashes([1, 0.4, 1, 3], 0.25);
+    expect(merged.dashes).toEqual([2.4 + 0.5, 2.5]);
+    // same period, every original on-point is still on
+    const period = merged.dashes.reduce((a, b) => a + b, 0);
+    expect(period).toBeCloseTo(5.4, 12);
+    for (const s of [0, 0.5, 1.5, 2, 2.3]) {
+      const t = s + merged.shift;
+      const r = ((t % period) + period) % period;
+      expect(r < merged.dashes[0]).toBe(true);
+    }
+  });
+
+  it("maps line joins to their codes and packs them with a direction", () => {
+    expect(joinCode("round")).toBe(JOIN.round);
+    expect(joinCode("bevel")).toBe(JOIN.bevel);
+    expect(joinCode("miter")).toBe(JOIN.miter);
+    expect(joinCode("miter-clip")).toBe(JOIN.miter);
+    for (const angle of [-Math.PI + 1e-3, -1, 0, 2, Math.PI - 1e-3]) {
+      const packed = Math.fround(packEnd(JOIN.bevel, angle));
+      expect(unpackEnd(packed).code).toBe(JOIN.bevel);
+      expect(unpackEnd(packed).angle).toBeCloseTo(angle, 5);
+    }
+  });
+});
+
+describe("appendFillEdges", () => {
+  const square = (x: number, y: number, s: number, ccw = true): Subpath => ({
+    points: ccw ? [x, y, x + s, y, x + s, y + s, x, y + s] : [x, y, x, y + s, x + s, y + s, x + s, y],
+    closed: true
+  });
+  // the filled side of every edge must be its left: a point just left of each edge's midpoint is inside the fill
+  const leftInside = (edges: Float32Array, inside: (x: number, y: number) => boolean) => {
+    for (let i = 0; i < edges.length; i += 4) {
+      const [ax, ay, bx, by] = [edges[i], edges[i + 1], edges[i + 2], edges[i + 3]];
+      const len = Math.hypot(bx - ax, by - ay);
+      const [nx, ny] = [-(by - ay) / len, (bx - ax) / len];
+      const [mx, my] = [(ax + bx) / 2, (ay + by) / 2];
+      expect(inside(mx + nx * 0.01, my + ny * 0.01)).toBe(true);
+      expect(inside(mx - nx * 0.01, my - ny * 0.01)).toBe(false);
+    }
+  };
+
+  it("orients both windings of a simple ring with the fill on the left", () => {
+    for (const ccw of [true, false]) {
+      const out = new F32();
+      expect(appendFillEdges([square(0, 0, 4, ccw)], out, false)).toBe(4);
+      leftInside(out.view(), (x, y) => x > 0 && x < 4 && y > 0 && y < 4);
+    }
+  });
+
+  it("orients holes (reversed for nonzero, either way for even-odd) toward the filled ring between them", () => {
+    const inside = (x: number, y: number) => x > 0 && x < 10 && y > 0 && y < 10 && !(x > 3 && x < 6 && y > 3 && y < 6);
+    const nonzero = new F32();
+    expect(appendFillEdges([square(0, 0, 10), square(3, 3, 3, false)], nonzero, false)).toBe(8);
+    leftInside(nonzero.view(), inside);
+    for (const ccw of [true, false]) {
+      const evenOdd = new F32();
+      expect(appendFillEdges([square(0, 0, 10), square(3, 3, 3, ccw)], evenOdd, true)).toBe(8);
+      leftInside(evenOdd.view(), inside);
+    }
+  });
+
+  it("omits internal edges where nonzero fills both sides, and degenerate or zero-area rings", () => {
+    const out = new F32();
+    // same-direction nested rings: winding 2 inside the inner one, still filled, so its edges are internal
+    expect(appendFillEdges([square(0, 0, 10), square(3, 3, 3)], out, false)).toBe(4);
+    expect(appendFillEdges([{ points: [0, 0, 1, 1], closed: true }], out, false)).toBe(0);
+    expect(appendFillEdges([{ points: [0, 0, 2, 0, 4, 0], closed: true }], out, false)).toBe(0);
+  });
+
+  it("orients a ring that touches another at a vertex from an edge midpoint, not the shared vertex", () => {
+    // a reversed (hole) triangle whose first vertex lies on the outer square's boundary
+    const hole: Subpath = { points: [10, 4, 7, 2, 7, 6], closed: true };
+    const inside = (x: number, y: number) =>
+      x > 0 && x < 10 && y > 0 && y < 10 && !(x > 7 && Math.abs(y - 4) < (2 * (10 - x)) / 3);
+    const out = new F32();
+    expect(appendFillEdges([square(0, 0, 10), hole], out, false)).toBe(7);
+    leftInside(out.view(), inside);
+  });
+
+  it("counts winding numbers with the shoelace orientation", () => {
+    const ring = square(0, 0, 4).points;
+    expect(windingNumber(2, 2, ring)).toBe(1);
+    expect(windingNumber(5, 2, ring)).toBe(0);
+    expect(windingNumber(2, 2, square(0, 0, 4, false).points)).toBe(-1);
+  });
+});
+
+describe("mayWindDeep", () => {
+  const square = (x: number, y: number, s: number, ccw = true): Subpath => ({
+    points: ccw ? [x, y, x + s, y, x + s, y + s, x, y + s] : [x, y, x, y + s, x + s, y + s, x + s, y],
+    closed: true
+  });
+  it("flags 8 stacked rings of one orientation, not 7, not 8 apart, not alternating ones", () => {
+    const stack = (n: number, step = 0.1) => Array.from({ length: n }, (_, i) => square(i * step, i * step, 10));
+    expect(mayWindDeep(stack(8))).toBe(true);
+    expect(mayWindDeep(stack(7))).toBe(false);
+    expect(mayWindDeep(stack(8, 20))).toBe(false);
+    expect(mayWindDeep(Array.from({ length: 14 }, (_, i) => square(i, i, 30 - 2 * i, i % 2 === 0)))).toBe(false);
+    expect(mayWindDeep(stack(8), 8, 3)).toBe(true); // out of work: conservative
+  });
+});
+
+describe("hasSharedSegments", () => {
+  const cell = (x: number, y: number): Subpath => ({ points: [x, y, x + 1, y, x + 1, y + 1, x, y + 1], closed: true });
+  it("finds a segment two subpaths share in either direction, not crossings or a lone path", () => {
+    expect(hasSharedSegments([cell(0, 0), cell(1, 0)])).toBe(true);
+    expect(hasSharedSegments([cell(0, 0), cell(2, 0)])).toBe(false);
+    const cross: Subpath[] = [
+      { points: [0, 0, 2, 2], closed: false },
+      { points: [2, 0, 0, 2], closed: false }
+    ];
+    expect(hasSharedSegments(cross)).toBe(false);
+    expect(hasSharedSegments([{ points: [0, 0, 1, 0, 0, 0], closed: false }])).toBe(false);
+  });
 });
