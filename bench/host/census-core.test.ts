@@ -13,6 +13,7 @@ import {
   judgeMemory,
   judgeOnStateFidelity,
   judgePrepares,
+  emptyInBothArms,
   judgePresets,
   judgeReorder,
   judgeToggleOff,
@@ -238,6 +239,49 @@ test("preset verdict: hard failures always fail, metric failures only past the a
   assert.match(problems.join(" | "), /night: 1 hard failure/);
   assert.deepEqual(judgePresets(rows, 1).filter(p => /gloom/.test(p)), [], "an allowance of 1 forgives gloom");
   assert.equal(judgePresets(rows, 1).filter(p => /night/.test(p)).length, 1, "but never a hard failure");
+});
+
+test("preset cells empty in both arms are N/A: listed apart, neither failing nor induced; one empty arm still fails", () => {
+  const empty = (preset: string, family: string, inkSvg: number, inkGpu: number, routed = 1): GoldenCellLike => {
+    const failures = [
+      ...(inkSvg < 4 ? [`empty in SVG arm (ink ${inkSvg} px, 1 drawables)`] : []),
+      ...(inkGpu < 4 || !routed ? [`empty in GPU arm (ink ${inkGpu} px, ${routed} routed)`] : [])
+    ];
+    return cell(preset, family, 1, false, { failures, metrics: { ssim: 1, over16Fraction: 0, inkSvg, inkGpu }, gates: { ...allGates, populated: false } });
+  };
+  const cells = [
+    gated("default", "vignette", allGates),
+    gated("default", "coastline", allGates),
+    gated("default", "borders", allGates),
+    gated("default", "rivers", allGates),
+    // clean: vignette opacity 0 paints nothing in either arm
+    empty("clean", "vignette", 0, 0),
+    // monochrome: coastline stroke-width 0, the GPU routes nothing and paints nothing either
+    empty("monochrome", "coastline", 0, 0, 0),
+    // the SVG paints, the GPU does not: a real miss
+    empty("night", "borders", 5000, 0),
+    // the GPU paints where the SVG is empty: a real miss too
+    empty("night", "rivers", 0, 900)
+  ];
+  const { rows } = summarizePresets(cells);
+  const clean = rows.find(r => r.preset === "clean")!;
+  assert.deepEqual(clean.notApplicable, ["vignette/k1"]);
+  assert.equal(clean.fail, 0);
+  assert.equal(clean.induced, 0);
+  assert.deepEqual(clean.failing, []);
+  assert.deepEqual(rows.find(r => r.preset === "monochrome")!.notApplicable, ["coastline/k1"]);
+  const night = rows.find(r => r.preset === "night")!;
+  assert.deepEqual(night.notApplicable, []);
+  assert.deepEqual(night.inducedCells.sort(), ["borders/k1", "rivers/k1"]);
+  assert.deepEqual(night.inducedGates, { populated: 2 });
+  const problems = judgePresets(rows);
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /^night: 2 cell\(s\)/);
+  // an empty-both cell that also failed something else (a harness error) is not N/A
+  const odd = cell("clean", "vignette", 1, false, { failures: ["empty in SVG arm (ink 0 px, 1 drawables)", "harness: boom"], metrics: { inkSvg: 0, inkGpu: 0 } });
+  assert.equal(emptyInBothArms(odd), false);
+  // a cell without ink metrics cannot be classified N/A
+  assert.equal(emptyInBothArms(cell("clean", "vignette", 1, false, { failures: ["empty in SVG arm (ink 0 px, 1 drawables)"], metrics: null })), false);
 });
 
 const snap = (cycle: number, extra: Partial<MemorySnapshot> = {}): MemorySnapshot => ({

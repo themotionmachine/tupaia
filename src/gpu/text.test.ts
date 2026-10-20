@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { layoutOnPath } from "./geometry";
+import { GLYPH_ATLAS_EDGE, glyph } from "./shaders";
 import {
   centralBaselineShift,
   centralNestedShift,
@@ -7,6 +8,7 @@ import {
   GLYPH_ATLAS,
   GLYPH_FLOATS,
   glyphAtlasRows,
+  glyphRowSnap,
   inkColor,
   inkMismatch,
   kernedAdvances,
@@ -475,6 +477,41 @@ describe("shapingReason", () => {
     expect(shapingReason("normal 400 32px Arial", "Office fluff")).toBe("");
     expect(shapingReason("normal 400 32px Arial", " ")).toBe("");
     expect(shapingReason("not a font", "abc")).toBe("");
+  });
+});
+
+describe("glyphRowSnap (W3c: shaders.ts glyph rowSnap)", () => {
+  // the straight "Haloed Straight" textPath of the parity fixture at k 1, dpr 2: 2 device rows per world unit, the
+  // halo cell 33 texels high, its top half way between two rows (the GPU drew it 0.5 px above Skia's)
+  it("moves an unrotated cell at atlas resolution onto a whole device row", () => {
+    const dy = glyphRowSnap(0, 2, 16.5, 33, 1213.5);
+    expect(1213.5 + dy * 2).toBe(1214);
+    expect(1213.2 + glyphRowSnap(0, 2, 16.5, 33, 1213.2) * 2).toBeCloseTo(1213);
+    // a world axis pointing up the screen still lands on a whole row
+    const flipped = glyphRowSnap(0, -2, 16.5, 33, 226.25);
+    expect(226.25 + flipped * -2).toBeCloseTo(226);
+    // a half row goes down the screen, as Skia's floor(y + 0.5) does (shared label31 at k 2 went up a whole px when
+    // the shader counted rows up from the bottom)
+    expect(glyphRowSnap(0, 4, 8.25, 33, 700.5) * 4).toBe(0.5);
+    // float32 noise either side of the half row goes the same way (label31's glyphs split 0.08 / 0.93 px without it)
+    expect(700.4999 + glyphRowSnap(0, 4, 8.25, 33, 700.4999) * 4).toBeCloseTo(701);
+    expect(700.5001 + glyphRowSnap(0, 4, 8.25, 33, 700.5001) * 4).toBeCloseTo(701);
+    expect(700.49 + glyphRowSnap(0, 4, 8.25, 33, 700.49) * 4).toBeCloseTo(700);
+    expect(glyphRowSnap(0, 2, 16.5, 33, 1214)).toBe(0);
+  });
+
+  it("leaves rotated and resampled cells where they are", () => {
+    expect(glyphRowSnap(0.3, 2, 16.5, 33, 1213.5)).toBe(0); // a curved label's glyph: Skia does not snap it
+    expect(glyphRowSnap(0, 2.4, 16.5, 33, 1213.5)).toBe(0); // between buckets: the cell is resampled
+    expect(glyphRowSnap(0, 0, 16.5, 33, 1213.5)).toBe(0);
+  });
+
+  it("is what the glyph shader does", () => {
+    expect(glyph.vs).toMatch(/world\.y \+= rowSnap\(/);
+    expect(glyph.vs).toMatch(/abs\(a_anchor\.z\) > 1e-4/);
+    expect(glyph.vs).toMatch(/floor\(rows \+ 0\.5 \+ 0\.0039\) - rows\) \/ perWorld/);
+    expect(glyph.vs).toMatch(/float rows = \(1\.0 - \(u_matrix \* vec3\(top, 1\.0\)\)\.y\)/);
+    expect(GLYPH_ATLAS).toBe(GLYPH_ATLAS_EDGE);
   });
 });
 

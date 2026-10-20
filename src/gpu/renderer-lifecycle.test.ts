@@ -13,6 +13,8 @@ const pipeline = vi.hoisted(() => ({
   prepares: [] as { svg: SVGSVGElement; revision: number }[],
   released: 0,
   overlayRoots: [] as Element[][],
+  clear: null as number[] | null, // the colour the last frame cleared to
+
   gate: null as Promise<void> | null // when set, prepareFrame waits on it, then honours ctx.stale() as the real one does
 }));
 
@@ -41,7 +43,9 @@ vi.mock("./framegraph", () => ({
     drawBatches = { submitted: 0, culled: 0 };
     state = { counts: { issued: 0, skipped: 0 } };
     passes = {};
-    render() {}
+    render(_frame: unknown, _camera: unknown, _viewport: unknown, clear: number[]) {
+      pipeline.clear = [...clear];
+    }
     dispose() {}
   }
 }));
@@ -101,9 +105,11 @@ const { GpuRenderer } = await import("./renderer");
 type Renderer = InstanceType<typeof GpuRenderer>;
 const global = globalThis as unknown as { customization?: number };
 
-function mapSvg(): SVGSVGElement {
+// the app's #map paints its own background (index.css #map, the style presets' "#map" background-color)
+function mapSvg(background = "rgb(0, 0, 0)"): SVGSVGElement {
   const svg = document.createElementNS(SVG_NS, "svg") as SVGSVGElement;
   svg.id = "map";
+  svg.style.backgroundColor = background;
   svg.innerHTML = `<defs>
       <filter id="filter-sepia"><feColorMatrix values="0.393 0.769 0.189 0 0 0.349 0.686 0.168 0 0 0.272 0.534 0.131 0 0 0 0 0 1 0"/></filter>
       <filter id="blurry"><feGaussianBlur stdDeviation="5"/></filter>
@@ -202,6 +208,46 @@ describe("[LIFE] GpuRenderer lifecycle wiring", () => {
     expect(renderer.telemetry().rootFilter).toEqual({ css: "", refused: "" });
     await new Promise(resolve => setTimeout(resolve, 200)); // past PREPARE_DELAY
     expect(pipeline.prepares).toHaveLength(1);
+  });
+
+  it("row 28 (W3c): over an ancestor's backdrop the canvas takes the renderer's copy of the filter, which ends over it", async () => {
+    expect(pipeline.clear).toEqual([0, 0, 0, 1]); // #map's own black
+    renderer.dispose();
+    // the golden's isolation: a transparent #map over a white parent, which the root filter never grades
+    document.body.innerHTML = "";
+    const page = document.createElement("div");
+    page.style.backgroundColor = "rgb(255, 255, 255)";
+    const svg = mapSvg("rgba(0, 0, 0, 0)");
+    page.append(svg);
+    document.body.append(page);
+    renderer = new GpuRenderer(svg, reason => fallBacks.push(reason));
+    await settled();
+    expect(pipeline.clear).toEqual([1, 1, 1, 1]);
+    expect(renderer.canvas.style.filter).toBe("");
+    svg.setAttribute("filter", "url(#filter-sepia)");
+    await vi.waitFor(() => expect(renderer.canvas.style.filter).toBe('url("#gpu-root-filter-backdrop")'));
+    expect(renderer.telemetry().rootFilter).toEqual({ css: 'url("#filter-sepia")', refused: "" });
+    expect(visible()).toBe(true);
+    const copy = document.getElementById("gpu-root-filter-backdrop")!;
+    expect([...copy.children].map(c => c.tagName.toLowerCase())).toEqual([
+      "fecomponenttransfer",
+      "fecolormatrix",
+      "fecomponenttransfer",
+      "feflood",
+      "fecomposite",
+      "fecomposite"
+    ]);
+    expect(copy.getAttribute("width")).toBe("1");
+    expect(copy.querySelector("feFlood, feflood")!.getAttribute("flood-color")).toBe("rgb(255, 255, 255)");
+    // the model's own filter is never written
+    expect(document.getElementById("filter-sepia")!.firstElementChild!.getAttribute("result")).toBeNull();
+    // the backdrop's own colour, faintly: what it mixes into a translucent pixel is the backdrop, not black
+    await vi.waitFor(() => expect(pipeline.clear![3]).toBeCloseTo(1 / 255));
+    expect(pipeline.clear!.slice(0, 3)).toEqual([1, 1, 1]);
+    svg.removeAttribute("filter");
+    await vi.waitFor(() => expect(renderer.canvas.style.filter).toBe(""));
+    await vi.waitFor(() => expect(pipeline.clear).toEqual([1, 1, 1, 1]));
+    expect(pipeline.prepares).toHaveLength(2); // one per renderer: a filter change never re-prepares
   });
 
   it("row 33: a load that replaces #map and fails before map:loaded hides and drops the old world", async () => {
