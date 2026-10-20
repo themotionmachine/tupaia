@@ -230,8 +230,10 @@ export interface Arms {
 }
 
 /** GPU arm (canvas shown) then SVG arm (canvas visibility hidden) from one DOM state, at device resolution. */
+// The Navigate/Edit pill (gpu page only) animates and changes with the mode; it is chrome, not map, in both arms.
+const HIDE_CHROME = "#renderModeIndicator { visibility: hidden !important; }";
 export async function captureArms(page: Page): Promise<Arms> {
-  const gpu = await page.screenshot({ animations: "disabled" });
+  const gpu = await page.screenshot({ animations: "disabled", style: HIDE_CHROME });
   const old = await page.evaluate(() => {
     const c = document.querySelector("canvas[data-gpu-renderer]") as HTMLCanvasElement | null;
     if (!c) return null;
@@ -240,7 +242,7 @@ export async function captureArms(page: Page): Promise<Arms> {
     return value;
   });
   await page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
-  const svg = await page.screenshot({ animations: "disabled" });
+  const svg = await page.screenshot({ animations: "disabled", style: HIDE_CHROME });
   await page.evaluate(value => {
     const c = document.querySelector("canvas[data-gpu-renderer]") as HTMLCanvasElement | null;
     if (c) c.style.visibility = value || "";
