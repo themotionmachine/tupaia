@@ -12,6 +12,9 @@ import {
   padBounds,
   refineOrder,
   reliefCell,
+  STEADY_SLACK,
+  steadyOverrun,
+  steadyReserve,
   TARGET_BUDGET,
   targetBytes,
   targetReserve,
@@ -286,5 +289,31 @@ describe("imageSource", () => {
 
   it("never uses detail for screen-space runs", () => {
     expect(imageSource(batch(true, detail), [150, 150, 250, 250]).texture).toBe(base);
+  });
+});
+
+// [RES2] W3 RES: with the steady share sized to the real group target, the dense parity world at k 1 (1280x720 DPR 2)
+// held 160.64 MiB: the share ended exactly at GPU_BUDGET while the trade-marker sprite textures (2 x 0.3 MiB, outside
+// every frame) and later steady allocations were never counted. The pending vertex/atlas estimate itself was exact.
+describe("steady reserve (RES2)", () => {
+  const MiB = 1 << 20;
+  it("holds back the target, the resident allocations and an explicit slack", () => {
+    expect(STEADY_SLACK).toBe(2 * MiB);
+    expect(steadyReserve(29_491_200, 629_000)).toBe(29_491_200 + 629_000 + STEADY_SLACK);
+    expect(steadyReserve(10, -5, 0)).toBe(10);
+  });
+
+  it("keeps a frame that spends its whole share under the budget, with the slack to spare", () => {
+    const target = targetReserve(2560, 1440, 4, 2); // 28.125 MiB at 1280x720 DPR 2
+    const resident = 629_000;
+    const own = 60 * MiB;
+    const pending = 5 * MiB;
+    const share = compatAllowance(0, own, pending, GPU_BUDGET, PEAK_LIMIT, steadyReserve(target, resident));
+    const steady = target + resident + own + pending + share;
+    expect(steady).toBe(GPU_BUDGET - STEADY_SLACK);
+    expect(steadyOverrun(steady)).toBe(0);
+    // the W3 plan (reserve = target alone) spent the resident bytes too: over by exactly them
+    const before = compatAllowance(0, own, pending, GPU_BUDGET, PEAK_LIMIT, target);
+    expect(steadyOverrun(target + resident + own + pending + before)).toBe(resident);
   });
 });

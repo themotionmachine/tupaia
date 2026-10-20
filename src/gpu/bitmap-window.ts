@@ -119,6 +119,10 @@ export class BitmapWindows {
   // `limit` is the caller's memory allowance for the new set (old+new peak headroom, steady share). A margin around the
   // view must also fit maxBytes; the visible-only crops need only fit `limit` (visible first: a 1512x982 world at k 1
   // needs ~68 MiB of visible crops for its three canonical bitmaps, over the 64 MiB margin cap, and showed the SVG).
+  // Measured (RES2, ~/.tupaia-gates/w3b-res2/win-*-10k-hrb.log): a generated 10k-cell 1512x982 world in a 1512x982
+  // window at DPR 2, heightmap, biomes and relief on, vignette off: 68.0 MiB of visible crops, covered at load; with
+  // the visible crops held to the cap, "GPU window miss at k=1" and the SVG shows. The parity world (1280x720) needs
+  // 42.3 MiB at any window size, so only worlds larger than the window bind.
   // Throws on canvas/upload failure after releasing every texture it created.
   async refresh(camera: Camera, viewport: Viewport, stale?: () => boolean, limit = Infinity): Promise<boolean> {
     if (this.disposed) return false;

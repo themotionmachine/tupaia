@@ -16,6 +16,9 @@ import {
   PEAK_LIMIT,
   refineOrder,
   reliefCell,
+  STEADY_SLACK,
+  steadyOverrun,
+  steadyReserve,
   targetReserve,
   windowAllowance
 } from "./budget";
@@ -201,6 +204,23 @@ export const SHARP_COMPAT = new Set([
 export const sharpReason = (reason: string) =>
   reason.split("; ").some(part => SHARP_COMPAT.has(part) || part.startsWith("text "));
 
+// How a prepare planned the steady budget and what it actually uploaded (RES2 telemetry). `estimate` is what the compat
+// share held back for the glyph atlas and vertex data before they were uploaded, `uploaded` the tracked bytes of the
+// same kinds after; `steady` the projected committed total (resident + target + this frame), `overrun` its excess over
+// `budget` (0 when within). `firstDetails` is why the first frame did or did not cut details.
+export interface PrepareMemory {
+  resident: number;
+  target: number;
+  slack: number;
+  estimate: Record<string, number>;
+  uploaded: Record<string, number>;
+  frame: number;
+  steady: number;
+  budget: number;
+  overrun: number;
+  firstDetails: "cut" | "off" | "revision only" | "none sharp" | "no room" | "skipped";
+}
+
 export interface Prepared {
   picking?: boolean; // absent on older callers means enabled
   frame: Frame;
@@ -222,6 +242,8 @@ export interface Prepared {
     // how the world runs of the prepare (and of the last refinement) were cut (compat-bounds.ts)
     windows?: WindowStats;
     refineWindows?: WindowStats;
+    // the steady-budget plan of the prepare (RES2): see PrepareMemory
+    memory?: PrepareMemory;
   };
   styleKey?: string; // stylesheet state its rasters were cut under (compat-reuse.ts styleState)
   runs: CompatRun[];
@@ -324,6 +346,47 @@ const payloadKey = (ctx: PrepareContext, picking: boolean): PayloadKey => ({
 
 const sameKey = (a: PayloadKey, b: PayloadKey) =>
   (Object.keys(a) as (keyof PayloadKey)[]).every(key => a[key] === b[key]);
+
+// A prepare that only follows a DOM revision (an edit) on the frame it replaces: same world, raster bucket, viewport,
+// picking mode and device limit (the camera scale may differ within the bucket). No previous frame (a load, a restore,
+// a frame dropped to fit) or any of those changed (a zoom to another bucket, a resize) is not one.
+export function revisionOnly(previous: PayloadKey | null | undefined, next: PayloadKey): boolean {
+  if (!previous) return false;
+  return (["worldEpoch", "bucket", "picking", "world", "screen", "maxTexture"] as const).every(
+    key => previous[key] === next[key]
+  );
+}
+
+// Tracked GPU bytes a frame owns, each resource once (a compat texture can sit in a run and the recipes): its compat
+// rasters and their settle details, the bitmap window crops, pattern/relief textures, glyph atlas and vertex buffers.
+export function frameBytes(prepared: Pick<Prepared, "runs" | "windows" | "payload" | "frame">): number {
+  const seen = new Set<object>();
+  let total = 0;
+  const add = (resource: { bytes: number } | null | undefined) => {
+    if (!resource || seen.has(resource)) return;
+    seen.add(resource);
+    total += resource.bytes;
+  };
+  for (const run of prepared.runs) {
+    add(run.slot.texture);
+    add(run.slot.detail?.texture);
+  }
+  for (const texture of prepared.payload?.recipes.keys() ?? []) add(texture);
+  for (const item of Object.values(prepared.frame))
+    if (item && typeof item === "object" && "kind" in item && (item.kind === "buffer" || item.kind === "texture"))
+      add(item as { bytes: number });
+  return total + (prepared.windows?.bytes ?? 0);
+}
+
+// Tracked bytes no frame owns: the renderer's own allocations (trade-marker sprite textures and instance buffer, the
+// unit-quad buffers), measured as the tracked total minus the group target and the frame on screen. Read at the start
+// of a prepare, before it allocates anything.
+export function residentBytes(
+  memory: { total: number; targets: number },
+  previous: Pick<Prepared, "runs" | "windows" | "payload" | "frame"> | null | undefined
+): number {
+  return Math.max(0, memory.total - memory.targets - (previous ? frameBytes(previous) : 0));
+}
 
 // Opt-out for the A/B (bench/host/restore-timing.ts): ?gpu-restore-retain=0 makes every restore a full prepare.
 export function retainEnabled(): boolean {
@@ -491,6 +554,9 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
   const viewbox = svg.querySelector("#viewbox");
   if (!viewbox) throw new Error("missing #viewbox");
   const payloadAt = payloadKey(ctx, picking);
+  // what the steady budget holds that neither this frame nor the one it replaces owns, before anything is allocated
+  const resident = residentBytes(device.memory(), ctx.previous);
+  const editOnly = revisionOnly(ctx.previous?.payload?.key, payloadAt);
   // the generation this prepare lays labels out at; a clear while it runs makes the frame's atlas unretainable
   const atlasGeneration = ctx.atlas.generation;
   const retained =
@@ -956,11 +1022,22 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
         glyphCount * GLYPH_FLOATS) *
       4;
     const pending = glyphBytes + vertexBytes;
-    // the group target this backing store gets (framegraph composite), not the flat TARGET_BUDGET cap
+    // per kind, compared with the uploads in the telemetry (PrepareMemory)
+    const estimate: Record<string, number> = {
+      "glyph atlas": glyphBytes,
+      fans: vertices.fans.length * 4,
+      segments: vertices.segments.length * 4,
+      "stroke caps": vertices.caps.length * 4,
+      sprites: vertices.sprites.length * 4,
+      "fill edges": vertices.edges.length * 4,
+      glyphs: glyphCount * GLYPH_FLOATS * 4
+    };
+    // the group target this backing store gets (framegraph composite), not the flat TARGET_BUDGET cap, plus the
+    // resident allocations and the explicit slack (steadyReserve)
     const { width: cssWidth, height: cssHeight, dpr } = ctx.screen;
     const reserveTarget = targetReserve(cssWidth * dpr, cssHeight * dpr, device.maxSamples ?? 0, dpr);
-    const allowance = (spent: number) =>
-      compatAllowance(tracked(), owned(), spent, undefined, undefined, reserveTarget);
+    const reserved = steadyReserve(reserveTarget, resident);
+    const allowance = (spent: number) => compatAllowance(tracked(), owned(), spent, undefined, undefined, reserved);
     const owned = () => textures.reduce((sum, texture) => sum + texture.bytes, 0) + windows.bytes;
 
     const worldRuns = runs.filter(run => !run.screen);
@@ -1262,12 +1339,43 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
       payload,
       release
     };
-    // The first frame's sharp runs at device density (firstDetails); a stale job gives up like any other step.
-    if (!(await firstDetails(prepared, ctx, reserveTarget))) {
+    // The first frame's sharp runs at device density (firstDetails), for a load or a camera bucket only: an edit's
+    // prepare commits on its base rasters and the settle refinement sharpens it (the edit's GPU frame is not held back
+    // by up to FIRST_DETAIL_MS). A stale job gives up like any other step.
+    const first = await firstDetails(prepared, ctx, reserved, editOnly);
+    if (first === "stale") {
       release();
       return null;
     }
     ctx.mark?.("detail");
+    const uploaded: Record<string, number> = { "glyph atlas": frame.atlas?.bytes ?? 0 };
+    for (const [key, label] of [
+      ["fans", "fans"],
+      ["segments", "segments"],
+      ["caps", "stroke caps"],
+      ["sprites", "sprites"],
+      ["edges", "fill edges"],
+      ["glyphs", "glyphs"]
+    ] as const)
+      uploaded[label] = frame[key]?.bytes ?? 0;
+    const own = frameBytes(prepared);
+    const steady = resident + reserveTarget + own;
+    prepared.compat.memory = {
+      resident,
+      target: reserveTarget,
+      slack: STEADY_SLACK,
+      estimate,
+      uploaded,
+      frame: own,
+      steady,
+      budget: GPU_BUDGET,
+      overrun: steadyOverrun(steady),
+      firstDetails: first
+    };
+    if (prepared.compat.memory.overrun)
+      console.warn(
+        `GPU steady budget: ${mib(steady)} planned over ${mib(GPU_BUDGET)} (frame ${mib(own)}, target ${mib(reserveTarget)}, resident ${mib(resident)})`
+      );
     return prepared;
   } catch (error) {
     release();
@@ -1288,7 +1396,7 @@ export function detailShare(
   room: number
 ): number {
   const sharp = runs.filter(run => run.sharp).length;
-  if (!sharp) return 0;
+  if (!sharp || !detailShareEnabled()) return 0;
   const { visible, pixels } = refineView(camera, viewport);
   if (!(visible.width > 0) || pixels.width / visible.width <= base) return 0;
   const want = Math.min(DETAIL_SHARE, sharp * pixels.width * pixels.height * 4);
@@ -1303,28 +1411,30 @@ export function detailShare(
 // keeps a matching request) instead of re-cutting. Bounded by FIRST_DETAIL_BUDGET, the room the steady budget leaves
 // once the previous frame is gone (and the peak room beside it now) and FIRST_DETAIL_MS of wall time (smallest
 // footprint first, so markers and icons before the precipitation field); runs whose base is already as dense as the
-// screen are skipped. Detail is optional: a failure leaves the base. False only when the job went stale.
-async function firstDetails(prepared: Prepared, ctx: PrepareContext, reserveTarget: number): Promise<boolean> {
-  if (!firstDetailEnabled() || !prepared.runs.some(run => run.sharp && !run.screen && run.slot.texture)) return true;
+// screen are skipped. Detail is optional: a failure leaves the base. "stale" only when the job went stale. Not for a
+// revision-only prepare (`editOnly`, an edit on the same camera bucket): the orchestrator's W3b call, so an edit's
+// frame is not held back by up to FIRST_DETAIL_MS (its settle refinement sharpens it right after).
+export async function firstDetails(
+  prepared: Prepared,
+  ctx: PrepareContext,
+  reserve: number,
+  editOnly = false
+): Promise<PrepareMemory["firstDetails"] | "stale"> {
+  if (!firstDetailEnabled()) return "off";
+  if (editOnly) return "revision only";
+  if (!prepared.runs.some(run => run.sharp && !run.screen && run.slot.texture)) return "none sharp";
   const { device } = ctx;
-  const frameBytes =
-    prepared.runs.reduce((n, run) => n + (run.slot.texture?.bytes ?? 0), 0) +
-    (prepared.windows?.bytes ?? 0) +
-    [...prepared.payload.recipes.keys()].reduce((n, texture) => n + texture.bytes, 0) +
-    (prepared.frame.atlas?.bytes ?? 0) +
-    Object.values(prepared.frame).reduce(
-      (n, item) => n + (item && typeof item === "object" && "kind" in item && item.kind === "buffer" ? item.bytes : 0),
-      0
-    );
+  // everything the frame holds, carried-over settle details included (they are tracked, and a detail this pass drops
+  // gives its bytes back through `spent`)
   const start = device.memory().total;
-  const steady = GPU_BUDGET - DETAIL_RESERVE - reserveTarget - frameBytes;
+  const steady = GPU_BUDGET - DETAIL_RESERVE - reserve - frameBytes(prepared);
   const deadline = performance.now() + FIRST_DETAIL_MS;
   const room = () => {
     if (performance.now() > deadline) return 0;
     const spent = device.memory().total - start;
     return Math.min(FIRST_DETAIL_BUDGET - spent, steady - spent, PEAK_LIMIT - device.memory().total);
   };
-  if (room() <= 0) return true;
+  if (room() <= 0) return "no room";
   const { visible, pixels } = refineView(ctx.camera, ctx.screen);
   try {
     await refineCompat(prepared, ctx, visible, pixels, GPU_BUDGET, {
@@ -1336,10 +1446,9 @@ async function firstDetails(prepared: Prepared, ctx: PrepareContext, reserveTarg
   } catch {
     // optional, like the settle refinement: the base rasters keep drawing
   }
-  return !ctx.stale();
+  return ctx.stale() ? "stale" : prepared.compat.refine?.rasterized ? "cut" : "skipped";
 }
 
-// The #viewbox child (or root overlay) each run's first element belongs to, deduplicated: which layers draw reused rasters.
 function layersOf(runs: readonly CompatRun[], viewbox: Element): string[] {
   const ids = new Set<string>();
   for (const run of runs) {
@@ -1547,25 +1656,22 @@ export interface RefineOptions {
   first?: boolean;
 }
 
-// Diagnosis switch: ?gpu-refine=0 turns settle refinement off, so a golden run (`params=gpu-refine=0`) measures the
-// first GPU frame a prepare commits instead of the refined one.
-// ?gpu-first-detail=0 leaves the first frame on its base rasters (firstDetails off); ?gpu-refine=0 turns off only the
-// settle refinement, so a gate run with it measures the first frame a camera change commits.
-export function firstDetailEnabled(): boolean {
+// Diagnosis switches (page URL flags, also golden `params=`):
+// - ?gpu-refine=0 turns off only the settle refinement, so a golden run measures the first frame a prepare commits
+//   (its first-frame details included) instead of the refined one;
+// - ?gpu-first-detail=0 leaves the first frame on its base rasters (firstDetails off);
+// - ?gpu-detail-share=0 gives world rasters the whole compat room when zoomed (detailShare off), the A/B arm for the
+//   first-frame cost of that share to non-sharp layers.
+const flagOn = (name: string) => {
   try {
-    return new URLSearchParams(globalThis.location?.search ?? "").get("gpu-first-detail") !== "0";
+    return new URLSearchParams(globalThis.location?.search ?? "").get(name) !== "0";
   } catch {
     return true;
   }
-}
-
-export function refineEnabled(): boolean {
-  try {
-    return new URLSearchParams(globalThis.location?.search ?? "").get("gpu-refine") !== "0";
-  } catch {
-    return true;
-  }
-}
+};
+export const firstDetailEnabled = (): boolean => flagOn("gpu-first-detail");
+export const refineEnabled = (): boolean => flagOn("gpu-refine");
+export const detailShareEnabled = (): boolean => flagOn("gpu-detail-share");
 
 export async function refineCompat(
   prepared: Prepared,
