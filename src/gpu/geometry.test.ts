@@ -13,6 +13,7 @@ import {
   dashOnLength,
   discCoverage,
   F32,
+  hasSharedSegments,
   JOIN,
   joinCode,
   layoutOnPath,
@@ -522,5 +523,19 @@ describe("mayWindDeep", () => {
     expect(mayWindDeep(stack(8, 20))).toBe(false);
     expect(mayWindDeep(Array.from({ length: 14 }, (_, i) => square(i, i, 30 - 2 * i, i % 2 === 0)))).toBe(false);
     expect(mayWindDeep(stack(8), 8, 3)).toBe(true); // out of work: conservative
+  });
+});
+
+describe("hasSharedSegments", () => {
+  const cell = (x: number, y: number): Subpath => ({ points: [x, y, x + 1, y, x + 1, y + 1, x, y + 1], closed: true });
+  it("finds a segment two subpaths share in either direction, not crossings or a lone path", () => {
+    expect(hasSharedSegments([cell(0, 0), cell(1, 0)])).toBe(true);
+    expect(hasSharedSegments([cell(0, 0), cell(2, 0)])).toBe(false);
+    const cross: Subpath[] = [
+      { points: [0, 0, 2, 2], closed: false },
+      { points: [2, 0, 0, 2], closed: false }
+    ];
+    expect(hasSharedSegments(cross)).toBe(false);
+    expect(hasSharedSegments([{ points: [0, 0, 1, 0, 0, 0], closed: false }])).toBe(false);
   });
 });

@@ -435,6 +435,28 @@ export function appendFillEdges(subpaths: Subpath[], out: F32, evenOdd: boolean,
   return count;
 }
 
+// Whether two subpaths of a stroke share a segment (same endpoints, either direction), as the cell grid's neighbouring
+// polygons do: blended, such a shared edge would draw twice as dark as SVG's single coverage mask (framegraph stroke).
+export function hasSharedSegments(subpaths: Subpath[]): boolean {
+  if (subpaths.length < 2) return false;
+  const seen = new Map<string, number>();
+  for (let s = 0; s < subpaths.length; s++) {
+    const { points: p, closed } = subpaths[s];
+    const n = p.length >> 1;
+    for (let i = 0; i < (closed ? n : n - 1); i++) {
+      const j = (i + 1) % n;
+      const a = `${p[i * 2]},${p[i * 2 + 1]}`,
+        b = `${p[j * 2]},${p[j * 2 + 1]}`;
+      if (a === b) continue;
+      const key = a < b ? `${a} ${b}` : `${b} ${a}`;
+      const owner = seen.get(key);
+      if (owner !== undefined && owner !== s) return true;
+      seen.set(key, s);
+    }
+  }
+  return false;
+}
+
 // Whether a nonzero fill's winding might reach `depth` (8: past the 3-bit stencil counter, framegraph.ts windingBits).
 // Necessary condition for that: `depth` rings of one orientation that all overlap at one point, so each of them has
 // bounding boxes overlapping `depth - 1` others of its orientation. Conservative: true when the count runs past

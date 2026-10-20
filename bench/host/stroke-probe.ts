@@ -20,7 +20,8 @@
 // Width, pitch and phase of those lines are still judged: a measured failure makes the line fail.
 //
 // Join probes (JOINS) check what straight lines cannot: polylines with 60-135 degree turns under miter, round and
-// bevel joins, dashed borders-style polylines, two crossing subpaths in one path and a translucent self-crossing path.
+// bevel joins, dashed borders-style polylines, crossing subpaths in one path, a grid of cells whose subpaths share
+// edges, and a translucent self-crossing path.
 // Per probe, over its box (device px, ink relative to the backdrop at the box's border), the verdict counts
 //   - notches: pixels SVG covers (>= 0.9 of the stroke's alpha) that GPU leaves at least 0.35 lighter (cracks at
 //     joins and crossings), and
@@ -104,6 +105,16 @@ const JOINS: JoinProbe[] = [
     d: "M222.3,10.3L246.3,46.3M246.3,10.3L222.3,46.3M222.3,28.1L246.3,28.6",
     box: [222.3, 10.3, 246.3, 46.3],
     width: 1.5
+  },
+  {
+    // 3x3 cells as nine closed subpaths: interior edges are shared by two cells, as in the cell grid
+    name: "shared-edge cells w0.7",
+    d: Array.from({ length: 9 }, (_, i) => {
+      const [x, y] = [291.3 + (i % 3) * 7, 14.3 + Math.floor(i / 3) * 7];
+      return `M${x},${y}h7v7h-7Z`;
+    }).join(""),
+    box: [291.3, 14.3, 312.3, 35.3],
+    width: 0.7
   },
   {
     name: "translucent self-crossing 0.5 w2.5",

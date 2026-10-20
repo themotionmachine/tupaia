@@ -59,6 +59,7 @@ import {
   appendStrokeCaps,
   capCode,
   F32,
+  hasSharedSegments,
   mayWindDeep,
   normalizeDashes,
   pathBounds
@@ -560,7 +561,8 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
       dashPeriod: dashes.reduce((sum, value) => sum + value, 0),
       dashOffset: style.dashOffset,
       dashCap: capCode(style.lineCap),
-      bounds: pathBounds(subpaths, Math.max(0, style.width) * 2)
+      bounds: pathBounds(subpaths, Math.max(0, style.width) * 2),
+      sharedSegments: hasSharedSegments(subpaths)
     };
     batch.dashes.set(dashes);
     return batch;

@@ -1,7 +1,7 @@
 // DOM-ordered passes over prepared batches: stencil-then-cover fills, instanced strokes/sprites/glyphs, compat
 // images, and opacity/mask groups composited from an offscreen target. Camera changes only touch uniforms.
 // Stencil layout (STENCIL below): bit 0x80 = group mask, set where a masked group's content is hidden; bits 0x78 = the
-// id of the last batch that marked the pixel (a translucent stroke or an anti-aliased fill: first fragment wins within
+// id of the last batch that marked the pixel (a banded stroke or an anti-aliased fill: first fragment wins within
 // the batch); bits 0x07 = fill winding (0x7F for a deepWinding fill, which clears the ids under it first).
 // Every test that draws colour requires the mask bit clear, so unmasked targets (bit never set) share the same tests.
 import { TARGET_BUDGET, targetSamples } from "./budget";
@@ -40,6 +40,7 @@ export interface StrokeBatch {
   dashPeriod: number;
   dashOffset: number;
   dashCap?: number; // capCode of stroke-linecap, applied to every dash end
+  sharedSegments?: boolean; // subpaths share segments (geometry.ts hasSharedSegments): draw in coverage bands
 }
 export interface SpriteBatch {
   kind: "sprites";
@@ -135,8 +136,8 @@ export function windingBits(fill: Pick<FillBatch, "evenOdd" | "deepWinding">): n
 }
 type Kind = keyof typeof shaders;
 const FLOAT = 4;
-// Coverage floors of a translucent stroke's passes, highest first (framegraph stroke).
-export const TRANSLUCENT_BANDS = [1, 0.75, 0.5, 0.25, 0] as const;
+// Coverage floors of a banded stroke's passes, highest first (framegraph stroke).
+export const COVERAGE_BANDS = [1, 0.75, 0.5, 0.25, 0] as const;
 export const STENCIL = { hidden: 0x80, id: 0x78, winding: 0x07, idShift: 3, ids: 15 } as const;
 
 // Fill edge anti-aliasing is on wherever the target has no MSAA (the DPR >= 2 canvas and every group target there);
@@ -157,7 +158,7 @@ export class FrameGraph {
   readonly passes = {
     composites: 0,
     fringes: 0,
-    translucentStrokes: 0,
+    bandedStrokes: 0,
     idClears: 0,
     stencilClears: 0,
     maskFills: 0,
@@ -472,14 +473,15 @@ export class FrameGraph {
     state.uniform1f(program.uniforms.u_dashOn, dash.on);
     state.uniform1f(program.uniforms.u_dashOffset, dash.offset);
     state.uniform1f(program.uniforms.u_dashCap, dash.cap);
-    // Joins are split at their bisectors in the shader, so segments of one path overlap only where the path crosses
-    // itself (or its subpaths cross each other). An opaque stroke blends there: src-over of two opaque partial
-    // coverages a and b gives 1 - (1 - a)(1 - b), the union for uncorrelated edges, and a full-coverage pixel stays
-    // full. A translucent one must not blend twice (SVG fills one coverage mask per path), so each pixel takes one
-    // fragment, marked with this batch's id; drawing in bands of decreasing coverage (TRANSLUCENT_BANDS) makes that the
-    // largest coverage within 0.25, so a faint edge pixel of one segment never blocks the body of a crossing one.
-    state.uniform1f(program.uniforms.u_minCoverage, 0);
-    if (stroke.color[3] >= 1) {
+    // Joins are split at their bisectors in the shader, so a path overlaps itself only where it crosses itself or its
+    // subpaths cross or coincide. Opaque, crossings blend: src-over of two opaque partial coverages a and b gives
+    // 1 - (1 - a)(1 - b), the union for crossing edges, and a full-coverage pixel stays full. A translucent stroke, or
+    // one whose subpaths share segments (the cell grid's neighbouring polygons), must not blend twice: SVG fills one
+    // coverage mask per path. Each pixel then keeps one fragment, marked with this batch's id, drawn in bands of
+    // decreasing coverage (COVERAGE_BANDS) so the one kept is within 0.25 of the largest: a faint edge pixel of one
+    // segment never blocks the body of a crossing one, and coincident edges draw once.
+    if (stroke.color[3] >= 1 && !stroke.sharedSegments) {
+      state.uniform1f(program.uniforms.u_minCoverage, -1); // blended: no floor, split the bisector sliver
       this.plain();
       gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, stroke.count);
       return;
@@ -488,11 +490,11 @@ export class FrameGraph {
     state.stencilFunc(gl.GREATER, id, STENCIL.hidden | STENCIL.id);
     state.stencilMask(STENCIL.id);
     state.stencilOp(gl.KEEP, gl.KEEP, gl.REPLACE);
-    for (const band of TRANSLUCENT_BANDS) {
+    for (const band of COVERAGE_BANDS) {
       state.uniform1f(program.uniforms.u_minCoverage, band);
       gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, stroke.count);
     }
-    this.passes.translucentStrokes++;
+    this.passes.bandedStrokes++;
   }
 
   private discs = new Map<number, { radius: number; scale: number }>();

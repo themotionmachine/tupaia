@@ -32,9 +32,9 @@ void main() {
 // split between its two segments at the bisector through the vertex (normal dIn + dOut): each pixel centre takes its
 // coverage from the one segment on its side, so neither the inner overlap of the two bodies nor the outer wedge is
 // drawn twice, and an earlier segment's partial edge pixel never lands inside the next segment's body. Overlaps left
-// (self-crossings, subpaths that cross, very short segments at sharp turns) blend for opaque strokes and are resolved
-// by the stencil for translucent ones (framegraph.ts stroke), which draw in passes of decreasing u_minCoverage (a
-// fragment below it is discarded).
+// (self-crossings, subpaths that cross or share segments, very short segments at sharp turns) blend for an opaque
+// stroke without shared segments and are resolved by the stencil otherwise (framegraph.ts stroke), drawing in passes of decreasing
+// u_minCoverage (a fragment below it is discarded).
 export const stroke = {
   vs: `${header}
 in vec2 a_corner;
@@ -149,9 +149,9 @@ void main() {
   float c1 = v_segment.z;
   // The neighbouring segment's side of a join bisector is its pixel, body and wedge alike. Both segments keep centres
   // within BISECTOR_SLACK device px of it: they interpolate their local frames from different quads, and a centre on
-  // the bisector must not be discarded by both. Both draw that sliver: an opaque stroke draws 1 - sqrt(1 - cov) there,
-  // which src-over of the two fragments composes back to cov (the two coverages agree on the bisector by symmetry); a
-  // translucent stroke keeps the first fragment (stencil). A reversal (dIn = -dOut) has no bisector: both keep it.
+  // the bisector must not be discarded by both. Both draw that sliver: a blended stroke (u_minCoverage < 0) draws
+  // 1 - sqrt(1 - cov) there, which src-over of the two fragments composes back to cov (the two coverages agree on the
+  // bisector by symmetry); a banded one keeps one fragment (stencil). A reversal (dIn = -dOut) has no bisector.
   float s0 = c0 >= 3.0 ? beyond(vec2(x, y), v_neighbours.xy + vec2(1.0, 0.0)) : 1e9;
   float s1 = c1 >= 3.0 ? beyond(vec2(len - x, -y), vec2(1.0, 0.0) + v_neighbours.zw) : 1e9;
   if (min(s0, s1) < -BISECTOR_SLACK) discard;
@@ -207,7 +207,7 @@ void main() {
     }
     cov = min(cov, dash);
   }
-  if (shared && u_color.a >= 1.0) cov = 1.0 - sqrt(max(0.0, 1.0 - cov));
+  if (shared && u_minCoverage < 0.0) cov = 1.0 - sqrt(max(0.0, 1.0 - cov));
   if (cov <= 0.0 || cov < u_minCoverage) discard;
   color = u_color * cov;
 }`
