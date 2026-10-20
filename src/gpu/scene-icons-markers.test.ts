@@ -65,31 +65,18 @@ describe("row 18 military regiments", () => {
   const regiment = (i: number) =>
     `<g id="regiment${i}"><rect x="0" y="0" width="6" height="3"/><text x="1" y="2">12</text><rect x="0" y="0" width="2" height="3"/><text x="1" y="2">⚔</text><image x="0" y="0" width="2" height="2" href="data:,"/></g>`;
 
-  it("[TEXT] rects and the number are native; the emoji icon and image are compat: shape / label / shape / compat", () => {
+  it("[COMPAT] a regiment with compat text/image makes the whole layer one compat run (no per-regiment fragments)", () => {
     env.fill("armies", `<g id="army1" fill="#ff0000">${regiment(1)}</g>`);
-    expect(layerRouting(buildStyled(env), "armies")).toEqual(["shape", "label", "shape", "compat(text emoji; image)"]);
-    expect(layerRouting(env.build({ nativeText: false }), "armies")).toEqual([
-      "shape",
-      "compat(text)",
-      "shape",
-      "compat(text; image)"
-    ]);
+    expect(layerRouting(buildStyled(env), "armies")).toEqual(["compat(text emoji; image)"]);
   });
 
-  it("[COMPAT] two regiments interleave native and compat runs in DOM order (no group-level compat run)", () => {
+  it("[COMPAT] two regiments are still one compat run of #armies, reported as one compat element", () => {
     env.fill("armies", `<g id="army1" fill="#ff0000">${regiment(1)}${regiment(2)}</g>`);
     const scene = buildStyled(env);
-    expect(layerRouting(scene, "armies")).toEqual([
-      "shape",
-      "label",
-      "shape",
-      "compat(text emoji; image)",
-      "shape",
-      "label",
-      "shape",
-      "compat(text emoji; image)"
-    ]);
-    expect(scene.layers.armies).toMatchObject({ native: 6, compat: 4 });
+    expect(layerRouting(scene, "armies")).toEqual(["compat(text emoji; image)"]);
+    const draw = scene.draws.find(d => d.layer === "armies");
+    expect(draw?.kind === "compat" && draw.elements).toEqual([env.layer("armies")]);
+    expect(scene.layers.armies).toMatchObject({ native: 0, compat: 1 });
   });
 
   it("[PRIM] an <image href=''> inside a regiment paints nothing and is skipped", () => {

@@ -169,9 +169,11 @@ export function planPattern(
     if (!Number.isFinite(inverse) || inverse <= 0) return "zone hatch scale";
     referenceZoom = 1 / inverse;
   }
-  // A scaled patternTransform changes the device size of a tile unit. Zone-hatch clones are excluded: their runtime
-  // UV scale (hatchUvAtZoom) cancels the S(1/k) factor, and `scale` (k x dpr) already over-resolves them.
-  const unit = clone ? 1 : Math.max(Math.hypot(transform[0], transform[1]), Math.hypot(transform[2], transform[3]));
+  // A scaled patternTransform changes the device size of a tile unit, the S(1/k) of a zone-hatch clone included: at
+  // the zoom it was written for (hatchUvAtZoom keeps it there) a clone's tile is width x dpr device px on screen, the
+  // size SVG rasterizes it at. A tile cut at k x dpr instead (as before) was minified k times by plain linear
+  // sampling: thin hatch strokes aliased away (zones at k 4: 0.70x the SVG ink).
+  const unit = Math.max(Math.hypot(transform[0], transform[1]), Math.hypot(transform[2], transform[3]));
   const deviceScale = scale * (unit > 0 && Number.isFinite(unit) ? unit : 1);
   return {
     width,

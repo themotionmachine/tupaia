@@ -391,10 +391,22 @@ const ignoredRoot = new Set(["defs", "style", "title", "desc", "metadata", "scri
 
 const mat3 = (m: ArrayLike<number>) => new Float32Array([m[0], m[1], 0, m[2], m[3], 0, m[4], m[5], 1]);
 
-function cellRings(): Subpath[] {
+// The rings of the last mesh, keyed by the canonical mesh image's href: cell-mesh-canvas.ts re-encodes it exactly when
+// the geometry key (every vertex index and coordinate bit) or the stroke changes, so an unchanged href is an unchanged
+// mesh. 100k cells cost a full ring walk per prepare otherwise.
+let ringCache: { key: string; graph: Graph; rings: Subpath[] } | null = null;
+
+export function cellRings(key = ""): Subpath[] {
   // grid/pack are `var`s (window properties); `customization` is a top-level `let`, readable only as a bare global
   const graph = typeof customization === "number" && customization === 1 ? globals.grid : globals.pack;
   if (!graph?.cells?.v || !graph.vertices?.p) return [];
+  if (key && ringCache?.key === key && ringCache.graph === graph) return ringCache.rings;
+  const rings = walkRings(graph);
+  ringCache = key ? { key, graph, rings } : null;
+  return rings;
+}
+
+function walkRings(graph: Graph): Subpath[] {
   const rings: Subpath[] = [];
   for (let i = 0; i < graph.cells.i.length; i++) {
     const vertices = graph.cells.v[graph.cells.i[i]];
@@ -636,7 +648,11 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
         }
         out.push(...pending);
       } else if (draw.kind === "cells") {
-        const batch = stroke(cellRings(), { stroke: draw.stroke, width: draw.width, dashes: [], dashOffset: 0 });
+        // opt-in native hairlines (?gpu-native-cells=1); by default scene.ts routes the mesh to compat, which shows the
+        // canonical mesh bitmap SVG displays
+        const href = draw.element.getAttribute("href") || draw.element.getAttribute("xlink:href") || "";
+        const rings = cellRings(href);
+        const batch = stroke(rings, { stroke: draw.stroke, width: draw.width, dashes: [], dashOffset: 0 });
         if (batch?.count) out.push(batch);
       } else if (draw.kind === "cachedPaths") {
         const image = await cachedReliefImage(draw.element, device.maxTextureSize);
@@ -896,7 +912,10 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
       const region = run.screen ? { x: 0, y: 0, ...ctx.screen } : ctx.world;
       const ratio = run.screen ? ctx.screen.dpr : resolution;
       const [w, h] = [Math.max(1, Math.round(region.width * ratio)), Math.max(1, Math.round(region.height * ratio))];
-      const canvas = await rasterizeRun(source, resolved as Element[], region, w, h, run.screen);
+      // raster px per live CSS px: a world raster is cut at `ratio` px per unit for CSS px per unit ≈ bucket / dpr
+      // (the reuse key holds the bucket, not the exact zoom); a screen raster at dpr px per CSS px
+      const cssScale = run.screen ? ctx.screen.dpr : (ratio * ctx.screen.dpr) / ctx.bucket;
+      const canvas = await rasterizeRun(source, resolved as Element[], region, w, h, run.screen, cssScale);
       if (ctx.stale()) return false;
       run.stamp = cloneStamp;
       if (!run.screen) {
@@ -1337,7 +1356,16 @@ export async function refineCompat(
     }
     const resolved = resolveManyInClone(run.elements, clone);
     if (resolved.some(item => typeof item === "string")) return false;
-    const canvas = await rasterizeRun(clone, resolved as Element[], visible, pixels.width, pixels.height, false);
+    // the detail is cut at device density: dpr raster px per live CSS px
+    const canvas = await rasterizeRun(
+      clone,
+      resolved as Element[],
+      visible,
+      pixels.width,
+      pixels.height,
+      false,
+      ctx.screen?.dpr ?? 1 // absent in partial test contexts
+    );
     if (ctx.stale()) return false;
     let cropped = cropRaster(canvas, visible);
     // Check the alpha-cropped allocation, not a hypothetical full viewport. Sparse labels and markers can fit
@@ -1483,7 +1511,7 @@ export async function refreshOverlays(
     for (const run of runs) {
       const resolved = resolveInClone(run.elements[0], clone);
       if (typeof resolved === "string") return "full";
-      const canvas = await rasterizeRun(clone, [resolved], region, w, h, true);
+      const canvas = await rasterizeRun(clone, [resolved], region, w, h, true, region.dpr);
       const cropped = ctx.stale() ? null : cropRaster(canvas, region);
       if (canvas !== cropped?.canvas) canvas.width = canvas.height = 0;
       held.push({ run, cropped });

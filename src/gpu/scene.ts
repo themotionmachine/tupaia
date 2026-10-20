@@ -214,6 +214,10 @@ export interface SceneOptions {
   // only as sharp as the budget-fitted world raster (about 1.2 px per unit at k 1), so until the settle refinement it
   // was illegible, and its CSS-pixel text-shadow scaled with the raster density.
   nativeText?: boolean;
+  // The baked cell mesh as native strokes. Default off (opt in with ?gpu-native-cells=1): SVG shows the canonical
+  // mesh bitmap (cell-mesh-canvas.ts, <= 2 px per unit, smoothed when zoomed), so the native hairlines drew 0.17x its
+  // ink at k 4 and 1.7x at k 1 on the parity golden. Off, the image is a compat run (budgeted world raster + detail).
+  nativeCells?: boolean;
 }
 
 function reliefIcons(value: string | null): ReliefSprite[] | null {
@@ -258,8 +262,9 @@ export function buildScene(viewbox: Element, curveTolerance = 0.2, options: Scen
   const maskRects = options.maskRects ?? flag("gpu-mask-rects") === "1";
   const nativeShapes = options.nativeShapes ?? flag("gpu-native-shapes") === "1";
   const nativeText = options.nativeText ?? flag("gpu-native-text") !== "0";
+  const nativeCells = options.nativeCells ?? flag("gpu-native-cells") === "1";
   return withCanonicalEmblemPaint(() =>
-    canonicalBuildScene(viewbox, curveTolerance, maskRects, nativeShapes, nativeText)
+    canonicalBuildScene(viewbox, curveTolerance, maskRects, nativeShapes, nativeText, nativeCells)
   );
 }
 
@@ -268,7 +273,8 @@ function canonicalBuildScene(
   curveTolerance: number,
   maskRects: boolean,
   nativeShapes: boolean,
-  nativeText: boolean
+  nativeText: boolean,
+  nativeCells: boolean
 ): Scene {
   const layers: Record<string, LayerReport> = {};
   // null unless a bench page installed globalThis.__gpuSceneCensus (scene-census.ts); read-only either way
@@ -370,6 +376,20 @@ function canonicalBuildScene(
       out.push({ kind: "trade", element, layer, opacity, children, unsupported });
       return;
     }
+    if (depth === 0 && element.id === "armies" && !effects && !(cs.mask && cs.mask !== "none")) {
+      // COMPAT: every regiment interleaves native boxes with compat text, icons and rotated groups, so the layer cut
+      // into a native/compat run per regiment (152 rasters on the parity map) and the boxes' native edges and the text
+      // glow over them never matched SVG. Any compat content makes the whole layer one compat run; a layer of plain
+      // boxes stays native.
+      const before = layers[layer] && { ...layers[layer], reasons: [...layers[layer].reasons] };
+      const inner: Draw[] = [];
+      for (const child of element.children) walk(child, layer, inner, depth + 1, inGroup);
+      const reasons = inner.flatMap(draw => (draw.kind === "compat" ? [draw.reason] : []));
+      if (!reasons.length) return void out.push(...inner);
+      if (before) layers[layer] = before;
+      else delete layers[layer];
+      return compat(element, layer, [...new Set(reasons.join("; ").split("; "))].join("; "), out);
+    }
     if (tag === "g" || tag === "a") {
       // Export materializes compact burg images into circles. Capture their stable parent,
       // because the transient image itself deliberately has no counterpart in that clone.
@@ -405,6 +425,7 @@ function canonicalBuildScene(
         const parent = computed(element.parentElement!);
         const stroke = parseColor(parent.stroke, number(parent.strokeOpacity, 1));
         const width = number(parent.strokeWidth, 1);
+        if (stroke && width > 0 && !nativeCells) return compat(element, layer, "cell mesh bitmap", out);
         if (stroke && width > 0) out.push({ kind: "cells", element, layer, stroke, width });
         return report(layer, true);
       }

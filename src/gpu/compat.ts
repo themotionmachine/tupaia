@@ -47,6 +47,7 @@ export function forgetCompatClone(): void {
 // Returns an undo function that reinserts in reverse order.
 export function isolate(root: Element, keep: Set<Element>): () => void {
   const removed: [Element, Element, Node | null][] = [];
+  const ids = idMap(root); // before pruning: the map must hold the pruned ids too
   const containsKept = new Set<Element>();
   for (const element of keep)
     for (let node = element.parentElement; node && node !== root.parentElement; node = node.parentElement)
@@ -64,10 +65,119 @@ export function isolate(root: Element, keep: Set<Element>): () => void {
   visit(root);
   // Keep all definitions: references can target descendants (paint servers, clip paths, charges), and
   // stylesheet rules can affect siblings. Outer-SVG <use> reachability alone is not a safe pruning rule.
+  const holder = holdReferenced(
+    root,
+    ids,
+    keep,
+    removed.map(([, child]) => child)
+  );
   return () => {
     for (let i = removed.length - 1; i >= 0; i--) {
       const [parent, child, next] = removed[i];
       parent.insertBefore(child, next);
+    }
+    holder?.remove();
+  };
+}
+
+// Elements that can name another by id: url() paint/clip/mask/filter/marker references, and href (including the
+// namespaced xlink:href, which an un-namespaced attribute selector cannot match, hence the tag names).
+const REFERENCING =
+  '[clip-path],[mask],[filter],[fill*="url("],[stroke*="url("],[style*="url("],[marker-start],[marker-mid],[marker-end],' +
+  "[href],use,textPath,pattern,linearGradient,radialGradient,feImage,image,tref";
+const URL_ID = /url\(\s*['"]?#([^'")\s]+)['"]?\s*\)/g;
+
+function referencedIds(element: Element, out: string[]): void {
+  for (const node of [element, ...element.querySelectorAll(REFERENCING)]) {
+    for (const { name, value } of Array.from(node.attributes)) {
+      if (name === "href" || name === "xlink:href") {
+        if (value.startsWith("#")) out.push(value.slice(1));
+      } else if (value.includes("url(")) for (const match of value.matchAll(URL_ID)) out.push(match[1]);
+    }
+  }
+}
+
+// Every id of a clone, built once: isolation only detaches and reinserts its nodes, never replaces them.
+const idMaps = new WeakMap<Element, Map<string, Element>>();
+function idMap(root: Element): Map<string, Element> {
+  let map = idMaps.get(root);
+  if (!map) {
+    map = new Map();
+    for (const node of root.querySelectorAll("[id]")) if (!map.has(node.id)) map.set(node.id, node);
+    idMaps.set(root, map);
+  }
+  return map;
+}
+
+// A kept element can reach a pruned one through a definition: a state halo is clipped by <clipPath><use href="#state0">
+// whose target is the native #statesBody path. Pruned, that clip is empty and the halo raster came out blank. The
+// references of the kept elements are followed (through definitions too); each pruned subtree holding a target moves
+// into a <defs> (referable, never painted) until the undo puts it back. Returns the holder (null when none was needed).
+function holdReferenced(
+  root: Element,
+  ids: Map<string, Element>,
+  keep: Set<Element>,
+  pruned: Element[]
+): Element | null {
+  if (!pruned.length) return null;
+  const queue: string[] = [];
+  for (const element of keep) referencedIds(element, queue);
+  if (!queue.length) return null;
+  const prunedSet = new Set(pruned);
+  const seen = new Set<string>();
+  const scanned = new Set<Element>();
+  let holder: Element | null = null;
+  while (queue.length) {
+    const id = queue.pop()!;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const target = ids.get(id);
+    if (!target) continue;
+    let owner: Element | null = null;
+    for (let node: Element | null = target; node && node !== root; node = node.parentElement)
+      if (prunedSet.has(node)) {
+        owner = node;
+        break;
+      }
+    const scan = owner ?? target;
+    if (owner) {
+      holder ??= root.appendChild(root.ownerDocument.createElementNS("http://www.w3.org/2000/svg", "defs"));
+      holder.appendChild(owner);
+      prunedSet.delete(owner);
+    }
+    if (scanned.has(scan)) continue;
+    scanned.add(scan);
+    referencedIds(scan, queue);
+  }
+  return holder;
+}
+
+// Group opacity is the GPU's: scene.ts turns every group below #viewbox with opacity < 1 into a group draw that
+// composites its children (compat rasters included) at that opacity, and a nested one becomes the compat element
+// itself. A compat raster cut with those ancestors intact carries their opacity once more (provinces at 0.7 drew at
+// 0.49). Sets each such ancestor to opacity 1 (attribute and inline style, which beats the inlined computed style and
+// any stylesheet rule) and returns the undo. The elements' own opacity stays in the raster.
+export function liftGroupOpacity(viewbox: Element, elements: Iterable<Element>): () => void {
+  const saved: [Element, string | null, string | null][] = [];
+  const seen = new Set<Element>();
+  for (const element of elements)
+    for (let node = element.parentElement; node && node !== viewbox; node = node.parentElement) {
+      if (seen.has(node)) continue;
+      seen.add(node);
+      const style = (node as unknown as ElementCSSInlineStyle).style;
+      const attribute = node.getAttribute("opacity");
+      const inline = style?.getPropertyValue("opacity") ?? "";
+      const below = (value: string | null) => !!value && value.trim() !== "" && Number(value) !== 1;
+      if (!below(attribute) && !below(inline)) continue;
+      saved.push([node, attribute, node.getAttribute("style")]);
+      node.setAttribute("opacity", "1");
+      if (below(inline)) style.setProperty("opacity", "1");
+    }
+  return () => {
+    for (let i = saved.length - 1; i >= 0; i--) {
+      const [node, attribute, style] = saved[i];
+      attribute === null ? node.removeAttribute("opacity") : node.setAttribute("opacity", attribute);
+      style === null ? node.removeAttribute("style") : node.setAttribute("style", style);
     }
   };
 }
@@ -102,7 +212,13 @@ export async function rasterizeRun(
   region: Region,
   pixelWidth: number,
   pixelHeight: number,
-  screen: boolean
+  screen: boolean,
+  // raster px per live CSS px. The decoded document is sized in live CSS px (pixel size / cssScale) and drawn at the
+  // pixel size: what is specified in screen px rather than user units (text-shadow, vector-effect=non-scaling-stroke,
+  // whose stroke and dashes the #coordinates grid uses) keeps its live size. Before, the document was its pixel size:
+  // the regiment glow and the coordinate grid came out at half width at dpr 2. Plain content renders identically
+  // (Chrome rasterizes an SVG image at its destination size).
+  cssScale = 1
 ): Promise<HTMLCanvasElement> {
   const viewbox = clone.querySelector("#viewbox");
   if (!viewbox) throw new Error("clone without #viewbox");
@@ -114,16 +230,22 @@ export async function rasterizeRun(
   const transform = viewbox.getAttribute("transform");
   let markup: string;
   let undoDefinitions = () => {};
+  let undoOpacity = () => {};
   try {
-    if (!screen) viewbox.removeAttribute("transform");
-    clone.setAttribute("width", String(pixelWidth));
-    clone.setAttribute("height", String(pixelHeight));
+    if (!screen) {
+      viewbox.removeAttribute("transform");
+      undoOpacity = liftGroupOpacity(viewbox, elements);
+    }
+    const scale = cssScale > 0 && Number.isFinite(cssScale) ? cssScale : 1;
+    clone.setAttribute("width", String(pixelWidth / scale));
+    clone.setAttribute("height", String(pixelHeight / scale));
     clone.setAttribute("viewBox", `${region.x} ${region.y} ${region.width} ${region.height}`);
     clone.setAttribute("preserveAspectRatio", "none");
     clone.removeAttribute("filter");
     undoDefinitions = isolateEmblemDefinitions(clone);
     markup = new XMLSerializer().serializeToString(clone);
   } finally {
+    undoOpacity();
     undoDefinitions();
     undo();
     for (const [name, value] of saved) value === null ? clone.removeAttribute(name) : clone.setAttribute(name, value);

@@ -288,3 +288,21 @@ describe("stock hatch patterns", () => {
       }
   });
 });
+
+describe("zone-hatch clone tiles", () => {
+  // [COMPAT] the clone's S(1/k) sets its device size: one tile unit is dpr device px at the zoom it was written for
+  it("rasterize at the on-screen pitch, not k times over", () => {
+    for (const k of [1, 2, 4, 8]) {
+      const p = planPattern(
+        fakePattern(
+          `<pattern width="4" height="4" patternUnits="userSpaceOnUse" data-zone-hatch-clone="" patternTransform="scale(${1 / k}) rotate(30 0 0)"><line/></pattern>`
+        ),
+        k * 2
+      );
+      if (typeof p === "string") throw new Error(p);
+      expect(p.referenceZoom).toBeCloseTo(k, 9);
+      expect(p.size.tw).toBe(8);
+      expect(p.pitch[0]).toBeCloseTo(8, 9);
+    }
+  });
+});

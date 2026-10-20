@@ -102,9 +102,18 @@ describe("row 3 biomes", () => {
 describe("row 4 cells grid", () => {
   const cells = '<image data-cell-mesh="1" href="data:," width="100" height="100"/>';
 
-  it("the baked mesh image is one native `cells` draw with the group's stroke", () => {
+  it("[COMPAT] the baked mesh image is one compat run by default: SVG shows that bitmap, not vectors", () => {
     env.fill("cells", cells);
-    const scene = build();
+    applyStylePreset(env);
+    const scene = env.build();
+    expect(layerRouting(scene, "cells")).toEqual(["compat(cell mesh bitmap)"]);
+    expect(scene.layers.cells).toMatchObject({ native: 0, compat: 1 });
+  });
+
+  it("opt-in (nativeCells): the baked mesh image is one native `cells` draw with the group's stroke", () => {
+    env.fill("cells", cells);
+    applyStylePreset(env);
+    const scene = env.build({ nativeCells: true });
     expect(layerRouting(scene, "cells")).toEqual(["cells"]);
     const [draw] = scene.draws.filter(d => d.layer === "cells");
     if (draw.kind === "cells") {
@@ -134,7 +143,8 @@ describe("row 4 cells grid", () => {
     env.fill("cells", cells);
     applyStylePreset(env);
     env.set("cells", { mask: "url(#land)" });
-    expect(layerRouting(env.build(), "cells")).toEqual(["group{mask:1,op:1}[cells]"]);
+    expect(layerRouting(env.build({ nativeCells: true }), "cells")).toEqual(["group{mask:1,op:1}[cells]"]);
+    expect(layerRouting(env.build(), "cells")).toEqual(["group{mask:1,op:1}[compat(cell mesh bitmap)]"]);
     env.set("cells", { mask: "url(#missing)" });
     expect(layerRouting(env.build(), "cells")).toEqual(["compat(mask #missing)"]);
   });
@@ -143,7 +153,8 @@ describe("row 4 cells grid", () => {
     env.fill("cells", cells);
     applyStylePreset(env);
     env.set("cells", { opacity: "0.5" });
-    expect(layerRouting(env.build(), "cells")).toEqual(["group{mask:none,op:0.5}[cells]"]);
+    expect(layerRouting(env.build({ nativeCells: true }), "cells")).toEqual(["group{mask:none,op:0.5}[cells]"]);
+    expect(layerRouting(env.build(), "cells")).toEqual(["group{mask:none,op:0.5}[compat(cell mesh bitmap)]"]);
   });
 });
 

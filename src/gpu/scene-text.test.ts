@@ -77,13 +77,15 @@ describe("non-label text is native glyphs", () => {
     expect(layerRouting(styled(), "prec")).toEqual(["label", "label", "compat(<circle>)"]);
   });
 
-  it("regiment numbers are native, the emoji icon stays compat, an empty icon text is skipped", () => {
+  // #armies is one compat run as soon as any regiment content is compat (COMPAT, W2): the emoji icon makes the whole
+  // layer compat, so regiment numbers are native only in a layer without compat content.
+  it("an emoji icon makes #armies one compat run, regiment numbers included", () => {
     computedShadows();
     env.fill(
       "armies",
       '<g id="army1" fill="#66c2a5"><g id="regiment1-0"><rect x="0" y="0" width="6" height="3"/><text x="3" y="1.5">9670</text><rect x="0" y="0" width="2" height="3"/><text class="regimentIcon" x="1" y="1.5">⚔️</text><text class="regimentIcon" x="1" y="1.5"></text></g></g>'
     );
-    expect(layerRouting(styled(), "armies")).toEqual(["shape", "label", "shape", "compat(text emoji)"]);
+    expect(layerRouting(styled(), "armies")).toEqual(["compat(text emoji)"]);
   });
 
   it("a rotated regiment stays one group-transform compat run", () => {
