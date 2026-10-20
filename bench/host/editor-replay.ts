@@ -167,6 +167,10 @@ async function loadFixture(page: Page, arm: Arm): Promise<void> {
   await page.evaluate(async () => {
     const rp = (globalThis as any).__rp;
     rp.stopTrade();
+    // loadMap's "Map is successfully loaded" main tip clears on a timer. While it shows, FMG's hover handler skips
+    // showMapTooltip (so an emblem under the pointer is not raised); whether the timer already fired depends on the
+    // arm's load time. Clear it so hover side effects are the same in every arm.
+    (globalThis as any).clearMainTip?.();
     rp.lastModel = null;
     await rp.settle(0);
   });
