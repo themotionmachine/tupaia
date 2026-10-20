@@ -39,11 +39,15 @@
 //                      auto: per family, whichever the GPU is built to reproduce (DENSE below): vector for the burgs
 //                        (the GPU draws the restored vectors on purpose), seen for the cell mesh (the GPU keeps the
 //                        displayed asset on purpose, scene.ts). The other reference is always measured and reported.
-//   GOLDEN_SETTLE_MS the SVG arm is shot until two consecutive shots this far apart agree to within 64 px (default 400; 0
-//                    = one shot), so a reference that is still changing (a lazy raster, a refinement) is waited out or
-//                    fails as a harness error.
+//   GOLDEN_SETTLE_MS the SVG arm is shot until two consecutive shots this far apart agree to within SETTLE_NOISE_PX px
+//                    (default 400; 0 = one shot), so a reference that is still changing (a lazy raster, a refinement)
+//                    is waited out or fails as a harness error. LIMIT: a reference that changes by no more than
+//                    SETTLE_NOISE_PX pixels per interval counts as settled, so a slow drift under that count (about
+//                    0.007 % of a dpr 2 frame) is not seen. The count is 16 px per dpr squared (64 px at dpr 2, 16 at
+//                    dpr 1) so the share of the frame stays the same at both ratios.
 //   GOLDEN_PRECOA    1 (default): render every emblem COA symbol before the first capture. 0: leave them lazy, as the app
-//                    does, so the cell catches the GPU/lazy-COA race (see `coa-race` in gate.ts golden-selftest).
+//                    does, so the cell catches the GPU/lazy-COA race (gate.ts `coa-race` is its own check, not a golden-selftest arm;
+//                    it uses GOLDEN_COA_LATE below, the deterministic form of the race).
 //   GOLDEN_COA_LATE  1: for the emblems family, the COA symbols arrive AFTER the GPU prepared, the lazy-COA race made
 //                    deterministic. The app inserts each symbol into #coas (svg#defElements, outside svg#map) only after
 //                    fetching its charges, so a prepare can precede it. Per cell: #coas is emptied, a revision inside
@@ -249,8 +253,9 @@ const origin = `http://127.0.0.1:${address.port}`;
 
 // ------------------------------------------------------------------ page helpers
 
+const VIEWPORT_WIDTH = 1280;
 async function openContext(dpr: number): Promise<{ context: BrowserContext; page: Page }> {
-  const context = await browser.newContext({ viewport: { width: 1280, height: 720 }, deviceScaleFactor: dpr, serviceWorkers: "block" });
+  const context = await browser.newContext({ viewport: { width: VIEWPORT_WIDTH, height: 720 }, deviceScaleFactor: dpr, serviceWorkers: "block" });
   await context.addInitScript(() => {
     localStorage.setItem("autosaveInterval", "0");
     localStorage.setItem("azgaarAssistant", "hide");
@@ -425,16 +430,17 @@ async function lateCoas(page: Page): Promise<{ symbols: number; preparesBefore: 
   const symbols = await page.evaluate(() => {
     const w = globalThis as any;
     const coas = document.getElementById("coas");
-    if (!coas) return -1;
+    if (!coas) return { count: -1, start: -1 };
     w.__goldenCoas = [...coas.childNodes];
     coas.replaceChildren();
-    // a revision inside svg#map: the renderer prepares now, against a #coas without symbols
+    // a revision inside svg#map: the renderer prepares now, against a #coas without symbols. The prepare count is read
+    // BEFORE the revision so the wait below cannot miss a prepare that finishes first.
+    const start = w.rendererStatus?.()?.gpu?.prepares ?? -1;
     document.querySelector("svg#map #emblems")?.setAttribute("data-golden-coa-late", String(Date.now()));
-    return w.__goldenCoas.length;
+    return { count: w.__goldenCoas.length, start };
   });
-  if (symbols <= 0) throw Error(symbols < 0 ? "GOLDEN_COA_LATE: no #coas" : "GOLDEN_COA_LATE: #coas holds no symbols to hold back");
-  const start = await gpuPrepares(page);
-  await page.waitForFunction(n => ((globalThis as any).rendererStatus?.()?.gpu?.prepares ?? -1) > n, start - 1, { timeout: 20000, polling: 50 }).catch(() => {});
+  if (symbols.count <= 0) throw Error(symbols.count < 0 ? "GOLDEN_COA_LATE: no #coas" : "GOLDEN_COA_LATE: #coas holds no symbols to hold back");
+  await page.waitForFunction(n => ((globalThis as any).rendererStatus?.()?.gpu?.prepares ?? -1) > n, symbols.start, { timeout: 20000, polling: 50 }).catch(() => {});
   await waitGpu(page); // the frame as it stands without the symbols: current and refined
   const preparesBefore = await gpuPrepares(page);
   await page.evaluate(() => {
@@ -446,7 +452,7 @@ async function lateCoas(page: Page): Promise<{ symbols: number; preparesBefore: 
     .waitForFunction(n => ((globalThis as any).rendererStatus?.()?.gpu?.prepares ?? -1) > n, preparesBefore, { timeout: 5000, polling: 50 })
     .then(() => true, () => false);
   await waitGpu(page);
-  return { symbols, preparesBefore, preparesAfter: await gpuPrepares(page), reprepared };
+  return { symbols: symbols.count, preparesBefore, preparesAfter: await gpuPrepares(page), reprepared };
 }
 
 // Self-test only: breaks the GPU frame in place and redraws. SVG is untouched. Each mode reports what it changed; a
@@ -590,7 +596,9 @@ const countDiff = (a: Buffer, b: Buffer) => {
 
 // The GPU arm (see GOLDEN_GPU_ARM), then the SVG arm (canvas hidden), from one DOM state. A GPU re-prepare between
 // the shots would mean the arms are not the same frame, so it is an error.
-async function captureArms(page: Page): Promise<{ gpu: Buffer; svg: Buffer; svgShots: number; svgSettled: boolean; showThrough: { composite: number; magenta: number } | null; probe: Record<string, Buffer> }> {
+async function captureArms(
+  page: Page
+): Promise<{ gpu: Buffer; svg: Buffer; svgShots: number; svgSettled: boolean; svgMoving?: string; showThrough: { composite: number; magenta: number } | null; probe: Record<string, Buffer> }> {
   const stamp = await gpuStamp(page);
   let gpu: Buffer;
   let showThrough: { composite: number; magenta: number } | null = null;
@@ -644,7 +652,11 @@ const showCanvas = (page: Page, value: string | null) =>
 // not bit-stable shot to shot: 9 px of one emblem frame flickered between identical-DOM shots (measured), so exact
 // equality would fail good cells. A reference still changing after that (a lazy raster, a refinement) is reported as not
 // settled, with where, and fails the cell as a harness error.
-const SETTLE_NOISE_PX = 64;
+// LIMIT (documented, not a bug): SETTLE_NOISE_PX is a pixel count per interval, so a reference drifting slower than that
+// is judged settled. It scales with the frame area, i.e. with dpr squared: 16 px per dpr^2 (64 at dpr 2, the measured
+// scale, and 16 at dpr 1), so the allowed share of the frame is the same at both ratios.
+const SETTLE_NOISE_PX_PER_DPR2 = 16;
+const settleNoisePx = (png: Buffer) => SETTLE_NOISE_PX_PER_DPR2 * (png.readUInt32BE(16) / VIEWPORT_WIDTH) ** 2; // PNG IHDR width / CSS width = dpr
 const SETTLE_SHOTS = 10;
 async function shootSvg(page: Page): Promise<{ png: Buffer; shots: number; settled: boolean; moving?: string }> {
   let png = await page.screenshot({ animations: "disabled" });
@@ -657,7 +669,7 @@ async function shootSvg(page: Page): Promise<{ png: Buffer; shots: number; settl
     const next = await page.screenshot({ animations: "disabled" });
     const change = next.equals(png) ? { n: 0, where: "" } : describeChange(png, next);
     png = next;
-    if (change.n <= SETTLE_NOISE_PX) return { png, shots, settled: true };
+    if (change.n <= settleNoisePx(next)) return { png, shots, settled: true };
     moving = change.where;
   }
   return { png, shots: SETTLE_SHOTS, settled: false, moving };

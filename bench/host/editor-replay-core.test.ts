@@ -232,6 +232,7 @@ describe("D13 stale resume", () => {
     staleFirst: staleShown ? { at: 16, frameRevision: 3, revision: 5, via: "reveal" } : null
   });
   const open = step({ index: 1, domDeltaCount: 0, domDelta: [] });
+  const settled = { gpu: gpu({ state: "active", suspendedReason: null, canvasVisible: true, pending: false }) }; // a step whose GPU frame is current
   const edit = step({ index: 2, op: "input", domDeltaCount: 2 });
   const quiet = step({ index: 2, op: "input", domDeltaCount: 0, domDelta: [], modelChanged: [] });
   const close = (staleShown: number, over: Partial<StepObservation> = {}) =>
@@ -253,11 +254,11 @@ describe("D13 stale resume", () => {
     assert.equal(checkStaleResume([open, step({ index: 2, op: "input", domDeltaCount: 0, modelChanged: ["pack.burgs"] }), close(1)]).length, 1);
     const moved = { "#viewbox>#labels": "x2", "#defs": "y" }; // the second session's edit, net
     assert.deepEqual(checkStaleResume([open, edit, close(0), step({ index: 4 }), close(1, { index: 5, dom: moved })]).length, 1);
-    assert.deepEqual(checkStaleResume([open, edit, close(0), step({ index: 4, domDeltaCount: 0 }), close(1, { index: 5 })]), []);
+    assert.deepEqual(checkStaleResume([open, edit, close(0, settled), step({ index: 4, domDeltaCount: 0 }), close(1, { index: 5 })]), []);
   });
 
   it("judges the net change from the step before the open to the close (W3 LIFE3 net-change reading)", () => {
-    const before = step({ index: 0, op: "display", dialogs: [], dom: { "#viewbox>#icons": "raster" } });
+    const before = step({ index: 0, op: "display", dialogs: [], dom: { "#viewbox>#icons": "raster" }, ...settled });
     const swapped = step({ index: 1, dom: { "#viewbox>#icons": "vectors" } }); // open: rasters to vectors
     const restored = { dom: { "#viewbox>#icons": "raster" } };
     // the DOM moved on open and came back on close: nothing changed, the last frame may show
@@ -275,7 +276,22 @@ describe("D13 stale resume", () => {
     const settings = step({ index: 2, op: "input", modelChanged: ["options"], model: { ...before.model, options: "2" } });
     assert.deepEqual(checkStaleResume([before, swapped, settings, close(2, { index: 3, model: settings.model, ...restored })]), []);
     // steps before the open (display, camera) are not part of the session
-    const display = step({ index: 0, op: "display", dialogs: [], domDeltaCount: 5, dom: { "#viewbox>#icons": "raster" } });
+    const display = step({ index: 0, op: "display", dialogs: [], domDeltaCount: 5, dom: { "#viewbox>#icons": "raster" }, ...settled });
     assert.deepEqual(checkStaleResume([display, swapped, close(1, restored)]), []);
+  });
+
+  it("exempts a net-unchanged session only when the step before the open had a settled GPU frame", () => {
+    const dom = { "#viewbox>#icons": "raster" };
+    const restored = { dom };
+    const swapped = step({ index: 1, dom: { "#viewbox>#icons": "vectors" } });
+    const base = (over: Partial<StepObservation>) => step({ index: 0, op: "display", dialogs: [], dom, ...over });
+    // settled base, nothing changed net: a stale frame may show
+    assert.deepEqual(checkStaleResume([base(settled), swapped, close(2, restored)]), []);
+    // the frame was already behind (pending) or unknown at the base: the net-unchanged exemption does not apply
+    for (const unsettled of [{ gpu: gpu({ state: "active", suspendedReason: null, canvasVisible: true, pending: true }) }, {}, { gpu: gpu({ pending: null }) }])
+      assert.equal(checkStaleResume([base(unsettled), swapped, close(2, restored)]).length, 1);
+    // edits made in a customization mode before any dialog opens are folded into the base (documented limit)
+    const edit = step({ index: 0, op: "input", dialogs: [], dom: { "#viewbox>#icons": "edited" }, domDeltaCount: 3, ...settled });
+    assert.deepEqual(checkStaleResume([edit, step({ index: 1, dom: { "#viewbox>#icons": "edited" } }), close(2, { dom: { "#viewbox>#icons": "edited" } })]), []);
   });
 });

@@ -237,6 +237,8 @@ export class GpuRenderer {
   private raf = 0;
   private prepareTimer = 0;
   private settleTimer = 0;
+  private refineHold = false; // test hook (holdRefinement)
+  private refineHeld = false;
   private motionTimer = 0;
   private invalidations = { count: 0, last: "" };
   private motionDeferrals = 0;
@@ -1112,6 +1114,16 @@ export class GpuRenderer {
     }, delay);
   }
 
+  // Test hook (bench/host/reuse-fidelity.ts): while held, a settle that would only sharpen the compat runs leaves the base
+  // rasters on show (a settle that would prepare still runs); releasing the hold runs the settle that was skipped.
+  holdRefinement(on: boolean): void {
+    this.refineHold = on;
+    if (!on && this.refineHeld) {
+      this.refineHeld = false;
+      this.scheduleSettle();
+    }
+  }
+
   private scheduleSettle(): void {
     clearTimeout(this.settleTimer);
     this.settleTimer = window.setTimeout(() => {
@@ -1296,6 +1308,10 @@ export class GpuRenderer {
         this.prepareWanted ? "settle-wanted" : prepared.revision !== this.revision ? "settle-revision" : "settle-bucket"
       );
     if (action === "none" || !this.active()) return;
+    if (this.refineHold) {
+      this.refineHeld = true;
+      return;
+    }
     const { visible, pixels } = refineView(this.view, this.viewport);
     const generation = this.generation;
     const token = ++this.refines; // a newer settle or prepare supersedes this refinement

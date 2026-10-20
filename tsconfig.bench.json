@@ -1,0 +1,18 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": [
+      "node"
+    ],
+    "rewriteRelativeImportExtensions": false,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false
+  },
+  "include": [
+    "bench/host/**/*.ts",
+    "bench/gate/*.ts"
+  ],
+  "exclude": [
+    "bench/host/labels.ts"
+  ]
+}

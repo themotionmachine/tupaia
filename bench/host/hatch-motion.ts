@@ -11,7 +11,7 @@ const mime = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css
 const server = createServer((request, response) => {
   const path = resolve(dist, "." + new URL(request.url || "/", "http://localhost").pathname);
   if (!path.startsWith(dist + "/") && path !== dist) return void response.writeHead(403).end();
-  try { const file = path === dist ? resolve(dist, "index.html") : path; response.setHeader("content-type", mime[extname(file)] || "application/octet-stream"); response.end(readFileSync(file)); }
+  try { const file = path === dist ? resolve(dist, "index.html") : path; response.setHeader("content-type", (mime as Record<string, string>)[extname(file)] || "application/octet-stream"); response.end(readFileSync(file)); }
   catch { response.writeHead(404).end(); }
 });
 await new Promise<void>(done => server.listen(0, "127.0.0.1", done));
