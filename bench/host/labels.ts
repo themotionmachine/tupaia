@@ -997,10 +997,10 @@ async function stepGlyphs(page: Page, blanks: Blanks, dir: string): Promise<Json
     // own getStart/EndPositionOfChar midpoint and the central shift with the same probe and ceil rule this harness
     // reads, so the analytic error compares the SVG position API with itself (it reads 0 by construction) and cannot
     // see a fidelity regression. Pixel registration (SVG ink against GPU ink, every label) is the position gate.
-    const info: string[] = [];
-    if (analytic.length && v.summary.analytic.max > TOL.glyphPx) info.push(`analytic: ${analytic.filter(e => e > TOL.glyphPx).length}/${analytic.length} native glyphs off by > ${TOL.glyphPx} device px (max ${v.summary.analytic.max}; along the baseline p95 ${v.summary.analytic.along.p95}, normal p95 ${v.summary.analytic.normal.p95})`);
-    if (unmatched) info.push(`analytic: ${unmatched} native characters have no GPU glyph of the same character within reach`);
-    v.info = info;
+    const notes: string[] = [];
+    if (analytic.length && v.summary.analytic.max > TOL.glyphPx) notes.push(`analytic: ${analytic.filter(e => e > TOL.glyphPx).length}/${analytic.length} native glyphs off by > ${TOL.glyphPx} device px (max ${v.summary.analytic.max}; along the baseline p95 ${v.summary.analytic.along.p95}, normal p95 ${v.summary.analytic.normal.p95})`);
+    if (unmatched) notes.push(`analytic: ${unmatched} native characters have no GPU glyph of the same character within reach`);
+    v.info = notes;
     const nativeCurved = (v.labels as Json[]).filter(l => l.native && l.curved).length;
     if (variant === "native" && !nativeCurved) failures.push("native: no native curved label was sampled (the variant exists to exercise them)");
     if (pixelCounted && pixelWithin / pixelCounted < TOL.registerShare) failures.push(`pixel: ${pixelCounted - pixelWithin}/${pixelCounted} glyphs shifted > ${TOL.registerPx} device px or missing (${missingGlyphs} missing; ${((pixelWithin / pixelCounted) * 100).toFixed(2)}% within, need ${TOL.registerShare * 100}%; p95 ${v.summary.pixel.p95}, max ${v.summary.pixel.max})`);
