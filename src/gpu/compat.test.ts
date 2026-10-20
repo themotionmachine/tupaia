@@ -10,6 +10,7 @@ import {
   forgetCompatClone,
   LADDER_HEADROOM,
   LADDER_STEPS,
+  ladderEstimate,
   ladderFit,
   ladderScale,
   ladderStart
@@ -85,5 +86,18 @@ describe("world raster ladder", () => {
     // never below 0, and level 0 stays at 0
     expect(ladderStart(0, bytes, 1 << 30)).toBe(0);
     expect(ladderStart(0, bytes, 1 << 20)).toBe(0);
+  });
+
+  it("estimates a fresh world loop's level from an earlier frame's bytes, without headroom (W4 RESUME)", () => {
+    const bytes = 60 << 20; // measured at level 4: 240 MiB at the base
+    expect(ladderEstimate(4, bytes, 240 << 20)).toBe(0);
+    // coarser than the earlier frame when the room shrank, sharper when it grew
+    expect(ladderEstimate(4, bytes, 50 << 20)).toBe(ladderFit(240 << 20, 50 << 20, 0));
+    expect(ladderEstimate(4, bytes, 50 << 20)).toBeGreaterThan(4);
+    expect(ladderEstimate(4, bytes, 150 << 20)).toBeLessThan(4);
+    // at most the room, at the sharpest such level
+    const level = ladderEstimate(4, bytes, 150 << 20);
+    expect((240 << 20) * ladderScale(level) ** 2).toBeLessThanOrEqual(150 << 20);
+    expect((240 << 20) * ladderScale(level - 1) ** 2).toBeGreaterThan(150 << 20);
   });
 });

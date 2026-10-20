@@ -278,6 +278,13 @@ describe("compat reuse tracker: what a change dirties", () => {
     expect(dirt.evaluate(runs, false, named, new Set(["glow"])).every(why => /named by a stylesheet/.test(why))).toBe(
       true
     );
+    // W4 RESUME: only the runs the naming rules reach, when the caller knows (prepare.ts styleReach); unknown: every run
+    const reach = (id: string) => (id === "glow" ? (i: number) => i === 0 : null);
+    const scoped = dirt.evaluate(runs, false, named, new Set(["glow"]), undefined, reach);
+    expect(scoped[0]).toMatch(/named by a stylesheet/);
+    expect(scoped.slice(1).every(why => why === "")).toBe(true);
+    const unknown = dirt.evaluate(runs, false, named, new Set(["glow"]), undefined, () => null);
+    expect(unknown.every(why => /named by a stylesheet/.test(why))).toBe(true);
   });
 
   it("notes definitions outside #map in one epoch, and prunes them", () => {
@@ -450,6 +457,23 @@ describe("compat reuse: stylesheets", () => {
       () => false
     );
     expect([...state.references].sort()).toEqual(["blur", "oceanPattern"]);
+  });
+
+  it("scopes each named id to the selectors of the plain rules naming it (W4 RESUME)", () => {
+    const media = {
+      cssText: "@media screen { #rivers { mask: url(#land); } }",
+      media: { mediaText: "screen" },
+      cssRules: [rule("#rivers", "mask: url(#land)")]
+    };
+    const font = { cssText: '@font-face { font-family: X; src: url("#font"); }' };
+    const state = styleState(
+      [sheet([rule("#landmass", "mask: url(#land)"), rule("#texture, #statesBody", "mask: url(#land)"), media, font])],
+      () => false
+    );
+    expect(state.scopes.get("land")).toEqual(["#landmass", "#texture, #statesBody", "#rivers"]);
+    expect(state.scopes.get("font")).toBeNull();
+    // a rule scoped to the live #map styles no clone element: it neither names nor scopes
+    expect(styleState([sheet([rule("svg#map #x", "fill: url(#paint)")])], () => false).scopes.has("paint")).toBe(false);
   });
 
   it("keys whether each media query holds, not only its text (resize, color-scheme flip)", () => {

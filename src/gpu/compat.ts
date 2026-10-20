@@ -445,8 +445,19 @@ export function ladderFit(bytes: number, room: number, from: number): number {
 // would reach with the previous frame's world bytes (measured at `from`) when that is higher (sharper): level 0 when
 // they fit the room there, else the ladder fit under LADDER_HEADROOM. Without it a reused frame never steps back up.
 export function ladderStart(from: number, bytes: number, room: number): number {
+  return Math.min(from, ladderEstimate(from, bytes, room * LADDER_HEADROOM, room));
+}
+
+// The sharpest level at which `bytes`, measured at level `from`, fit `room` (level 0 when they fit `base` there).
+// prepare.ts starts a world loop that cuts every raster afresh here when an earlier frame of the same world says how
+// many bytes its rasters took (W4 RESUME), with no LADDER_HEADROOM: the loop applies it when it steps down. Without it
+// the loop starts at level 0 and, past the room, resamples everything it holds: a heightmap resume at k 1 cut its first
+// parity runs at 2 px per unit and threw half of those pixels away. An estimate from the earlier content: new rasters
+// that do not fit still step down, and new content much smaller than the old can leave the frame a rung coarser than a
+// loop from level 0 would.
+export function ladderEstimate(from: number, bytes: number, room: number, base = room): number {
   const atBase = bytes / ladderScale(from) ** 2;
-  return Math.min(from, atBase <= room ? 0 : ladderFit(atBase, room * LADDER_HEADROOM, 0));
+  return atBase <= base ? 0 : ladderFit(atBase, room, 0);
 }
 
 // Crops a decoded raster to its non-transparent pixels plus 1 px transparent padding and returns the world rect of the

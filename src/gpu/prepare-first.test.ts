@@ -331,6 +331,15 @@ describe("first-frame details (prepareFrame level)", () => {
     expect(cuts).toEqual(["run0"]);
   });
 
+  it("skips a prepare behind the SVG (a restore, a resume hold): the settle refinement sharpens it", async () => {
+    const gpu = device(0);
+    const { prepared } = sharpFrame([10]);
+    cuts.length = 0;
+    expect(await firstDetails(prepared, { ...firstCtx(gpu), behind: "restore" }, 0, false)).toBe("restore");
+    expect(await firstDetails(prepared, { ...firstCtx(gpu), behind: "resume hold" }, 0, false)).toBe("resume hold");
+    expect(cuts).toEqual([]);
+  });
+
   it("stays within the steady room left once the frame (carried details included) and the reserve are counted", async () => {
     const run = async (carried: number) => {
       const gpu = device(5_000_000); // the previous frame, still tracked: only what this pass allocates is spent
