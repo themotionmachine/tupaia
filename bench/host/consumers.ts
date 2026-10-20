@@ -260,7 +260,7 @@ const idle = (page: Page, arm: Arm, allowSuspended = false): Promise<Status> => 
 // idle plus a record of how long the renderer took to settle (and whether it did): the judge fails a gpu arm that never settled
 async function settled(run: ArmRun, page: Page, label: string, allowSuspended = false): Promise<Status> {
   const status = await idle(page, run.arm, allowSuspended);
-  ((run.facts.settle ??= []) as unknown[]).push({ label, waitedMs: status.waitedMs ?? null, waitError: status.waitError ?? null, state: status.state, active: status.active, fallbackReason: status.fallbackReason });
+  ((run.facts.settle ??= []) as unknown[]).push({ label, waitedMs: status.waitedMs ?? null, waitError: status.waitError ?? null, state: status.state, active: status.active, fallbackReason: status.fallbackReason, refinementPending: status.refinementPending ?? null });
   return status;
 }
 // stop the trade caravans, which keep invalidating the gpu scene (a prepare of the parity world takes tens of seconds)
@@ -1056,7 +1056,7 @@ function judgeWorld(world: string, svgRun: ArmRun, gpuRun: ArmRun): Check[] {
   }
   const settleLog = (gpuRun.facts.settle ?? []) as Array<{ label: string; waitedMs: number | null; waitError: string | null }>;
   const unsettled = settleLog.filter(x => x.waitError);
-  checks.push(verdict(!unsettled.length, "run", tag("run.gpu-settles"), "the gpu renderer settled (no prepare, refinement or suspension left pending) after every world change and dialog", unsettled.map(x => `${x.label}: ${x.waitError}`).join(" | ")));
+  checks.push(verdict(!unsettled.length, "run", tag("run.gpu-settles"), "the gpu renderer settled on a current frame (D12: no prepare or suspension left pending; refinement not awaited) after every world change and dialog", unsettled.map(x => `${x.label}: ${x.waitError}`).join(" | ")));
   const slowest = [...settleLog].sort((a, b) => (b.waitedMs ?? 0) - (a.waitedMs ?? 0)).slice(0, 4);
   checks.push(info("run", tag("run.gpu-settle-times"), "slowest times for the gpu renderer to settle", slowest.map(x => `${x.label} ${((x.waitedMs ?? 0) / 1000).toFixed(1)}s`).join(", ")));
   const gpuFinal = gpuRun.facts.final;

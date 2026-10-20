@@ -24,6 +24,7 @@
       refinementPending: !!g?.refinementPending,
       moving: !!g?.moving,
       canvasVisible: !!g?.canvasVisible,
+      coverage: g?.windows?.coverage ?? null,
       suspendedReason: g?.suspendedReason || "",
       sourceCurrent: g?.sourceCurrent ?? null,
       frames: g?.frames ?? null,
@@ -32,8 +33,11 @@
   };
 
   /**
-   * Let the app and (for the gpu arm) the renderer finish: fonts, relief and burg rasters, then a presented frame with
-   * no prepare or refinement pending. `allowSuspended` accepts a renderer that is deliberately suspended (a dialog is open).
+   * Let the app and (for the gpu arm) the renderer finish: fonts, relief and burg rasters, then the current frame on
+   * screen (D12: every DOM revision in it, no prepare pending, inside its bitmap windows). The refined (sharpened) frame
+   * is not waited for: no probe reads GPU pixels, and refinement only redraws compat detail (W3 LIFE3; waiting for it
+   * cost up to ~50 s per settle on the parity world). `refinementPending` in the result reports it.
+   * `allowSuspended` accepts a renderer that is deliberately suspended (a dialog is open).
    * Resolves with the status, never throws, so the caller can record a fallback instead of aborting the run.
    */
   C.idle = async ({ gpu, allowSuspended = false, timeoutMs = 240000 } = {}) => {
@@ -59,11 +63,11 @@
         suspendedSince ||= Date.now();
         if (Date.now() - suspendedSince > 3000) return { ...s, waitError: `renderer suspended (${s.suspendedReason})`, waitedMs: Date.now() - started };
       } else suspendedSince = 0;
-      const settled = s.state === "active" && !s.pending && !s.refinementPending && !s.moving;
-      if (settled && (allowSuspended ? true : s.canvasVisible)) {
+      const current = x => x.state === "active" && !x.pending && !x.moving && x.coverage !== "missing";
+      if (current(s) && (allowSuspended ? true : s.canvasVisible)) {
         await raf2();
         const again = C.status();
-        if (again.state === "active" && !again.pending && !again.refinementPending && !again.moving) return { ...again, waitedMs: Date.now() - started };
+        if (current(again)) return { ...again, waitedMs: Date.now() - started };
       }
       await sleep(50);
     }
