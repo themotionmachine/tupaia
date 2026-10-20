@@ -6,14 +6,20 @@ vi.mock("../io/export", () => ({ prepareMapClone }));
 
 import { cropRegion } from "./budget";
 import {
+  type BatchMember,
   gridWindow,
   liveBounds,
   measureBounds,
+  newWindowStats,
+  planBatches,
+  rasterizeWindowed,
   reachesFilter,
   touchesOpenEdge,
   transformBox,
   union,
-  WINDOW_PAD_UNITS
+  WINDOW_PAD_PX,
+  WINDOW_PAD_UNITS,
+  WindowBatches
 } from "./compat-bounds";
 
 const svgNs = "http://www.w3.org/2000/svg";
@@ -108,6 +114,34 @@ describe("geometry bounds", () => {
     expect(liveBounds([empty], viewbox)).toEqual({ x0: 0, y0: 0, x1: 0, y1: 0 });
   });
 
+  // COST2 item 4: a round-capped dot (a zero-length subpath) measures 0x0 but paints its cap; left out, a dot apart from
+  // the rest of its run fell outside the window and was lost
+  it("keeps a zero-size box of an element that can paint a point, not of one that paints nothing", () => {
+    const viewbox = shape({ x: 0, y: 0, width: 0, height: 0 }, matrix(0, 0));
+    const at = (tag: string, attrs: Record<string, string>, bbox: { x: number; y: number }) => {
+      const element = document.createElementNS(svgNs, tag);
+      for (const [name, value] of Object.entries(attrs)) element.setAttribute(name, value);
+      Object.assign(element, { getBBox: () => ({ ...bbox, width: 0, height: 0 }), getScreenCTM: () => matrix(0, 0) });
+      return element;
+    };
+    const body = shape({ x: 10, y: 10, width: 5, height: 5 }, matrix(0, 0));
+    const dot = at("path", { d: "M300 200z", "stroke-linecap": "round" }, { x: 300, y: 200 });
+    const p = WINDOW_PAD_UNITS;
+    expect(liveBounds([body, dot], viewbox)).toEqual({ x0: 10 - p, y0: 10 - p, x1: 300 + p, y1: 200 + p });
+    // a group holding only a dot measures 0x0 too
+    const group = at("g", {}, { x: 40, y: 50 });
+    group.append(document.createElementNS(svgNs, "line"));
+    expect(liveBounds([group], viewbox)).toEqual({ x0: 40 - p, y0: 50 - p, x1: 40 + p, y1: 50 + p });
+    // an empty path, an empty group, a zero-size rect or circle paint nothing: no box
+    const nothing = [
+      at("path", {}, { x: 0, y: 0 }),
+      at("path", { d: "" }, { x: 0, y: 0 }),
+      at("g", {}, { x: 0, y: 0 }),
+      at("circle", { r: "0" }, { x: 5, y: 5 })
+    ];
+    expect(liveBounds([body, ...nothing], viewbox)).toEqual({ x0: 10 - p, y0: 10 - p, x1: 15 + p, y1: 15 + p });
+  });
+
   it("is unknown (null) when a measurement fails", () => {
     const viewbox = shape({ x: 0, y: 0, width: 0, height: 0 }, matrix(0, 0));
     const broken = shape({ x: 0, y: 0, width: 1, height: 1 }, null);
@@ -180,5 +214,94 @@ describe("filters make a run unbounded", () => {
     expect(reachesFilter([get("c")])).toBe(true); // the element's own style
     expect(reachesFilter([get("b")])).toBe(false);
     expect(reachesFilter([get("d"), get("e")])).toBe(false);
+  });
+});
+
+describe("missed and batched windows (COST2)", () => {
+  const full = { x: 0, y: 0, width: 1000, height: 500 };
+  const member = (box: { x0: number; y0: number; x1: number; y1: number } | null, tag = "circle"): BatchMember => ({
+    clones: [document.createElementNS(svgNs, tag)],
+    bounds: box
+  });
+
+  it("a run whose box misses the region is transparent without a decode", async () => {
+    const stats = newWindowStats();
+    const result = await rasterizeWindowed({
+      clone: document.createElementNS(svgNs, "svg") as SVGSVGElement,
+      clones: [document.createElementNS(svgNs, "circle")],
+      full,
+      width: 1000,
+      height: 500,
+      cssScale: 1,
+      stats,
+      bounds: { x0: 2000, y0: 0, x1: 2100, y1: 10 }
+    });
+    expect(result).toBeNull();
+    expect(stats.missed).toBe(1);
+    expect(stats.pixels).toBe(0);
+  });
+
+  it("groups pairwise disjoint windows, keeps only batches of two or more, in order", () => {
+    // windows are padded by WINDOW_PAD_PX raster pixels (1 px per unit here)
+    const gap = 2 * WINDOW_PAD_PX + 1;
+    const runs: [string, BatchMember][] = [
+      ["a", member({ x0: 10, y0: 10, x1: 20, y1: 20 })],
+      ["b", member({ x0: 20 + gap, y0: 10, x1: 30 + gap, y1: 20 })], // clear of a
+      ["c", member({ x0: 15, y0: 15, x1: 25, y1: 25 })], // overlaps a: next batch
+      ["d", member({ x0: 400, y0: 300, x1: 410, y1: 310 })], // clear of all: first batch
+      ["e", member(null)], // unbounded: never batched
+      ["f", member({ x0: 0, y0: 0, x1: 0, y1: 0 })], // empty box: rasterizeWindowed cuts it in full
+      ["g", member({ x0: 5000, y0: 0, x1: 5010, y1: 10 })], // missed
+      ["h", member({ x0: 0, y0: 0, x1: 900, y1: 450 })] // most of the raster: cut in full
+    ];
+    const batches = planBatches(runs, full, 1000, 500);
+    expect(batches.map(batch => batch.map(item => item.key))).toEqual([["a", "b", "d"]]);
+    // c alone in its batch is dropped (no shared decode to gain)
+    const more = planBatches([...runs, ["i", member({ x0: 600, y0: 10, x1: 610, y1: 20 })]], full, 1000, 500);
+    expect(more.map(batch => batch.map(item => item.key))).toEqual([["a", "b", "d", "i"]]);
+    const two = planBatches(
+      [...runs, ["j", member({ x0: 16, y0: 16, x1: 18, y1: 18 })], ["k", member({ x0: 700, y0: 20, x1: 705, y1: 25 })]],
+      full,
+      1000,
+      500
+    );
+    // j overlaps a and c: a third batch; k joins the first one
+    expect(two.map(batch => batch.map(item => item.key))).toEqual([["a", "b", "d", "k"]]);
+  });
+
+  it("never lets a batch's union outgrow the pixel cap", () => {
+    const runs: [string, BatchMember][] = [
+      ["a", member({ x0: 10, y0: 10, x1: 20, y1: 20 })],
+      ["b", member({ x0: 900, y0: 400, x1: 910, y1: 410 })],
+      ["c", member({ x0: 60, y0: 10, x1: 70, y1: 20 })]
+    ];
+    // a and b span almost the whole raster; with a small cap b cannot join a's batch
+    const batches = planBatches(runs, full, 1000, 500, 100 * 100);
+    expect(batches.map(batch => batch.map(item => item.key))).toEqual([["a", "c"]]);
+  });
+
+  it("does not batch a filtered run (its reach is not bounded by its geometry)", () => {
+    const filtered = member({ x0: 300, y0: 10, x1: 310, y1: 20 });
+    filtered.clones[0].setAttribute("filter", "url(#blur)");
+    const batches = planBatches(
+      [
+        ["a", member({ x0: 10, y0: 10, x1: 20, y1: 20 })],
+        ["f", filtered],
+        ["b", member({ x0: 600, y0: 10, x1: 610, y1: 20 })]
+      ],
+      full,
+      1000,
+      500
+    );
+    expect(batches.map(batch => batch.map(item => item.key))).toEqual([["a", "b"]]);
+  });
+
+  it("hands a run outside every batch back to the caller", async () => {
+    const cuts = new WindowBatches(
+      { clone: document.createElementNS(svgNs, "svg") as SVGSVGElement, full, width: 1000, height: 500, cssScale: 1 },
+      [["a", member(null)]]
+    );
+    expect(cuts.size).toBe(0);
+    expect(await cuts.take("a")).toBeUndefined();
   });
 });

@@ -39,7 +39,15 @@ import {
   scaleRaster,
   stampedClone
 } from "./compat";
-import { type Box, measureBounds, newWindowStats, rasterizeWindowed, type WindowStats } from "./compat-bounds";
+import {
+  type BatchMember,
+  type Box,
+  measureBounds,
+  newWindowStats,
+  rasterizeWindowed,
+  WindowBatches,
+  type WindowStats
+} from "./compat-bounds";
 import {
   type CompatRoot,
   compatShapes,
@@ -56,10 +64,12 @@ import {
 import {
   compatDirt,
   documentStyle,
+  type ReuseNode,
   referenceClosure,
   releaseShared,
   retain,
   type StyleState,
+  sameExternals,
   sharedReleaser
 } from "./compat-reuse";
 import type { GpuDevice, TextureSource, TrackedBuffer, TrackedTexture } from "./device";
@@ -158,6 +168,9 @@ interface CompatRun {
   // world run: the world box its live geometry reaches (compat-bounds.ts measureBounds; null: unbounded), measured once
   // per frame at the frame's revision
   bounds?: Box | null;
+  // live elements outside the definitions its raster paints through, by id (compat-reuse.ts referenceClosure), as of
+  // the prepare that cut or reused it
+  externals?: Map<string, ReuseNode>;
 }
 
 // Per-prepare compat reuse (telemetry). `reasons` counts dirty runs by why they were dirty (at most 8 distinct).
@@ -1129,6 +1142,38 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
         live: run.elements
       });
     };
+    // World runs still to cut at the current level share decodes where their windows are disjoint (compat-bounds.ts
+    // WindowBatches): planned when the first of them is cut, again after the level steps down the ladder.
+    let shared: { resolution: number; cuts: WindowBatches<CompatRun> } | null = null;
+    const disposeShared = async () => shared?.cuts.dispose();
+    const batched = async (run: CompatRun, source: SVGSVGElement, w: number, h: number, cssScale: number) => {
+      if (run.screen) return undefined;
+      if (shared?.resolution !== resolution) {
+        await shared?.cuts.dispose();
+        const done = new Set([...cut, ...kept]);
+        const pending = [
+          run,
+          ...worldRuns.filter(
+            other => other !== run && !done.has(other) && adopted.get(other)?.level !== level && other.bounds
+          )
+        ];
+        const resolved = resolveManyInClone(
+          pending.flatMap(other => other.elements),
+          source
+        );
+        const members: [CompatRun, BatchMember][] = [];
+        let at = 0;
+        for (const other of pending) {
+          const clones = resolved.slice(at, at + other.elements.length);
+          at += other.elements.length;
+          if (clones.some(item => typeof item === "string")) continue;
+          members.push([other, { clones: clones as Element[], live: other.elements, bounds: other.bounds ?? null }]);
+        }
+        const args = { clone: source, full: ctx.world, width: w, height: h, cssScale, stats: windowStats };
+        shared = { resolution, cuts: new WindowBatches(args, members) };
+      }
+      return shared.cuts.take(run);
+    };
     const rasterize = async (run: CompatRun): Promise<boolean> => {
       const source = await cloneNow();
       if (ctx.stale()) return false;
@@ -1154,7 +1199,9 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
       // raster px per live CSS px: a world raster is cut at `ratio` px per unit for CSS px per unit ≈ bucket / dpr
       // (the reuse key holds the bucket, not the exact zoom); a screen raster at dpr px per CSS px
       const cssScale = run.screen ? ctx.screen.dpr : (ratio * ctx.screen.dpr) / ctx.bucket;
-      const cropped = await cutRun(run, source, resolved as Element[], region, w, h, cssScale);
+      const cropped =
+        (await batched(run, source, w, h, cssScale)) ??
+        (await cutRun(run, source, resolved as Element[], region, w, h, cssScale));
       if (ctx.stale()) {
         if (cropped) cropped.canvas.width = cropped.canvas.height = 0;
         return false;
@@ -1261,6 +1308,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
       level = next;
       resolution = ladder ? base * ladderScale(level) : resolution * scale;
     }
+    await disposeShared();
     for (const { run, canvas, rect } of held) {
       run.slot.texture = device.texture(run.screen ? "compat screen" : "compat world", canvas);
       if (!run.screen) textures.push(run.slot.texture);
@@ -1532,6 +1580,22 @@ function adoptRuns(device: GpuDevice, svg: SVGSVGElement, runs: CompatRun[], pre
   const now = compatDirt.now();
   let detailBytes = 0;
   const carried = new Set<ImageBatch["detail"]>();
+  // What each run paints through (referenceClosure), recorded on every run: a definition change dirties only the runs
+  // that name it, and a later frame reuses a run's raster only while its live external references are the same elements
+  const document = svg.ownerDocument;
+  const closures = new Map<CompatRun, ReturnType<typeof referenceClosure>>();
+  const closureOf = (run: CompatRun) => {
+    let closure = closures.get(run);
+    if (!closure) {
+      closure = referenceClosure(run.elements as unknown as Parameters<typeof referenceClosure>[0], id =>
+        document.getElementById(id)
+      );
+      closures.set(run, closure);
+      run.externals = closure.externals;
+    }
+    return closure;
+  };
+  if (style) for (const run of runs) closureOf(run);
   if (style && previous?.runs.length) {
     const before = new Map<Element, CompatRun>();
     for (const run of previous.runs) before.set(run.elements[0], run);
@@ -1549,22 +1613,27 @@ function adoptRuns(device: GpuDevice, svg: SVGSVGElement, runs: CompatRun[], pre
       else if (previous.styleKey !== style.key) count("stylesheets");
       else pairs.push({ run, old });
     }
-    const document = svg.ownerDocument;
-    // what each run paints through: a definition change dirties only the runs that name it
-    const closures = pairs.map(({ run }) =>
-      referenceClosure(run.elements as unknown as Parameters<typeof referenceClosure>[0], id =>
-        document.getElementById(id)
-      )
-    );
+    const closures = pairs.map(({ run }) => closureOf(run));
     const verdicts = compatDirt.evaluate(
       pairs.map(pair => pair.old),
       !!style.structural,
       closures.map(closure => closure.ids),
-      style.references
+      style.references,
+      closures.map(closure => [...closure.externals.values()])
     );
     pairs.forEach(({ run, old }, i) => {
-      const external = verdicts[i] || closures[i].external;
-      if (external) count(verdicts[i] || `reference ${external}`);
+      // a live element the run paints through (the states halo clips by #stateN paths): watched by the tracker while
+      // it is the same element inside svg#map (the tracker sees only svg#map records), else never reused
+      const { externals, external } = closures[i];
+      const outside = [...externals].find(([, node]) => !svg.contains(node as unknown as Node));
+      const why =
+        verdicts[i] ||
+        (outside
+          ? `reference #${outside[0]}`
+          : sameExternals(old.externals, externals)
+            ? ""
+            : `reference ${external} replaced`);
+      if (why) count(why);
       else {
         if (run.screen) report.screenClean++;
         else report.worldClean++;
@@ -1768,6 +1837,7 @@ export async function refineCompat(
   const windowStats = newWindowStats();
   prepared.compat.refineWindows = windowStats;
   let refined = false;
+  let shared: WindowBatches<CompatRun> | null = null;
   // every run this pass may cut, measured in one batch: one restyle at most (measureBounds)
   const viewbox = runs[0]?.elements[0]?.closest?.("#viewbox"); // absent on partial test elements
   if (viewbox)
@@ -1814,17 +1884,29 @@ export async function refineCompat(
     // the detail is cut at device density: dpr raster px per live CSS px, over the run's window of the visible raster
     // a kept detail dropped above: measured now
     if (viewbox) measureBounds([run], viewbox);
-    let cropped = await rasterizeWindowed({
+    // COST2: the runs this pass may still cut share decodes where their windows are disjoint (WindowBatches)
+    shared ??= refineBatches(
+      runs.slice(runs.indexOf(run)),
+      kept,
       clone,
-      clones: resolved as Element[],
-      full: visible,
-      width: pixels.width,
-      height: pixels.height,
-      cssScale: ctx.screen?.dpr ?? 1, // absent in partial test contexts
-      stats: windowStats,
-      bounds: run.bounds ?? null,
-      live: run.elements
-    });
+      visible,
+      pixels,
+      ctx.screen?.dpr ?? 1,
+      windowStats
+    );
+    let cropped =
+      (await shared.take(run)) ??
+      (await rasterizeWindowed({
+        clone,
+        clones: resolved as Element[],
+        full: visible,
+        width: pixels.width,
+        height: pixels.height,
+        cssScale: ctx.screen?.dpr ?? 1, // absent in partial test contexts
+        stats: windowStats,
+        bounds: run.bounds ?? null,
+        live: run.elements
+      }));
     if (ctx.stale()) {
       if (cropped) cropped.canvas.width = cropped.canvas.height = 0;
       return false;
@@ -1860,7 +1942,38 @@ export async function refineCompat(
       cropped.canvas.width = cropped.canvas.height = 0;
     }
   }
+  await shared?.dispose();
   return refined;
+}
+
+// The batches a refinement pass cuts from (compat-bounds.ts WindowBatches): `runs` from the first one it cuts, without
+// the details it may keep. A run the pass then skips (out of room, past FIRST_DETAIL_MS) leaves its cut unused.
+function refineBatches(
+  runs: readonly CompatRun[],
+  kept: ReadonlySet<CompatRun>,
+  clone: SVGSVGElement,
+  visible: Region,
+  pixels: { width: number; height: number },
+  cssScale: number,
+  stats: WindowStats
+): WindowBatches<CompatRun> {
+  const pending = runs.filter(run => !kept.has(run) && run.bounds);
+  const resolved = resolveManyInClone(
+    pending.flatMap(run => run.elements),
+    clone
+  );
+  const members: [CompatRun, BatchMember][] = [];
+  let at = 0;
+  for (const run of pending) {
+    const clones = resolved.slice(at, at + run.elements.length);
+    at += run.elements.length;
+    if (clones.some(item => typeof item === "string")) continue;
+    members.push([run, { clones: clones as Element[], live: run.elements, bounds: run.bounds ?? null }]);
+  }
+  return new WindowBatches(
+    { clone, full: visible, width: pixels.width, height: pixels.height, cssScale, stats },
+    members
+  );
 }
 
 // Floors both sides so the scaled bytes never exceed `fit²` of the source; null when nothing would remain.

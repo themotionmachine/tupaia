@@ -1059,10 +1059,11 @@ export class GpuRenderer {
   }
 
   // A definition the map references changed outside svg#map (definitions.ts): a static revision. No record of it
-  // reaches the net-change test, so a suspension it lands in is judged by the revision rule.
+  // reaches the net-change test, so a suspension it lands in is judged by the revision rule. The compat reuse tracker
+  // sees the same records through watchCompatInputs and dirties only the runs that paint through the changed ids
+  // (COST2: marking every run here re-cut all 29 parity world runs whenever a COA arrived on zoom).
   private definitionChanged(reason: string): void {
     this.net.fail(reason);
-    compatDirt.all(reason);
     this.invalidations.last = reason;
     this.traceJob("revision", reason)();
     this.invalidate(false);
