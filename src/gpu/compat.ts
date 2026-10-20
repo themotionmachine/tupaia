@@ -182,6 +182,85 @@ export function liftGroupOpacity(viewbox: Element, elements: Iterable<Element>):
   };
 }
 
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+// The one <canvas> a <foreignObject> hosts (the heightmap editor's #heights, the manual-assignment paint overlay), or
+// null when it hosts anything else.
+function hostedCanvas(host: Element): HTMLCanvasElement | null {
+  const children = [...host.children];
+  const canvas = children[0];
+  return children.length === 1 && canvas.tagName.toLowerCase() === "canvas" ? (canvas as HTMLCanvasElement) : null;
+}
+
+const cssLength = (value: string | undefined, fallback: string) => {
+  const match = /^\s*([\d.]+)(px)?\s*$/.exec(value ?? "");
+  return match ? match[1] : fallback;
+};
+
+// A <foreignObject> must never reach the decoded SVG image: Chrome taints the canvas it is drawn into, and the texture
+// upload then fails ("Tainted canvases may not be loaded") and the whole frame falls back. A clone's canvas is blank
+// anyway (cloneNode copies no pixels). Each foreignObject inside a kept clone element whose live counterpart (same
+// index among the element's foreignObjects) hosts one <canvas> becomes an <image> of that live canvas's pixels (a data
+// URL, the only image source an SVG image may load), laid out over the canvas's CSS box; every other foreignObject left
+// in the clone is detached for the serialization. Returns the undo. `encode` is injectable for tests.
+export function bridgeForeignObjects(
+  clone: Element,
+  kept: readonly Element[],
+  live: readonly Element[] | undefined,
+  encode: (canvas: HTMLCanvasElement) => string = canvas => canvas.toDataURL()
+): () => void {
+  const all = [...clone.querySelectorAll("foreignObject")];
+  if (!all.length) return () => {};
+  const swaps: [Element, Element][] = [];
+  const handled = new Set<Element>();
+  const within = (element: Element) => [
+    ...(element.tagName === "foreignObject" ? [element] : []),
+    ...element.querySelectorAll("foreignObject")
+  ];
+  kept.forEach((element, i) => {
+    const source = live?.[i];
+    if (!source) return;
+    const copies = within(element);
+    const originals = within(source);
+    if (copies.length !== originals.length) return;
+    copies.forEach((copy, j) => {
+      const canvas = hostedCanvas(originals[j]);
+      if (!canvas?.width || !canvas.height) return;
+      let href: string;
+      try {
+        href = encode(canvas);
+      } catch {
+        return; // a tainted live canvas: detached below like any other foreignObject
+      }
+      const image = clone.ownerDocument.createElementNS(SVG_NS, "image");
+      for (const name of ["x", "y", "transform", "opacity", "style", "class"]) {
+        const value = copy.getAttribute(name);
+        if (value !== null) image.setAttribute(name, value);
+      }
+      image.setAttribute("width", cssLength(canvas.style?.width, copy.getAttribute("width") ?? "0"));
+      image.setAttribute("height", cssLength(canvas.style?.height, copy.getAttribute("height") ?? "0"));
+      image.setAttribute("preserveAspectRatio", "none");
+      image.setAttribute("href", href);
+      swaps.push([copy, image]);
+      handled.add(copy);
+    });
+  });
+  const removed: [Element, Node, Node | null][] = [];
+  for (const [copy, image] of swaps) copy.replaceWith(image);
+  for (const host of all)
+    if (!handled.has(host) && host.parentNode) {
+      removed.push([host, host.parentNode, host.nextSibling]);
+      host.remove();
+    }
+  return () => {
+    for (let i = removed.length - 1; i >= 0; i--) {
+      const [host, parent, next] = removed[i];
+      parent.insertBefore(host, next);
+    }
+    for (const [copy, image] of swaps) image.replaceWith(copy);
+  };
+}
+
 function decode(markup: string, width: number, height: number): Promise<HTMLCanvasElement> {
   const url = URL.createObjectURL(new Blob([markup], { type: "image/svg+xml;charset=utf-8" }));
   return new Promise((resolve, reject) => {
@@ -204,6 +283,34 @@ function decode(markup: string, width: number, height: number): Promise<HTMLCanv
   });
 }
 
+// Mask and clip rects sized in viewport percentages (#water and #fog: x 0, y 0, width and height 100%) resolve against
+// the live svg#map viewport (the window, svgWidth x svgHeight) in the masked element's user space, so on a map larger
+// than the window the live SVG masks everything past world x svgWidth / y svgHeight. A raster's document has its own
+// size and viewBox (the run's region), where they resolved against the region instead: the GPU drew the water-masked
+// texture over the whole 1680x849 demo map where SVG stops at 1280x720 (corpus demo-v1.112 texture over16 9.3%), and a
+// settle detail (region = the view) would mask differently again. Pins them to the live viewport for serialization.
+// Returns an undo function.
+export function pinViewportPercentages(clone: Element, width: number, height: number): () => void {
+  const changed: [Element, string, string][] = [];
+  if (!(width > 0) || !(height > 0)) return () => {};
+  for (const rect of clone.querySelectorAll("mask rect, clipPath rect"))
+    for (const [name, size] of [
+      ["x", width],
+      ["y", height],
+      ["width", width],
+      ["height", height]
+    ] as const) {
+      const value = rect.getAttribute(name);
+      const match = value?.trim().match(/^([-+]?(?:\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?)%$/i);
+      if (!value || !match) continue;
+      changed.push([rect, name, value]);
+      rect.setAttribute(name, String((Number(match[1]) / 100) * size));
+    }
+  return () => {
+    for (let i = changed.length - 1; i >= 0; i--) changed[i][0].setAttribute(changed[i][1], changed[i][2]);
+  };
+}
+
 // World runs render a world region with the #viewbox transform removed; screen runs (overlays outside #viewbox)
 // render the svg viewport as-is. The clone is restored after serialization so it can serve the next run.
 export async function rasterizeRun(
@@ -218,7 +325,9 @@ export async function rasterizeRun(
   // whose stroke and dashes the #coordinates grid uses) keeps its live size. Before, the document was its pixel size:
   // the regiment glow and the coordinate grid came out at half width at dpr 2. Plain content renders identically
   // (Chrome rasterizes an SVG image at its destination size).
-  cssScale = 1
+  cssScale = 1,
+  // the live elements `elements` were resolved from (same order): the pixels of a canvas a <foreignObject> hosts
+  live?: readonly Element[]
 ): Promise<HTMLCanvasElement> {
   const viewbox = clone.querySelector("#viewbox");
   if (!viewbox) throw new Error("clone without #viewbox");
@@ -231,7 +340,11 @@ export async function rasterizeRun(
   let markup: string;
   let undoDefinitions = () => {};
   let undoOpacity = () => {};
+  let undoForeign = () => {};
+  let undoPercent = () => {};
   try {
+    // before the raster's own size and viewBox replace the live viewport the percentages resolve against
+    undoPercent = pinViewportPercentages(clone, Number(saved[0][1]), Number(saved[1][1]));
     if (!screen) {
       viewbox.removeAttribute("transform");
       undoOpacity = liftGroupOpacity(viewbox, elements);
@@ -243,8 +356,11 @@ export async function rasterizeRun(
     clone.setAttribute("preserveAspectRatio", "none");
     clone.removeAttribute("filter");
     undoDefinitions = isolateEmblemDefinitions(clone);
+    undoForeign = bridgeForeignObjects(clone, elements, live);
     markup = new XMLSerializer().serializeToString(clone);
   } finally {
+    undoForeign();
+    undoPercent();
     undoOpacity();
     undoDefinitions();
     undo();

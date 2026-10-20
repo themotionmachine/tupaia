@@ -10,6 +10,7 @@ import { normalizeZoneHatching } from "@/renderers/zone-hatching";
 import { connectVertices, ensureEl, getBase64, getCoordinates, getGridPolygon, rn, unique } from "@/utils";
 import { compactEmblemCloneStyles } from "../renderers/emblems/styles";
 import { cloneFonts, fontFace } from "./export-fonts";
+import { computedStyleText } from "./inline-style";
 
 type MapSelection = Selection<SVGSVGElement, unknown, null, undefined>;
 
@@ -607,27 +608,7 @@ function inlineStyle(clone: MapSelection): void {
   // #prec text: the wind arrows' size and shadow come from an index.css rule on the text itself (#prec text), which a
   // detached clone (export, GPU compat raster) would otherwise lose: they came out at the default font size
   clone.selectAll<SVGElement, unknown>("g, #ruler *, #scaleBar > text, #prec text").each(function () {
-    const compStyle = window.getComputedStyle(this);
-    let style = "";
-
-    for (let i = 0; i < compStyle.length; i++) {
-      const key = compStyle[i];
-      const value = compStyle.getPropertyValue(key);
-
-      if (key === "cursor") continue; // cursor should be default
-      if (this.hasAttribute(key)) continue; // don't add style if there is the same attribute
-      if (value === baseline(key)) continue;
-      style += `${key}:${value};`;
-    }
-
-    for (const key in compStyle) {
-      const value = compStyle.getPropertyValue(key);
-
-      if (key === "cursor") continue; // cursor should be default
-      if (this.hasAttribute(key)) continue; // don't add style if there is the same attribute
-      if (value === baseline(key)) continue;
-      style += `${key}:${value};`;
-    }
+    const style = computedStyleText(this, window.getComputedStyle(this), baseline);
 
     if (style !== "") {
       if (sequential) this.setAttribute("style", style);
