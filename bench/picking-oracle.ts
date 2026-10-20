@@ -184,6 +184,12 @@ export const MIN_RATE = 0.995;
 // from the cohort gate and reported separately, with a strict all-samples tally beside the gate.
 export const EDGE_BAND_PX = 0.25;
 export const EDGE_RING = 8; // probe directions on the band circle
+// The band is gated too, at a looser rate, so it cannot hide a hit-shape regression smaller than the band: a GPU
+// polygon 0.2 px too narrow or wide, or a thin element missing from the index, sends its mismatches into the band, and
+// this floor catches them. Per world, every band sample together must agree at >= BAND_MIN_RATE, and every band cohort
+// with n >= MIN_COHORT must too. Calibrated on picking-20261020T102047-287Z (Metal): bands 170/171, 294/298, 477/483;
+// river band 83/83, 222/225, 346/351 (lowest 98.6%).
+export const BAND_MIN_RATE = 0.97;
 
 // What clicked()'s DOM branches make of one probe hit; canvas fallbacks collapse to one key (they are not vector edges).
 export function ringKey(desc: ChainDesc | null): string {
@@ -241,6 +247,30 @@ export function cohortGate(
     if (status === "insufficient" && required) failures.push(`${kind} n=${n} < ${MIN_COHORT}`);
   }
   if (!opts.valid) failures.push("rejected: scene changed or GPU not ready during sampling");
+  return { cohorts, failures };
+}
+
+// The edge-band floor for one world: `all` counts every band sample (agree includes agree-none), `kinds` the band
+// samples per cohort (tally). Same valid/settled rules as cohortGate; a band cohort below MIN_COHORT is reported only.
+export function edgeBandGate(
+  all: { n: number; agree: number },
+  kinds: Record<string, KindTally>,
+  opts: { valid: boolean; settled: boolean }
+): { cohorts: Record<string, CohortVerdict>; failures: string[] } {
+  const cohorts: Record<string, CohortVerdict> = {};
+  const failures: string[] = [];
+  if (!opts.valid) return { cohorts, failures };
+  const gating = opts.settled;
+  if (gating && all.n && all.agree / all.n < BAND_MIN_RATE)
+    failures.push(`edge band ${all.agree}/${all.n} = ${((100 * all.agree) / all.n).toFixed(2)}% < ${BAND_MIN_RATE * 100}%`);
+  for (const [kind, t] of Object.entries(kinds)) {
+    if (kind === "none") continue;
+    const n = t.expected + t.extra + t.wrongInto;
+    const rate = n ? t.agree / n : null;
+    const status: CohortStatus = !gating ? "reported" : n < MIN_COHORT ? "insufficient" : t.agree / n >= BAND_MIN_RATE ? "pass" : "fail";
+    cohorts[kind] = { n, agree: t.agree, rate, required: false, status };
+    if (status === "fail") failures.push(`edge band ${kind} ${t.agree}/${n} = ${((100 * t.agree) / n).toFixed(2)}% < ${BAND_MIN_RATE * 100}%`);
+  }
   return { cohorts, failures };
 }
 

@@ -123,9 +123,6 @@ function ancestorAt(element: Element, steps: number): Element | null {
   return node;
 }
 
-const sameClass = (a: Classified | null, b: Classified) =>
-  !!a && a.kind === b.kind && a.id === b.id && a.branch === b.branch;
-
 // x, y: SVG-local CSS px (the gpuPick convention).
 export function selectAt(sources: SelectionSources, x: number, y: number, tolerance = 0): GpuSelection {
   const unavailable = sources.unavailable?.() ?? null;
@@ -139,20 +136,26 @@ export function selectAt(sources: SelectionSources, x: number, y: number, tolera
   const direct = element ? classifyElement(element, hit?.depth) : null;
   const base = { target: null, relief: null, hit, world };
   // An anonymous leaf (hit.depth) is indexed under its [id] ancestor: the branch and id are the leaf's. The target is
-  // the live leaf found by the hit's child-index path, re-checked here: exactly `depth` steps below the ancestor and
-  // classified the same. Anything else (no path, DOM moved) leaves the target null rather than handing the editor
-  // the ancestor or a sibling.
+  // the live leaf found by the hit's child-index path, re-checked here: exactly `depth` steps below the ancestor. When
+  // it resolves, the live leaf decides, classified at depth 0 like clicked()'s own target: its tag (a #markets fill or
+  // border <path> has no branch, so clicked() falls through to pickBurg/pickRelief) and its anonymous ancestors' data
+  // (the goodsBurgs <g data-id> sits between the leaf and its [id] ancestor). Anything else (no path, DOM moved)
+  // keeps the ancestry classification with a null target rather than handing the editor the ancestor or a sibling.
+  let passThrough = false;
   if (direct && hit?.depth && direct.branch !== "terrain") {
-    const leaf = sources.leaf?.(hit, element!) ?? null;
-    const ok = leaf && ancestorAt(leaf, hit.depth) === element && sameClass(classifyElement(leaf), direct);
-    return { ...direct, ...base, via: "index", target: ok ? leaf : null };
+    const found = sources.leaf?.(hit, element!) ?? null;
+    const leaf = found && ancestorAt(found, hit.depth) === element ? found : null;
+    if (!leaf) return { ...direct, ...base, via: "index", target: null };
+    const live = classifyElement(leaf);
+    if (live) return { ...live, ...base, via: "index", target: leaf };
+    passThrough = true;
   }
   // A materialized relief glyph (an id-less <use>, indexed under the #terrain group): clicked()'s terrain branch,
   // ahead of the fallbacks. An exact pick instance resolved to its live <use> is the target, keyed like
   // editReliefIcon's "(id)|href@x,y"; otherwise (unsupported symbol, stale index) the hit is reported unsupported
   // rather than given the group as a target or passed through.
   const glyph = direct?.branch === "terrain" && (!direct.id || element!.id === "terrain");
-  if (direct && !glyph) return { ...direct, ...base, via: "index", target: element };
+  if (direct && !glyph && !passThrough) return { ...direct, ...base, via: "index", target: element };
   if (glyph || (hit?.layer === "terrain" && !element)) {
     const use = hit && hit.instance !== undefined ? (sources.glyph?.(hit) ?? null) : null;
     const info = hit && hit.instance !== undefined ? (sources.glyphInfo?.(hit) ?? null) : null;

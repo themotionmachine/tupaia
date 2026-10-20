@@ -1369,14 +1369,21 @@ const DEFS: Record<string, CheckDef> = {
             world: r.world,
             errors: r.errors?.length ?? 0,
             semanticMismatches: r.semantic?.mismatches?.length ?? null,
-            pickP95Ms: round(Math.max(...((r.views as Json[] | undefined) ?? []).map(v => Number(v.query?.pickMs?.p95) || 0)), 2),
+            pickP95Ms: r.views?.length
+              ? round(Math.max(...(r.views as Json[]).map(v => Number(v.query?.pickMs?.p95) || 0)), 2)
+              : null,
             cohorts:
               r.gate?.cohorts &&
               Object.fromEntries(
                 Object.entries(r.gate.cohorts as Record<string, Json>).map(([k, c]) => [k, `${c.agree}/${c.n} ${c.status}${c.required ? "*" : ""}`])
               ),
             cells: r.gate?.cells && `${r.gate.cells.agree}/${r.gate.cells.n} ${r.gate.cells.pass ? "pass" : "fail"}`,
-            edgeBand: r.gate?.edgeBand && { px: r.gate.edgeBand.px, excluded: r.gate.edgeBand.excluded, agree: r.gate.edgeBand.agree },
+            edgeBand: r.gate?.edgeBand && {
+              px: r.gate.edgeBand.px,
+              excluded: r.gate.edgeBand.excluded,
+              agree: r.gate.edgeBand.agree,
+              failures: r.gate.edgeBand.failures
+            },
             strictFailures: r.gate?.strict?.failures,
             failures: r.gate?.failures
           }))

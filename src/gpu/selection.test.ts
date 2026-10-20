@@ -204,6 +204,34 @@ describe("selectAt", () => {
     expect(resolveLeaf(map, [0])).toBeNull();
   });
 
+  it("classifies the resolved live leaf of a depth > 0 hit: market paths fall through, goodsBurgs read their <g>", () => {
+    const withData = (el: Element, id: string) =>
+      Object.assign(el, { getAttribute: (n: string) => (n === "data-id" ? id : null) });
+    const leafOf = (h: PickHit, ancestor: Element) => resolveLeaf(ancestor, h.path!);
+    // #markets > g#market4[data-id=4] > (path fill, path border, text): indexed under g#market4 at depth 1
+    const marketG = withData(node("g", "market4", [node("path", ""), node("path", ""), node("text", "")]), "4");
+    node("svg", "map", [node("g", "viewbox", [node("g", "markets", [marketG])])]);
+    const at = (leaf: Element, depth: number) => () => ({ ...hit(marketG.id), depth, path: leafPath(leaf, depth)! });
+    const fill = marketG.children[0];
+    const fallback = { fallbacks: true, pickBurg: () => 7 };
+    expect(
+      selectAt(sources({ pick: at(fill, 1), element: () => marketG, leaf: leafOf, ...fallback }), 1, 1)
+    ).toMatchObject({ kind: "burg", id: "7", via: "pickBurg" });
+    const label = marketG.children[2];
+    const text = selectAt(sources({ pick: at(label, 1), element: () => marketG, leaf: leafOf, ...fallback }), 1, 1);
+    expect(text).toMatchObject({ kind: "market", id: "4", branch: "markets", via: "index" });
+    expect(text.target).toBe(label);
+    // #goodsBurgs > g[data-id=9] (no id) > text: indexed under #goodsBurgs at depth 2; the id is the <g>'s data-id
+    const burgG = withData(node("g", "", [node("text", "")]), "9");
+    const goodsBurgs = node("g", "goodsBurgs", [burgG]);
+    node("svg", "map", [goodsBurgs]);
+    const goodsLeaf = burgG.children[0];
+    const pick = () => ({ ...hit("goodsBurgs"), depth: 2, path: leafPath(goodsLeaf, 2)! });
+    const goods = selectAt(sources({ pick, element: () => goodsBurgs, leaf: leafOf }), 1, 1);
+    expect(goods).toMatchObject({ kind: "market", id: "9", branch: "goodsBurgs", via: "index" });
+    expect(goods.target).toBe(goodsLeaf);
+  });
+
   it("prefers a selectable index hit and keeps the raw hit, consulting no fallback", () => {
     const label = chain(["g", "labels"], ["g", "states"], ["text", "stateLabel1"]);
     const calls: string[] = [];

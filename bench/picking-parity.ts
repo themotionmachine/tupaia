@@ -16,8 +16,9 @@
 //   the run fails (route is gated wherever it reaches 50). Raw gpuPick agreement is reported only.
 // - Edge band (disclosed, PICK_EDGE_BAND CSS px, default EDGE_BAND_PX; 0 = strict): pass A also probes EDGE_RING points
 //   on a circle of that radius; a sample whose clicked() outcome changes there sits on a boundary Blink only
-//   approximates (Skia stroke outline vs the true offset) and is excluded from the cohort gate. row.gate.strict keeps
-//   the all-samples verdicts (reported) and row.gate.edgeBand the excluded counts.
+//   approximates (Skia stroke outline vs the true offset) and is excluded from the cohort gate. The band has its own
+//   floor (BAND_MIN_RATE: the world's band and every band cohort with n>=50), so a hit-shape change smaller than the
+//   band still fails. row.gate.strict keeps the all-samples verdicts (reported), row.gate.edgeBand the band verdicts.
 // - Views: one world is sampled at up to PICK_VIEWS cameras at zoom k (planViews: the primary camera, then windows on
 //   the required kinds the earlier ones show too few of); each view has its own quiet window, guard and passes.
 // - Targeted cohorts come from each element's own geometry, never from hit testing: fill points by isPointInFill,
@@ -41,8 +42,10 @@ import {
   classifyClick,
   cohortGate,
   compareSelections,
+  BAND_MIN_RATE,
   EDGE_BAND_PX,
   EDGE_RING,
+  edgeBandGate,
   inEdgeBand,
   COMPARABLE,
   MIN_COHORT,
@@ -173,7 +176,7 @@ const report: any = {
       "TradeAnimation.stop() in setup, MutationObserver on #map, #terrain FNV hash + child count, relief revision, prepared GPU scene, " +
       "camera, pickRelief call counter, sampled targets still connected; any change rejects the view and its world",
     gpu: "window.gpuSelect(svg-local CSS px, tolerance 0) = PickIndex hit classified like clicked() + its fallbacks; raw gpuPick reported",
-    gate: `D3: semantic outcome per cohort, n>=${MIN_COHORT} at >=${MIN_RATE * 100}%; required cohorts ${REQUIRED.join(",")} on ${REQUIRED_WORLDS.join(",")}; edge band ${edgeBand} CSS px excluded (strict tally reported); cells exact outside the band`,
+    gate: `D3: semantic outcome per cohort, n>=${MIN_COHORT} at >=${MIN_RATE * 100}%; required cohorts ${REQUIRED.join(",")} on ${REQUIRED_WORLDS.join(",")}; edge band ${edgeBand} CSS px gated apart at >=${BAND_MIN_RATE * 100}% (world and band cohorts n>=${MIN_COHORT}; strict tally reported); cells exact outside the band`,
     cells: "findCell at GPU camera world vs brute-force nearest pack.cells.p at SVG CTM world (CPU, no GPU id buffer)",
     required: REQUIRED,
     requiredWorlds: REQUIRED_WORLDS,
@@ -1320,6 +1323,9 @@ try {
       const strict = cohortGate(tally(pairs(eligible)), { valid, settled: phase === "settled", required });
       const banded = eligible.filter(s => s.edge);
       const bandKinds = tally(pairs(banded));
+      const bandAgree = banded.filter(s => s.semanticOutcome === "agree" || s.semanticOutcome === "agree-none").length;
+      // the band is gated at its own floor (BAND_MIN_RATE), so a sub-band hit-shape regression cannot hide in it
+      const band = edgeBandGate({ n: banded.length, agree: bandAgree }, bandKinds, { valid, settled: phase === "settled" });
       const cellsPass = valid && phase === "settled" && row.cells.gated > 0 && row.cells.agree === row.cells.gated;
       row.gate = {
         cohorts: verdict.cohorts,
@@ -1327,10 +1333,13 @@ try {
         edgeBand: {
           px: edgeBand,
           excluded: banded.length,
-          agree: banded.filter(s => s.semanticOutcome === "agree" || s.semanticOutcome === "agree-none").length,
+          agree: bandAgree,
+          minRate: BAND_MIN_RATE,
           kinds: Object.fromEntries(
             Object.entries(bandKinds).map(([kind, t]) => [kind, { n: t.expected + t.extra + t.wrongInto, agree: t.agree }])
-          )
+          ),
+          cohorts: band.cohorts,
+          failures: band.failures
         },
         strict: {
           note: "every eligible sample, edge band included; reported only",
@@ -1339,8 +1348,8 @@ try {
           ),
           failures: strict.failures
         },
-        failures: [...verdict.failures, ...(phase === "settled" && valid && !cellsPass ? [`cells ${row.cells.agree}/${row.cells.gated}`] : [])],
-        note: `D3: actual = window.gpuSelect; a cohort with n>=${MIN_COHORT} needs >=${MIN_RATE * 100}%; n = expected + extra + wrongInto; samples within the ${edgeBand} CSS px edge band excluded (strict = all)`
+        failures: [...verdict.failures, ...band.failures, ...(phase === "settled" && valid && !cellsPass ? [`cells ${row.cells.agree}/${row.cells.gated}`] : [])],
+        note: `D3: actual = window.gpuSelect; a cohort with n>=${MIN_COHORT} needs >=${MIN_RATE * 100}%; n = expected + extra + wrongInto; samples within the ${edgeBand} CSS px edge band gated separately at >=${BAND_MIN_RATE * 100}% per world and per band cohort with n>=${MIN_COHORT} (strict = all, reported)`
       };
       row.semantic = {
         note: "actual = window.gpuSelect (src/gpu/selection.ts); oracle unchanged",
@@ -1457,7 +1466,12 @@ const summary = {
     })),
     counts: r.counts,
     cohorts: r.gate && Object.fromEntries(Object.entries(r.gate.cohorts).map(([k, c]) => [k, cohortLine(c)])),
-    edgeBand: r.gate?.edgeBand && { px: r.gate.edgeBand.px, excluded: r.gate.edgeBand.excluded, agree: r.gate.edgeBand.agree },
+    edgeBand: r.gate?.edgeBand && {
+      px: r.gate.edgeBand.px,
+      excluded: r.gate.edgeBand.excluded,
+      agree: r.gate.edgeBand.agree,
+      cohorts: Object.fromEntries(Object.entries(r.gate.edgeBand.cohorts ?? {}).map(([k, c]) => [k, cohortLine(c)]))
+    },
     strict: r.gate?.strict && Object.fromEntries(Object.entries(r.gate.strict.cohorts).map(([k, c]: [string, any]) => [k, cohortLine({ ...c, status: c.wouldBe })])),
     cells: r.gate?.cells,
     gateFailures: r.gate?.failures,

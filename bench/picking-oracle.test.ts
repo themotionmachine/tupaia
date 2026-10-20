@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import {
   bisectorDistance,
   classifyClick,
+  BAND_MIN_RATE,
   cohortGate,
   compareSelections,
+  edgeBandGate,
   inEdgeBand,
   mulberry32,
   normalizeGpu,
@@ -127,6 +129,27 @@ test("cohortGate gates every cohort with n >= 50 and fails a short required coho
   assert.equal(rejected.cohorts.river.status, "rejected");
   assert.equal(rejected.failures.length, 1);
   assert.ok(REQUIRED.includes("regiment") && REQUIRED.includes("ice") && !REQUIRED.includes("route"));
+});
+
+test("edgeBandGate floors the world's band and every band cohort with n >= 50", () => {
+  const t = (expected: number, agree: number) => ({ expected, agree, missing: expected - agree, wrong: 0, extra: 0, wrongInto: 0 });
+  assert.equal(BAND_MIN_RATE, 0.97);
+  // picking-20261020T102047-287Z 100k: band 477/483, river band 346/351 -> pass
+  const ok = edgeBandGate({ n: 483, agree: 477 }, { river: t(351, 346), relief: t(40, 36) }, { valid: true, settled: true });
+  assert.deepEqual(ok.failures, []);
+  assert.equal(ok.cohorts.river.status, "pass");
+  assert.equal(ok.cohorts.relief.status, "insufficient"); // n < 50: reported only
+  // a sub-band hit-shape regression: every river band sample moves to the other side
+  const narrow = edgeBandGate({ n: 483, agree: 300 }, { river: t(351, 170) }, { valid: true, settled: true });
+  assert.deepEqual(narrow.failures.map(f => f.split(" ").slice(0, 3).join(" ")), ["edge band 300/483", "edge band river"]);
+  // a band cohort can fail while the world's band passes
+  const one = edgeBandGate({ n: 1000, agree: 990 }, { river: t(100, 95) }, { valid: true, settled: true });
+  assert.equal(one.failures.length, 1);
+  assert.equal(one.cohorts.river.status, "fail");
+  assert.deepEqual(edgeBandGate({ n: 10, agree: 0 }, { river: t(100, 0) }, { valid: true, settled: false }).failures, []);
+  assert.equal(edgeBandGate({ n: 10, agree: 0 }, { river: t(100, 0) }, { valid: true, settled: false }).cohorts.river.status, "reported");
+  assert.deepEqual(edgeBandGate({ n: 10, agree: 0 }, {}, { valid: false, settled: true }).failures, []); // cohortGate rejects
+  assert.deepEqual(edgeBandGate({ n: 0, agree: 0 }, {}, { valid: true, settled: true }).failures, []); // band 0 = strict
 });
 
 test("planViews adds windows on the scarce kinds, clamped inside the map, deterministically", () => {
