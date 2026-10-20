@@ -60,7 +60,8 @@ export type Step =
   | { op: "open"; button: string; expect?: Expect; note?: string }
   // Set a form control (by id, or any selector under the page) and fire its event. `checked` drives a checkbox.
   // `uiOnly`: the control sets editor state that no model/DOM/canvas change shows by itself (a brush size)
-  | ({ op: "input"; value?: string | number; checked?: boolean; event?: "input" | "change"; uiOnly?: boolean; note?: string } & Control)
+  // `mustChange` is accepted for readability: an input that is not `uiOnly` must change something anyway (see the rule below)
+  | ({ op: "input"; value?: string | number; checked?: boolean; event?: "input" | "change"; uiOnly?: boolean; mustChange?: boolean; note?: string } & Control)
   // Click a button: by id, or by a Playwright selector (e.g. `.ui-dialog-buttonset button:has-text("Keep")`).
   // `mustChange`: the recording must show the click changed the model or the model DOM (an undo that undoes nothing
   // proves nothing). `dom`: click through the DOM (el.click()) instead of a pointer click, for a control in the
@@ -272,6 +273,14 @@ export function checkGpuStep(step: StepObservation, arm: Arm, resumeLimitMs: num
  * restore the defaults, apply), changed nothing on screen; a model change with no DOM trace (options, notes) cannot
  * make the frame differ from the SVG. Without a step before the open to compare with, any step's DOM delta or model
  * change since the previous close counts, as before.
+ *
+ * Limits (W3b HARNESS):
+ * - The net-unchanged exemption needs the base step's GPU frame to be settled (`base.gpu.pending === false`). If the
+ *   frame was already behind at the step before the open, a stale frame older than that step would pass any net-unchanged
+ *   session, so such a base gets no exemption and the close is judged as changing.
+ * - The base is the last step before the FIRST step with a dialog open. A script that edits in a customization mode (the
+ *   heightmap editor, the template editor) before any dialog opens has those edits folded into the base: they are not part
+ *   of the judged session, so a stale frame after them is only caught by the revision rule (checkGpuStep), not here.
  */
 export function checkStaleResume(steps: StepObservation[]): string[] {
   const out: string[] = [];
@@ -284,7 +293,7 @@ export function checkStaleResume(steps: StepObservation[]): string[] {
     previous = step;
     if (step.op !== "close") continue;
     const changed = base
-      ? !sameHashes(base.dom, step.dom) || DEFINITION_MODEL.some(key => base!.model[key] !== step.model[key])
+      ? base.gpu?.pending !== false || !sameHashes(base.dom, step.dom) || DEFINITION_MODEL.some(key => base!.model[key] !== step.model[key])
       : touched;
     const stale = step.resume?.staleShown ?? 0;
     if (changed && stale) {
