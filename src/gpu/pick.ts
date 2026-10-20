@@ -64,12 +64,90 @@ export interface HitShape {
   stroke?: { rings: ArrayLike<number>[]; closed: boolean[]; halfWidth: number; cap?: StrokeCap };
   box?: ArrayLike<number>;
   clip?: ArrayLike<number>;
-  // Text cells: Chrome hit-tests SVG text with the 1×1 CSS px square whose top-left is the pointer, not the point, so a
-  // cell is hit up to one CSS px left of and above its extent (measured: P3-TEXT-MARKER-PICKING.md). Convex rings only.
-  square?: boolean;
+  // Text cells: Chrome hit-tests axis-aligned SVG text cells with the bounding box of its hit-test location, not the point
+  // (P3-TEXT-MARKER-PICKING.md; the rule: HitLocation below). `true`: the cells are the axis-aligned boxes of the fill
+  // rings in index space. An object: the same cells in the text's own user space (`boxes`, [x0, y0, x1, y1] each, already
+  // grown to the 1/64 LayoutUnit grid) and the inverse local-to-parent transforms of every non-identity level from the
+  // index space down to it (`frames`, outermost first: a nested marker <svg>'s viewBox, a transformed <g>, the text's own
+  // transform), along which the location's box is carried exactly as Blink carries it.
+  square?: boolean | { frames: Matrix[]; boxes: number[][] };
   depth?: number; // see PickHit.depth
   path?: readonly number[] | null; // see PickHit.path
 }
+
+// A 2D affine [a, b, c, d, e, f] (x' = a·x + c·y + e, y' = b·x + d·y + f), as SVGMatrix orders it.
+export type Matrix = readonly [number, number, number, number, number, number];
+
+// Blink's point hit-test location (core/layout/hit_test_location.cc, svg/transformed_hit_test_location.cc): the exact
+// point plus a LayoutUnit bounding box, [x0, y0, x1, y1]. elementFromPoint starts it as the 1×1 CSS px box whose top-left
+// is the point floored to the 1/64 grid. Every SVG object with a non-identity local-to-parent transform (the #viewbox
+// camera, a nested <svg> viewport, a transformed <g> or <text>) maps it into its own space: the point exactly, and the
+// box through the inverse transform; a mapped box narrower or shorter than 1 unit is kept, grown outward to the 1/64
+// grid (EnclosingRect), otherwise it restarts as a fresh 1×1 box at the floored mapped point. Text items are hit when
+// this box *strictly* overlaps their LayoutUnit rect (PhysicalRect::Intersects: touching edges miss); fills, strokes
+// and rotated (textPath) glyph quads use the point alone. So at camera k > 1 the box is 1/k world units snapped outward to
+// the world 1/64 grid, at k 1 a 1-unit box at the floored world point, and inside a marker <svg> (viewBox 0 0 30 30,
+// a few world units wide) a fresh 1×1 box in the marker's own units. Coordinates are float32 as in gfx::PointF/RectF.
+export interface HitLocation {
+  x: number;
+  y: number;
+  box: [number, number, number, number];
+}
+
+const f32 = Math.fround;
+const floor64 = (v: number) => Math.floor(f32(v) * 64) / 64;
+const ceil64 = (v: number) => Math.ceil(f32(v) * 64) / 64;
+
+export function pointerLocation(x: number, y: number): HitLocation {
+  const px = f32(x);
+  const py = f32(y);
+  const x0 = floor64(px);
+  const y0 = floor64(py);
+  return { x: px, y: py, box: [x0, y0, x0 + 1, y0 + 1] };
+}
+
+const isIdentity = (m: Matrix) => m[0] === 1 && m[1] === 0 && m[2] === 0 && m[3] === 1 && m[4] === 0 && m[5] === 0;
+
+export function invertMatrix(m: Matrix): Matrix | null {
+  const det = m[0] * m[3] - m[1] * m[2];
+  if (!det || !Number.isFinite(det)) return null;
+  const a = m[3] / det;
+  const b = -m[1] / det;
+  const c = -m[2] / det;
+  const d = m[0] / det;
+  return [a, b, c, d, -(a * m[4] + c * m[5]), -(b * m[4] + d * m[5])];
+}
+
+// The location one level down: `inverse` maps the parent's space into the object's (its local-to-parent transform
+// inverted). An identity level is skipped, as Blink skips it.
+export function descendLocation(location: HitLocation, inverse: Matrix): HitLocation {
+  if (isIdentity(inverse)) return location;
+  const [a, b, c, d, e, f] = inverse;
+  const map = (x: number, y: number) => [a * x + c * y + e, b * x + d * y + f];
+  const x = f32(a * location.x + c * location.y + e);
+  const y = f32(b * location.x + d * location.y + f);
+  const [x0, y0, x1, y1] = location.box;
+  const corners = [map(x0, y0), map(x1, y0), map(x1, y1), map(x0, y1)];
+  const minX = f32(Math.min(...corners.map(p => p[0])));
+  const maxX = f32(Math.max(...corners.map(p => p[0])));
+  const minY = f32(Math.min(...corners.map(p => p[1])));
+  const maxY = f32(Math.max(...corners.map(p => p[1])));
+  if (f32(maxX - minX) < 1 || f32(maxY - minY) < 1)
+    return { x, y, box: [floor64(minX), floor64(minY), ceil64(maxX), ceil64(maxY)] };
+  return pointerLocation(x, y);
+}
+
+// The location in world space for an svg-local CSS px point under the #viewbox camera (translate(x y) scale(k)).
+export function worldLocation(camera: { k: number; x: number; y: number }, x: number, y: number): HitLocation {
+  const k = f32(camera.k);
+  const inverse = invertMatrix([k, 0, 0, k, f32(camera.x), f32(camera.y)]);
+  const start = pointerLocation(x, y);
+  return inverse ? descendLocation(start, inverse) : start;
+}
+
+// PhysicalRect::Intersects: a strict overlap, so a box that only touches the rect misses it.
+const boxesOverlap = (a: ArrayLike<number>, b: ArrayLike<number>, k = 0) =>
+  a[0] < b[k + 2] && b[k] < a[2] && a[1] < b[k + 3] && b[k + 1] < a[3];
 
 // Whether the axis-aligned square [x, x + s] × [y, y + s] meets the convex ring (separating axis test).
 export function squareMeetsConvex(x: number, y: number, s: number, ring: ArrayLike<number>): boolean {
@@ -132,7 +210,8 @@ interface Item {
   cap?: StrokeCap;
   instance: number | null;
   narrow: Narrowphase | null;
-  square: boolean;
+  // text cells hit by the location box (HitShape.square): their boxes in the text's space, 4 numbers each
+  square: { frames: Matrix[]; boxes: Float64Array } | null;
   depth: number;
   path: readonly number[] | null;
   minX: number;
@@ -425,7 +504,9 @@ export class PickIndex {
         0,
         clip
       );
-      this.items[index].square = !!shape.square;
+      const square = squareCells(shape.square, this.items[index].rings);
+      this.items[index].square = square;
+      if (square) this.coords += square.boxes.length;
     }
     if (shape.stroke?.rings.length) {
       const index = this.add(
@@ -449,9 +530,10 @@ export class PickIndex {
     this.entries = 0;
   }
 
-  // `pixel` = one CSS px in index units: the pointer square of `square` items (0 = point hit testing everywhere).
-  pickAll(x: number, y: number, tolerance = 0, pixel = 0): PickHit[] {
-    return this.candidates(x, y, Math.max(tolerance, pixel))
+  // `pixel`: how `square` items are hit. A HitLocation (worldLocation) is Blink's location box for the query; a number
+  // is the older approximation, a `pixel`-wide square whose top-left is (x, y) (0 = point hit testing everywhere).
+  pickAll(x: number, y: number, tolerance = 0, pixel: Pixel = 0): PickHit[] {
+    return this.candidates(x, y, reachOf(x, y, tolerance, pixel))
       .filter(i => this.hits(this.items[i], x, y, tolerance, pixel))
       .sort((a, b) => b - a)
       .map(i => this.hit(i));
@@ -459,8 +541,8 @@ export class PickIndex {
 
   // The topmost hit: candidates are tested top-down and the first hit returns, so the large low fills under a hit
   // (biomes, cells, ocean) are never ring-tested. Buckets hold item indices in insertion (paint) order.
-  pick(x: number, y: number, tolerance = 0, layer?: string, pixel = 0): PickHit | null {
-    const reach = Math.max(tolerance, pixel);
+  pick(x: number, y: number, tolerance = 0, layer?: string, pixel: Pixel = 0): PickHit | null {
+    const reach = reachOf(x, y, tolerance, pixel);
     const r0 = this.row(y - reach);
     const c0 = this.col(x - reach);
     const single = r0 === this.row(y + reach) && c0 === this.col(x + reach);
@@ -481,7 +563,7 @@ export class PickIndex {
 
   // Diagnostics only (bench): the broadphase candidates at (x, y) whose box contains it, topmost first, plus every item
   // of `ids`, each with its geometry, which rings contain the point and whether the item hits. Never used to select.
-  inspect(x: number, y: number, ids: string[] = [], pixel = 0) {
+  inspect(x: number, y: number, ids: string[] = [], pixel: Pixel = 0) {
     const round = (ring: ArrayLike<number>) => Array.from(ring, v => Math.round(v * 1000) / 1000);
     const near = this.candidates(x, y, 0).filter(i => {
       const item = this.items[i];
@@ -500,7 +582,7 @@ export class PickIndex {
           broadphase: near.includes(i),
           hit: this.hits(item, x, y, 0, pixel),
           narrow: !!item.narrow,
-          square: item.square,
+          square: item.square ? { frames: item.square.frames, boxes: Array.from(item.square.boxes) } : false,
           depth: item.depth,
           halfWidth: item.halfWidth,
           outline: item.outline,
@@ -558,7 +640,7 @@ export class PickIndex {
       outline: null,
       instance: null,
       narrow: null,
-      square: false,
+      square: null,
       depth: 0,
       path: null,
       minX: minX - pad,
@@ -603,8 +685,9 @@ export class PickIndex {
     return out;
   }
 
-  private hits(item: Item, x: number, y: number, tolerance: number, pixel = 0): boolean {
-    const reach = item.square ? pixel : 0; // the pointer square extends right and down from (x, y)
+  private hits(item: Item, x: number, y: number, tolerance: number, pixel: Pixel = 0): boolean {
+    if (item.square && typeof pixel === "object") return this.boxHits(item, x, y, tolerance, pixel);
+    const reach = item.square && typeof pixel === "number" ? pixel : 0; // the square extends right and down from (x, y)
     if (x + reach < item.minX - tolerance || x > item.maxX + tolerance) return false;
     if (y + reach < item.minY - tolerance || y > item.maxY + tolerance) return false;
     if (item.clip && !insideRings(x, y, [item.clip], false)) return false;
@@ -623,6 +706,21 @@ export class PickIndex {
     return item.rings.some((ring, k) => polylineDistance(x, y, ring, item.closed[k]) <= tolerance);
   }
 
+  // A text item under Blink's location box: the box carried down to the cells' space must strictly overlap a cell
+  // (no point fallback: a point on a cell's right or bottom edge misses there too). `tolerance` > 0 (hover queries)
+  // still widens the cells by that distance in index space.
+  private boxHits(item: Item, x: number, y: number, tolerance: number, location: HitLocation): boolean {
+    const [x0, y0, x1, y1] = location.box;
+    if (Math.max(x, x1) < item.minX - tolerance || Math.min(x, x0) > item.maxX + tolerance) return false;
+    if (Math.max(y, y1) < item.minY - tolerance || Math.min(y, y0) > item.maxY + tolerance) return false;
+    if (item.clip && !insideRings(x, y, [item.clip], false)) return false;
+    const { frames, boxes } = item.square!;
+    let local = location;
+    for (const inverse of frames) local = descendLocation(local, inverse);
+    for (let k = 0; k < boxes.length; k += 4) if (boxesOverlap(local.box, boxes, k)) return true;
+    return tolerance > 0 && item.rings.some(ring => polylineDistance(x, y, ring, true) <= tolerance);
+  }
+
   private hit(i: number): PickHit {
     const item = this.items[i];
     const hit: PickHit = { layer: item.layer, id: item.id, index: i, order: i };
@@ -631,4 +729,34 @@ export class PickIndex {
     if (item.path) hit.path = item.path;
     return hit;
   }
+}
+
+type Pixel = number | HitLocation;
+
+// Broadphase reach around (x, y) covering the tolerance and the location box (or the numeric pointer square).
+function reachOf(x: number, y: number, tolerance: number, pixel: Pixel): number {
+  if (typeof pixel === "number") return Math.max(tolerance, pixel);
+  const [x0, y0, x1, y1] = pixel.box;
+  return Math.max(tolerance, x - x0, x1 - x, y - y0, y1 - y, 0);
+}
+
+// The cell boxes of a square text item: given in the text's space, or (`true`) the boxes of its index-space rings.
+function squareCells(square: HitShape["square"], rings: Float64Array[]): Item["square"] {
+  if (!square) return null;
+  if (square !== true) return { frames: square.frames, boxes: Float64Array.from(square.boxes.flat()) };
+  const boxes = new Float64Array(rings.length * 4);
+  rings.forEach((ring, r) => {
+    let minX = Number.POSITIVE_INFINITY,
+      minY = Number.POSITIVE_INFINITY,
+      maxX = Number.NEGATIVE_INFINITY,
+      maxY = Number.NEGATIVE_INFINITY;
+    for (let k = 0; k < ring.length; k += 2) {
+      minX = Math.min(minX, ring[k]);
+      maxX = Math.max(maxX, ring[k]);
+      minY = Math.min(minY, ring[k + 1]);
+      maxY = Math.max(maxY, ring[k + 1]);
+    }
+    boxes.set([minX, minY, maxX, maxY], r * 4);
+  });
+  return { frames: [], boxes };
 }

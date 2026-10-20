@@ -14,7 +14,8 @@ import { normalizeDashes } from "./geometry";
 // Known approximations: <use> is its bbox (except a <use> of a viewBox <svg>, see useShapes), clip-path/mask are
 // ignored, strokes use round joins, per-tspan paint is taken from the <text>, non-scaling-stroke widths are not
 // compensated.
-import { type HitShape, leafPath } from "./pick";
+import { type HitShape, invertMatrix, leafPath, type Matrix } from "./pick";
+import { parseTransform } from "./relief-pick";
 import { parseDashes, pointsToPath } from "./scene";
 import { flattenPath, type Subpath } from "./svg-path";
 
@@ -64,9 +65,21 @@ export function pickDepth(element: { id: string; parentElement: unknown }): numb
 // Painted leaves as elementFromPoint can return them. <text> is the leaf for its tspans.
 const LEAVES = "path,circle,ellipse,rect,line,polyline,polygon,text,use,image";
 const UNPAINTED = "defs,clipPath,mask,pattern,symbol,marker";
-// world-space flattening tolerance (map units); the pick gate allows only a 1 css px edge band at zoom ≤ 8
-const WORLD_TOLERANCE = 0.01;
-export const PICK_TOLERANCE = WORLD_TOLERANCE;
+// Hit geometry flattening chord error, CSS px. Blink tests fills against the true curves (Skia), so every chord of our
+// flattened rings moves the hit edge inward on a convex arc: the picking gate's 0.25 CSS px edge band holds that
+// error at its 97% floor only while it stays a small fraction of the band (a fixed 0.01 world units was 0.04 CSS px at
+// k 4 and failed it: parity band 78/82, shared river band 85/88, W3 PICK).
+export const PICK_CSS_TOLERANCE = 0.01;
+// Map units at zoom 1 (and the default for callers without a camera: tests, screen overlays in CSS px).
+export const PICK_TOLERANCE = PICK_CSS_TOLERANCE;
+
+// The world-space flattening tolerance of a pick index prepared at raster `bucket` (device px per world unit, rounded up
+// to a power of two: scaleBucket) and `dpr`. The index is only rebuilt when the bucket changes, so the bound is taken
+// at the bucket's largest zoom (bucket / dpr CSS px per unit); past the top bucket (16) the camera's own zoom `k`.
+export function pickTolerance(bucket: number, dpr: number, k = 1): number {
+  const scale = Math.max(1, bucket / Math.max(dpr, 1e-6), k);
+  return PICK_CSS_TOLERANCE / scale;
+}
 
 // Stroke hit rings: fine for distance. A dashed stroke takes its on-dashes from the Skia-style chordal measure of the
 // true curve (dash-measure.ts), since Chrome's dash phase follows that measure (P3-SELECTION-GUARDS-AND-LAYERS.md).
@@ -209,6 +222,47 @@ export function layoutSnap(q: number[]): number[] {
   return [x0, y0, x1, y0, x1, y1, x0, y1];
 }
 
+// Blink's hit-test levels from the world (`viewbox`, whose screen CTM is `world`) down to `leaf`'s own user space: the
+// inverse local-to-parent transform of every object on the way whose transform is not the identity (a nested <svg>'s
+// x/y and viewBox, a <g> or the <text>'s own transform attribute), outermost first; HitLocation carries the pointer's
+// box along them. Entries are snapped to float32 (Blink's lengths) so a level that is the identity in Blink is skipped
+// here too. null when `leaf` is not below `viewbox`.
+export function hitFrames(
+  leaf: Node,
+  viewbox: unknown,
+  world: Affine,
+  ctms: Map<Node, Affine | null> = new Map()
+): Matrix[] | null {
+  const chain: Node[] = [];
+  let node: Node | null = leaf;
+  while (node && node !== viewbox) {
+    chain.push(node);
+    node = node.parentElement;
+  }
+  if (!node) return null;
+  const ctm = (n: Node) => {
+    if (n === viewbox) return world;
+    if (!ctms.has(n)) ctms.set(n, n.getScreenCTM?.() ?? null);
+    return ctms.get(n)!;
+  };
+  const snap = (v: number) => Math.fround(Math.abs(v) < 1e-9 ? 0 : Math.abs(v - 1) < 1e-9 ? 1 : v);
+  const frames: Matrix[] = [];
+  for (let k = chain.length - 1; k >= 0; k--) {
+    const parent = chain[k].parentElement;
+    const own = ctm(chain[k]);
+    const outer = parent ? ctm(parent) : null;
+    if (!own || !outer) return null;
+    const t = relative(outer, own);
+    const level: Matrix = [snap(t.a), snap(t.b), snap(t.c), snap(t.d), snap(t.e), snap(t.f)];
+    if (level[0] === 1 && level[1] === 0 && level[2] === 0 && level[3] === 1 && level[4] === 0 && level[5] === 0)
+      continue;
+    const inverse = invertMatrix(level);
+    if (!inverse) return null;
+    frames.push(inverse);
+  }
+  return frames;
+}
+
 // One user-space quad per addressable character: the cell from start to end position along the advance, with the
 // font's ascent/descent across it. Browsers report the cell's axis-aligned extent, so for rotated characters (text on
 // a path) the across-advance span and its offset from the baseline are recovered from that extent.
@@ -328,12 +382,67 @@ export function sensitivity(style: Style): { fill: boolean; stroke: boolean; box
 }
 
 // Hit geometry of a <use> that references an <svg> with a viewBox (the emblem COAs: <use width=1em href=#burgCOA1>
-// of <svg viewBox="0 10 200 200"> holding defs, a <g clip-path=shield> and the shield outline <path>): the top-level
-// painted children mapped through the viewBox into the use's viewport, then by `m` into the world. A child with a
-// clip-path is its clip shapes (the content is assumed to fill its clip, as a COA field does). Blink hits the
+// of <svg viewBox="0 10 200 200"> holding defs, a <g clip-path=shield> and the shield outline <path>): the painted
+// shapes of the instance, mapped through the viewBox into the use's viewport, then by `m` into the world. Blink hits the
 // instantiated shapes, so the transparent corners of the use's box are click-through; its bbox claimed them (PICK W3:
 // emblems over goods cells, lakes and relief). null = not this case (the caller keeps the bbox).
-function useShapes(leaf: Node, m: Affine): Pick<HitShape, "fill" | "stroke">[] | null {
+// - Each shape's pointer-events, visibility, fill, stroke and stroke-width resolve as in the <use> shadow tree: its own
+//   inline style or presentation attribute, else its nearest ancestor's within the referenced <svg>, else the <use>'s
+//   computed value (`inherited`); its sensitivity follows (SVG2 §15.6), so a stroke-only or pointer-events="none"
+//   ornament is not a fill. Stylesheet rules aimed at the referenced content are not modelled.
+// - `transform` attributes on groups and shapes inside the <svg> compose down the tree (rings and stroke widths).
+// - A node with a clip-path is its clip shapes (the content is assumed to fill its clip, as a COA field does), mapped by
+//   the clipPath's own transform and, for clipPathUnits="objectBoundingBox", by the clipped content's bounding box.
+const INHERITED = ["pointer-events", "visibility", "fill", "stroke", "stroke-width", "fill-rule"] as const;
+type Inherited = (typeof INHERITED)[number];
+const CSS_NAME: Record<Inherited, keyof Style> = {
+  "pointer-events": "pointerEvents",
+  visibility: "visibility",
+  fill: "fill",
+  stroke: "stroke",
+  "stroke-width": "strokeWidth",
+  "fill-rule": "fillRule"
+};
+
+// A property's own declared value on `node`: its inline style wins over its presentation attribute. null = none.
+function declared(node: Node, name: string): string | null {
+  const style = node.getAttribute?.("style");
+  if (style)
+    for (const rule of style.split(";")) {
+      const at = rule.indexOf(":");
+      if (at > 0 && rule.slice(0, at).trim().toLowerCase() === name) {
+        const value = rule
+          .slice(at + 1)
+          .replace(/!important/i, "")
+          .trim();
+        if (value) return value;
+      }
+    }
+  const value = node.getAttribute?.(name)?.trim();
+  return value || null;
+}
+
+const multiplyAffine = (m: Affine, n: Affine): Affine => ({
+  a: m.a * n.a + m.c * n.b,
+  b: m.b * n.a + m.d * n.b,
+  c: m.a * n.c + m.c * n.d,
+  d: m.b * n.c + m.d * n.d,
+  e: m.a * n.e + m.c * n.f + m.e,
+  f: m.b * n.e + m.d * n.f + m.f
+});
+
+// A `transform` attribute as an Affine (identity when absent); null when it does not parse.
+function ownTransform(node: Node): Affine | null {
+  const t = parseTransform(node.getAttribute?.("transform") ?? null);
+  return t && { a: t[0], b: t[1], c: t[2], d: t[3], e: t[4], f: t[5] };
+}
+
+function useShapes(
+  leaf: Node,
+  m: Affine,
+  tolerance: number,
+  inherited: Style | null
+): Pick<HitShape, "fill" | "stroke">[] | null {
   const doc = (leaf as unknown as { ownerDocument?: Document }).ownerDocument;
   const href = leaf.getAttribute?.("href") ?? leaf.getAttribute?.("xlink:href") ?? "";
   if (!doc?.getElementById || !href.startsWith("#")) return null;
@@ -362,47 +471,109 @@ function useShapes(leaf: Node, m: Affine): Pick<HitShape, "fill" | "stroke">[] |
     e: m.a * tx + m.c * ty + m.e,
     f: m.b * tx + m.d * ty + m.f
   };
-  const scale = Math.sqrt(Math.abs(view.a * view.d - view.b * view.c));
-  if (!(scale > 0)) return null;
-  const rings = (node: Node) => {
+  const scaleOf = (t: Affine) => Math.sqrt(Math.abs(t.a * t.d - t.b * t.c));
+  if (!(scaleOf(view) > 0)) return null;
+  const rings = (node: Node, t: Affine) => {
     const d = shapePath(node);
-    return d ? flattenPath(d, WORLD_TOLERANCE / scale).filter(s => s.points.length >= 2) : [];
+    const scale = scaleOf(t);
+    return d && scale > 0 ? flattenPath(d, tolerance / scale).filter(s => s.points.length >= 2) : [];
+  };
+  // the inherited property at `node`: declared on it or an ancestor up to the referenced <svg>, else the <use>'s
+  const resolve = (node: Node, name: Inherited): string | undefined => {
+    for (let n: Node | null = node; n; n = n.parentElement) {
+      const value = declared(n, name);
+      if (value && value !== "inherit") return value;
+      if (n === ref) break;
+    }
+    return inherited?.[CSS_NAME[name]] as string | undefined;
   };
   const parts: Pick<HitShape, "fill" | "stroke">[] = [];
   const children = (node: Node) => [...((node as unknown as { children?: Iterable<Node> }).children ?? [])];
-  const visit = (node: Node, depth: number) => {
+  // the object bounding box of `node`'s content in its own user space (its transform excluded), [x, y, w, h]
+  const contentBox = (node: Node): number[] | null => {
+    let minX = Number.POSITIVE_INFINITY,
+      minY = Number.POSITIVE_INFINITY,
+      maxX = Number.NEGATIVE_INFINITY,
+      maxY = Number.NEGATIVE_INFINITY;
+    const walk = (n: Node, at: Affine, top = false) => {
+      const tag = n.tagName.toLowerCase();
+      if (UNPAINTED.split(",").includes(tag)) return;
+      const own = top ? IDENTITY_AFFINE : ownTransform(n);
+      if (!own) return;
+      const here = multiplyAffine(at, own);
+      if (tag === "g") {
+        for (const child of children(n)) walk(child, here);
+        return;
+      }
+      for (const sp of rings(n, here))
+        for (let k = 0; k < sp.points.length; k += 2) {
+          const x = here.a * sp.points[k] + here.c * sp.points[k + 1] + here.e;
+          const y = here.b * sp.points[k] + here.d * sp.points[k + 1] + here.f;
+          minX = Math.min(minX, x);
+          maxX = Math.max(maxX, x);
+          minY = Math.min(minY, y);
+          maxY = Math.max(maxY, y);
+        }
+    };
+    walk(node, IDENTITY_AFFINE, true);
+    return minX <= maxX ? [minX, minY, maxX - minX, maxY - minY] : null;
+  };
+  const visit = (node: Node, t: Affine, depth: number) => {
     const tag = node.tagName.toLowerCase();
-    if (UNPAINTED.split(",").includes(tag) || node.getAttribute?.("display") === "none") return;
+    if (UNPAINTED.split(",").includes(tag) || declared(node, "display") === "none") return;
+    const own = ownTransform(node);
+    if (!own) return; // an unparseable transform: the element is not rendered
+    const here = multiplyAffine(t, own);
     const clip = /^url\(["']?#([^"')]+)["']?\)$/.exec(node.getAttribute?.("clip-path") ?? "");
     if (clip) {
       const region = doc.getElementById(clip[1]) as unknown as Node | null;
-      for (const shape of region ? children(region) : []) {
-        const subpaths = rings(shape);
+      if (!region) return;
+      // Blink (CalculateClipTransform): the clipPath's transform, then the bounding-box units mapping
+      let space = multiplyAffine(here, ownTransform(region) ?? IDENTITY_AFFINE);
+      if (region.getAttribute?.("clipPathUnits") === "objectBoundingBox") {
+        const box = contentBox(node);
+        if (!box || !(box[2] > 0 && box[3] > 0)) return;
+        space = multiplyAffine(space, { a: box[2], b: 0, c: 0, d: box[3], e: box[0], f: box[1] });
+      }
+      for (const shape of children(region)) {
+        const shapeSpace = multiplyAffine(space, ownTransform(shape) ?? IDENTITY_AFFINE);
+        const subpaths = rings(shape, shapeSpace);
         if (subpaths.length)
-          parts.push({ fill: { rings: subpaths.map(sp => transform(view, sp.points)), evenOdd: false } });
+          parts.push({ fill: { rings: subpaths.map(sp => transform(shapeSpace, sp.points)), evenOdd: false } });
       }
       return;
     }
-    if (tag === "g") {
-      if (depth < 2) for (const child of children(node)) visit(child, depth + 1);
+    if (tag === "g" || tag === "a" || tag === "switch") {
+      if (depth < 8) for (const child of children(node)) visit(child, here, depth + 1);
       return;
     }
-    const subpaths = rings(node);
+    const sense = sensitivity({
+      pointerEvents: resolve(node, "pointer-events") ?? "auto",
+      visibility: resolve(node, "visibility") ?? "visible",
+      display: "inline",
+      fill: resolve(node, "fill") ?? "black",
+      stroke: resolve(node, "stroke") ?? "none",
+      strokeWidth: resolve(node, "stroke-width") ?? "1"
+    });
+    if (!sense) return;
+    const subpaths = rings(node, here);
     if (!subpaths.length) return;
-    const ringsOf = () => subpaths.map(sp => transform(view, sp.points));
-    if (node.getAttribute?.("fill") !== "none")
-      parts.push({ fill: { rings: ringsOf(), evenOdd: node.getAttribute?.("fill-rule") === "evenodd" } });
-    const stroke = node.getAttribute?.("stroke");
-    if (stroke && stroke !== "none") {
-      const strokeWidth = node.getAttribute?.("stroke-width");
-      const w = strokeWidth == null ? 1 : Number.parseFloat(strokeWidth);
+    const ringsOf = () => subpaths.map(sp => transform(here, sp.points));
+    if (sense.fill || sense.box)
+      parts.push({ fill: { rings: ringsOf(), evenOdd: resolve(node, "fill-rule") === "evenodd" } });
+    if (sense.stroke) {
+      const w = Number.parseFloat(resolve(node, "stroke-width") ?? "1");
       if (w > 0)
-        parts.push({ stroke: { rings: ringsOf(), closed: subpaths.map(sp => sp.closed), halfWidth: (w / 2) * scale } });
+        parts.push({
+          stroke: { rings: ringsOf(), closed: subpaths.map(sp => sp.closed), halfWidth: (w / 2) * scaleOf(here) }
+        });
     }
   };
-  for (const child of children(ref)) visit(child, 0);
+  for (const child of children(ref)) visit(child, view, 0);
   return parts.length ? parts : null;
 }
+
+const IDENTITY_AFFINE: Affine = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
 
 // A <use> of one plain shape that carries no paint of its own (coastline and lake outlines: <use href=#feature_N> of
 // a bare <path> in #featurePaths): the instance is that shape at (x, y), painted with the use's inherited style, so
@@ -460,7 +631,11 @@ export type CompatRoot = Node & { querySelectorAll(selector: string): Iterable<N
 // at the nearest viewport, which for marker content is the nested <svg>, not the map.
 // Adjacent compatibility roots are converted in one synchronous chunk. Expose their owned culls together:
 // restoring one <use> before reading the next otherwise forces a fresh SVG layout for every root.
-export function compatShapesBatch(elements: CompatRoot[], viewbox: { getScreenCTM?(): Affine | null }): HitShape[][] {
+export function compatShapesBatch(
+  elements: CompatRoot[],
+  viewbox: { getScreenCTM?(): Affine | null },
+  tolerance = PICK_TOLERANCE
+): HitShape[][] {
   return withCanonicalEmblemPaint(() => {
     const exposed = new Map<Node, string>();
     try {
@@ -481,18 +656,27 @@ export function compatShapesBatch(elements: CompatRoot[], viewbox: { getScreenCT
           else leaf.setAttribute("class", value ?? "");
         }
       }
-      return elements.map(element => canonicalCompatShapes(element, viewbox));
+      return elements.map(element => canonicalCompatShapes(element, viewbox, tolerance));
     } finally {
       for (const [leaf, value] of exposed) leaf.setAttribute!("class", value);
     }
   });
 }
 
-export function compatShapes(element: CompatRoot, viewbox: { getScreenCTM?(): Affine | null }): HitShape[] {
-  return withCanonicalEmblemPaint(() => canonicalCompatShapes(element, viewbox));
+// `tolerance`: the flattening chord error in `viewbox` units (pickTolerance for the world).
+export function compatShapes(
+  element: CompatRoot,
+  viewbox: { getScreenCTM?(): Affine | null },
+  tolerance = PICK_TOLERANCE
+): HitShape[] {
+  return withCanonicalEmblemPaint(() => canonicalCompatShapes(element, viewbox, tolerance));
 }
 
-function canonicalCompatShapes(element: CompatRoot, viewbox: { getScreenCTM?(): Affine | null }): HitShape[] {
+function canonicalCompatShapes(
+  element: CompatRoot,
+  viewbox: { getScreenCTM?(): Affine | null },
+  tolerance: number
+): HitShape[] {
   const world = viewbox.getScreenCTM?.();
   if (!world || !(world.a * world.d - world.b * world.c)) return [];
   const leaves = element.closest(LEAVES) === element ? [element] : [...element.querySelectorAll(LEAVES)];
@@ -510,6 +694,7 @@ function canonicalCompatShapes(element: CompatRoot, viewbox: { getScreenCTM?(): 
     return !known;
   };
   const clips = new Map<Node, number[] | null>();
+  const ctms = new Map<Node, Affine | null>();
   const positions = new Map<Element, Map<Element, number>>();
   const shapes: HitShape[] = [];
   const exposed: [Node, string][] = [];
@@ -557,7 +742,7 @@ function canonicalCompatShapes(element: CompatRoot, viewbox: { getScreenCTM?(): 
         const b = leaf.getBBox?.();
         return b && (b.width > 0 || b.height > 0) ? boxCorners(m, b.x, b.y, b.width, b.height) : undefined;
       };
-      const referenced = tag === "use" && !sense.box ? useShapes(leaf, m) : null;
+      const referenced = tag === "use" && !sense.box ? useShapes(leaf, m, tolerance, css) : null;
       const plain = tag === "use" && !sense.box && !referenced ? usePlainShape(leaf) : null;
       if (referenced) {
         // <use> of an <svg> with a viewBox (emblems): its referenced shapes, not its bbox; one shape each, so
@@ -570,20 +755,25 @@ function canonicalCompatShapes(element: CompatRoot, viewbox: { getScreenCTM?(): 
         if (sense.box || sense.fill || (tag === "use" && sense.stroke)) shape.box = box();
       } else if (tag === "text") {
         if (sense.fill || sense.stroke) {
-          const cells = textCells(leaf as unknown as TextApi).map(cell =>
-            transform(m, axisAligned(cell) ? layoutSnap(cell) : cell)
+          const local = textCells(leaf as unknown as TextApi).map(cell =>
+            axisAligned(cell) ? layoutSnap(cell) : cell
           );
+          const cells = local.map(cell => transform(m, cell));
           if (cells.length) {
             shape.fill = { rings: cells, evenOdd: false };
-            // Chrome's 1px pointer square applies to axis-aligned glyph boxes only; rotated (textPath) glyphs hit by point
-            shape.square = cells.every(axisAligned);
+            // Chrome's location box applies to axis-aligned glyph boxes only; rotated (textPath) glyphs hit by point.
+            // The box is tested in the text's own space, reached through its hit-test levels (pick.ts HitLocation).
+            if (local.every(axisAligned)) {
+              const frames = hitFrames(leaf, viewbox, world, ctms);
+              shape.square = frames ? { frames, boxes: local.map(q => [q[0], q[1], q[4], q[5]]) } : true;
+            }
           }
         }
       } else {
         const d = plain ? plain.d : shapePath(leaf);
         if (!d) continue;
         const scale = Math.sqrt(det);
-        const subpaths = flattenPath(d, WORLD_TOLERANCE / scale).filter(s => s.points.length >= 2);
+        const subpaths = flattenPath(d, tolerance / scale).filter(s => s.points.length >= 2);
         // a plain-shape <use> places its instance at (x, y) in the use's user space
         const placed: Affine = plain
           ? { ...m, e: m.a * plain.x + m.c * plain.y + m.e, f: m.b * plain.x + m.d * plain.y + m.f }

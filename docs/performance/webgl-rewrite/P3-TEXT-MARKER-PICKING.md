@@ -131,3 +131,37 @@ The two rules are small and purely geometric, and they close every source-proven
 harness found. The cost is that the GPU picker now copies one undocumented Chrome rendering detail: the 1/64 grid and
 the left/top bias of the pointer square. If Chrome changes it, or if another engine handles it differently, these rows
 will move. SVG mode is unaffected because it still uses native hit testing.
+
+## Update (PICK2, 2026-10-20): the mechanism, read from Blink source
+
+Rule (a) was right at zoom 2 only by coincidence. Blink's source (`core/layout/hit_test_location.cc`,
+`core/layout/svg/transformed_hit_test_location.cc`, `PhysicalRect::Intersects`, `FragmentItem::ComputeTextBoundsRectForHitTest`)
+gives the general rule, now in `src/gpu/pick.ts` (`HitLocation`, `pointerLocation`, `descendLocation`, `worldLocation`):
+
+- `elementFromPoint` starts a point location: the exact point plus a 1×1 CSS px bounding box whose top-left is the
+  point floored to the 1/64 LayoutUnit grid.
+- Every SVG object whose local-to-parent transform is not the identity maps the location into its own space: the
+  point exactly; the box through the inverse transform. If the mapped box is narrower or shorter than 1 unit it is
+  kept, grown outward to the 1/64 grid of that space (`EnclosingRect`). Otherwise the box restarts as a fresh 1×1 box
+  at the floored mapped point.
+- An axis-aligned text item is hit when that box **strictly** overlaps its LayoutUnit rect: a box that only touches
+  an edge misses. Rotated (textPath) glyph quads test the point alone, which confirms (b).
+
+What this means for the map:
+
+- At camera k > 1 the box is 1/k world units, snapped to the world grid.
+- At k = 1 it is a 1-unit box at the floored *world* point. The floored CSS point is the same only when the camera's
+  translation lies on the grid.
+- Inside a marker `<svg>` (viewBox 0 0 30 30 drawn a few units wide) it is a fresh 1×1 box in marker units, about
+  0.2 world units.
+
+The old 1 CSS px pointer square missed all three cases. That is why the 100k burg-label band failed at zoom 1, and why
+flooring the CSS point (the W3 PICK experiment) broke marker42 at zoom 2.
+
+Evidence:
+
+- `~/.tupaia-gates/w3b-pick2/probe/textbox.mjs` compares `elementFromPoint` with the index on about 33k edge samples.
+  The samples cover 120 labels and 60 marker `<svg>`s at seven cameras (k 1 identity, k 1 / 1.37 / 2 / 3.3 / 4 / 8,
+  off-grid translations).
+- Result: 0 mismatches for the new model, against 1,308 for the old square (`textbox.out.txt`).
+- `gate picking` at k 1: 100k burg band 107/118 → 111/112.

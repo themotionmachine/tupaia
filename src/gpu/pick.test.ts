@@ -2,16 +2,20 @@ import { describe, expect, it } from "vitest";
 import { PICK_TOLERANCE } from "./compat-pick";
 import { dashPieces, measureContour } from "./dash-measure";
 import {
+  descendLocation,
   END_SLACK,
   insideRings,
+  invertMatrix,
   PickIndex,
+  pointerLocation,
   polylineCovers,
   polylineDistance,
   type StrokeCap,
   segmentDistance,
   squareMeetsConvex,
   strokeCovers,
-  windingNumber
+  windingNumber,
+  worldLocation
 } from "./pick";
 import { flattenPath } from "./svg-path";
 
@@ -410,6 +414,51 @@ describe("PickIndex", () => {
     // non-square items keep point semantics under the same pixel
     index.addFill("markers", "rect", [[100, 100, 110, 100, 110, 110, 100, 110]], false);
     expect(index.pick(99.8, 105, 0, undefined, 0.5)?.id).toBe("ocean");
+  });
+
+  it("Blink's location box: 1x1 CSS px at the floored point, carried down each transformed level (PICK2)", () => {
+    expect(pointerLocation(10.3, 20.7).box).toEqual([10.296875, 20.6875, 11.296875, 21.6875]);
+    // an identity camera is no level: the CSS box stays
+    expect(worldLocation({ k: 1, x: 0, y: 0 }, 10.3, 20.7)).toEqual(pointerLocation(10.3, 20.7));
+    // k 1 off the grid: the mapped box is exactly 1 wide, so it restarts at the floored world point
+    const k1 = worldLocation({ k: 1, x: 0.3, y: 0 }, 10.3, 20.7).box;
+    expect(k1[0]).toBe(Math.floor(Math.fround(10.3 - 0.3) * 64) / 64);
+    expect(k1[2] - k1[0]).toBe(1);
+    // k 2: the CSS box mapped to 0.5 world units, grown outward to the world 1/64 grid
+    const [x0, y0, x1, y1] = worldLocation({ k: 2, x: -101.3, y: -55.9 }, 10.3, 20.7).box;
+    for (const v of [x0, y0, x1, y1]) expect(v * 64).toBe(Math.round(v * 64));
+    expect(x1 - x0).toBeGreaterThanOrEqual(0.5);
+    expect(x1 - x0).toBeLessThanOrEqual(0.5 + 2 / 64);
+    expect(x0).toBeLessThanOrEqual((10.296875 + 101.3) / 2);
+    // a nested marker <svg> scaling world units by 5 (viewBox 30 in 6 units): a fresh 1x1 box in marker units
+    const local = descendLocation({ x: 10, y: 10, box: [10, 10, 10.5, 10.5] }, [5, 0, 0, 5, -40, -40]);
+    expect(local.box).toEqual([10, 10, 11, 11]);
+    expect(invertMatrix([2, 0, 0, 2, 4, 6])).toEqual([0.5, -0, -0, 0.5, -2, -3]);
+  });
+
+  it("text cells under a location box: strict overlap, so a touching box misses (PICK2)", () => {
+    const index = new PickIndex(100, 100);
+    index.addFill("base", "ocean", [[0, 0, 100, 0, 100, 100, 0, 100]], false);
+    index.addShape("labels", {
+      id: "t",
+      fill: { rings: [[20, 20, 30, 20, 30, 25, 20, 25]], evenOdd: false },
+      square: true
+    });
+    const at = (x: number, y: number) => index.pick(x, y, 0, undefined, pointerLocation(x, y))?.id;
+    expect(at(19.5, 22)).toBe("t"); // the box reaches right into the cell
+    expect(at(19, 22)).toBe("ocean"); // box [19, 20] only touches the left edge at 20
+    expect(at(19 + 1 / 64, 22)).toBe("t");
+    expect(at(30, 22)).toBe("ocean"); // a point on the right edge: its box starts there
+    expect(at(25, 19)).toBe("ocean");
+    // a cell in a nested space: the box is carried through the frames, the boxes are local
+    index.addShape("markers", {
+      id: "m",
+      fill: { rings: [[60, 60, 61, 60, 61, 61, 60, 61]], evenOdd: false },
+      square: { frames: [[5, 0, 0, 5, -300, -300]], boxes: [[0, 0, 5, 5]] }
+    });
+    expect(at(60.5, 60.5)).toBe("m");
+    expect(at(59.9, 60.5)).toBe("m"); // local x -0.5: a fresh 1x1 box [-0.5, 0.5] in marker units overlaps [0, 5]
+    expect(at(59.7, 60.5)).toBe("ocean"); // local x -1.5: box [-1.5, -0.5] does not
   });
 
   it("squareMeetsConvex matches a rotated cell exactly", () => {
