@@ -43,7 +43,9 @@ function fakeContext() {
         fontBoundingBoxDescent: px * 0.3
       };
     },
-    getImageData: (_x: number, _y: number, w: number, h: number) => ({ data: new Uint8ClampedArray(w * h * 4).fill(255) }),
+    getImageData: (_x: number, _y: number, w: number, h: number) => ({
+      data: new Uint8ClampedArray(w * h * 4).fill(255)
+    }),
     clearRect() {},
     save() {},
     restore() {},
@@ -99,7 +101,12 @@ function fakeDevice(total = 0) {
       height: options.rows ?? source.height,
       bytes: source.width * (options.rows ?? source.height) * 4
     }),
-    buffer: (label: string, data: Float32Array) => ({ kind: "buffer", label, data: data.slice(), bytes: data.byteLength }),
+    buffer: (label: string, data: Float32Array) => ({
+      kind: "buffer",
+      label,
+      data: data.slice(),
+      bytes: data.byteLength
+    }),
     release: (resource: unknown) => {
       if (resource) released.push(resource);
     },
@@ -122,7 +129,11 @@ async function frame(bucket: number, elements: SVGTextElement[]): Promise<Prepar
     count += batch.count;
   }
   const glyphs = new Float32Array(count * GLYPH_FLOATS);
-  chunks.reduce((at, chunk) => (glyphs.set(chunk, at), at + chunk.length), 0);
+  let at = 0;
+  for (const chunk of chunks) {
+    glyphs.set(chunk, at);
+    at += chunk.length;
+  }
   const release = vi.fn();
   return {
     bucket,

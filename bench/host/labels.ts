@@ -1445,7 +1445,14 @@ async function stepFonts(page: Page, blanks: Blanks, dir: string, world: string)
 //   TOL.registerPx, missing glyphs count against it; labels the zoom restyled, textSignatures, are left out). The
 //   labels golden against a fresh prepare of the same view (CARRY_MARGIN) and the fresh prepare's own D11 verdict
 //   are info (summary.freshD11): compat runs carry a raster of the prepared zoom until the settle refines it.
-const ZOOM_PARTS = (env.LABELS_ZOOM_PARTS || "shadows,carry").split(",");
+// - fresh (W4a GLYPHZ): a frame prepared and settled at each ZOOM_FRESH camera, `native` variant, judged as the labels
+//   golden (D1 and D11 coverage, gated). Between powers of two the prepare cuts glyphs at the raster bucket and the
+//   settle re-cuts them at k * dpr (src/gpu/glyph-fine.ts); before that re-cut existed these cameras missed the D11
+//   over16-of-ink cap (W3b GLYPH2 freshD11 22-37%). The cell records which glyph set the frame draws (`fine`), and
+//   pixel-registers the native glyphs (info).
+const ZOOM_PARTS = (env.LABELS_ZOOM_PARTS || "shadows,carry,fresh").split(",");
+// fresh-prepare cameras between powers of two (dpr 2: raster buckets 4 and 8)
+const ZOOM_FRESH = [1.1, 1.4, 1.9, 2.8, 3.5];
 // [prepared, viewed] zoom pairs within one bucket at dpr 2; [1.5, 1.5] is a fresh prepare between powers of two
 const ZOOM_SHADOW_PAIRS: [number, number][] = [
   [1.1, 1.9],
@@ -1590,7 +1597,7 @@ function judgeGolden(m: CellMetrics): { gates: Json; failures: string[] } {
 }
 
 async function stepZoom(page: Page, dir: string): Promise<Json> {
-  const result: Json = { shadows: [] as Json[], carry: [] as Json[] };
+  const result: Json = { shadows: [] as Json[], carry: [] as Json[], fresh: [] as Json[] };
   const [gw, gh] = (await page.evaluate(() => [(globalThis as any).graphWidth, (globalThis as any).graphHeight])) as [number, number];
   try {
     // rescaleLabels off for both parts: the label DOM is then the same at every zoom, so a frame carried between two
@@ -1778,6 +1785,45 @@ async function stepZoom(page: Page, dir: string): Promise<Json> {
       log(`${cell.pass ? "PASS" : "FAIL"} zoom carry k ${kPrepared} -> ${kViewed}: pixel ${JSON.stringify(cell.pixel ?? null)} fresh max ${cell.fresh?.pixel?.max}${cell.metrics ? ` ssim ${cell.metrics.ssim} ink ${cell.metrics.inkRatio} over16OfInk ${cell.metrics.over16OfInk} (fresh ${cell.fresh?.metrics?.over16OfInk}, fresh D11 ${cell.fresh?.d11?.length ? cell.fresh.d11.join("/") : "pass"})` : ""}${cell.pass ? "" : ` :: ${cell.failures.join("; ")}`}`);
       write();
     }
+    // ---- fresh
+    for (const k of ZOOM_PARTS.includes("fresh") ? ZOOM_FRESH : []) {
+      const cell: Json = { k, bucket: scaleBucket(k * dpr), failures: [] as string[] };
+      result.fresh.push(cell);
+      try {
+        const at: [number, number] = states ? states.anchors[0].at : [gw / 2, gh / 2];
+        const blanks = await captureBlanks(page, centerOn(k, at[0], at[1]));
+        await isolateLabels(page, null);
+        cell.camera = await zoomTo(page, centerOn(k, at[0], at[1]));
+        await settleApp(page);
+        await reprepare(page);
+        const status = await waitGpu(page);
+        if (status.active !== "gpu" || status.timedOut) cell.failures.push(`GPU not active/settled: ${JSON.stringify(status)}`);
+        // which glyph set the frame draws: the bucket's, or the settle's re-cut at k * dpr (glyph-fine.ts)
+        cell.fine = await page.evaluate(() => {
+          const r = (globalThis as any).gpuRenderer;
+          const p = r?.prepared;
+          const scale = (r?.view?.k ?? 0) * (r?.viewport?.dpr ?? 0);
+          return { scale: Number(scale.toFixed(4)), bucket: p?.bucket ?? null, fineScale: p?.frame?.fineScale ?? null, labels: p?.glyphLabels?.length ?? null, drawn: !!p?.frame?.fineGlyphs && Math.abs((p.frame.fineScale ?? 0) / scale - 1) < 1e-4 };
+        });
+        const shots = await captureArms(page);
+        const svg = decode(shots.svg);
+        const gpu = decode(shots.gpu);
+        const glyphs = await judgeGlyphs(inkOf(svg, blanks.svg), inkOf(gpu, blanks.gpu), svg.width, svg.height, null);
+        cell.pixel = glyphs.pixel; // info
+        const m = measureCell(svg, gpu, blanks.svg, blanks.gpu);
+        cell.metrics = roundMetrics(m);
+        const judged = judgeGolden(m);
+        cell.gates = judged.gates;
+        cell.failures.push(...judged.failures);
+        cell.pass = cell.failures.length === 0;
+        if (keep === "all" || !cell.pass) cell.images = saveShots(join(dir, "zoom", "fresh"), `k${fmtK(k)}`, shots, svg, gpu);
+      } catch (error) {
+        cell.failures.push(`harness: ${String(error).slice(0, 400)}`);
+        cell.pass = false;
+      }
+      log(`${cell.pass ? "PASS" : "FAIL"} zoom fresh k ${k}: fine ${JSON.stringify(cell.fine ?? null)}${cell.metrics ? ` ssim ${cell.metrics.ssim} ink ${cell.metrics.inkRatio} over16OfInk ${cell.metrics.over16OfInk} over16 ${cell.metrics.over16Fraction}` : ""} pixel within ${cell.pixel?.withinTol ?? "n/a"}${cell.pass ? "" : ` :: ${cell.failures.join("; ")}`}`);
+      write();
+    }
   } finally {
     await page.evaluate(setVariant, "map");
     if (result.rescaleLabelsWas !== undefined)
@@ -1786,16 +1832,20 @@ async function stepZoom(page: Page, dir: string): Promise<Json> {
         if (box) box.checked = was;
       }, result.rescaleLabelsWas);
   }
-  const failing = [...result.shadows, ...result.carry].filter((c: Json) => !c.pass);
+  const failing = [...result.shadows, ...result.carry, ...result.fresh].filter((c: Json) => !c.pass);
   result.summary = {
     shadows: result.shadows.length,
     shadowFail: result.shadows.filter((c: Json) => !c.pass).map((c: Json) => `${c.variant}@k${c.kPrepared}->k${c.kViewed}`),
     carry: result.carry.length,
     carryFail: result.carry.filter((c: Json) => !c.pass).map((c: Json) => `k${c.kPrepared}->k${c.kViewed}`),
     // INFO: a fresh prepare's labels layer at these cameras against the absolute D11 golden (not gated here)
-    freshD11: result.carry.map((c: Json) => `k${c.kViewed}: ${c.fresh?.d11?.length ? c.fresh.d11.join("/") : c.fresh ? "pass" : "n/a"}`)
+    freshD11: result.carry.map((c: Json) => `k${c.kViewed}: ${c.fresh?.d11?.length ? c.fresh.d11.join("/") : c.fresh ? "pass" : "n/a"}`),
+    // GATED (W4a GLYPHZ): fresh frames between powers of two against the labels golden
+    fresh: result.fresh.length,
+    freshFail: result.fresh.filter((c: Json) => !c.pass).map((c: Json) => `k${c.k}`),
+    freshOver16OfInk: result.fresh.map((c: Json) => `k${c.k}: ${c.metrics?.over16OfInk ?? "n/a"}${c.fine?.drawn ? " fine" : ""}`)
   };
-  result.failure = failing.length ? `${failing.length} zoom cells failed: ${failing.slice(0, 6).map((c: Json) => `${c.variant ? `shadow ${c.variant}@k${c.kPrepared}->k${c.kViewed}` : `carry k${c.kPrepared}->k${c.kViewed}`} (${c.failures[0]})`).join("; ")}` : null;
+  result.failure = failing.length ? `${failing.length} zoom cells failed: ${failing.slice(0, 6).map((c: Json) => `${c.variant ? `shadow ${c.variant}@k${c.kPrepared}->k${c.kViewed}` : c.kViewed !== undefined ? `carry k${c.kPrepared}->k${c.kViewed}` : `fresh k${c.k}`} (${c.failures[0]})`).join("; ")}` : null;
   return result;
 }
 
