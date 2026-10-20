@@ -10,7 +10,7 @@ import { normalizeZoneHatching } from "@/renderers/zone-hatching";
 import { connectVertices, ensureEl, getBase64, getCoordinates, getGridPolygon, rn, unique } from "@/utils";
 import { compactEmblemCloneStyles } from "../renderers/emblems/styles";
 import { cloneFonts, fontFace } from "./export-fonts";
-import { computedStyleText } from "./inline-style";
+import { computedStyleText, namedKeys } from "./inline-style";
 
 type MapSelection = Selection<SVGSVGElement, unknown, null, undefined>;
 
@@ -597,6 +597,7 @@ function inlineStyle(clone: MapSelection): void {
   const emptyG = clone.append("g").node()!;
   const defaultStyles = window.getComputedStyle(emptyG);
   const sequential = styleAttributeSelectors();
+  const named = namedKeys(defaultStyles);
   const defaults = new Map<string, string>();
   const writes: [SVGElement, string][] = [];
   const baseline = (key: string) => {
@@ -608,7 +609,7 @@ function inlineStyle(clone: MapSelection): void {
   // #prec text: the wind arrows' size and shadow come from an index.css rule on the text itself (#prec text), which a
   // detached clone (export, GPU compat raster) would otherwise lose: they came out at the default font size
   clone.selectAll<SVGElement, unknown>("g, #ruler *, #scaleBar > text, #prec text").each(function () {
-    const style = computedStyleText(this, window.getComputedStyle(this), baseline);
+    const style = computedStyleText(this, window.getComputedStyle(this), baseline, named);
 
     if (style !== "") {
       if (sequential) this.setAttribute("style", style);

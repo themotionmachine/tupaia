@@ -3,7 +3,7 @@
 // maps saved mid-fade: <g id="ice" opacity="0.9" style="opacity: 0.04"> showed at 0.9 in exports and on the GPU).
 import { describe, expect, it } from "vitest";
 
-import { computedStyleText } from "./inline-style";
+import { computedStyleText, namedKeys } from "./inline-style";
 
 const ns = "http://www.w3.org/2000/svg";
 
@@ -50,5 +50,43 @@ describe("computedStyleText", () => {
       baseline
     );
     expect(parse(text)).toEqual({ fill: "rgb(255, 0, 0)" });
+  });
+});
+
+// COST2: the for-in pass reads only the keys that can name a property; the text is unchanged
+describe("namedKeys", () => {
+  // a declaration as CSSOM enumerates it: indices, property names and their camelCase aliases; getPropertyValue
+  // lowercases its argument, so an alias reads ""
+  function enumerated(values: Record<string, string>): CSSStyleDeclaration {
+    const declaration: Record<string | number, unknown> = {};
+    const keys = Object.keys(values);
+    keys.forEach((key, i) => {
+      declaration[i] = key;
+    });
+    for (const key of [...keys, "font", "marker"]) {
+      declaration[key] = values[key] ?? "";
+      declaration[key.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase())] = "";
+    }
+    Object.defineProperty(declaration, "length", { value: keys.length, enumerable: true });
+    Object.defineProperty(declaration, "getPropertyValue", {
+      value: (key: string) => values[key.toLowerCase()] ?? "",
+      enumerable: true
+    });
+    return declaration as unknown as CSSStyleDeclaration;
+  }
+  const values = { fill: "rgb(1, 2, 3)", "font-size": "12px", "stroke-width": "2", font: "12px serif", opacity: "1" };
+
+  it("drops indices and camelCase aliases", () => {
+    const keys = namedKeys(enumerated(values));
+    expect(keys).toEqual(expect.arrayContaining(["fill", "font-size", "stroke-width", "font", "marker", "length"]));
+    expect(keys.some(key => /[A-Z]/.test(key) || /^\d+$/.test(key))).toBe(false);
+  });
+
+  it("gives the same text as the full for-in", () => {
+    const g = group({ "stroke-width": "2" });
+    const declaration = enumerated(values);
+    const full = computedStyleText(g, declaration, baseline);
+    expect(computedStyleText(g, declaration, baseline, namedKeys(declaration))).toBe(full);
+    expect(full).toContain("font-size:12px;");
   });
 });
