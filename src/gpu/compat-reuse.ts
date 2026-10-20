@@ -12,9 +12,11 @@
 // It fails closed. A change to a stylesheet or a font dirties every run. A change to a definition dirties the runs that
 // paint through it: the ids its change can reach are matched against each run's reference closure (the ids its subtree,
 // its ancestors and the definitions they reach name), and every run when a stylesheet names one of them. An ancestor
-// attribute dirties the runs under that ancestor. When a stylesheet rule can make a map element
-// depend on its siblings (structural pseudo-classes, sibling combinators, :has), any change outside the runs, ancestor
-// attributes included, dirties every run.
+// attribute dirties the runs under that ancestor. A live map element outside the definitions that a run paints through
+// (an external reference: the states halo's clip names #stateN paths) dirties the run when its subtree changes, and the
+// run is not reused once the id resolves to another element (prepare.ts adoptRuns). When a stylesheet rule can make a
+// map element depend on its siblings (structural pseudo-classes, sibling combinators, :has), any change outside the
+// runs, ancestor attributes included, dirties every run.
 
 export interface ReuseNode {
   tagName?: string;
@@ -319,8 +321,9 @@ export class CompatDirt {
       if (above.has(node)) {
         // Subtree rule: an attribute reaches the pixels of its own subtree only (inheritance, transforms, effects and
         // descendant selectors all flow downwards). The ways it can reach further are each closed elsewhere: sibling
-        // combinators and :has() make the stylesheet `structural` (every run dirty, below), and a run that paints
-        // through an id outside the definitions is never reused (externalReference). The zoom-end label font-size
+        // combinators and :has() make the stylesheet `structural` (every run dirty, below), and a live element a run
+        // paints through by id is watched itself (`watched`): a <use>, textPath or feImage instance of it takes the
+        // element's own geometry, not its ancestors' attributes. The zoom-end label font-size
         // write on #labels > g#states therefore dirties the label runs under it, not every run (PERF-A stop-loss).
         // Known gap: an ancestor id change that makes a url(#id) or href elsewhere resolve to another element.
         if (kinds & ATTR) {
