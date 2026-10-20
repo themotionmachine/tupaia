@@ -80,17 +80,3 @@ describe("isolate keeps what the kept elements reference", () => {
     expect(svg.outerHTML).toBe(before);
   });
 });
-
-describe("scaleTextShadows", () => {
-  it("scales px lengths of text-shadow in style attributes and rules, nothing else", async () => {
-    const { scaleTextShadows } = await import("./compat");
-    const markup =
-      "<style>#armies text {stroke: none; text-shadow: 0 0 4px #000; font-size: 4px}</style>" +
-      '<g style="text-shadow:rgb(0, 0, 0) 1px -2px 0.5px;stroke-width:3px"><text>x</text></g>';
-    expect(scaleTextShadows(markup, 2)).toBe(
-      "<style>#armies text {stroke: none; text-shadow: 0 0 8px #000; font-size: 4px}</style>" +
-        '<g style="text-shadow:rgb(0, 0, 0) 2px -4px 1px;stroke-width:3px"><text>x</text></g>'
-    );
-    expect(scaleTextShadows(markup, 1)).toBe(markup);
-  });
-});

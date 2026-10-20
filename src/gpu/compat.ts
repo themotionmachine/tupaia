@@ -204,19 +204,6 @@ function decode(markup: string, width: number, height: number): Promise<HTMLCanv
   });
 }
 
-// text-shadow on SVG text ignores the element's transforms (the viewBox mapping included): its lengths are CSS px of
-// the document, which the live page zooms by its device pixel ratio and an SVG decoded as an image does not. A raster
-// cut at `cssScale` raster px per live CSS px scales them to match: the live regiment banners' 4 px glow came out at
-// half width at k 1 (dpr 2), a quarter at k 4. Lengths in style attributes and <style> rules alike; 1 is a no-op.
-export function scaleTextShadows(markup: string, cssScale: number): string {
-  if (!(cssScale > 0) || Math.abs(cssScale - 1) < 1e-6 || !markup.includes("text-shadow")) return markup;
-  return markup.replace(
-    /(text-shadow\s*:\s*)([^;"}<]+)/g,
-    (_, name: string, value: string) =>
-      name + value.replace(/(-?(?:\d+\.?\d*|\.\d+))px/g, (__, n: string) => `${+(Number(n) * cssScale).toFixed(3)}px`)
-  );
-}
-
 // World runs render a world region with the #viewbox transform removed; screen runs (overlays outside #viewbox)
 // render the svg viewport as-is. The clone is restored after serialization so it can serve the next run.
 export async function rasterizeRun(
@@ -226,7 +213,12 @@ export async function rasterizeRun(
   pixelWidth: number,
   pixelHeight: number,
   screen: boolean,
-  cssScale = 1 // raster px per live CSS px (scaleTextShadows)
+  // raster px per live CSS px. The decoded document is sized in live CSS px (pixel size / cssScale) and drawn at the
+  // pixel size: what is specified in screen px rather than user units (text-shadow, vector-effect=non-scaling-stroke,
+  // whose stroke and dashes the #coordinates grid uses) keeps its live size. Before, the document was its pixel size:
+  // the regiment glow and the coordinate grid came out at half width at dpr 2. Plain content renders identically
+  // (Chrome rasterizes an SVG image at its destination size).
+  cssScale = 1
 ): Promise<HTMLCanvasElement> {
   const viewbox = clone.querySelector("#viewbox");
   if (!viewbox) throw new Error("clone without #viewbox");
@@ -244,8 +236,9 @@ export async function rasterizeRun(
       viewbox.removeAttribute("transform");
       undoOpacity = liftGroupOpacity(viewbox, elements);
     }
-    clone.setAttribute("width", String(pixelWidth));
-    clone.setAttribute("height", String(pixelHeight));
+    const scale = cssScale > 0 && Number.isFinite(cssScale) ? cssScale : 1;
+    clone.setAttribute("width", String(pixelWidth / scale));
+    clone.setAttribute("height", String(pixelHeight / scale));
     clone.setAttribute("viewBox", `${region.x} ${region.y} ${region.width} ${region.height}`);
     clone.setAttribute("preserveAspectRatio", "none");
     clone.removeAttribute("filter");
@@ -259,7 +252,7 @@ export async function rasterizeRun(
     if (transform !== null) viewbox.setAttribute("transform", transform);
   }
   // Restore the shared clone before yielding: preparation and refinement may decode concurrently.
-  return decode(scaleTextShadows(markup, cssScale), pixelWidth, pixelHeight);
+  return decode(markup, pixelWidth, pixelHeight);
 }
 
 // Decode resolution for world runs: the desired density capped by MAX_TEXTURE_SIZE and by a per-run decode pixel cap
