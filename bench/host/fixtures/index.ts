@@ -55,6 +55,28 @@ export interface CameraPreset {
   covers: string[];
 }
 
+/**
+ * Which golden family (bench/host/golden-families.ts names) each camera `covers` tag frames. layer-golden.ts picks a
+ * family's cameras with it, and `build-parity-fixture.ts --verify` asserts that every covered family has ink in each
+ * preset's frame. Families without an entry are framed by the world view (k 1) or the showcase (k > 1).
+ */
+export const COVERS_BY_FAMILY: Record<string, string[]> = {
+  ice: ["ice"],
+  zones: ["zones-stock-hatch"],
+  labels: ["labels"],
+  emblems: ["emblems"],
+  compass: ["compass"],
+  markers: ["markers"],
+  military: ["regiments"],
+  rulers: ["measurers"],
+  grid: ["grid-dashed"],
+  coordinates: ["coordinates"],
+  landmass: ["coastline-filter"],
+  lakes: ["lakes"],
+  coastline: ["coastline-filter"],
+  states: ["halo"]
+};
+
 export interface Expectation {
   /** Dotted path into `census` (see parity-page.js). */
   path: string;

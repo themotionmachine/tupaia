@@ -50,6 +50,7 @@ The trade animation needs nothing: `TradeAnimation.sync()` runs on load and the 
 npm run gate -- build                                   # dist/ must be current (CF_BUILD=1 vite build)
 node bench/host/fixtures/build-parity-fixture.ts        # writes tests/fixtures/parity/ (--out DIR for elsewhere)
 node bench/host/fixtures/build-parity-fixture.ts --verify [--shots DIR]   # load the file, re-check the census, frame every preset
+                                                        # and check each covered family has ink in the frame
 node bench/host/fixtures/build-parity-fixture.ts --seeds a,b,c            # what other seeds would generate (lakes, land)
 node --test bench/host/fixtures/fixtures.test.ts        # no browser
 ```
@@ -58,6 +59,16 @@ The builder drives one headless page through the app's own functions (the MCP br
 `parity-page.js` for each feature), saves with `prepareMapData`, reloads the text in a second page and compares
 the census before writing anything. It refuses to write a manifest if an expectation fails. The header's date and
 map id (the only things that vary between runs) are rewritten, so two builds on one host give the same sha256.
+
+## Camera presets
+
+`parity-v1.json` `cameras` holds, per k in 2/4/8, a `showcase` (regiments, markers, measurers, labels, the coastline
+filter, dashed grid, coordinates, halo), and one preset each for `ice`, `lake`, `compass`, `emblem` and two or three
+stock `hatch` zones, plus `k1-world`. `coastlineSwitch` frames either side of the k 1.5 and 2.6 filter switches.
+`COVERS_BY_FAMILY` in `index.ts` maps the `covers` tags to golden families. The golden frames each family with the
+presets that cover it; a family with several covering presets at one k (zones) gets one cell per preset, keyed
+`…/k4@<camera id>` after the first. `--verify` isolates each covered family in each preset's frame and requires at
+least 100 px of ink (dpr 1), so a preset that slides off its target fails the check, not only the golden.
 
 ## What the fixture is, and is not
 

@@ -131,7 +131,7 @@ The runtimes are typical M1 Max wall times, without lock wait.
 | `boundary-after` | no | `bench/renderer-bundle-boundary.ts`: the static module graph for default boot and save/export contains no GPU presentation code (the GPU stays lazy). | ~1 s |
 | `boundary-before` | no | The same analysis, but expects GPU code to be **present**. Run it only against a pre-split baseline build; it fails on current builds by design. | ~1 s |
 | `golden` | shared | `bench/host/layer-golden.ts`: the per-layer golden (D1, D5). See "Per-layer golden" below. | ~3–4 min for all families at k {1,4}, dpr 2 |
-| `golden-selftest` | shared | Proves the golden can still fail and pass: `layers=ocean k=1` on the shared fixture must pass, and the same cell with `break=drop-batch` must fail on a metric gate after a batch was actually dropped. A harness error or a no-op break fails the check. `reading=` as for golden. | ~40 s |
+| `golden-selftest` | shared | Proves the golden can still fail and pass, on the shared fixture at k 1: ocean, rulers and goods pass with `gpu_arm=probe` (no SVG shows through the canvas); ocean with `break=drop-batch` fails on a whole-frame gate; rulers with `break=thin-stroke` fails only the D11 coverage gate; goods with `break=drop-icon` fails it too. A harness error or a no-op break fails the check. `reading=` as for golden. | ~3 min |
 | `consumers` | shared | `bench/host/consumers.ts`: the document's consumers (REWRITE-PLAN rows 31-38 and 40), `?renderer=svg` against `?renderer=gpu` on the same world and build, on the parity fixture and the shared fixture (`worlds=parity,shared`). Text save (46 sections, SVG at index 5, identical between arms at a non-identity camera, I8 I9 I11 I12 I15), binary save and `ldb` lastMap and reload round trips (I14), cloud save/load/conflict/versions/restore against a mocked Worker (no network), SVG/PNG/JPEG/tiles exports, the `mesh` texture and the 3D view (mesh and satellite), the transform tool's 4x preview, the minimap (viewport rectangle and click target), the elevation profile, charts and emblem dialogs, the heightmap preview, and a hash of `window.pack`/`grid` that the renderer must not change (row 40). Raster output is compared exactly; a tiny difference counts as rasterizer noise only when the SVG handed to the rasterizer is byte-identical between arms (the bound is `RASTER_NOISE` in `consumers.ts`; `control=1` runs a second svg page instead of the gpu arm to measure it). The gpu arm must stay on the gpu path through every probe. `break=save-tamper\|export-tamper\|tamper` perturbs the gpu arm's save and/or PNG export; see `consumers-selftest`. Evidence: `consumers.json` (every check with its status and file) plus the saves, exports and screenshots of both arms under `<world>/{svg,gpu}/`. | ~15-25 min |
 | `consumers-selftest` | shared | Proves the consumers harness can still fail: runs the `save` and `export` steps on the parity fixture with `break=tamper` (the gpu arm's text save and PNG export are perturbed) and requires `save.arms-equal`, `save.svg-section-identical` and `export.png` to FAIL, with no harness error and no other unexpected failure. | ~6 min |
 | `lock-probe` | (takes it) | Acquires and releases the host lock in `mode=shared\|exclusive` (default exclusive) and launches nothing. Shows whether another job holds the lock, which slot you got, and how long you waited. | 0 s + wait |
@@ -193,10 +193,11 @@ Arguments:
 | `preset` | a built-in style preset, a comma list, `all`, or `map` (keep the fixture's own style) | `default` |
 | `fixture` | `shared` (shared-v8), `parity` (`TUPAIA_GATE_PARITY_MAP`, `tests/fixtures/parity/parity.map` or `~/.tupaia-gates/fixtures/parity.map`), or a path to a `.map` | `shared` |
 | `census` | path to a census expectations JSON | none |
-| `reading` | `conservative` or `over44` (see the verdict) | `conservative` |
+| `reading` | `over44` or `conservative` (see the verdict) | `over44` |
 | `keep` | `all`, or `fail` to keep PNGs for failing cells only | `all` |
 | `bg` | backdrop `#rrggbb` | `#ffffff` |
-| `break` | `none`, or `drop-batch` (self-test only, see below) | `none` |
+| `break` | `none`, `drop-batch`, `thin-stroke` or `drop-icon` (self-test only, see below) | `none` |
+| `gpu_arm` | `canvas`, `composite` or `probe` (how the GPU arm is captured, see below) | `canvas` |
 
 - **Families.** These are defined in `bench/host/golden-families.ts`. A family is a direct child of `#viewbox`, or
   one of the root overlays `#scaleBar`, `#vignette` and `#legend`. Each carries the REWRITE-PLAN §5 rows it serves.
@@ -209,23 +210,48 @@ Arguments:
   - It paints the backdrop on `svg#map`'s parent and makes `svg#map` transparent. Putting the colour on `svg#map`
     itself was asymmetric: the compat lane rasterizes an export clone that keeps the root's inline style, so every
     compat raster became an opaque sheet over the native draws (the ocean pattern hid the native ocean fill).
-- **Verdict per cell (D1).**
+- **GPU arm.** With `gpu_arm=canvas` (the default) the GPU arm is the canvas alone: an opaque cover of the backdrop
+  colour is slipped between `svg#map` and the canvas for that shot, so the SVG underneath can never count as GPU
+  output. The cover is outside `svg#map`, so nothing is re-prepared; a re-prepare between the two arms' shots fails
+  the cell. `gpu_arm=probe` also captures the composite (canvas over the live SVG, the pre-W2 capture) and the canvas
+  over a magenta cover, and fails any cell where either differs from the canvas-only shot. On 2026-10-20 it found
+  no pixel of show-through on any parity cell at gate scale (the compat-only lakes that score SSIM 1.0000 are the
+  canvas). `gpu_arm=composite` is the old capture, for diagnosis.
+- **Page chrome.** The tip bar (`#tooltip`) and the Navigate/Edit indicator are hidden for the whole run: both change
+  on their own timers and showed up as "ink" (77K px from a load toast in one blank; 2.5K px of a lagging "Updating").
+- **Zoom styling.** The app's zoom styling (label sizes, emblem groups, ruler sizes) only touches layers that are
+  visible when the camera moves, and isolation had the family hidden then. Each cell re-runs it with the family
+  shown. Every emblem's COA symbol is rendered once at load, because the renderer does not observe `#coas` (outside
+  `svg#map`): a prepare that races the lazy COA fetches keeps a raster with emblems missing (renderer finding, W2).
+- **Verdict per cell (D1, D11).**
   - SSIM ≥ 0.95, over16 ≤ 1 %, and "≤ 0.5 % at Δ ≤ 44", all on the isolated layer's whole frame.
-  - The default reading of the last clause, `reading=conservative`, is P2-FIDELITY-MEASUREMENT's reading and the
-    repo convention (`fidelity-metrics.ts` GATES): changed ≤ 0.5 % and max Δ ≤ 44.
-  - `reading=over44` (at most 0.5 % of pixels differ by more than 44) is a looser, **opt-in** reading. Nobody has
-    approved it as the gate (P2-FIDELITY-MEASUREMENT: "do not retune silently"), so the `browser` and `nightly`
-    tiers never use it. On the 2026-10-19 shared-fixture run it would have passed `temperature` with 47–65 % of
-    pixels changed. Making it the default is Ryan's decision.
-  - Both readings are always reported (`gates.conservative`, `gates.over44` per cell).
-  - All gates are whole-frame fractions, so a small or faint family can lose much of its ink and still pass. Each
-    cell therefore reports `inkRatio` (min/max of the two arms' ink pixels) and `over16OfInk`, and carries a
-    non-gating `notes` entry when the ratio is under 0.9 or over16 exceeds 10 % of the layer's ink. The result line
-    lists passing cells with notes; read them before trusting a PASS for compass, burgs, markers or scaleBar.
+  - The last clause is read as `reading=over44` by default (D11, Ryan 2026-10-19): at most 0.5 % of pixels differ
+    by more than 44.
+  - `reading=conservative` is the strict reading (P2-FIDELITY-MEASUREMENT, `fidelity-metrics.ts` GATES): changed
+    ≤ 0.5 % and max Δ ≤ 44. It fails on invisible rounding and anti-aliasing (91 of 160 parity cells at W1). It stays
+    available, and both are always reported (`gates.conservative`, `gates.over44` per cell; a cell that passes
+    over44 but not the strict reading carries a note, and `summary.strictOnly` counts them).
+  - **Coverage (D11), gated under both readings.** Whole-frame fractions let a small layer lose most of its ink and
+    pass, so each cell is also judged on the layer's own ink (pixels that differ from the blank in either arm):
+    - ink: `min(inkSvg, inkGpu) ≥ 0.9 × max(inkSvg, inkGpu) − 16`. Symmetric: thinner strokes and dropped icons fail,
+      and so do heavier strokes.
+    - over16 of ink: `over16 pixels ≤ 0.2 × inkUnion + 16`. At most one in five of the layer's own ink pixels may
+      differ visibly.
+    - The 16 px slack (a 2×2 CSS-px dot at dpr 2) is the tiny-layer guard: it is negligible for any real layer and
+      stops a 30-pixel layer from failing on a few edge pixels (such a layer must keep ≥ 11 px of ink).
+    - The numbers come from the W1 parity sweep (`COVERAGE` in `bench/golden-metrics.ts` has the evidence). Cells
+      whose differences are rounding or anti-aliasing only reach ratio 0.925 and over16-of-ink 18.5 % (borders k 4, AA
+      on dash ends). The real gaps the whole-frame gates missed all fall outside: ratio burgs 0.21–0.63,
+      coordinates 0.55–0.67, rivers 0.66–0.89, military 0.60/0.72, borders/routes k 1 0.83, states k 8 0.84;
+      over16-of-ink coastline k 1.6–2.5 30–31 %, routes 28–60 % (dash phase), labels k 1 27.6 %, markers k 1/2 30–35 %,
+      emblems k 1/2 55–61 %.
+  - Each cell gets a `class`: `pass`, `coverage` (only the coverage gate failed), `gap` (a whole-frame gate failed),
+    `empty`, `census` (routing drift only) or `harness`. `summary.table` is the per-layer table.
   - A family that paints nothing in either arm fails: an empty layer is a failure, not a pass. Each arm's ink is
-    counted against its own blank capture (every family hidden). Page chrome over the canvas blends differently
-    from the same chrome over the SVG.
+    counted against its own blank capture (every family hidden).
   - A GPU fallback also fails the cell, as does any page error or WebGL validation warning during the run.
+  - `aborted` lists the requests the route allowlist aborted (each logs "Failed to load resource:
+    net::ERR_FAILED"). On the parity fixture it is one: the Google Analytics `gtag/js` script in `index.html`.
 - **Census.** For each cell the report records:
   - native/compat counts from `rendererStatus().gpu.layers`;
   - skipped counts and a route × kind × tag × reason histogram from the opt-in `src/gpu/scene-census.ts` sink
@@ -244,12 +270,17 @@ Arguments:
     unchanged pixels as the faded SVG, 0 < Δ ≤ 16 light blue, 16 < Δ ≤ 44 orange and Δ > 44 red.
   - The JSON result line lists the PNGs of failing cells only.
 - **Self-test.**
-  - `gate golden layers=ocean k=1 fixture=shared` passes. On 2026-10-19 the result was SSIM 1.0000, over16 0, and
-    0.04 % of pixels changed by 1 code value.
-  - The same run with `break=drop-batch` fails at SSIM 0.82 and over16 99.7 %. That mode removes the bottom-most
-    fill/stroke batch from the GPU frame only, which is a dropped path. Use it only to show the harness can fail.
-  - `gate golden-selftest` re-runs both of those as one check (and it is a step of `browser`), so the harness's
-    ability to fail is re-proven on every tier run rather than once by hand.
+  - `gate golden-selftest` re-proves on every tier run, on the shared fixture at k 1, that the harness can still
+    tell pass from fail:
+    - ocean, rulers and goods pass, captured with `gpu_arm=probe` (so the GPU arm is shown to be the canvas alone);
+    - ocean with `break=drop-batch` (the bottom-most fill batch removed from the GPU frame, a dropped path) fails on a
+      whole-frame gate;
+    - rulers with `break=thin-stroke` (every stroke batch at half width) fails the coverage gate while every
+      whole-frame gate passes, which is the case D11 exists for;
+    - goods with `break=drop-icon` (every 4th leaf draw batch dropped: a quarter of the resource icons) fails the
+      coverage gate (its whole-frame gates fail too).
+    A break that changes nothing, or a failure on a harness error instead of a metric, fails the self-test. The
+    breaks only touch the GPU frame; use them only to show the harness can fail.
   - The metric math (`bench/golden-metrics.test.ts`) and the PNG codec (`bench/png.ts`) are covered by `gate bench`.
   - `break=drop-batch` and the root-family census read the renderer's internal `gpuRenderer.prepared`. If its shape
     changes, the cell fails with a `harness:` message instead of silently counting zero.

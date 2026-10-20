@@ -3,7 +3,8 @@
 //
 //   node bench/host/fixtures/build-parity-fixture.ts              # build, write into tests/fixtures/parity/
 //   node bench/host/fixtures/build-parity-fixture.ts --out DIR    # write somewhere else (default for experiments)
-//   node bench/host/fixtures/build-parity-fixture.ts --verify     # load the committed file and re-check its census
+//   node bench/host/fixtures/build-parity-fixture.ts --verify     # load the committed file and re-check its census,
+//                                                                  # and that every preset frames ink of what it covers
 //
 // It serves dist/ (build it first: `npm run gate -- build`), drives ONE headless page through the app's own
 // functions (the MCP bridge for generate and layers, parity-page.js for each feature), saves with prepareMapData,
@@ -16,9 +17,12 @@ import { resolve } from "node:path";
 import { chromium, type Page } from "playwright";
 import { checkCensus, FEATURES, rowsCovered, type ExpectationFailure } from "./features.ts";
 import {
-  PAGE_SCRIPT, PARITY_CONFIG as C, PARITY_DIR, PARITY_LAYERS_ON, REPO_ROOT,
+  COVERS_BY_FAMILY, PAGE_SCRIPT, PARITY_CONFIG as C, PARITY_DIR, PARITY_LAYERS_ON, REPO_ROOT,
   sha256File, type CameraPreset, type ParityManifest
 } from "./index.ts";
+import { FAMILIES } from "../golden-families.ts";
+import { isolateLayer } from "../golden-isolation.ts";
+import { decodePng } from "../../png.ts";
 import { checkDist, startStaticServer } from "../../../mcp/src/static-server.ts";
 
 const argv = process.argv.slice(2);
@@ -302,6 +306,10 @@ function report(label: string, failures: ExpectationFailure[]): void {
   for (const f of failures) console.error(`   ${f.feature}: ${f.path} want ${f.want}, got ${JSON.stringify(f.got)}`);
 }
 
+// A preset that frames a family must show at least this much of it (device px at dpr 1, the verify page's ratio): a
+// 10×10 px patch. Smaller is a frame that grazes the content, which the golden would judge on a handful of pixels.
+const MIN_FRAME_INK = 100;
+
 async function verify(origin: string, dir: string, shots?: string): Promise<void> {
   const mapPath = resolve(dir, `${C.version}.map`);
   const manifest = JSON.parse(readFileSync(resolve(dir, `${C.version}.json`), "utf8")) as ParityManifest;
@@ -315,9 +323,21 @@ async function verify(origin: string, dir: string, shots?: string): Promise<void
     const failures = checkCensus(census, { withPreamble: true });
     report("committed fixture", failures);
     if (failures.length) process.exitCode = 1;
+    // what the golden does before it captures (layer-golden.ts loadFixture): labels at every zoom, each family's toggle
+    // on, and every emblem's COA symbol rendered
+    await page.evaluate(async () => {
+      const w = globalThis as any;
+      if (w.hideLabels?.checked) w.hideLabels.checked = false;
+      for (const g of document.querySelectorAll<SVGGElement>("svg#map #emblems > g"))
+        if (g.children.length && !g.children[0].getAttribute("href")) await w.renderGroupCOAs?.(g);
+    });
+    const toggles = [...new Set(FAMILIES.map(f => f.toggle).filter((t): t is string => !!t))];
+    await bridge(page, "display", { on: toggles });
+    await settle(page);
     // every camera preset must frame what it says; the coastline presets must land on the expected filter
     const frames = [...manifest.cameras, ...manifest.coastlineSwitch.map(c => ({ ...c }))] as (CameraPreset & { expect?: string })[];
     if (shots) mkdirSync(shots, { recursive: true });
+    const inkLines: string[] = [];
     for (const cam of frames) {
       const seen = await page.evaluate(async c => {
         const w = globalThis as any;
@@ -335,7 +355,35 @@ async function verify(origin: string, dir: string, shots?: string): Promise<void
         process.exitCode = 1;
       }
       if (shots) await page.screenshot({ path: resolve(shots, `${cam.id}.png`), animations: "disabled" });
+      // each family the preset claims to cover must paint something in this frame: the family alone (golden isolation)
+      // against every family hidden, after the app's zoom styling ran with the family shown
+      const covered = FAMILIES.filter(f => (COVERS_BY_FAMILY[f.name] ?? []).some(tag => cam.covers.includes(tag)));
+      if (!covered.length) continue;
+      const shot = async (id: string | null, root?: boolean) => {
+        await page.evaluate(isolateLayer, { id, root, bg: "#ffffff" });
+        await page.evaluate(async () => {
+          const w = globalThis as any;
+          w.invokeActiveZooming?.();
+          await w.__tupaia.settle?.();
+          await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+        });
+        return decodePng(await page.screenshot({ animations: "disabled" }));
+      };
+      const blank = await shot(null);
+      for (const family of covered) {
+        const img = await shot(family.id, family.root);
+        let ink = 0;
+        for (let i = 0; i < img.data.length; i += 4)
+          if (img.data[i] !== blank.data[i] || img.data[i + 1] !== blank.data[i + 1] || img.data[i + 2] !== blank.data[i + 2]) ink++;
+        inkLines.push(`${cam.id}/${family.name} ${ink}`);
+        if (ink < MIN_FRAME_INK) {
+          console.error(`   ${cam.id}: covers ${family.name}, but the family paints ${ink} px in the frame (need ≥ ${MIN_FRAME_INK})`);
+          process.exitCode = 1;
+        }
+      }
+      await page.evaluate(isolateLayer, { id: null, restore: true });
     }
+    console.error(`covered-family ink (px at dpr 1): ${inkLines.join(", ")}`);
     console.error(`${frames.length} camera frames checked${shots ? `, screenshots in ${shots}` : ""}`);
   } finally {
     await browser.close();
