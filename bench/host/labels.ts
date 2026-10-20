@@ -1815,7 +1815,10 @@ async function stepZoom(page: Page, dir: string): Promise<Json> {
           const r = (globalThis as any).gpuRenderer;
           const p = r?.prepared;
           const scale = (r?.view?.k ?? 0) * (r?.viewport?.dpr ?? 0);
-          return { scale: Number(scale.toFixed(4)), bucket: p?.bucket ?? null, fineScale: p?.frame?.fineScale ?? null, labels: p?.glyphLabels?.length ?? null, drawn: !!p?.frame?.fineGlyphs && Math.abs((p.frame.fineScale ?? 0) / scale - 1) < 1e-4 };
+          // the latest re-cut's trace entry (renderer.ts refineGlyphs: wall ms and outcome), info
+          const jobs = (globalThis as any).rendererStatus?.()?.gpu?.trace?.jobs ?? [];
+          const cut = [...jobs].reverse().find((j: any) => j.kind === "glyphs");
+          return { scale: Number(scale.toFixed(4)), bucket: p?.bucket ?? null, fineScale: p?.frame?.fineScale ?? null, labels: p?.glyphLabels?.length ?? null, drawn: !!p?.frame?.fineGlyphs && Math.abs((p.frame.fineScale ?? 0) / scale - 1) < 1e-4, cut: cut ? { ms: cut.ms === null ? null : Number(cut.ms.toFixed(1)), detail: cut.detail } : null };
         });
         const shots = await captureArms(page);
         const svg = decode(shots.svg);
