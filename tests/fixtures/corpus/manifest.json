@@ -276,43 +276,62 @@
  "goldenKnownGaps": [
   {
    "family": "cells",
-   "reason": "the same family fails the golden on the parity fixture at k 1 (W1 triage in build-GLUE.md); a GPU fidelity gap owned by another packet, not a corpus finding"
+   "reason": "the same family fails the golden on the parity fixture at k 1 (W1 triage in build-GLUE.md); a GPU fidelity gap owned by another packet, not a corpus finding",
+   "maxOver16": 6.7,
+   "minSsim": 0.821
   },
   {
    "family": "coordinates",
-   "reason": "the same family fails the golden on the parity fixture at k 1 (W1 triage in build-GLUE.md); a GPU fidelity gap owned by another packet, not a corpus finding"
+   "reason": "the same family fails the golden on the parity fixture at k 1 (W1 triage in build-GLUE.md); a GPU fidelity gap owned by another packet, not a corpus finding",
+   "maxOver16": 2.1,
+   "maxOver44": 2.0,
+   "minSsim": 0.915
   },
   {
    "family": "states",
-   "reason": "the same family fails the golden on the parity fixture at k 1 (W1 triage in build-GLUE.md); a GPU fidelity gap owned by another packet, not a corpus finding"
+   "reason": "the same family fails the golden on the parity fixture at k 1 (W1 triage in build-GLUE.md); a GPU fidelity gap owned by another packet, not a corpus finding",
+   "maxOver16": 25.3,
+   "maxOver44": 7.5
   },
   {
    "family": "provinces",
-   "reason": "the same family fails the golden on the parity fixture at k 1 (W1 triage in build-GLUE.md); a GPU fidelity gap owned by another packet, not a corpus finding"
+   "reason": "the same family fails the golden on the parity fixture at k 1 (W1 triage in build-GLUE.md); a GPU fidelity gap owned by another packet, not a corpus finding",
+   "maxOver16": 78.5
   },
   {
    "family": "zones",
-   "reason": "the same family fails the golden on the parity fixture at k 1 (W1 triage in build-GLUE.md); a GPU fidelity gap owned by another packet, not a corpus finding"
+   "reason": "the same family fails the golden on the parity fixture at k 1 (W1 triage in build-GLUE.md); a GPU fidelity gap owned by another packet, not a corpus finding; bounds for zones are a guess (no corpus map failed it)",
+   "maxOver16": 5.0,
+   "maxOver44": 2.0,
+   "minSsim": 0.8
   },
   {
    "family": "markets",
-   "reason": "the same family fails the golden on the parity fixture at k 1 (W1 triage in build-GLUE.md); a GPU fidelity gap owned by another packet, not a corpus finding"
+   "reason": "the same family fails the golden on the parity fixture at k 1 (W1 triage in build-GLUE.md); a GPU fidelity gap owned by another packet, not a corpus finding",
+   "maxOver16": 2.1,
+   "maxOver44": 1.5
   },
   {
    "family": "markers",
-   "reason": "the same family fails the golden on the parity fixture at k 1 (W1 triage in build-GLUE.md); a GPU fidelity gap owned by another packet, not a corpus finding"
+   "reason": "the same family fails the golden on the parity fixture at k 1 (W1 triage in build-GLUE.md); a GPU fidelity gap owned by another packet, not a corpus finding",
+   "maxOver16": 1.4,
+   "maxOver44": 1.0
   },
   {
    "family": "emblems",
-   "reason": "the same family fails the golden on the parity fixture at k 1 (W1 triage in build-GLUE.md); a GPU fidelity gap owned by another packet, not a corpus finding"
+   "reason": "the same family fails the golden on the parity fixture at k 1 (W1 triage in build-GLUE.md); a GPU fidelity gap owned by another packet, not a corpus finding",
+   "maxOver16": 2.0
   },
   {
    "family": "labels",
-   "reason": "the same family fails the golden on the parity fixture at k 1 (W1 triage in build-GLUE.md); a GPU fidelity gap owned by another packet, not a corpus finding"
+   "reason": "the same family fails the golden on the parity fixture at k 1 (W1 triage in build-GLUE.md); a GPU fidelity gap owned by another packet, not a corpus finding",
+   "maxOver44": 0.8
   },
   {
    "family": "military",
-   "reason": "the same family fails the golden on the parity fixture at k 1 (W1 triage in build-GLUE.md); a GPU fidelity gap owned by another packet, not a corpus finding"
+   "reason": "the same family fails the golden on the parity fixture at k 1 (W1 triage in build-GLUE.md); a GPU fidelity gap owned by another packet, not a corpus finding",
+   "maxOver16": 2.2,
+   "maxOver44": 0.9
   },
   {
    "family": "ice",
@@ -320,28 +339,33 @@
     "legacy-v1.7",
     "legacy-v1.99"
    ],
-   "reason": "legacy-only gap, cause not confirmed: both files carry style=\"opacity: 0.04\" (a jQuery fade caught mid-way by the old version) on #ice next to opacity=\"0.9\" and filter dropShadow05; the SVG honours the style (CSS beats the attribute) and the GPU draws the polygons far stronger (over16 3.8%, whole polygons orange in the diff). Suspect: the scene reads the opacity attribute, not the inline style. Evidence ~/.tupaia-gates/w2-corpus/corpus-20261020T013057-325Z/legacy-v1.7/golden"
+   "reason": "legacy-only gap, cause not confirmed: both files carry style=\"opacity: 0.04\" (a jQuery fade caught mid-way by the old version) on #ice next to opacity=\"0.9\" and filter dropShadow05; the SVG honours the style (CSS beats the attribute) and the GPU draws the polygons far stronger (over16 3.8%, whole polygons orange in the diff). Suspect: the scene reads the opacity attribute, not the inline style. Evidence ~/.tupaia-gates/w2-corpus/corpus-20261020T013057-325Z/legacy-v1.7/golden",
+   "maxOver16": 5.1
   },
   {
    "family": "ocean",
    "maps": [
     "legacy-v1.4"
    ],
-   "reason": "legacy-only gap, cause not confirmed: ocean over16 1.9% on the v1.4 file (the parity fixture's ocean passes over44 and over16); old ocean layer markup"
+   "reason": "legacy-only gap, cause not confirmed: ocean over16 1.9% on the v1.4 file (the parity fixture's ocean passes over44 and over16); old ocean layer markup",
+   "maxOver16": 2.5,
+   "maxOver44": 1.9
   },
   {
    "family": "texture",
    "maps": [
     "demo-v1.112"
    ],
-   "reason": "legacy-only gap, cause not confirmed: the diff shows the GPU and SVG differ outside the 1280x720 image rectangle of a 1680x849 world (over16 9.3%); the texture <image> is a fixed 1280x720 with preserveAspectRatio slice and the layer is masked by #land"
+   "reason": "legacy-only gap, cause not confirmed: the diff shows the GPU and SVG differ outside the 1280x720 image rectangle of a 1680x849 world (over16 9.3%); the texture <image> is a fixed 1280x720 with preserveAspectRatio slice and the layer is masked by #land",
+   "maxOver16": 12.1
   },
   {
    "family": "rivers",
    "maps": [
     "demo-v1.112"
    ],
-   "reason": "borderline legacy-only gap: over44 0.57% against 0.5% on demo.map; rivers pass on the parity fixture"
+   "reason": "borderline legacy-only gap: over44 0.57% against 0.5% on demo.map; rivers pass on the parity fixture",
+   "maxOver44": 0.8
   }
  ]
 }

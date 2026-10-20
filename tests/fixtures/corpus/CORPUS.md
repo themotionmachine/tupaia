@@ -36,13 +36,14 @@ the map id. `demo-v1.112` is the repo's existing `tests/fixtures/demo.map` (writ
 | `legacy-v1.123` | `legacy-v1.123.map` | 1.123.0 | 2.14 MB | load | 2 | Vite-era build. Runs only 1.124 (goods, markets, #tradeAnimation) and 1.127. |
 | `demo-v1.112` | `../demo.map` | 1.112.1 | 4.31 MB | load | 3 | Not copied: referenced in place. Runs 1.113, 1.124 and 1.127. |
 
-Total committed: 12.0 MB in 7 files (plain text, as the app saves them).
+Total committed: 12.0 MB in 7 files (plain text, as the app saves them; the files mix CRLF and LF, so `.gitattributes` marks `*.map` as `-text` to keep the pinned sha256 and size stable under `core.autocrlf`).
 
 ## Migration gates
 
-`auto-update.ts` has 41 `isOlderThan(...)` gates (listed in file order, which is the old float order, not semver
-order). A map triggers every gate newer than its own version, so the oldest loadable map runs all of them at once and each newer map runs
-a suffix. Each manifest entry lists the gates it triggers; the unit test recomputes that list from `auto-update.ts` and fails when it is stale.
+`auto-update.ts` has 40 `isOlderThan(...)` gates (listed in file order, which is the old float order, not semver
+order). A map triggers every gate whose semver is newer than its own version. The oldest loadable map runs all of them at once, but a newer map
+does **not** run a clean suffix of the file: `parseMapVersion` reads the float-era headers as semver (see "Findings: migration ordering").
+Each manifest entry lists the gates it triggers; the unit test recomputes that list from `auto-update.ts` and fails when it is stale.
 Gates triggered by at least one map that must load: 1.0.0, 1.1.0, 1.3.0, 1.4.0, 1.5.0, 1.6.0, 1.7.0, 1.11.0, 1.21.0, 1.22.0, 1.61.0, 1.62.0, 1.63.0, 1.64.0, 1.65.0, 1.65.2, 1.72.0, 1.73.0, 1.84.0, 1.85.0, 1.86.0, 1.88.0, 1.91.0, 1.92.0, 1.94.0, 1.95.0, 1.96.0, 1.98.0, 1.99.0, 1.100.0, 1.104.0, 1.105.0, 1.106.0, 1.107.0, 1.108.0, 1.109.0, 1.111.0, 1.113.0, 1.124.0, 1.127.0.
 
 **Not triggerable: `1.0.0`.** Only a file older than 1.0.0 runs it, and `load.ts` refuses every file below `0.70.0` as ancient. The real
@@ -62,6 +63,31 @@ exactly this one gate.
 7. a per-map layer golden at k 1 (`bench/host/layer-golden.ts`, the file's own style, `over44` reading, centred camera). Families with nothing to paint
    in either arm and no drawables are reported as empty. Families listed in `manifest.goldenKnownGaps` fail the same way on the parity
    fixture; their metric failures are reported but do not gate (some are scoped to a single map: legacy-only gaps found by this corpus, listed with their suspected cause) (`strict=1` gates them).
+   A known gap excuses **metric drift only** (ssim, over16, over44), and only up to the family's bound in the manifest (`maxOver16`, `maxOver44`,
+   `minSsim`: the worst value measured across the corpus plus about 30 %; a metric with no bound has no tolerance). `empty in GPU arm`, `empty in SVG arm`,
+   `census changed`, a dropped GPU path or a harness error are never excused, so a routed-but-invisible layer fails whatever the family. The bounds for
+   `zones` are a guess (no corpus map failed zones).
+   Limit: under the centred camera every cell carries about 76901 px of baseline ink against the blank, so the golden's ink-emptiness test never fires;
+   only a layer with zero drawables is reported as empty, and a layer that is in the document but paints nothing in both arms (for example `states`,
+   `borders`, `lakes`, `fog`, `vignette` on `demo-v1.112`) passes vacuously. The gpu-routed check (5) is the backstop for routing, not for ink. Measuring ink
+   relative to the per-map baseline is a change to `bench/host/layer-golden.ts` (COVER's file).
+
+## Findings: migration ordering (decision for Ryan)
+
+`auto-update.ts` compares versions as semver (`isOlderThan` over `parseMapVersion`), but the gates were written for upstream's float versions
+(`version < 1.7`, `version < 1.11`, `version < 1.652`). The two orders disagree because a float's decimals are not a minor number:
+- `1.7` parses to `1.7.0` and `1.4` to `1.4.0`, so the v1.7 map runs the `1.11`, `1.21`, `1.22` and `1.61`..`1.65.2` gates, which in the float era were
+  **older** than 1.7. Those gates reset the terrain scheme, `oceanLayers` and the grid type (1.11), rebuild rulers (1.61), move the regions opacity (1.64) and
+  rewrite river data (1.65). The v1.4 map runs `1.11`/`1.21`/`1.22` the same way.
+- 1.2x maps (minor 21 or 22, greater than 3) skip the `1.3` to `1.7` gates, and 1.61 to 1.66 maps skip the `1.7.0` markers migration.
+
+The svg-vs-gpu checks cannot see this: both arms migrate identically. It is upstream behaviour, left unchanged here. Fixing it means deciding, for
+each gate, what the float era meant, and a wrong guess would corrupt maps that load fine today. The manifest lists the gates each map actually runs.
+
+## Findings: the first save after a migration is not a fixed point
+
+Save 1 (right after loading the legacy file) differs from save 2 (after reloading save 1) in section 5 (svg) for `legacy-v1.0` and `legacy-v1.4`, in both
+arms. This is recorded as INFO (`save.*.first-reload`); only save 2 equals save 3 is gated. A migrated map therefore settles after one round trip.
 
 ## Findings so far
 
@@ -75,7 +101,16 @@ Fixed in this packet (`src/io/auto-update.ts`):
 - The duplicate `#tradeAnimation` is already handled in the current tree (the 1.124.0 gate reuses the shell's container and
   `keepSingleTradeContainer` collapses saved duplicates); the corpus asserts exactly one after every load.
 
+Known fidelity bugs this corpus found, for STROKE/COMPAT (also see `manifest.goldenKnownGaps`):
+- `ice` on v1.7 and v1.99: the file carries `style="opacity: 0.04"` next to `opacity="0.9"`; the SVG honours the inline style and the GPU appears to read
+  the attribute. This can also hit current maps whenever a group has an inline-style opacity (a fade caught mid-way). Evidence:
+  `~/.tupaia-gates/w2-corpus/corpus-20261020T013057-325Z/legacy-v1.7/golden`.
+- v0.9b `#borders` routed 0 when the floor is lowered (evidence `~/.tupaia-gates/w2-corpus/exp09c`).
+
 Observed, not changed:
+- 1.65.2 now keeps hidden `#rivers`/`#borders` `style` on load (the gate used to fire for every map). Nothing in the current code sets `style` on those groups
+  (toggles remove children). `load.ts` turns `toggleRivers` on from `hasChildren()` before auto-update runs, so a hand-edited map with `#rivers { display: none }`
+  would show the button on with the layer hidden. This deviates from upstream and will conflict on an upstream rebase.
 - `showStatistics()` ends every load and sets `mapId = Date.now()`, so the map id in the file is never kept (the same for the parity fixture).
 - The loader's `0.70.0` floor (above).
 - With the floor lowered to `0.7.0` (scratch build, reverted), `legacy-v0.9b` loads and migrates under both arms with equal hashes and saves, but

@@ -357,11 +357,11 @@ function runGolden(entry: Entry): GoldenOutcome {
   const judged = cells.filter(c => !isEmpty(c));
   // Families that fail the same way on the parity fixture are known GPU gaps (manifest.goldenKnownGaps): reported, not gated.
   // CORPUS_STRICT=1 gates them too.
-  const known = strict ? [] : manifest.goldenKnownGaps.filter(k => !k.maps || k.maps.includes(entry.id)).map(k => k.family);
+  const known = strict ? [] : manifest.goldenKnownGaps.filter(k => !k.maps || k.maps.includes(entry.id));
   const { gating: bad, excused } = splitKnownGaps(judged, known);
   checks.push(verdict(!data.errors?.length, 33, id("harness"), `${entry.id}: the golden ran without a page or harness error`, data.errors?.[0]?.split("\n")[0].slice(0, 240) ?? "none", `${entry.id}/golden/golden.json`));
   checks.push(verdict(judged.length > 0 && !bad.length, 33, id("cells"), `${entry.id}: every populated layer family passes the golden at k 1 (SVG arm vs GPU arm, over44 reading, the file's own style), known parity gaps aside`, `${judged.length - bad.length - excused.length}/${judged.length} pass${bad.length ? `; failing: ${bad.slice(0, 6).map(c => `${c.family} (${c.failures?.[0]?.slice(0, 110)})`).join("; ")}` : ""}${excused.length ? `; ${excused.length} known-gap failures excused` : ""}`, `${entry.id}/golden/golden.json`));
-  checks.push(info(33, id("known-gaps"), `${entry.id}: known-gap families that failed (not gated; each also fails on the parity fixture)`, excused.map(c => `${c.family}: ${c.failures?.[0]?.slice(0, 100)}`).join(" | ") || "none"));
+  checks.push(info(33, id("known-gaps"), `${entry.id}: known-gap families that failed within their bounds (not gated; the ten blanket families also fail on the parity fixture, the map-scoped ones are corpus findings)`, excused.map(c => `${c.family}: ${c.failures?.[0]?.slice(0, 100)}`).join(" | ") || "none"));
   checks.push(info(33, id("empty"), `${entry.id}: families with nothing to paint in this map (not judged)`, empty.map(c => c.family).join(", ") || "none"));
   const notes = judged.filter(c => c.pass && c.notes?.length);
   if (notes.length) checks.push(info(33, id("notes"), `${entry.id}: passing cells with a footprint note`, notes.slice(0, 8).map(c => `${c.family}: ${c.notes.join("; ")}`).join(" | ")));

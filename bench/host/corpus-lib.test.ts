@@ -87,11 +87,40 @@ test("a golden cell with nothing to paint and no drawables is empty; a failing p
 
 test("known golden gaps excuse metric failures only", () => {
   const cell = (family: string, failures: string[], pass = false) => ({ family, pass, failures });
+  const gaps = ["cells", "provinces", "states"].map(family => ({ family, maxOver16: 10, maxOver44: 2, minSsim: 0.8 }));
   const { gating, excused } = splitKnownGaps(
     [cell("cells", ["ssim 0.9 < 0.95"]), cell("cells", ["GPU not active: context lost"]), cell("rivers", ["over16 3% > 1%"]), cell("provinces", [], true), cell("states", ["harness: boom"])],
-    ["cells", "provinces", "states"]
+    gaps
   );
   assert.deepEqual(excused.map(c => c.family), ["cells"]);
   assert.deepEqual(gating.map(c => `${c.family}:${c.failures?.[0]}`), ["cells:GPU not active: context lost", "rivers:over16 3% > 1%", "states:harness: boom"]);
   assert.ok(manifest.goldenKnownGaps.every(k => k.reason.length > 20 && (k.maps ?? []).every(id => manifest.entries.some(e => e.id === id))));
+});
+
+test("a known gap never excuses a layer that paints nothing or a census change", () => {
+  const cell = (family: string, failures: string[]) => ({ family, pass: false, failures });
+  const gaps = [{ family: "labels", maxOver16: 10, maxOver44: 2, minSsim: 0.8 }];
+  const { gating, excused } = splitKnownGaps(
+    [
+      cell("labels", ["empty in GPU arm (ink 120 px, 14 routed)"]),
+      cell("labels", ["over44 0.700% > 0.500%", "empty in GPU arm (ink 0 px, 14 routed)"]),
+      cell("labels", ["empty in SVG arm (ink 5 px, 9 drawables)"]),
+      cell("labels", ["census changed: native 3->0"]),
+      cell("labels", ["over44 0.700% > 0.500%"])
+    ],
+    gaps
+  );
+  assert.equal(excused.length, 1);
+  assert.equal(gating.length, 4);
+});
+
+test("a known gap is bounded: drift beyond the measured value plus margin gates, an unbounded metric has no tolerance", () => {
+  const cell = (failures: string[]) => ({ family: "states", pass: false, failures });
+  const gaps = [{ family: "states", maxOver16: 25.3, minSsim: 0.8 }];
+  const { gating, excused } = splitKnownGaps(
+    [cell(["over16 19.431% > 1.000%"]), cell(["over16 40.000% > 1.000%"]), cell(["ssim 0.7000 < 0.95"]), cell(["over44 0.600% > 0.500%"]), cell(["conservative: changed 3% (max 1%), maxDelta 200 (max 40)"])],
+    gaps
+  );
+  assert.equal(excused.length, 1);
+  assert.equal(gating.length, 4);
 });
