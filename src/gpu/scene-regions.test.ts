@@ -78,10 +78,10 @@ describe("row 7 states fill and halo", () => {
 });
 
 describe("row 8 provinces and borders", () => {
-  it("#provs holds province labels: <text> children are compat 'text'; paths are native", () => {
+  it("#provs holds province labels: <text> children are native glyphs inside the opacity group (TEXT)", () => {
     env.fill("provs", '<path d="M0,0h10v10z" fill="#ff0000"/><text x="1" y="1">Province</text>');
     applyStylePreset(env);
-    expect(layerRouting(env.build(), "provs")).toEqual(["group{mask:none,op:0.7}[shape,compat(text)]"]);
+    expect(layerRouting(env.build(), "provs")).toEqual(["group{mask:none,op:0.7}[shape,label]"]);
   });
 
   it("[STROKE] state borders carry dash [2], province borders dash [0,2] with round caps; both native, state first", () => {

@@ -55,9 +55,9 @@ describe("row 43 emoji and image markers", () => {
     expect(scene.layers.markers.native).toBe(0);
   });
 
-  it("[LABELS] a bare <text> in a non-label layer is compat 'text' (emoji glyphs are never native here)", () => {
+  it("[TEXT] an emoji <text> in a non-label layer stays compat (color glyphs are never native)", () => {
     env.fill("markets", '<text x="1" y="1">⚖️</text>');
-    expect(layerRouting(buildStyled(env), "markets")).toEqual(["compat(text)"]);
+    expect(layerRouting(buildStyled(env), "markets")).toEqual(["compat(text emoji)"]);
   });
 });
 
@@ -65,9 +65,15 @@ describe("row 18 military regiments", () => {
   const regiment = (i: number) =>
     `<g id="regiment${i}"><rect x="0" y="0" width="6" height="3"/><text x="1" y="2">12</text><rect x="0" y="0" width="2" height="3"/><text x="1" y="2">⚔</text><image x="0" y="0" width="2" height="2" href="data:,"/></g>`;
 
-  it("[COMPAT] rects are native but text/image are compat: one regiment fragments into shape / compat / shape / compat", () => {
+  it("[TEXT] rects and the number are native; the emoji icon and image are compat: shape / label / shape / compat", () => {
     env.fill("armies", `<g id="army1" fill="#ff0000">${regiment(1)}</g>`);
-    expect(layerRouting(buildStyled(env), "armies")).toEqual(["shape", "compat(text)", "shape", "compat(text; image)"]);
+    expect(layerRouting(buildStyled(env), "armies")).toEqual(["shape", "label", "shape", "compat(text emoji; image)"]);
+    expect(layerRouting(env.build({ nativeText: false }), "armies")).toEqual([
+      "shape",
+      "compat(text)",
+      "shape",
+      "compat(text; image)"
+    ]);
   });
 
   it("[COMPAT] two regiments interleave native and compat runs in DOM order (no group-level compat run)", () => {
@@ -75,15 +81,15 @@ describe("row 18 military regiments", () => {
     const scene = buildStyled(env);
     expect(layerRouting(scene, "armies")).toEqual([
       "shape",
-      "compat(text)",
+      "label",
       "shape",
-      "compat(text; image)",
+      "compat(text emoji; image)",
       "shape",
-      "compat(text)",
+      "label",
       "shape",
-      "compat(text; image)"
+      "compat(text emoji; image)"
     ]);
-    expect(scene.layers.armies).toMatchObject({ native: 4, compat: 6 });
+    expect(scene.layers.armies).toMatchObject({ native: 6, compat: 4 });
   });
 
   it("[PRIM] an <image href=''> inside a regiment paints nothing and is skipped", () => {

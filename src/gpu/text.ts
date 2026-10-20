@@ -45,13 +45,51 @@ export class GlyphAtlas {
   // halo = 0 draws the fill mask; halo > 0 draws a stroke mask of that pixel width with the given SVG line join.
   glyph(font: string, char: string, halo: number, join: CanvasLineJoin = "round", miter = 4): Glyph | null {
     const key = halo > 0 ? `${font}|${halo}|${join}|${miter}|${char}` : `${font}|0|${char}`;
+    // miter corners can reach miterLimit * half the stroke width past the outline
+    const extra = ((join === "miter" ? Math.max(1, miter) : 1) * halo) / 2 + PAD;
+    return this.entry(key, font, char, extra, "auto", c => {
+      if (halo > 0) {
+        c.lineJoin = join;
+        c.miterLimit = miter;
+        c.lineWidth = halo;
+        c.strokeText(char, 0, 0);
+      } else c.fillText(char, 0, 0);
+    });
+  }
+
+  // The blurred coverage of a whole string (a CSS text-shadow is the blur of the text's union, not of each glyph):
+  // `blur` is the shadow blur in this raster's pixels (canvas shadowBlur and CSS blur radius both mean sigma = blur/2).
+  shadow(font: string, text: string, blur: number, kerning: CanvasFontKerning): Glyph | null {
+    const key = `${font}|shadow|${blur}|${kerning}|${text}`;
+    // a Gaussian of sigma = blur/2 is negligible past 3 sigma
+    const extra = Math.ceil(1.5 * blur) + PAD;
+    return this.entry(key, font, text, extra, kerning, (c, cell) => {
+      // only the shadow lands in the cell: the text itself is drawn off the canvas and its shadow offset back
+      c.beginPath();
+      c.rect(cell.x, cell.y, cell.width, cell.height);
+      c.clip();
+      const away = 4 * ATLAS;
+      c.shadowColor = "#fff";
+      c.shadowBlur = blur;
+      c.shadowOffsetX = away;
+      c.fillText(text, -away, 0);
+    });
+  }
+
+  private entry(
+    key: string,
+    font: string,
+    text: string,
+    extra: number,
+    kerning: CanvasFontKerning,
+    paint: (c: CanvasRenderingContext2D, cell: { x: number; y: number; width: number; height: number }) => void
+  ): Glyph | null {
     const cached = this.glyphs.get(key);
     if (cached) return cached;
     const c = this.context;
     c.font = font;
-    const m = c.measureText(char);
-    // miter corners can reach miterLimit * half the stroke width past the outline
-    const extra = ((join === "miter" ? Math.max(1, miter) : 1) * halo) / 2 + PAD;
+    c.fontKerning = kerning;
+    const m = c.measureText(text);
     const left = Math.floor(-m.actualBoundingBoxLeft - extra);
     const top = Math.floor(-m.actualBoundingBoxAscent - extra);
     const width = Math.ceil(m.actualBoundingBoxRight + extra) - left;
@@ -63,12 +101,7 @@ export class GlyphAtlas {
     c.translate(this.x - left, this.y - top);
     c.fillStyle = c.strokeStyle = "#fff";
     c.textBaseline = "alphabetic";
-    if (halo > 0) {
-      c.lineJoin = join;
-      c.miterLimit = miter;
-      c.lineWidth = halo;
-      c.strokeText(char, 0, 0);
-    } else c.fillText(char, 0, 0);
+    paint(c, { x: left, y: top, width, height });
     c.restore();
     const glyph = {
       u0: this.x / ATLAS,
@@ -346,6 +379,7 @@ async function layoutLabel(
   if (!measure) return "textPath reference";
   // exactly <text><textPath><tspan>…</tspan>…</textPath></text>; stray text would render outside the modelled chunks
   const textPath = text.querySelector("textPath");
+  if (!textPath && !text.children.length) return layoutStraight(text, scale, atlas, out, boxes);
   if (!textPath || textPath.parentNode !== text) return "textPath reference";
   const lines = [...textPath.children];
   const outside = [...text.childNodes].some(node =>
@@ -408,7 +442,7 @@ async function layoutLabel(
     }
     const rasterFont = cssFont(style, px * scale);
     measure.font = rasterFont;
-    measure.fontKerning = style.textRendering === "optimizeSpeed" ? "none" : "auto";
+    measure.fontKerning = kerningFor(style.textRendering);
     const baselineShift = centralBaselineShift(style.dominantBaseline, measure.measureText(content), scale);
     if (baselineShift === null) return "central baseline metrics";
     const advances = spacedAdvances(
@@ -441,6 +475,241 @@ async function layoutLabel(
       }
       picked = true; // one pick box per glyph, from the first painted pass
     }
+  }
+  return "";
+}
+
+// ---------------------------------------------------------------- straight text (outside #labels)
+// A plain <text x y [dx dy]>content</text>: one horizontal line from (x+dx, y+dy), anchored as text-anchor says. The
+// overlay layers draw their small text this way (temperature, regiment numbers, coordinates, wind arrows, rulers).
+
+// Chromium returns computed text-rendering in lower case; optimizeSpeed turns kerning off (Blink FontDescription).
+export function kerningFor(textRendering: string | undefined): CanvasFontKerning {
+  return (textRendering || "").toLowerCase() === "optimizespeed" ? "none" : "auto";
+}
+
+// Color glyphs: the atlas stores coverage only, so an emoji would come out as a tinted silhouette. Conservative:
+// some symbols (©, ™, ↔) that usually render as text are kept on the compat lane too.
+export function emojiContent(content: string): boolean {
+  return /\p{Extended_Pictographic}|\u{FE0F}|\u{20E3}/u.test(content);
+}
+
+export interface TextShadow {
+  color: Rgba;
+  x: number; // CSS px: Chromium paints an SVG text-shadow in CSS pixels, independent of the user-space transform
+  y: number;
+  blur: number;
+}
+
+const SHADOW_LENGTH = "(-?(?:\\d+\\.?\\d*|\\.\\d+)(?:e[+-]?\\d+)?)px";
+const SHADOW = new RegExp(`^(.+?)\\s+${SHADOW_LENGTH}\\s+${SHADOW_LENGTH}(?:\\s+${SHADOW_LENGTH})?$`, "i");
+
+// Computed text-shadow ("rgb(…) 0px 0px 10px, …"): [] for none, null when it cannot be read exactly. Fully
+// transparent shadows paint nothing and are dropped.
+export function parseTextShadows(value: string | undefined): TextShadow[] | null {
+  if (!value || value === "none") return [];
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < value.length; i++) {
+    if (value[i] === "(") depth++;
+    else if (value[i] === ")") depth--;
+    else if (value[i] === "," && depth === 0) {
+      parts.push(value.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(value.slice(start));
+  const shadows: TextShadow[] = [];
+  for (const part of parts) {
+    const match = SHADOW.exec(part.trim());
+    if (!match) return null;
+    const color = parseColor(match[1]);
+    const [x, y, blur] = [Number(match[2]), Number(match[3]), Number(match[4] ?? 0)];
+    if (!color || ![x, y, blur].every(Number.isFinite) || blur < 0) return null;
+    if (color[3] > 0) shadows.push({ color, x, y, blur });
+  }
+  return shadows;
+}
+
+// Device pixels per CSS pixel as the renderer sizes its canvas (renderer.ts caps the DPR at 2).
+function devicePixelRatio(): number {
+  const dpr = Number(globalThis.devicePixelRatio) || 1;
+  return Math.min(Math.max(dpr, 1), 2);
+}
+
+// Text style as getComputedStyle exposes it (a plain record in tests).
+type StraightStyle = Partial<Record<string, string>>;
+
+interface StraightPlan {
+  content: string;
+  px: number;
+  x: number;
+  y: number;
+  fill: Rgba | null;
+  stroke: Rgba | null;
+  strokeWidth: number;
+  join: CanvasLineJoin;
+  miter: number;
+  shadows: TextShadow[];
+  baseline: "auto" | "central";
+  anchor: "start" | "middle" | "end";
+}
+
+// Everything about a straight <text> that does not need fonts: a reason it must stay compat, or the plan to lay it out.
+export function planStraightText(text: Element, style: StraightStyle): StraightPlan | string {
+  if ([...text.childNodes].some(node => !isText(node))) return "tspan structure";
+  if (text.getAttribute("transform") !== null) return "text transform";
+  if (presentAttribute(text, ["rotate", "textLength", "lengthAdjust"])) return "text positioning";
+  const content = text.textContent || "";
+  if (emojiContent(content)) return "emoji";
+  const contentReason = unsupportedContent(content);
+  if (contentReason) return contentReason;
+  const baselineValue = style.dominantBaseline === "alphabetic" ? "auto" : style.dominantBaseline || "auto";
+  const checked: StraightStyle = { textShadow: "none", dominantBaseline: baselineValue };
+  for (const [property] of STYLE_DEFAULTS) if (!(property in checked)) checked[property] = style[property];
+  checked.fill = style.fill;
+  checked.stroke = style.stroke;
+  const unsupported = unsupportedStyle(checked);
+  if (unsupported) return unsupported;
+  const px = Number.parseFloat(style.fontSize || "");
+  // browsers compute font-size in px; a bare number (presentation attribute, as in the test stub) means px too
+  if (!(px > 0) || !PX.test(style.fontSize || "")) return "font-size";
+  const length = (name: string) => parseLength(text.getAttribute(name) ?? "0", px);
+  const [x, y, dx, dy] = ["x", "y", "dx", "dy"].map(length);
+  if (x === null || y === null || dx === null || dy === null) return "text positioning";
+  if (letterSpacingPx(style.letterSpacing) !== 0) return "letter-spacing";
+  const opacity = Number.parseFloat(style.opacity ?? "1");
+  const fillOpacity = Number.parseFloat(style.fillOpacity ?? "1");
+  const fill = parseColor(style.fill, fillOpacity * opacity);
+  if (!fill && style.fill && style.fill !== "none") return `fill ${style.fill}`;
+  const strokeColor = parseColor(style.stroke, Number.parseFloat(style.strokeOpacity ?? "1") * opacity);
+  if (!strokeColor && style.stroke && style.stroke !== "none") return `stroke ${style.stroke}`;
+  const strokeWidth = strokeColor ? Number.parseFloat(style.strokeWidth || "1") || 0 : 0;
+  const stroke = strokeWidth > 0 ? strokeColor : null;
+  if (stroke) {
+    const strokeReason = unsupportedStroke(style);
+    if (strokeReason) return strokeReason;
+  }
+  const shadows = parseTextShadows(style.textShadow);
+  if (!shadows) return "text-shadow";
+  if (shadows.length) {
+    // the shadow is the blur of everything the text paints; only a plain opaque fill is modelled
+    if (stroke) return "text-shadow over stroke";
+    if (!fill || fillOpacity * opacity < 1) return "text-shadow over translucent fill";
+  }
+  // per-pass alpha would show the overlap that group opacity hides
+  if (opacity < 1 && fill && stroke) return "opacity over fill and stroke";
+  const anchor = style.textAnchor === "middle" ? "middle" : style.textAnchor === "end" ? "end" : "start";
+  return {
+    content,
+    px,
+    x: x + dx,
+    y: y + dy,
+    fill,
+    stroke,
+    strokeWidth,
+    join: (style.strokeLinejoin || "miter") as CanvasLineJoin,
+    miter: Number.parseFloat(style.strokeMiterlimit || "4") || 4,
+    shadows,
+    baseline: baselineValue as "auto" | "central",
+    anchor
+  };
+}
+
+// The scene's routing check: "" when the text can be drawn natively (fonts are checked at layout).
+export function straightTextReason(text: Element, style: StraightStyle): string {
+  const plan = planStraightText(text, style);
+  return typeof plan === "string" ? plan : "";
+}
+
+// Shadows are sized for the raster bucket (device px per world unit = scale): exact when the camera's k·dpr equals it
+// (k·dpr a power of two up to 16), smaller than SVG's by up to 2x in between. The blurred mask is cut at a lower
+// resolution where its sigma allows (a blur of sigma ≥ 2 px loses nothing to bilinear upsampling) to save atlas room.
+async function layoutStraight(
+  text: SVGTextElement,
+  scale: number,
+  atlas: GlyphAtlas,
+  out: number[],
+  boxes: LabelBatch["boxes"]
+): Promise<string> {
+  const style = getComputedStyle(text);
+  const plan = planStraightText(text, style as unknown as StraightStyle);
+  if (typeof plan === "string") return plan;
+  const { content, px } = plan;
+  const font = cssFont(style, px);
+  const fontIssue = await fontReady(font, content);
+  if (fontIssue) {
+    atlas.fontIssues.set(font, content);
+    return fontIssue;
+  }
+  const kerning = kerningFor(style.textRendering);
+  const rasterFont = cssFont(style, px * scale);
+  measure!.font = rasterFont;
+  measure!.fontKerning = kerning;
+  const metrics = measure!.measureText(content);
+  const baselineShift = centralBaselineShift(plan.baseline, metrics, scale);
+  if (baselineShift === null) return "central baseline metrics";
+  const advances = prefixAdvances(content, s => measure!.measureText(s).width / scale);
+  const width = advances.reduce((sum, advance) => sum + advance, 0);
+  const x0 = plan.x - (plan.anchor === "middle" ? width / 2 : plan.anchor === "end" ? width : 0);
+  const y0 = plan.y;
+  const instances: number[] = [];
+  const push = (cx: number, cy: number, glyph: Glyph, glyphScale: number, color: Rgba) =>
+    instances.push(
+      cx,
+      cy,
+      0,
+      glyph.left / glyphScale,
+      baselineShift + glyph.top / glyphScale,
+      glyph.width / glyphScale,
+      glyph.height / glyphScale,
+      glyph.u0,
+      glyph.v0,
+      glyph.u1,
+      glyph.v1,
+      ...color
+    );
+  const dpr = devicePixelRatio();
+  // CSS paints the first shadow on top: the last one goes down first
+  for (const shadow of [...plan.shadows].reverse()) {
+    const sigma = (shadow.blur * dpr) / 2; // device px
+    const reduce = sigma > 2 ? 2 / sigma : 1;
+    const shadowScale = scale * reduce;
+    const glyph = atlas.shadow(cssFont(style, px * shadowScale), content, shadow.blur * dpr * reduce, kerning);
+    if (!glyph) return "glyph atlas full";
+    push(x0 + (shadow.x * dpr) / scale, y0 + (shadow.y * dpr) / scale, glyph, shadowScale, shadow.color);
+  }
+  const passes: [number, Rgba | null][] = [
+    [0, plan.fill],
+    [plan.strokeWidth * scale, plan.stroke]
+  ];
+  if (strokeBeforeFill(style.paintOrder)) passes.reverse();
+  const chars = [...content];
+  let box: number[] | null = null;
+  for (const [halo, color] of passes) {
+    if (!color) continue;
+    let pen = x0;
+    for (let i = 0; i < chars.length; i++) {
+      const advance = advances[i];
+      if (chars[i].trim()) {
+        const glyph = atlas.glyph(rasterFont, chars[i], halo, plan.join, plan.miter);
+        if (!glyph) return "glyph atlas full";
+        push(pen, y0, glyph, scale, color);
+      }
+      pen += advance;
+    }
+    box ??= [
+      x0,
+      y0 + baselineShift - metrics.fontBoundingBoxAscent / scale,
+      width,
+      (metrics.fontBoundingBoxAscent + metrics.fontBoundingBoxDescent) / scale
+    ];
+  }
+  out.push(...instances);
+  if (box) {
+    const [bx, by, bw, bh] = box;
+    boxes.push({ id: text.id, corners: [bx, by, bx + bw, by, bx + bw, by + bh, bx, by + bh] });
   }
   return "";
 }

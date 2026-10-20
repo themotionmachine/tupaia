@@ -24,13 +24,15 @@ afterEach(() => env.dispose());
 const show = (id: string) => env.layer(id).setAttribute("style", "display:inline");
 
 describe("row 21 data overlays", () => {
-  it("temperature: isoline paths are native; tempLabels <text> and <circle> are compat (circle native opt-in)", () => {
+  it("temperature: isoline paths are native; tempLabels <text> is native glyphs (TEXT), <circle> compat (native opt-in)", () => {
     env.fill(
       "temperature",
-      '<path d="M0,0h10v10z" fill="#ff0000" stroke="#ff0000"/><g id="tempLabels"><text x="1" y="1">12</text><circle cx="1" cy="1" r="1"/></g>'
+      '<path d="M0,0h10v10z" fill="#ff0000" stroke="#ff0000"/><g id="tempLabels"><text x="1" y="1">12°F</text><circle cx="1" cy="1" r="1"/></g>'
     );
-    expect(layerRouting(styled(), "temperature")).toEqual(["shape", "compat(text; <circle>)"]);
-    expect(layerRouting(styled(shapes), "temperature")).toEqual(["shape", "compat(text)", "shape"]);
+    expect(layerRouting(styled(), "temperature")).toEqual(["shape", "label", "compat(<circle>)"]);
+    expect(layerRouting(styled(shapes), "temperature")).toEqual(["shape", "label", "shape"]);
+    // opt out (?gpu-native-text=0): the text joins the compat run as before TEXT
+    expect(layerRouting(styled({ nativeText: false }), "temperature")).toEqual(["shape", "compat(text; <circle>)"]);
   });
 
   it("[PRIM] population <line> strokes are compat by default; opt-in native strokes with no fill", () => {
