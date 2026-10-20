@@ -696,11 +696,47 @@ input[type="color"]::-webkit-color-swatch-wrapper {
   margin: 0.4em 0;
   white-space: nowrap;
   font-family: var(--monospace);
-  animation: glowing 2s infinite;
+  position: relative;
 }
 
 .glow {
   animation: glowing 3s infinite ease-in-out;
+}
+
+/* Buttons pulse on the compositor: the shadow sits on a layer whose opacity animates, so no frame repaints the page.
+   An animated box-shadow repaints every frame, and each repaint re-layerizes the whole document, the map SVG included
+   (25 to 265 ms a frame on a dense map): the first-visit glow of #optionsTrigger ran forever and starved the main thread
+   (GPU prepares 2.5 to 7 times slower, the markets-off toggle 74 to 93 s). Selects keep the box-shadow pulse (no
+   ::after on a replaced element); their glow is brief. */
+button.glow {
+  animation: none;
+  position: relative;
+}
+
+button.glow::after,
+#finalizeHeightmap::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: 0 0 10px #f44336;
+  pointer-events: none;
+  animation: glowing-opacity 3s infinite ease-in-out;
+}
+
+#finalizeHeightmap::after {
+  animation-duration: 2s;
+  animation-timing-function: ease;
+}
+
+@keyframes glowing-opacity {
+  0%,
+  100% {
+    opacity: 0.1;
+  }
+  50% {
+    opacity: 1;
+  }
 }
 
 @keyframes glowing {
