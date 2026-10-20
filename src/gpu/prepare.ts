@@ -85,6 +85,9 @@ export interface PrepareContext {
   // the CPU payload of the frame a context loss destroyed (retainFrame): a restore at the same key re-uploads it
   // instead of walking and converting the scene again; absent or stale: a full prepare
   retained?: RetainedFrame | null;
+  // the prepare gave up because the live DOM changed under it without a revision bump (a run element was detached):
+  // the caller must prepare again once it ends
+  sourceChanged?(): void;
 }
 
 // The scene curve tolerance; buildScene's own default, passed explicitly so the cache key cannot drift from it.
@@ -886,6 +889,13 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
       if (ctx.stale()) return false;
       const resolved = resolveManyInClone(run.elements, source);
       const missing = resolved.find(item => typeof item === "string");
+      // A run element removed since the scene was read: drawCoordinates rebuilds the graticule on each camera settle
+      // and that churn is routed to the overlay lane without a revision bump, so it can land mid-prepare. This prepare
+      // predates the change; abort it (the renderer re-prepares or refreshes the overlay) instead of failing for good.
+      if (missing === "detached element") {
+        ctx.sourceChanged?.();
+        return false;
+      }
       if (missing) {
         const i = resolved.indexOf(missing);
         const e = run.elements[i];
