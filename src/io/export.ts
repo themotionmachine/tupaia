@@ -22,6 +22,7 @@ const toGeoCoordinates = (x: number, y: number) => getCoordinates(x, y, mapCoord
 // heightmap editor's resume (W4b HEIGHT). Its encodings are kept per URL (per font declaration), a failed or non-string
 // one dropped. Every other type (the user's SVG/PNG/JPEG exports, 3D, mesh) fetches afresh as before.
 const GPU_ASSET_LIMIT = 64;
+const GPU_ASSET_PENDING_MS = 10_000;
 const gpuAssets = new Map<string, Promise<unknown>>();
 function gpuAsset<T>(key: string, load: () => Promise<T>, keep: (value: T) => boolean): Promise<T> {
   const known = gpuAssets.get(key) as Promise<T> | undefined;
@@ -32,7 +33,20 @@ function gpuAsset<T>(key: string, load: () => Promise<T>, keep: (value: T) => bo
   const drop = () => {
     if (gpuAssets.get(key) === loading) gpuAssets.delete(key);
   };
-  loading.then(value => keep(value) || drop(), drop);
+  let settled = false;
+  loading.then(
+    value => {
+      settled = true;
+      if (!keep(value)) drop();
+    },
+    () => {
+      settled = true;
+      drop();
+    }
+  );
+  // getBase64 never calls back on a network error: a load still pending after GPU_ASSET_PENDING_MS is forgotten so later
+  // clones fetch again (the clone already waiting on it hangs as it did before the memo)
+  setTimeout(() => settled || drop(), GPU_ASSET_PENDING_MS);
   return loading;
 }
 
