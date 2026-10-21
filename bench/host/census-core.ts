@@ -238,14 +238,15 @@ export interface PresetRow {
 
 // the exact hard-failure phrases layer-golden.ts emits: a GPU that is not drawing, a prepare that never settled, a harness error
 const HARD = /^(GPU not active|GPU frame did not settle|harness:)/;
-const EMPTY_ARM = /^empty in (SVG|GPU) arm /;
+// "empty in GPU arm at the layer's real opacity" (FAINT presence) is not an empty arm: the lifted SVG has ink there
+const EMPTY_ARM = /^empty in (SVG|GPU) arm \(/;
 /** Empty in both arms: neither arm paints ink and nothing failed but the emptiness itself. Needs the ink metrics. */
 export function emptyInBothArms(c: GoldenCellLike): boolean {
   const m = c.metrics;
   if (c.pass || m?.inkSvg == null || m.inkGpu == null) return false;
   if (m.inkSvg >= MIN_INK_PIXELS || m.inkGpu >= MIN_INK_PIXELS) return false;
   const failures = c.failures ?? [];
-  return failures.length > 0 && failures.every(f => EMPTY_ARM.test(f));
+  return failures.some(f => f.startsWith("empty in SVG arm (")) && failures.every(f => EMPTY_ARM.test(f));
 }
 const cellId = (c: GoldenCellLike) => `${c.family}/k${c.k}${/@/.test(c.key) ? c.key.slice(c.key.indexOf("@")) : ""}`;
 
