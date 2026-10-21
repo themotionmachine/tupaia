@@ -52,11 +52,15 @@ export class GlyphAtlas {
   generation = 0;
 
   // `rows`: the canvas height (a fine cut's atlas, glyph-fine.ts, holds fewer rows than the renderer's); uvs stay
-  // normalized by the full GLYPH_ATLAS edge either way
-  constructor(rows = ATLAS) {
+  // normalized by the full GLYPH_ATLAS edge either way. `paint` false: a measuring atlas (GLYPH3's placed cut lays a
+  // label out only for its glyph places, glyph-fine.ts): cells are measured, never drawn or packed, so it never fills.
+  constructor(
+    rows = ATLAS,
+    readonly paint = true
+  ) {
     this.canvas = document.createElement("canvas");
-    this.canvas.width = ATLAS;
-    this.canvas.height = Math.max(1, Math.min(ATLAS, Math.ceil(rows)));
+    this.canvas.width = paint ? ATLAS : 1;
+    this.canvas.height = paint ? Math.max(1, Math.min(ATLAS, Math.ceil(rows))) : 1;
     const context = this.canvas.getContext("2d", { willReadFrequently: false });
     if (!context) throw new Error("Canvas2D unavailable");
     this.context = context;
@@ -139,6 +143,11 @@ export class GlyphAtlas {
     const top = Math.floor(-m.actualBoundingBoxAscent - extra);
     const width = Math.ceil(m.actualBoundingBoxRight + extra) - left;
     const height = Math.ceil(m.actualBoundingBoxDescent + extra) - top;
+    if (!this.paint) {
+      const measured = { u0: 0, v0: 0, u1: 0, v1: 0, left, top, width, height };
+      this.glyphs.set(key, measured);
+      return measured;
+    }
     if (width > ATLAS || height > ATLAS) return null;
     if (this.x + width > ATLAS) [this.x, this.y, this.row] = [0, this.y + this.row, 0];
     if (this.y + height > this.canvas.height) return null;
@@ -198,6 +207,208 @@ export class GlyphAtlas {
     this.generation++;
   }
 }
+
+// ---------------------------------------------------------------- placed glyphs (W4b GLYPH3)
+// Where a laid-out glyph instance's pen sits and what it paints, recorded by layoutLabels (`places`, one entry per
+// instance, null for a soft shadow cell): the world anchor (x, y) and angle, the pen's offset from it along the
+// glyph's axes before the per-zoom central shift (ox, oy), and the paint of its atlas cell at the layout's raster
+// scale (font at raster px, halo in raster px). glyph-fine.ts re-cuts a settled frame's glyphs from these.
+export interface GlyphPlace {
+  font: string;
+  char: string;
+  halo: number;
+  join: CanvasLineJoin;
+  miter: number;
+  ink: string;
+  x: number;
+  y: number;
+  angle: number;
+  ox: number;
+  oy: number;
+  dynamic: [number, number, number];
+}
+
+// The camera a placed cut is for: screen CSS px = world * k + (x, y), device px = CSS px * dpr.
+export interface PlaceCamera {
+  x: number;
+  y: number;
+  k: number;
+  dpr: number;
+}
+
+// A glyph's pen in device px at a camera (the central shift at its k, as the glyph shader applies it). Chromium keeps
+// an SVG glyph's position in user space as float32, and Skia rounds a pen on a device-row tie (axis-aligned text) by
+// that value: on shared at k 1.1 "The Badlands" (#lbl_regions) has its pen at device y 686.5 exactly in doubles, but
+// 683.2727 user units (676 plus a central shift of 8/1.1) is 683.27270508 in float32, 686.49995 on screen, and the SVG
+// paints a row above what the double rounds to. The world pen is therefore rounded to float32 first.
+export function placePen(place: GlyphPlace, camera: PlaceCamera): [number, number] {
+  const [ascent, descent, mode] = place.dynamic;
+  const oy = place.oy + centralShiftAt(ascent, descent, mode, camera.k);
+  const [c, s] = [Math.cos(place.angle), Math.sin(place.angle)];
+  const wx = Math.fround(place.x + c * place.ox - s * oy);
+  const wy = Math.fround(place.y + s * place.ox + c * oy);
+  return [(wx * camera.k + camera.x) * camera.dpr, (wy * camera.k + camera.y) * camera.dpr];
+}
+
+// A device-aligned cell: integer device rect [x0, x0 + width) x [y0, y0 + height) holding the glyph drawn at its
+// rotation with its pen at `pen` (device px, sub-pixel phase kept), plus its spot in the placed atlas (ax, ay).
+export interface PlacedCell {
+  place: GlyphPlace;
+  pen: [number, number];
+  x0: number;
+  y0: number;
+  width: number;
+  height: number;
+  ax: number;
+  ay: number;
+}
+
+// Skia rasterizes an SVG glyph in place: at its rotation, with its pen at its own sub-pixel position (axis-aligned text
+// on a whole device row, x in quarter px; rotated text in quarter px on both axes). A mask cut once, axis-aligned at
+// phase 0, and resampled at the glyph's angle and phase cannot reproduce that coverage (PHASE1-PLAN D14: rotated state
+// labels at k 1 missed the D11 cap). A placed atlas cuts each glyph the way Skia draws it on screen: Canvas2D (Skia
+// too) fills the glyph under the same rotation and the same fractional device translation, into a cell whose texels
+// are the screen's device pixels, so the glyph shader reads it back texel for pixel.
+export class PlacedGlyphAtlas {
+  readonly cells: PlacedCell[] = [];
+  private readonly boxes = new Map<string, [number, number, number, number]>();
+  private x = 0;
+  private y = 0;
+  private row = 0;
+  private context: CanvasRenderingContext2D | null = null;
+  canvas: HTMLCanvasElement | null = null;
+
+  constructor(private readonly measurer: CanvasRenderingContext2D) {}
+
+  get rows(): number {
+    return this.y + this.row;
+  }
+
+  // The glyph's ink box around its pen (unrotated raster px: left, top, right, bottom, y down), with the halo's reach
+  // and the Lanczos margin.
+  private box(place: GlyphPlace): [number, number, number, number] {
+    const key = `${place.font}|${place.halo}|${place.join}|${place.miter}|${place.char}`;
+    const cached = this.boxes.get(key);
+    if (cached) return cached;
+    const c = this.measurer;
+    c.font = place.font;
+    c.fontKerning = "auto";
+    c.textRendering = "auto";
+    const m = c.measureText(place.char);
+    const extra = ((place.join === "miter" ? Math.max(1, place.miter) : 1) * place.halo) / 2 + PAD;
+    const box: [number, number, number, number] = [
+      -m.actualBoundingBoxLeft - extra,
+      -m.actualBoundingBoxAscent - extra,
+      m.actualBoundingBoxRight + extra,
+      m.actualBoundingBoxDescent + extra
+    ];
+    this.boxes.set(key, box);
+    return box;
+  }
+
+  // Reserve a cell for a glyph whose pen sits at `pen` (device px); null when its cell misses the view
+  // [0, width) x [0, height) or the atlas has no room left (the instance then keeps its resampled cell).
+  add(place: GlyphPlace, pen: [number, number], view: { width: number; height: number }): PlacedCell | null {
+    const [l, t, r, b] = this.box(place);
+    const [c, s] = [Math.cos(place.angle), Math.sin(place.angle)];
+    let [minX, minY, maxX, maxY] = [Infinity, Infinity, -Infinity, -Infinity];
+    for (const [x, y] of [
+      [l, t],
+      [r, t],
+      [r, b],
+      [l, b]
+    ]) {
+      const dx = pen[0] + c * x - s * y;
+      const dy = pen[1] + s * x + c * y;
+      [minX, minY, maxX, maxY] = [Math.min(minX, dx), Math.min(minY, dy), Math.max(maxX, dx), Math.max(maxY, dy)];
+    }
+    if (!(maxX > 0 && maxY > 0 && minX < view.width && minY < view.height)) return null;
+    const [x0, y0] = [Math.floor(minX), Math.floor(minY)];
+    const [width, height] = [Math.ceil(maxX) - x0, Math.ceil(maxY) - y0];
+    if (width > ATLAS || height > ATLAS) return null;
+    if (this.x + width > ATLAS) [this.x, this.y, this.row] = [0, this.y + this.row, 0];
+    if (this.y + height > ATLAS) return null;
+    const cell = { place, pen, x0, y0, width, height, ax: this.x, ay: this.y };
+    this.x += width + 1;
+    this.row = Math.max(this.row, height + 1);
+    this.cells.push(cell);
+    return cell;
+  }
+
+  // Draw every reserved cell into a canvas of `rows` rows (the packed height); false without a 2D context.
+  paintAll(): boolean {
+    const canvas = document.createElement("canvas");
+    canvas.width = ATLAS;
+    canvas.height = Math.max(1, this.rows);
+    const c = canvas.getContext("2d", { willReadFrequently: false });
+    if (!c) return false;
+    this.canvas = canvas;
+    this.context = c;
+    for (const cell of this.cells) this.paint(cell);
+    return true;
+  }
+
+  private paint(cell: PlacedCell): void {
+    const c = this.context!;
+    const { place } = cell;
+    c.save();
+    c.beginPath();
+    c.rect(cell.ax, cell.ay, cell.width, cell.height);
+    c.clip();
+    // the pen keeps its fractional device position, so Skia rounds and phases it as it does on screen
+    c.translate(cell.ax + (cell.pen[0] - cell.x0), cell.ay + (cell.pen[1] - cell.y0));
+    if (place.angle) c.rotate(place.angle);
+    c.font = place.font;
+    c.fontKerning = "auto";
+    c.textRendering = "auto";
+    c.textBaseline = "alphabetic";
+    c.fillStyle = c.strokeStyle = place.ink;
+    if (place.halo > 0) {
+      c.lineJoin = place.join;
+      c.miterLimit = place.miter;
+      c.lineWidth = place.halo;
+      c.strokeText(place.char, 0, 0);
+    } else c.fillText(place.char, 0, 0);
+    c.restore();
+  }
+
+  release(): void {
+    if (this.canvas) this.canvas.width = this.canvas.height = 0;
+    this.canvas = null;
+    this.context = null;
+  }
+}
+
+// A placed cell's glyph instance (GLYPH_FLOATS): an unrotated quad on the cell's device rect at the camera, no central
+// shift (it is in the pen), colour from the instance it replaces, baseline mode -1 = sample the placed atlas texel for
+// device pixel (shaders.ts glyph). uvs are normalized by GLYPH_ATLAS like every glyph cell's.
+export function placedInstance(
+  cell: PlacedCell,
+  camera: PlaceCamera,
+  color: ArrayLike<number>,
+  out: Float32Array,
+  offset: number
+): void {
+  const scale = camera.k * camera.dpr;
+  out[offset] = (cell.x0 / camera.dpr - camera.x) / camera.k;
+  out[offset + 1] = (cell.y0 / camera.dpr - camera.y) / camera.k;
+  out[offset + 2] = 0;
+  out[offset + 3] = 0;
+  out[offset + 4] = 0;
+  out[offset + 5] = cell.width / scale;
+  out[offset + 6] = cell.height / scale;
+  out[offset + 7] = cell.ax / ATLAS;
+  out[offset + 8] = cell.ay / ATLAS;
+  out[offset + 9] = (cell.ax + cell.width) / ATLAS;
+  out[offset + 10] = (cell.ay + cell.height) / ATLAS;
+  for (let i = 0; i < 4; i++) out[offset + 11 + i] = color[i];
+  out[offset + 15] = 0;
+  out[offset + 16] = 0;
+  out[offset + 17] = PLACED_MODE;
+}
+
+// a_baseline.z of a placed cell (shaders.ts glyph)
+export const PLACED_MODE = -1;
 
 // The atlas cuts a text-shadow alone by drawing the text far off the canvas and offsetting only its shadow back in
 // (GlyphAtlas.shadow). Chromium paints that shadow; a browser that culled the off-canvas draw before its shadow would
@@ -882,19 +1093,21 @@ export function centralBaselineShift(
 export async function layoutLabels(
   elements: SVGTextElement[],
   rasterScale: number,
-  atlas: GlyphAtlas
+  atlas: GlyphAtlas,
+  places?: (GlyphPlace | null)[]
 ): Promise<LabelBatch> {
   measure ??= document.createElement("canvas").getContext("2d");
   const out: number[] = [];
   const boxes: LabelBatch["boxes"] = [];
   const failed: LabelBatch["failed"] = [];
   for (const element of elements) {
-    const [instances, picked] = [out.length, boxes.length];
-    const reason = await layoutLabel(element, rasterScale, atlas, out, boxes);
+    const [instances, picked, placed] = [out.length, boxes.length, places?.length ?? 0];
+    const reason = await layoutLabel(element, rasterScale, atlas, out, boxes, places);
     if (!reason) continue;
     // a label is either fully native or fully compat, never half drawn
     out.length = instances;
     boxes.length = picked;
+    if (places) places.length = placed;
     failed.push({ element, reason });
   }
   return { instances: new Float32Array(out), count: out.length / GLYPH_FLOATS, boxes, failed };
@@ -905,12 +1118,13 @@ async function layoutLabel(
   scale: number,
   atlas: GlyphAtlas,
   out: number[],
-  boxes: LabelBatch["boxes"]
+  boxes: LabelBatch["boxes"],
+  places?: (GlyphPlace | null)[]
 ): Promise<string> {
   if (!measure) return "textPath reference";
   // exactly <text><textPath><tspan>…</tspan>…</textPath></text>; stray text would render outside the modelled chunks
   const textPath = text.querySelector("textPath");
-  if (!textPath && !text.children.length) return layoutStraight(text, scale, atlas, out, boxes);
+  if (!textPath && !text.children.length) return layoutStraight(text, scale, atlas, out, boxes, places);
   if (!textPath || textPath.parentNode !== text) return "textPath reference";
   const lines = [...textPath.children];
   const outside = [...text.childNodes].some(node =>
@@ -1066,6 +1280,20 @@ async function layoutLabel(
           ...color,
           ...baseline.dynamic
         );
+        places?.push({
+          font: rasterFont,
+          char: chars[i],
+          halo,
+          join,
+          miter,
+          ink,
+          x: at.x,
+          y: at.y,
+          angle: at.angle,
+          ox: at.origin,
+          oy: at.dy + baseline.baked,
+          dynamic: baseline.dynamic
+        });
         if (!picked)
           boxes.push({ id: text.id, corners: quad(at.x, at.y, at.angle, lx, ly + baseline.atPrepare, w, h) });
       }
@@ -1331,7 +1559,8 @@ async function layoutStraight(
   scale: number,
   atlas: GlyphAtlas,
   out: number[],
-  boxes: LabelBatch["boxes"]
+  boxes: LabelBatch["boxes"],
+  places?: (GlyphPlace | null)[]
 ): Promise<string> {
   const style = getComputedStyle(text);
   const plan = planStraightText(text, style as unknown as StraightStyle);
@@ -1391,6 +1620,7 @@ async function layoutStraight(
   }
   const [x0, y0] = pens[0] ?? [plan.x, plan.y];
   const instances: number[] = [];
+  const placed: (GlyphPlace | null)[] = [];
   const push = (cx: number, cy: number, glyph: Glyph, glyphScale: number, color: Rgba) =>
     instances.push(
       cx,
@@ -1444,6 +1674,7 @@ async function layoutStraight(
       -a,
       ...baseline.dynamic
     );
+    placed.push(null); // a soft cell keeps its bucket mask (its blur is not a glyph Skia rasterizes in place)
   }
   const passes: [number, Rgba | null][] = [
     [0, plan.fill],
@@ -1459,6 +1690,20 @@ async function layoutStraight(
       const glyph = atlas.glyph(rasterFont, chars[i], halo, plan.join, plan.miter, ink);
       if (!glyph) return "glyph atlas full";
       push(pens[i][0], pens[i][1], glyph, scale, color);
+      placed.push({
+        font: rasterFont,
+        char: chars[i],
+        halo,
+        join: plan.join,
+        miter: plan.miter,
+        ink,
+        x: pens[i][0],
+        y: pens[i][1],
+        angle: 0,
+        ox: 0,
+        oy: baseline.baked,
+        dynamic: baseline.dynamic
+      });
     }
     box ??= [
       x0,
@@ -1468,6 +1713,7 @@ async function layoutStraight(
     ];
   }
   out.push(...instances);
+  places?.push(...placed);
   if (box) {
     const [bx, by, bw, bh] = box;
     boxes.push({ id: text.id, corners: [bx, by, bx + bw, by, bx + bw, by + bh, bx, by + bh] });

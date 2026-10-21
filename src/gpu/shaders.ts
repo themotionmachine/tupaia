@@ -532,6 +532,12 @@ void main() {
 //   sigma * (k * dpr / bucket) device px: narrower than CSS's whenever k * dpr is not the bucket. The fragment shader
 //   adds the missing Gaussian, sqrt(sigma^2 - shown^2) device px, as a weighted grid of bilinear taps clamped to the
 //   cell (text.ts gives the cell a 6-sigma margin, enough for the bucket's 2x).
+//
+// GLYPH3 (W4b): a placed cell (a_baseline.z = -1, text.ts placedInstance) is a glyph glyph-fine.ts cut at the settled
+// camera in place, at its rotation and sub-pixel pen phase, into a device-aligned cell of the placed atlas (u_placed,
+// its rows rescaled by u_placedScale). It is an unrotated quad with no central shift (both are in the cell) and no
+// rowSnap (Skia already put the pen where it paints it); at that camera every device pixel centre is a texel centre,
+// so the Lanczos taps read the cell texel for pixel, and the 3% coverage floor (for ringing) does not apply.
 export const SHADOW_MASK_SIGMA = 2;
 // text.ts GLYPH_ATLAS (the atlas edge its uvs are normalized by), repeated here because text.ts imports this file
 export const GLYPH_ATLAS_EDGE = 2048;
@@ -547,6 +553,7 @@ in vec4 a_color;
 in vec3 a_baseline;
 uniform mat3 u_matrix;
 uniform float u_atlasScale; // GLYPH_ATLAS / the uploaded atlas rows (text.ts glyphAtlasRows)
+uniform float u_placedScale; // the same for the placed atlas (GLYPH3)
 uniform float u_k; // CSS px per world unit at the current camera
 uniform float u_rows; // device rows of the render target (the drawing buffer)
 out vec2 v_uv;
@@ -554,6 +561,7 @@ out vec4 v_color;
 out float v_soft;
 flat out float v_sigma;
 flat out vec4 v_cell;
+flat out float v_placed;
 float centralShift() {
   if (a_baseline.z < 0.5) return 0.0;
   float css = (floor(a_baseline.x * u_k + 0.5) - floor(a_baseline.y * u_k + 0.5)) * 0.5;
@@ -566,7 +574,7 @@ float centralShift() {
 // at that resolution a top on a whole row is the baseline on one, and the Lanczos taps land on texel centres
 // vertically. Elsewhere (rotated, soft, resampled cells) 0. text.ts glyphRowSnap is the reference copy.
 float rowSnap(vec2 top) {
-  if (abs(a_anchor.z) > 1e-4 || u_rows <= 0.0) return 0.0;
+  if (abs(a_anchor.z) > 1e-4 || u_rows <= 0.0 || a_baseline.z < -0.5) return 0.0;
   // device rows counted down the screen, as Skia rounds them (floor(y + 0.5): a tie goes down), per world unit
   float perWorld = -u_matrix[1][1] * 0.5 * u_rows;
   float texels = (a_uv.w - a_uv.y) * ${GLYPH_ATLAS_EDGE.toFixed(1)};
@@ -590,8 +598,10 @@ void main() {
     world.y += rowSnap(a_anchor.xy + a_box.xy + vec2(0.0, shift));
     v_sigma = 0.0;
   }
-  v_uv = mix(a_uv.xy, a_uv.zw, a_corner) * vec2(1.0, u_atlasScale);
-  v_cell = a_uv * vec4(1.0, u_atlasScale, 1.0, u_atlasScale);
+  v_placed = a_baseline.z < -0.5 ? 1.0 : 0.0;
+  float rows = v_placed > 0.5 ? u_placedScale : u_atlasScale;
+  v_uv = mix(a_uv.xy, a_uv.zw, a_corner) * vec2(1.0, rows);
+  v_cell = a_uv * vec4(1.0, rows, 1.0, rows);
   float alpha = abs(a_color.a);
   v_color = vec4(a_color.rgb * alpha, alpha);
   gl_Position = vec4((u_matrix * vec3(world, 1.0)).xy, 0.0, 1.0);
@@ -602,8 +612,13 @@ in vec4 v_color;
 in float v_soft;
 flat in float v_sigma;
 flat in vec4 v_cell;
+flat in float v_placed;
 uniform sampler2D u_atlas;
+uniform sampler2D u_placed;
 out vec4 color;
+// one cell's atlas (a placed cell's, or the glyph set's); v_placed is per instance, so uniform over a primitive
+float tap(vec2 uv) { return v_placed > 0.5 ? textureLod(u_placed, uv, 0.0).a : textureLod(u_atlas, uv, 0.0).a; }
+float fetch(ivec2 at) { return v_placed > 0.5 ? texelFetch(u_placed, at, 0).a : texelFetch(u_atlas, at, 0).a; }
 float lanczos3(float x) {
   x = abs(x);
   if (x < 1e-4) return 1.0;
@@ -637,7 +652,7 @@ float softCoverage(vec2 p, vec2 dx, vec2 dy, vec2 size) {
   return sum / weights;
 }
 void main() {
-  ivec2 isize = textureSize(u_atlas, 0);
+  ivec2 isize = v_placed > 0.5 ? textureSize(u_placed, 0) : textureSize(u_atlas, 0);
   vec2 size = vec2(isize);
   vec2 p = v_uv * size - 0.5;
   vec2 dx = dFdx(p);
@@ -652,7 +667,7 @@ void main() {
       for (int i = 0; i < 4; i++) {
         vec2 o = vec2(i == 1 || i == 3 ? 0.25 : -0.25, i >= 2 ? 0.25 : -0.25);
         // explicit level 0: the atlas has no mipmaps, and derivatives inside non-uniform control flow are undefined
-        coverage += textureLod(u_atlas, (p + 0.5 + o.x * dx + o.y * dy) * texel, 0.0).a;
+        coverage += tap((p + 0.5 + o.x * dx + o.y * dy) * texel);
       }
       coverage *= 0.25;
     } else {
@@ -670,13 +685,14 @@ void main() {
       }
       for (int j = 0; j < 6; j++) {
         float row = 0.0;
-        for (int i = 0; i < 6; i++) row += wx[i] * texelFetch(u_atlas, clamp(base + ivec2(i, j), ivec2(0), isize - 1), 0).a;
+        for (int i = 0; i < 6; i++) row += wx[i] * fetch(clamp(base + ivec2(i, j), ivec2(0), isize - 1));
         coverage += wy[j] * row;
       }
       coverage /= sx * sy;
     }
     coverage = clamp(coverage, 0.0, 1.0);
-    if (coverage < 0.03) coverage = 0.0;
+    // a placed cell read texel for pixel has no ringing or fringe to drop: its faint coverage is Skia's own
+    if (coverage < 0.03 && v_placed < 0.5) coverage = 0.0;
   }
   color = v_color * clamp(coverage, 0.0, 1.0);
 }`
