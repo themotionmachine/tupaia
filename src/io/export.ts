@@ -17,6 +17,45 @@ type MapSelection = Selection<SVGSVGElement, unknown, null, undefined>;
 // project canvas coordinates to geographic [lon, lat], rounded to 4 decimals
 const toGeoCoordinates = (x: number, y: number) => getCoordinates(x, y, mapCoordinates, graphWidth, graphHeight, 4);
 
+// The GPU compat clone (type "gpu") is cut again by every prepare that rasterizes, and each cut fetched and base64-encoded
+// the same assets (ocean pattern, texture, marker and regiment images, fonts): about 90 ms of idle wait per clone on the
+// heightmap editor's resume (W4b HEIGHT). Its encodings are kept per URL (per font declaration), a failed or non-string
+// one dropped. Every other type (the user's SVG/PNG/JPEG exports, 3D, mesh) fetches afresh as before.
+const GPU_ASSET_LIMIT = 64;
+const gpuAssets = new Map<string, Promise<unknown>>();
+function gpuAsset<T>(key: string, load: () => Promise<T>, keep: (value: T) => boolean): Promise<T> {
+  const known = gpuAssets.get(key) as Promise<T> | undefined;
+  if (known) return known;
+  if (gpuAssets.size >= GPU_ASSET_LIMIT) gpuAssets.clear();
+  const loading = load();
+  gpuAssets.set(key, loading);
+  const drop = () => {
+    if (gpuAssets.get(key) === loading) gpuAssets.delete(key);
+  };
+  loading.then(value => keep(value) || drop(), drop);
+  return loading;
+}
+
+// getBase64 as a promise; memoized for the GPU clone
+function cloneBase64(url: string, type: string): Promise<string | ArrayBuffer | null> {
+  const load = () => new Promise<string | ArrayBuffer | null>(resolve => getBase64(url, resolve));
+  return type === "gpu" ? gpuAsset(`url ${url}`, load, value => typeof value === "string") : load();
+}
+
+// loadFontsAsDataURI; memoized per font declaration for the GPU clone (same order and content either way)
+function cloneFontsAsDataURI(fonts: Parameters<typeof loadFontsAsDataURI>[0], type: string) {
+  if (type !== "gpu") return loadFontsAsDataURI(fonts);
+  return Promise.all(
+    fonts.map(font =>
+      gpuAsset(
+        `font ${JSON.stringify(font)}`,
+        () => loadFontsAsDataURI([font]).then(([loaded]) => loaded),
+        loaded => !!loaded
+      )
+    )
+  );
+}
+
 export interface GetMapURLOptions {
   debug?: boolean;
   noLabels?: boolean;
@@ -366,12 +405,8 @@ export async function prepareMapClone(type: string, options: GetMapURLOptions = 
       const image = cloneEl.getElementById("oceanicPattern");
       const href = image?.getAttribute("href");
       if (image && href) {
-        await new Promise<void>(resolve => {
-          getBase64(href, base64 => {
-            if (typeof base64 === "string") image.setAttribute("href", base64);
-            resolve();
-          });
-        });
+        const base64 = await cloneBase64(href, type);
+        if (typeof base64 === "string") image.setAttribute("href", base64);
       }
     }
 
@@ -380,12 +415,8 @@ export async function prepareMapClone(type: string, options: GetMapURLOptions = 
       const image = cloneEl.querySelector("#texture > image");
       const href = image?.getAttribute("href");
       if (image && href) {
-        await new Promise<void>(resolve => {
-          getBase64(href, base64 => {
-            if (typeof base64 === "string") image.setAttribute("href", base64);
-            resolve();
-          });
-        });
+        const base64 = await cloneBase64(href, type);
+        if (typeof base64 === "string") image.setAttribute("href", base64);
       }
     }
 
@@ -457,13 +488,9 @@ export async function prepareMapClone(type: string, options: GetMapURLOptions = 
 
       for (const url of imageHrefs) {
         if (!url) continue;
-        await new Promise<void>(resolve => {
-          getBase64(url, base64 => {
-            externalMarkerImages.forEach(img => {
-              if (typeof base64 === "string" && img.getAttribute("href") === url) img.setAttribute("href", base64);
-            });
-            resolve();
-          });
+        const base64 = await cloneBase64(url, type);
+        externalMarkerImages.forEach(img => {
+          if (typeof base64 === "string" && img.getAttribute("href") === url) img.setAttribute("href", base64);
         });
       }
     }
@@ -475,13 +502,9 @@ export async function prepareMapClone(type: string, options: GetMapURLOptions = 
 
       for (const url of imageHrefs) {
         if (!url) continue;
-        await new Promise<void>(resolve => {
-          getBase64(url, base64 => {
-            externalRegimentImages.forEach(img => {
-              if (typeof base64 === "string" && img.getAttribute("href") === url) img.setAttribute("href", base64);
-            });
-            resolve();
-          });
+        const base64 = await cloneBase64(url, type);
+        externalRegimentImages.forEach(img => {
+          if (typeof base64 === "string" && img.getAttribute("href") === url) img.setAttribute("href", base64);
         });
       }
     }
@@ -520,7 +543,7 @@ export async function prepareMapClone(type: string, options: GetMapURLOptions = 
     const usedFonts = cloneFonts(cloneEl);
     const fontsToLoad = usedFonts.filter(font => font.src);
     if (fontsToLoad.length) {
-      const dataURLfonts = await loadFontsAsDataURI(fontsToLoad);
+      const dataURLfonts = await cloneFontsAsDataURI(fontsToLoad, type);
       const fontFaces = dataURLfonts.map(fontFace).join("\n");
 
       const style = document.createElement("style");

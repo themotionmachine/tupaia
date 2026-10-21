@@ -445,16 +445,24 @@ export function ladderFit(bytes: number, room: number, from: number): number {
 // would reach with the previous frame's world bytes (measured at `from`) when that is higher (sharper): level 0 when
 // they fit the room there, else the ladder fit under LADDER_HEADROOM. Without it a reused frame never steps back up.
 export function ladderStart(from: number, bytes: number, room: number): number {
-  return Math.min(from, ladderEstimate(from, bytes, room * LADDER_HEADROOM, room));
+  return Math.min(from, ladderHint(from, bytes, room));
+}
+
+// Where a world loop that cuts every raster afresh starts when an earlier frame of the same world says how many bytes
+// its rasters took (`bytes`, measured at level `from`; prepare.ts, W4 RESUME): level 0 when they fit the room there,
+// else the ladder fit under LADDER_HEADROOM, the level the loop itself would step down to from level 0 with the same
+// bytes. Without the headroom (W4b HEIGHT) a frame committed at the hint sat between HEADROOM·room and room, and the
+// next prepare that kept its rasters stepped down at the first byte of lost room and re-cut every world raster (river
+// resume 1075 ms against about 600). An estimate from the earlier content: new rasters that do not fit still step down,
+// and new content much smaller than the old can leave the frame a rung coarser than a loop from level 0 would.
+export function ladderHint(from: number, bytes: number, room: number): number {
+  return ladderEstimate(from, bytes, room * LADDER_HEADROOM, room);
 }
 
 // The sharpest level at which `bytes`, measured at level `from`, fit `room` (level 0 when they fit `base` there).
-// prepare.ts starts a world loop that cuts every raster afresh here when an earlier frame of the same world says how
-// many bytes its rasters took (W4 RESUME), with no LADDER_HEADROOM: the loop applies it when it steps down. Without it
-// the loop starts at level 0 and, past the room, resamples everything it holds: a heightmap resume at k 1 cut its first
-// parity runs at 2 px per unit and threw half of those pixels away. An estimate from the earlier content: new rasters
-// that do not fit still step down, and new content much smaller than the old can leave the frame a rung coarser than a
-// loop from level 0 would.
+// Without a start level from an earlier frame (ladderHint) a fresh world loop starts at level 0 and, past the room,
+// resamples everything it holds: a heightmap resume at k 1 cut its first parity runs at 2 px per unit and threw half of
+// those pixels away (W4 RESUME).
 export function ladderEstimate(from: number, bytes: number, room: number, base = room): number {
   const atBase = bytes / ladderScale(from) ** 2;
   return atBase <= base ? 0 : ladderFit(atBase, room, 0);

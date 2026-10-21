@@ -656,7 +656,11 @@ export function compatShapesBatch(
           else leaf.setAttribute("class", value ?? "");
         }
       }
-      return elements.map(element => canonicalCompatShapes(element, viewbox, tolerance));
+      // One sibling-position memo for the whole batch (leafPath): a memo per root rebuilt the child index of a shared
+      // parent for every root under it, quadratic in a layer of anonymous siblings (W4b HEIGHT: 1.4 s of the marker
+      // resume's gpu-select prepare). The DOM does not change within this synchronous call.
+      const positions = new Map<Element, Map<Element, number>>();
+      return elements.map(element => canonicalCompatShapes(element, viewbox, tolerance, positions));
     } finally {
       for (const [leaf, value] of exposed) leaf.setAttribute!("class", value);
     }
@@ -675,7 +679,8 @@ export function compatShapes(
 function canonicalCompatShapes(
   element: CompatRoot,
   viewbox: { getScreenCTM?(): Affine | null },
-  tolerance: number
+  tolerance: number,
+  positions = new Map<Element, Map<Element, number>>()
 ): HitShape[] {
   const world = viewbox.getScreenCTM?.();
   if (!world || !(world.a * world.d - world.b * world.c)) return [];
@@ -695,7 +700,6 @@ function canonicalCompatShapes(
   };
   const clips = new Map<Node, number[] | null>();
   const ctms = new Map<Node, Affine | null>();
-  const positions = new Map<Element, Map<Element, number>>();
   const shapes: HitShape[] = [];
   const exposed: [Node, string][] = [];
   try {

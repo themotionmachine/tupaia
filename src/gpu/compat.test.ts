@@ -12,6 +12,7 @@ import {
   LADDER_STEPS,
   ladderEstimate,
   ladderFit,
+  ladderHint,
   ladderScale,
   ladderStart
 } from "./compat";
@@ -86,6 +87,29 @@ describe("world raster ladder", () => {
     // never below 0, and level 0 stays at 0
     expect(ladderStart(0, bytes, 1 << 30)).toBe(0);
     expect(ladderStart(0, bytes, 1 << 20)).toBe(0);
+  });
+
+  // W4b HEIGHT: the hint lands where the loop itself would step down to from level 0, under LADDER_HEADROOM, so the next
+  // prepare that keeps those rasters does not step down (and re-cut them all) at the first byte of lost room.
+  it("starts a fresh world loop from an earlier frame's bytes where a loop from level 0 would land", () => {
+    const bytes = 60 << 20; // measured at level 4: 240 MiB at the base
+    // the base fits the room: level 0, as the loop would never step down
+    expect(ladderHint(4, bytes, 240 << 20)).toBe(0);
+    for (const mib of [50, 100, 150, 200, 239]) {
+      const room = mib << 20;
+      const level = ladderHint(4, bytes, room);
+      // the loop from 0 steps down once, to the ladder fit under the headroom
+      expect(level).toBe(ladderFit(240 << 20, room * LADDER_HEADROOM, 0));
+      const atLevel = (240 << 20) * ladderScale(level) ** 2;
+      expect(atLevel).toBeLessThanOrEqual(room * LADDER_HEADROOM);
+      // a reusing prepare whose room shrank by up to the headroom stays at that level
+      expect(ladderStart(level, atLevel, room * 0.9)).toBe(level);
+      expect(ladderFit(atLevel, room * 0.9, level)).toBe(level);
+    }
+    // where the hint without headroom sat in the slack: 240·2^(-1/2) ≈ 170 MiB at level 1 fits a 190 MiB room but not
+    // 0.85 of it (161.5), so the hint is one rung coarser than the bare estimate
+    expect(ladderEstimate(4, bytes, 190 << 20)).toBe(1);
+    expect(ladderHint(4, bytes, 190 << 20)).toBe(2);
   });
 
   it("estimates a fresh world loop's level from an earlier frame's bytes, without headroom (W4 RESUME)", () => {

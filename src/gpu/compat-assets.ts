@@ -3,6 +3,11 @@
 import { EMBLEM_RULES } from "../renderers/emblems/styles";
 
 const generated = /^(burg|state|province)COA\d+$/;
+// Map-wide definitions that matter only to the runs that name them (W4b HEIGHT): the feature outlines drawFeatures writes
+// (#featurePaths, about 270 of the 340 KB every parity raster serialized, parsed again by each decode) and the masks
+// beside them (#land and #water name every outline; #fog). Pruned on the same terms as an unused COA: nothing kept names
+// them or anything inside them, through any chain of definitions.
+const SHARED_DEFINITIONS = "defs #deftemp > #featurePaths, defs #deftemp > mask[id]";
 const identifier = /^[\w.:-]+$/;
 const unchanged = () => {};
 // Export copies these fixed, definitions-independent app rules. Exact matching deliberately rejects user CSS.
@@ -131,7 +136,10 @@ function candidateGraph(root: Element, candidates: Element[]): CandidateGraph {
 export function isolateEmblemDefinitions(root: Element): () => void {
   if (!safeStyles(root) || root.querySelector("script,foreignObject,animate,animateMotion,animateTransform,set"))
     return unchanged;
-  const candidates = [...root.querySelectorAll("defs > svg[id]")].filter(element => generated.test(element.id));
+  const candidates = [
+    ...[...root.querySelectorAll("defs > svg[id]")].filter(element => generated.test(element.id)),
+    ...root.querySelectorAll(SHARED_DEFINITIONS)
+  ];
   if (!candidates.length) return unchanged;
   const candidateSet = new Set(candidates);
   for (const candidate of candidates)
