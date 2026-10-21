@@ -85,6 +85,7 @@ import { type BrowserContext, chromium, type Page } from "playwright";
 import { type CensusCounts, type CellMetrics, COVERAGE, DEFAULT_READING, FAINT, heatmap, isFaint, judgeCell, measureCell, type Reading } from "../golden-metrics.ts";
 import { decodePng, encodePng } from "../png.ts";
 import { type Family, parsePresets, parseZooms, selectFamilies } from "./golden-families.ts";
+import { emptyInBothArms } from "./census-core.ts";
 import { isolateLayer, setLayerOpacity } from "./golden-isolation.ts";
 import { type CameraPreset, COVERS_BY_FAMILY, resolveFixture } from "./fixtures/index.ts";
 
@@ -1103,14 +1104,19 @@ try {
 } catch (error) {
   report.errors.push(`harness: ${error instanceof Error ? error.stack : String(error)}`);
 } finally {
-  const failed = report.cells.filter(c => !c.pass);
+  // A cell that paints nothing in either arm, and fails on nothing but that emptiness, is not applicable: the preset
+  // styles the layer away (opacity 0, stroke-width 0) or into the backdrop colour. The same rule as `gate presets`
+  // (census-core emptyInBothArms); a cell where one arm has ink, or any other failure (census, harness), still fails.
+  for (const c of report.cells) if (emptyInBothArms(c as never)) c.class = "n/a";
+  const failed = report.cells.filter(c => !c.pass && c.class !== "n/a");
+  const notApplicable = report.cells.filter(c => c.class === "n/a").map(c => c.key);
   const byFamily: Record<string, { pass: number; fail: number }> = {};
   const byClass: Record<string, number> = {};
   // family → "k1:pass k4:coverage ..." (the per-layer table)
   const table: Record<string, string[]> = {};
   for (const c of report.cells) {
     byFamily[c.family] ??= { pass: 0, fail: 0 };
-    byFamily[c.family][c.pass ? "pass" : "fail"]++;
+    byFamily[c.family][c.pass || c.class === "n/a" ? "pass" : "fail"]++;
     const cls = c.class ?? (c.pass ? "pass" : "harness");
     byClass[cls] = (byClass[cls] ?? 0) + 1;
     (table[`${c.preset}/d${c.dpr}/${c.family}`] ??= []).push(`${c.key.split("/").pop()}:${cls}`);
@@ -1119,7 +1125,8 @@ try {
     cells: report.cells.length,
     pass: report.cells.length - failed.length,
     fail: failed.length,
-    empty: report.cells.filter(c => c.gates && !c.gates.populated).length,
+    empty: report.cells.filter(c => c.gates && !c.gates.populated && c.class !== "n/a").length,
+    notApplicable,
     byClass,
     // cells the default (over44) reading passes and the strict (conservative) reading would fail
     strictOnly: report.cells.filter(c => c.pass && c.gates && !c.gates.conservative).length,

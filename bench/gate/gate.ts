@@ -708,7 +708,7 @@ async function goldenCheck(ctx: Ctx): Promise<Partial<Result>> {
     env.GOLDEN_CENSUS = path;
   }
   const result = await runScript(ctx, nodeScript("bench/host/layer-golden.ts"), env, report, DEFS.golden.timeout, data => {
-    const failing = (data?.cells ?? []).filter((c: Json) => !c.pass);
+    const failing = (data?.cells ?? []).filter((c: Json) => !c.pass && c.class !== "n/a");
     return {
       failure: reportFailure(data),
       metrics: data && {
@@ -719,6 +719,7 @@ async function goldenCheck(ctx: Ctx): Promise<Partial<Result>> {
         arm: data.args?.gpuArm,
         // requests the route allowlist aborted (each logs "Failed to load resource: net::ERR_FAILED")
         aborted: data.aborted,
+        notApplicable: data.summary?.notApplicable,
         failing: failing.slice(0, 20).map((c: Json) => ({
           cell: c.key,
           class: c.class,
@@ -736,7 +737,7 @@ async function goldenCheck(ctx: Ctx): Promise<Partial<Result>> {
   // Every cell's PNGs stay in the evidence dir; the result line lists the failing cells' only.
   const images: Record<string, string> = {};
   for (const cell of readJson(report)?.cells ?? [])
-    if (!cell.pass && cell.images) for (const [kind, path] of Object.entries(cell.images)) images[`${cell.key}/${kind}`] = join(ctx.dir, String(path));
+    if (!cell.pass && cell.class !== "n/a" && cell.images) for (const [kind, path] of Object.entries(cell.images)) images[`${cell.key}/${kind}`] = join(ctx.dir, String(path));
   result.images = images;
   return result;
 }
@@ -2120,6 +2121,9 @@ const TIERS: Record<string, Array<[string, Args]>> = {
         ] as [string, Args]
     )
   ).concat([
+    // cyberpunk draws its borders white, the golden's backdrop colour, so the matrix above judges them N/A (both arms
+    // empty); on a black backdrop they are a real comparison and a GPU that drops them fails here
+    ...[1, 2].map(dpr => ["golden", { layers: "borders", k: "1,2,4,8", dpr: String(dpr), preset: "cyberpunk", fixture: "parity", bg: "#000000", keep: "fail" }] as [string, Args]),
     // W3 PICK: the picking gate at zoom 1 and 4 (the browser tier runs zoom 2 only). PICK2 makes them pass; nightly keeps
     // going past a failure, so a failing one is recorded here without stopping the matrix or the browser tier
     ["picking", { zoom: "1" }],
@@ -2164,7 +2168,7 @@ async function runTier(tier: string, args: Args): Promise<number> {
       check === "paired"
         ? `paired#${preset.block}`
         : check === "golden" && tier === "nightly"
-          ? `golden[d${preset.dpr} ${preset.preset}]`
+          ? `golden[d${preset.dpr} ${preset.preset}${preset.bg ? ` ${preset.layers} bg${preset.bg}` : ""}]`
           : check === "picking" && preset.zoom
             ? `picking[k${preset.zoom}]`
             : check;

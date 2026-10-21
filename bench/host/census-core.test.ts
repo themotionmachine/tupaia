@@ -299,6 +299,10 @@ test("preset cells empty in both arms are N/A: listed apart, neither failing nor
   assert.equal(emptyInBothArms(odd), false);
   // a cell without ink metrics cannot be classified N/A
   assert.equal(emptyInBothArms(cell("clean", "vignette", 1, false, { failures: ["empty in SVG arm (ink 0 px, 1 drawables)"], metrics: null })), false);
+  // FAINT presence: the plain capture is empty in both arms but the lifted SVG has ink; never N/A
+  assert.equal(emptyInBothArms(cell("default", "ice", 1, false, { failures: ["empty in GPU arm at the layer's real opacity (plain ink 0 px; the SVG arm paints it at 2 code values, lifted ink 0 px)"], metrics: { inkSvg: 0, inkGpu: 0 } })), false);
+  // the GPU alone empty is a failure, not N/A
+  assert.equal(emptyInBothArms(cell("default", "borders", 1, false, { failures: ["empty in GPU arm (ink 0 px, 0 routed)"], metrics: { inkSvg: 0, inkGpu: 0 } })), false);
 });
 
 const snap = (cycle: number, extra: Partial<MemorySnapshot> = {}): MemorySnapshot => ({
