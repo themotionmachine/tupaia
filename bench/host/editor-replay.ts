@@ -27,6 +27,8 @@
 //   REPLAY_LAUNCHER   metal | swiftshader (bench/host/launcher.ts)                         default metal
 //   REPLAY_RESUME_MS  limit for a resume / GPU settle                                       default 60000
 //   REPLAY_TRACE      1: log every step as it starts (a hung step shows as the last line)
+//   REPLAY_PROFILE    1: write a CPU profile of each GPU arm's resume (close click to refined frame) to
+//                     profile-<arm>-<script>.cpuprofile (diagnosis only: the profiler slows the resume)
 //   REPLAY_PARALLEL   1 (default): the replay arms run side by side after the recording; 0: one after another (the
 //                     resume latency as a timing: `gate replay-resume`, exclusive lock)
 //   REPLAY_BREAK      none, or a comma list of model, dom, dispatch: self-test. At the first input step of every
@@ -58,7 +60,7 @@ import { adapterMatches, launcherFrom, launchOptions, probeAdapter } from "./lau
 
 const env = process.env;
 const root = resolve(import.meta.dirname, "../..");
-const dist = resolve(root, "dist");
+const dist = env.REPLAY_DIST ? resolve(env.REPLAY_DIST) : resolve(root, "dist"); // REPLAY_DIST: diagnosis only
 const outDir = resolve(env.GATE_OUT_DIR || process.cwd());
 const scriptDir = resolve(import.meta.dirname, "editor-scripts");
 const ALL_SCRIPTS = readdirSync(scriptDir).filter(f => f.endsWith(".ts") && !f.endsWith(".test.ts") && f !== "common.ts").map(f => f.slice(0, -3)).sort();
@@ -277,6 +279,14 @@ async function runStep(page: Page, arm: Arm, step: Step, index: number, frozen: 
       break;
     }
     case "close":
+      // REPLAY_PROFILE=1 (diagnosis only): a CPU profile of the resume, from the close click to the refined frame
+      if (env.REPLAY_PROFILE && arm !== "svg") {
+        const cdp = await page.context().newCDPSession(page);
+        await cdp.send("Profiler.enable");
+        await cdp.send("Profiler.setSamplingInterval", { interval: 200 });
+        await cdp.send("Profiler.start");
+        (page as any).__profiler = cdp;
+      }
       await (step.via ? page.locator(step.via) : page.locator(`.ui-dialog:has(> ${step.dialog}) .ui-dialog-titlebar-close`)).click();
       if (breaks.includes("stale") && arm !== "svg")
         await page.evaluate(() => {
@@ -296,6 +306,13 @@ async function runStep(page: Page, arm: Arm, step: Step, index: number, frozen: 
   // a close that leaves another editor open (a script with two dialogs) has nothing to resume to: only the last one is timed
   if (step.op === "close" && arm !== "svg" && !(await page.evaluate(() => (globalThis as any).__rp.dialogs().length)))
     resume = await page.evaluate(limit => (globalThis as any).__rp.resume(limit), resumeLimit);
+  if ((page as any).__profiler) {
+    const cdp = (page as any).__profiler;
+    (page as any).__profiler = null;
+    const { profile } = await cdp.send("Profiler.stop");
+    writeFileSync(join(outDir, `profile-${arm}-${(page as any).__script}.cpuprofile`), JSON.stringify(profile));
+    await cdp.detach().catch(() => {});
+  }
   // a display change is always followed by a camera step, which waits for the GPU frame itself
   await page.evaluate(limit => (globalThis as any).__rp.settle(limit), step.op === "display" ? 0 : resumeLimit);
   if (breaks.length && arm !== "svg" && step.op === "input" && !(page as any).__broken) {
