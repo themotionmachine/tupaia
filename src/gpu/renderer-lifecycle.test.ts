@@ -125,6 +125,7 @@ vi.mock("./prepare", () => ({
   compatReuseEnabled: () => false,
   hasDetail: () => false,
   releaseDetail: () => {},
+  syncReliefDetails: async () => false,
   refineCompat: async () => false,
   refineView: () => ({ visible: { x: 0, y: 0, width: 1, height: 1 }, pixels: { width: 1, height: 1 } }),
   refineRequest: () => "",

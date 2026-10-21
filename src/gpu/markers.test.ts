@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   classify,
+  denseZoomSwap,
   MARKER_FLOATS,
   type MarkerElementLike,
   type MutationLike,
@@ -276,6 +277,20 @@ describe("classify: pixel-neutral viewport decoration", () => {
     const plain = element("g", terrain, {});
     expect(classify([childList(plain, [element("use", plain, {})])])).toBe("static");
     expect(classify([childList(overlay, [next]), childList(terrain, [element("image", terrain, {})])])).toBe("static");
+  });
+
+  it("reports a relief viewport swap for the renderer to re-read, though the revision skips it", () => {
+    const terrain = element("g", viewbox, { id: "terrain" });
+    const overlay = element("g", terrain, { "data-dense-zoom": "" });
+    const viewport = (href: string) => element("image", overlay, { href, "data-relief-viewport": "" });
+    // relief-viewport.ts replaceChildren, image.remove(), a released overlay and a new one
+    expect(denseZoomSwap([childList(overlay, [viewport("b")], [viewport("a")])])).toBe(true);
+    expect(denseZoomSwap([childList(overlay, [], [viewport("a")])])).toBe(true);
+    expect(denseZoomSwap([childList(terrain, [], [overlay])])).toBe(true);
+    expect(denseZoomSwap([childList(terrain, [overlay])])).toBe(true);
+    // not a dense-zoom node: no re-read
+    expect(denseZoomSwap([childList(terrain, [element("use", terrain, {})])])).toBe(false);
+    expect(denseZoomSwap([changed(overlay, "style", "display: none")])).toBe(false);
   });
 
   describe("dense-zoom visibility handoff on the canonical image", () => {

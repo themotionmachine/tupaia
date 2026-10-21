@@ -48,6 +48,7 @@ import {
 } from "./lifecycle";
 import {
   classify,
+  denseZoomSwap,
   type MarkerInstances,
   pixelRecords,
   TRADE_LAYER,
@@ -71,7 +72,8 @@ import {
   refineView,
   refreshOverlays as refreshOverlayBatches,
   releaseDetail,
-  retainFrame
+  retainFrame,
+  syncReliefDetails
 } from "./prepare";
 import { scaleBucket } from "./raster";
 import { glyphTarget } from "./relief-pick";
@@ -348,6 +350,8 @@ export class GpuRenderer {
   private activeRefinements = 0;
   private windowTimer = 0;
   private windowJob = false;
+  private reliefJob = false; // syncRelief in flight
+  private reliefAgain = false; // a viewport swap (or a commit) arrived while it ran: sync once more after it
   private windowMiss = ""; // camera key whose crop could not fit: no retry until the view changes
   private edgeMiss = ""; // same, for a proactive edge refresh while the view was still covered
   private windowStats = { refreshes: 0, misses: 0, detailReleases: 0, gaps: 0 };
@@ -982,6 +986,7 @@ export class GpuRenderer {
       const done = this.traceJob("window", edge ? "edge" : "miss");
       // PAN: a moving frame's pan cache is transient (released at rest): it limits the peak room, not the steady share
       const pan = this.graph.panBytes;
+      let committed = false;
       const refresh = () =>
         windows.refresh(
           this.view,
@@ -990,7 +995,7 @@ export class GpuRenderer {
           windowAllowance(this.device.memory().total - pan, windows.bytes, GPU_BUDGET, PEAK_LIMIT - pan)
         );
       try {
-        let committed = await refresh();
+        committed = await refresh();
         // Canonical crops outrank optional compat detail: free it, recompute the allowance and retry once. Settle
         // re-refines afterwards within whatever room the new crops leave. Only for an uncovered view: a proactive edge
         // refresh is optional too, and evicting detail for it would cycle release -> refresh -> re-refine.
@@ -1023,7 +1028,42 @@ export class GpuRenderer {
         done(stale() ? "stale" : undefined);
       }
       if (!stale()) this.requestDraw();
+      // a relief detail replaced while these crops were cut (syncRelief): cut them again, once per commit
+      if (committed && !stale() && windows.detailsStale) this.refreshWindows();
     }, 0);
+  }
+
+  // The dense-zoom relief viewport image is re-rendered asynchronously after a zoom, and its overlay swap is neutral
+  // (no revision): hand the new image to the prepared relief window as its detail and re-crop the windows, so the
+  // GPU shows the same sharp relief as the SVG instead of the stale viewport, or the base raster upscaled.
+  private syncRelief(): void {
+    const prepared = this.prepared;
+    if (!prepared?.windows || this.preparing || this.device.lost || this.device.disposed) return;
+    if (this.reliefJob) {
+      this.reliefAgain = true;
+      return;
+    }
+    this.reliefJob = true;
+    const generation = this.generation;
+    const stale = () =>
+      generation !== this.generation || this.prepared !== prepared || this.device.lost || this.device.disposed;
+    void Promise.resolve()
+      .then(() => syncReliefDetails(prepared, this.device.maxTextureSize, stale))
+      .then(
+        changed => {
+          if (!changed || stale()) return;
+          this.windowMiss = this.edgeMiss = ""; // the same camera, new detail pixels: not a known miss
+          this.refreshWindows();
+        },
+        () => {} // detail is optional: the committed crops keep drawing
+      )
+      .finally(() => {
+        this.reliefJob = false;
+        if (this.reliefAgain) {
+          this.reliefAgain = false;
+          this.syncRelief();
+        }
+      });
   }
 
   // Screen-overlay lane: re-rasterizes only the changed overlays' prepared batches, off the observer callback, while the
@@ -1358,6 +1398,7 @@ export class GpuRenderer {
     this.noticeSuspension();
     this.net.note(withoutMarkerRecords(records)); // PAINT: moving caravans are not a change of the map
     if (records.some(record => record.target === this.svg && record.type === "attributes")) this.applyRootFilter();
+    if (denseZoomSwap(records)) this.syncRelief();
     const roots: Element[] = [];
     const change = classify(
       records,
@@ -1647,6 +1688,8 @@ export class GpuRenderer {
       this.resume();
       // overlay changes that waited for this job (its clone may predate them)
       if (!behind && !this.device.disposed) this.refreshOverlays();
+      // the relief viewport may have been re-rendered after this job read it
+      if (!behind && !this.device.disposed) this.syncRelief();
     }
   }
 

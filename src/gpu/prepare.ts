@@ -339,6 +339,60 @@ interface WindowSource {
   rect: [number, number, number, number];
   opacity?: number;
   detail: WindowDetail | null; // the relief viewport's sharper canonical image, cropped with the window
+  relief?: Element; // the canonical relief image whose dense-zoom viewport supplies `detail` (syncReliefDetails)
+}
+
+// The dense-zoom relief viewport image beside a canonical relief image (dense-zoom.ts, relief-viewport.ts), as the
+// sharper detail of that image's bitmap window; null when there is none or it does not decode.
+export async function reliefDetail(element: Element, maxTexture: number): Promise<WindowDetail | null> {
+  const viewport = element.parentElement?.querySelector("image[data-relief-viewport]");
+  if (!viewport) return null;
+  const detail = await cachedReliefImage(viewport, maxTexture);
+  const rect: ImageBatch["rect"] = [
+    Number(viewport.getAttribute("x")),
+    Number(viewport.getAttribute("y")),
+    Number(viewport.getAttribute("width")),
+    Number(viewport.getAttribute("height"))
+  ];
+  if (!detail || !rect.every(Number.isFinite) || !(rect[2] > 0 && rect[3] > 0)) return null;
+  return { image: detail, rect: meetImageRect(rect, detail.naturalWidth, detail.naturalHeight), covers: rect };
+}
+
+// Which viewport image a detail was read from (href and box), or that there is none: "" both ways.
+function viewportKey(element: Element): string {
+  const viewport = element.parentElement?.querySelector("image[data-relief-viewport]");
+  if (!viewport) return "";
+  const href = viewport.getAttribute("href") || viewport.getAttribute("xlink:href") || "";
+  return [href, ...["x", "y", "width", "height"].map(name => Number(viewport.getAttribute(name)))].join(" ");
+}
+function detailKey(detail: WindowDetail | null): string {
+  return detail ? [detail.image.getAttribute("src") || "", ...detail.covers].join(" ") : "";
+}
+
+// The dense-zoom relief viewport is re-rendered asynchronously after every zoom (relief-viewport.ts paint), and its
+// overlay swap is pixel-neutral to the DOM revision (markers.ts neutral), so a prepare reads whichever viewport image
+// existed when it ran: often the previous camera's, upscaled. This re-reads each relief window's viewport and hands a
+// changed one to the bitmap windows as the slot's new detail (the payload too, for a context restore). Resolves true
+// when a detail changed: the caller refreshes the windows, which re-crop it. Never touches the DOM.
+export async function syncReliefDetails(
+  prepared: Pick<Prepared, "windows" | "payload">,
+  maxTexture: number,
+  stale: () => boolean
+): Promise<boolean> {
+  const windows = prepared.windows;
+  if (!windows) return false;
+  let changed = false;
+  for (const item of prepared.payload.windows) {
+    if (!item.relief?.isConnected) continue;
+    if (viewportKey(item.relief) === detailKey(item.detail)) continue;
+    const detail = await reliefDetail(item.relief, maxTexture);
+    if (stale()) return false;
+    if (detailKey(detail) === detailKey(item.detail)) continue;
+    if (!windows.setDetail(item.slot, detail)) continue;
+    item.detail = detail;
+    changed = true;
+  }
+  return changed;
 }
 
 interface Payload {
@@ -475,14 +529,15 @@ export function rehydrate(
     image: HTMLImageElement,
     rect: [number, number, number, number],
     opacity?: number,
-    detail?: WindowDetail | null
+    detail?: WindowDetail | null,
+    relief?: Element
   ) => ImageBatch
 ): { runs: CompatRun[]; batches: Batch[] } {
   const textures = new Map<TrackedTexture, TrackedTexture>();
   for (const [old, recipe] of retained.recipes) textures.set(old, make(recipe.label, recipe.source, recipe.options));
   const slots = new Map<ImageBatch, ImageBatch>();
   for (const item of retained.windows) {
-    const slot = addWindow(item.image, item.rect, item.opacity, item.detail);
+    const slot = addWindow(item.image, item.rect, item.opacity, item.detail, item.relief);
     slots.set(item.slot, slot);
   }
   const runs = retained.runs.map(run => {
@@ -650,10 +705,11 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
     image: HTMLImageElement,
     rect: [number, number, number, number],
     opacity?: number,
-    detail: WindowDetail | null = null
+    detail: WindowDetail | null = null,
+    relief?: Element
   ) => {
     const slot = windows.add(image, rect, opacity, detail);
-    windowSources.push({ slot, image, rect: [...rect], opacity, detail });
+    windowSources.push({ slot, image, rect: [...rect], opacity, detail, ...(relief ? { relief } : {}) });
     return slot;
   };
   const runs: CompatRun[] = [];
@@ -953,24 +1009,9 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
         if (cached && width > 0 && height > 0) {
           // The dense-zoom relief viewport image is a sharper copy of the visible part: a detail of the same window,
           // cropped and budgeted with it (at most the padded viewport image, which is twice the visible area).
-          let sharper: WindowDetail | null = null;
-          const viewport = draw.element.parentElement?.querySelector("image[data-relief-viewport]");
-          if (viewport) {
-            const detail = await cachedReliefImage(viewport, device.maxTextureSize);
-            if (ctx.stale()) return false;
-            const rect: ImageBatch["rect"] = [
-              Number(viewport.getAttribute("x")),
-              Number(viewport.getAttribute("y")),
-              Number(viewport.getAttribute("width")),
-              Number(viewport.getAttribute("height"))
-            ];
-            if (detail && rect.every(Number.isFinite) && rect[2] > 0 && rect[3] > 0)
-              sharper = {
-                image: detail,
-                rect: meetImageRect(rect, detail.naturalWidth, detail.naturalHeight),
-                covers: rect
-              };
-          }
+          // It follows the viewport after this prepare too (syncReliefDetails).
+          const sharper = await reliefDetail(draw.element, device.maxTextureSize);
+          if (ctx.stale()) return false;
           const slot = addWindow(
             cached,
             meetImageRect(
@@ -979,7 +1020,8 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
               cached.naturalHeight
             ),
             undefined,
-            sharper
+            sharper,
+            draw.element
           );
           scene.layers[draw.layer].source = "canonical-raster-cache";
           addHits();
