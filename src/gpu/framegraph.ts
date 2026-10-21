@@ -290,7 +290,7 @@ export class FrameGraph {
   private clip: Rect4 | null = null;
   // PAN: the cached static world (texture of the drawing buffer) and what it holds: the frame, the camera (whole
   // device pixels from the one it was built at), a key of everything else it depends on, and the zoom the last moving
-  // frame had (a changed zoom draws without the cache until it holds still)
+  // frame had (a changed zoom draws without the cache until the camera pans at it)
   private panCache: {
     texture: TrackedTexture;
     frame: Frame | null;
@@ -339,7 +339,8 @@ export class FrameGraph {
   // PAN: `frame` for a moving camera, through the pan cache (panSplit above). Returns the camera drawn: `camera`, or
   // `camera` moved by under half a device pixel so that the cached world shifts by whole device pixels. null when
   // nothing was drawn: no static world to keep, a multisampled canvas (the cache is copied out of the drawing buffer),
-  // the zoom changed since the last moving frame (zooming redraws everything anyway: the cache would only add a copy),
+  // the zoom changed since the last moving frame or the camera has not panned since it did (zooming redraws everything
+  // anyway: the cache would only add a copy),
   // or `room` refused the cache texture (`bytes`). The caller then renders the frame as usual.
   // Exact but for two things: the strips render the same batches at the same camera as render() would there (each
   // pixel sees the same batch sequence; culling only skips batches that write nothing in the strip), the shifted pixels
@@ -372,6 +373,14 @@ export class FrameGraph {
     if (cache && cache.k !== camera.k) {
       cache.k = camera.k;
       cache.frame = null;
+      cache.camera = camera;
+      this.panStats.zooms++;
+      return null;
+    }
+    // PANEND (W4b): a redraw at the zoomed camera itself (the live markers moved, the camera did not) stays uncached
+    // too. Rebuilding there (the world drawn, then copied out of the drawing buffer) was the costliest frame of a wheel
+    // zoom on parity, and the next zoom step threw the cache away again; it is built once the camera pans at this zoom.
+    if (cache && !cache.frame && cache.camera.x === camera.x && cache.camera.y === camera.y) {
       this.panStats.zooms++;
       return null;
     }

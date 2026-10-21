@@ -195,6 +195,24 @@ describe("FrameGraph.pan (PAN W4a)", () => {
     expect(graph.panStats).toMatchObject({ zooms: 2, rebuilds: 2, shifts: 0 });
   });
 
+  it("[PANEND] does not rebuild for a redraw at the zoomed camera, only once the camera pans at that zoom", () => {
+    const { graph, calls } = setup();
+    const frame = frameOf(world);
+    graph.pan(frame, { k: 2, x: 0, y: 0 }, VIEWPORT, CLEAR, null, 0, always);
+    expect(graph.pan(frame, { k: 2.1, x: 5, y: 3 }, VIEWPORT, CLEAR, null, 0, always)).toBeNull();
+    calls.length = 0;
+    // the live markers moved, the camera did not: no copy out of the drawing buffer
+    expect(graph.pan(frame, { k: 2.1, x: 5, y: 3 }, VIEWPORT, CLEAR, null, 0, always)).toBeNull();
+    expect(graph.pan(frame, { k: 2.2, x: 6, y: 3 }, VIEWPORT, CLEAR, null, 0, always)).toBeNull();
+    expect(graph.pan(frame, { k: 2.2, x: 6, y: 3 }, VIEWPORT, CLEAR, null, 0, always)).toBeNull();
+    expect(calls.filter(([name]) => name === "copyTexSubImage2D")).toHaveLength(0);
+    expect(graph.panStats).toMatchObject({ zooms: 4, rebuilds: 1, shifts: 0 });
+    expect(graph.pan(frame, { k: 2.2, x: 7, y: 3 }, VIEWPORT, CLEAR, null, 0, always)).toEqual({ k: 2.2, x: 7, y: 3 });
+    expect(graph.panStats).toMatchObject({ zooms: 4, rebuilds: 2, shifts: 0 });
+    expect(graph.pan(frame, { k: 2.2, x: 8, y: 3 }, VIEWPORT, CLEAR, null, 0, always)).toEqual({ k: 2.2, x: 8, y: 3 });
+    expect(graph.panStats).toMatchObject({ zooms: 4, rebuilds: 2, shifts: 1 });
+  });
+
   it("rebuilds for another frame, epoch or clear colour, and past half the view uncovered", () => {
     const { graph } = setup();
     const frame = frameOf(world);
