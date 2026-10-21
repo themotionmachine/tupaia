@@ -458,12 +458,14 @@ PROOF-PLAN §4 "Labels" and "Fonts". Tolerances are in `TOL` (labels-core.ts), i
   at k 1.1, 1.4, 1.9, 2.8 and 3.5 (`native` variant, centred on a state label), judged as the labels golden. Between
   powers of two a prepare cuts glyphs at the raster bucket and shows them minified; the settle now re-cuts the frame's
   native labels at k·dpr (`src/gpu/glyph-fine.ts`, drawn only while the camera stays at that scale), and each cell
-  records whether that fine set is drawn (`fine.drawn`). Each camera has a control, the same view at the power of two
-  at or below it (k 1 and 2). A cell meets D1 and D11 absolutely; where its control misses D11 coverage itself, it
-  may not read worse than the control by more than `FRESH_MARGIN` (3 points of over16-of-ink, 0.02 ink ratio). That
-  exemption exists because parity's native state label misses D11 at k 1 already (27.4% over16 of ink: rotated
-  glyphs resampled from an atlas cut at phase 0, D14's cause, not the octave). Before the re-cut, shared failed at
-  k 1.1 and 1.4 (25.3% and 24.9% over16 of ink, control k 1 passing); see the GLYPHZ report for after numbers.
+  records whether that fine set is drawn (`fine.drawn`). Since W4b GLYPH3 the settle also cuts every native glyph in
+  view **in place** (`placed`): its rotation and sub-pixel pen phase at the settled camera, into a device-aligned cell
+  the glyph shader reads texel for pixel, at a power of two as between them (D14's cause: an axis-aligned cell cut at
+  phase 0 and resampled at the glyph's angle and phase); `fine.placed` records that the placed set is drawn. Each
+  camera has a control, the same view at the power of two at or below it (k 1 and 2), and **every cell, controls
+  included, meets D1 and D11 absolutely**. The relative rule that judged a camera beside a control that missed D11
+  itself (`FRESH_MARGIN`: parity's native state label at k 1 was 23.7% over16 of ink) is retired; with the placed cut
+  parity reads 2.2-4.1% over16 of ink at k 1-1.9 and shared 0-1.2% (GLYPH3 report).
   `LABELS_ZOOM_PARTS=shadows|carry|fresh` runs one part; `LABELS_ZOOM_FRESH` overrides the cameras (direct runs only).
 - Page chrome that changes between captures (`#tooltip`, `#renderModeIndicator`) is hidden by a sheet in `<head>`.
 

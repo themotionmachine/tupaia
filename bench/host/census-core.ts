@@ -307,14 +307,12 @@ export function summarizePresets(cells: GoldenCellLike[], baseline = "default", 
 }
 
 /** The presets verdict: hard failures always fail; metric failures fail only past `allowInduced` per preset. */
-// Induced cells Ryan accepted as documented exceptions (PHASE1-PLAN D14), keyed "preset/family/k". Each is exempt from
-// `allow=` only; a hard failure still fails, and the cell stays listed in `inducedCells`.
-export const PRESET_EXCEPTIONS: Readonly<Record<string, string>> = {
-  // cyberpunk paints labels white on the golden's white backdrop, so the cell's ink is the two fixture labels with their
-  // own halo style; their rotated / sub-pixel glyphs are resampled from the atlas where Skia rasterizes each in place
-  // (over16 25.4% of the layer's ink against the 20% cap at 4bc881d4). Default-preset labels pass.
-  "cyberpunk/labels/k1": "D14: rotated and sub-pixel glyph resampling on a near-empty labels layer"
-};
+// Induced cells Ryan accepted as documented exceptions, keyed "preset/family/k". Each is exempt from `allow=` only; a
+// hard failure still fails, and the cell stays listed in `inducedCells`. Empty since W4b GLYPH3: PHASE1-PLAN D14's
+// "cyberpunk/labels/k1" (rotated and sub-pixel glyphs resampled from an atlas cut at phase 0, over16 25.4% of the
+// layer's ink against the 20% cap) is retired, the settle now cuts those glyphs in place (src/gpu/glyph-fine.ts) and
+// the cell reads 7.8%.
+export const PRESET_EXCEPTIONS: Readonly<Record<string, string>> = {};
 
 export function judgePresets(
   rows: PresetRow[],
