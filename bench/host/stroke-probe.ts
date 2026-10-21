@@ -58,6 +58,7 @@ import { chromium, type Page } from "playwright";
 import { COVERAGE } from "../golden-metrics.ts";
 import { decodePng, type DecodedPng } from "../png.ts";
 import { isolateLayer } from "./golden-isolation.ts";
+import { HIDE_CHROME } from "./screenshot-chrome.ts";
 
 const env = process.env;
 const REPO = resolve(import.meta.dirname, "../..");
@@ -360,13 +361,13 @@ async function waitGpu(page: Page): Promise<string> {
 }
 
 async function captureArms(page: Page): Promise<{ gpu: Buffer; svg: Buffer }> {
-  const gpu = await page.screenshot({ animations: "disabled" });
+  const gpu = await page.screenshot({ animations: "disabled", style: HIDE_CHROME });
   await page.evaluate(() => {
     const c = document.querySelector("canvas[data-gpu-renderer]") as HTMLCanvasElement | null;
     if (c) c.style.visibility = "hidden";
   });
   await page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
-  const svg = await page.screenshot({ animations: "disabled" });
+  const svg = await page.screenshot({ animations: "disabled", style: HIDE_CHROME });
   await page.evaluate(() => {
     const c = document.querySelector("canvas[data-gpu-renderer]") as HTMLCanvasElement | null;
     if (c) c.style.visibility = "";

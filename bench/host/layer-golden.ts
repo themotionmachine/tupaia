@@ -86,6 +86,7 @@ import { type CensusCounts, type CellMetrics, COVERAGE, DEFAULT_READING, FAINT, 
 import { decodePng, encodePng } from "../png.ts";
 import { type Family, parsePresets, parseZooms, selectFamilies } from "./golden-families.ts";
 import { isolateLayer, setLayerOpacity } from "./golden-isolation.ts";
+import { HIDE_CHROME } from "./screenshot-chrome.ts";
 import { type CameraPreset, COVERS_BY_FAMILY, resolveFixture } from "./fixtures/index.ts";
 
 const env = process.env;
@@ -674,19 +675,19 @@ async function captureArms(
   let gpu: Buffer;
   let showThrough: { composite: number; magenta: number } | null = null;
   let probe: Record<string, Buffer> = {};
-  if (gpuArm === "composite") gpu = await page.screenshot({ animations: "disabled" });
+  if (gpuArm === "composite") gpu = await page.screenshot({ animations: "disabled", style: HIDE_CHROME });
   else {
-    const composite = gpuArm === "probe" ? await page.screenshot({ animations: "disabled" }) : null;
+    const composite = gpuArm === "probe" ? await page.screenshot({ animations: "disabled", style: HIDE_CHROME }) : null;
     let magenta: Buffer | null = null;
     try {
       if (composite) {
         await setCover(page, "#ff00ff");
         await twoFrames(page);
-        magenta = await page.screenshot({ animations: "disabled" });
+        magenta = await page.screenshot({ animations: "disabled", style: HIDE_CHROME });
       }
       await setCover(page, bg);
       await twoFrames(page);
-      gpu = await page.screenshot({ animations: "disabled" });
+      gpu = await page.screenshot({ animations: "disabled", style: HIDE_CHROME });
     } finally {
       await setCover(page, null);
     }
@@ -730,14 +731,14 @@ const SETTLE_NOISE_PX_PER_DPR2 = 16;
 const settleNoisePx = (png: Buffer) => SETTLE_NOISE_PX_PER_DPR2 * (png.readUInt32BE(16) / VIEWPORT_WIDTH) ** 2; // PNG IHDR width / CSS width = dpr
 const SETTLE_SHOTS = 10;
 async function shootSvg(page: Page): Promise<{ png: Buffer; shots: number; settled: boolean; moving?: string }> {
-  let png = await page.screenshot({ animations: "disabled" });
+  let png = await page.screenshot({ animations: "disabled", style: HIDE_CHROME });
   if (settleMs === 0) return { png, shots: 1, settled: true };
   let moving: string | undefined;
   // patient on a loaded host: five shots settleMs apart, then up to five more 1.5 s apart (a 12-20 load average made the
   // page lag by seconds in the presets run) before the reference counts as moving
   for (let shots = 2; shots <= SETTLE_SHOTS; shots++) {
     await page.waitForTimeout(shots <= 5 ? settleMs : 1500);
-    const next = await page.screenshot({ animations: "disabled" });
+    const next = await page.screenshot({ animations: "disabled", style: HIDE_CHROME });
     const change = next.equals(png) ? { n: 0, where: "" } : describeChange(png, next);
     png = next;
     if (change.n <= settleNoisePx(next)) return { png, shots, settled: true };

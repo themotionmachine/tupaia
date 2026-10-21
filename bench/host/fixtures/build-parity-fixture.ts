@@ -22,6 +22,7 @@ import {
 } from "./index.ts";
 import { FAMILIES } from "../golden-families.ts";
 import { isolateLayer } from "../golden-isolation.ts";
+import { HIDE_CHROME } from "../screenshot-chrome.ts";
 import { decodePng } from "../../png.ts";
 import { checkDist, startStaticServer } from "../../../mcp/src/static-server.ts";
 
@@ -354,7 +355,7 @@ async function verify(origin: string, dir: string, shots?: string): Promise<void
         console.error(`   ${cam.id}: coastline filter ${seen.filter}, expected ${cam.expect}`);
         process.exitCode = 1;
       }
-      if (shots) await page.screenshot({ path: resolve(shots, `${cam.id}.png`), animations: "disabled" });
+      if (shots) await page.screenshot({ path: resolve(shots, `${cam.id}.png`), animations: "disabled", style: HIDE_CHROME });
       // each family the preset claims to cover must paint something in this frame: the family alone (golden isolation)
       // against every family hidden, after the app's zoom styling ran with the family shown
       const covered = FAMILIES.filter(f => (COVERS_BY_FAMILY[f.name] ?? []).some(tag => cam.covers.includes(tag)));
@@ -367,7 +368,7 @@ async function verify(origin: string, dir: string, shots?: string): Promise<void
           await w.__tupaia.settle?.();
           await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
         });
-        return decodePng(await page.screenshot({ animations: "disabled" }));
+        return decodePng(await page.screenshot({ animations: "disabled", style: HIDE_CHROME }));
       };
       const blank = await shot(null);
       for (const family of covered) {
