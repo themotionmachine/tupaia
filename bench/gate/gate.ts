@@ -1495,6 +1495,22 @@ const DEFS: Record<string, CheckDef> = {
       }));
     }
   },
+  // W4c BOOT: ?renderer=gpu with the classic main.js delayed (the production network race), every load must reach an
+  // active GPU frame: the renderer waits for the first world instead of preparing before main.js declared its globals
+  "boot-order": {
+    lock: "shared",
+    keys: ["reps", "delay"],
+    spec: { reps: { type: "int", default: 3 }, delay: { type: "int", default: 1500 } },
+    timeout: 600,
+    run: ctx => {
+      const report = join(ctx.dir, "report.json");
+      const env = { BOOT_OUTPUT: report, BOOT_DIST: join(REPO, "dist"), BOOT_REPS: String(ctx.args.reps), BOOT_DELAY_MS: String(ctx.args.delay) };
+      return runScript(ctx, nodeScript("bench/host/boot-order.ts"), env, report, 600, data => ({
+        failure: data && !data.pass ? String(data.failure ?? "boot-order failed").slice(0, 2000) : null,
+        metrics: data && { passed: data.passed, reps: data.reps, delayMs: data.delay }
+      }));
+    }
+  },
   canonical: {
     lock: "shared",
     keys: [],
@@ -2079,6 +2095,7 @@ const TIERS: Record<string, Array<[string, Args]>> = {
   ],
   browser: [
     ["build", { typecheck: true }],
+    ["boot-order", {}],
     ["canonical", {}],
     ["palette", {}],
     ["picking", {}],
