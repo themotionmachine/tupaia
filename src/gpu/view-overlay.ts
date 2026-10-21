@@ -11,11 +11,12 @@
 //   (no atlas growth, the atlas generation the frame was laid out at), with the same instance count, and the glyph
 //   instance buffer is re-uploaded;
 // - its hit items are replaced in place (PickIndex.replaceRange: same count, same paint order);
-// - the GLYPHZ fine set is dropped (its atlas is gone; the next settle re-cuts it).
+// - the GLYPHZ fine set, the GLYPH3 placed set and its cached glyph places are dropped (the next settle re-cuts them).
 // Anything else (another scale, a label that would route to compat, a compat run holding a label, no snapshot) is
 // "full": the caller makes it a revision, as before.
 import { type CompatRoot, compatShapes, pickTolerance } from "./compat-pick";
 import type { GpuDevice } from "./device";
+import { forgetGlyphs } from "./glyph-fine";
 import { PickIndex } from "./pick";
 import type { Prepared } from "./prepare";
 import { GLYPH_FLOATS, type GlyphAtlas, layoutLabels } from "./text";
@@ -117,12 +118,6 @@ export async function refreshView(
   });
   ctx.device.updateBuffer(prepared.frame.glyphs, payload.glyphs);
   for (const run of prepared.runs) run.elements = run.elements.map(element => moved.get(element) ?? element);
-  const { frame } = prepared;
-  if (frame.fineGlyphs || frame.fineAtlas) {
-    ctx.device.release(frame.fineGlyphs ?? null);
-    ctx.device.release(frame.fineAtlas ?? null);
-    frame.fineGlyphs = frame.fineAtlas = null;
-    frame.fineScale = 0;
-  }
+  forgetGlyphs(prepared, ctx.device);
   return { outcome: "committed", snapshot: after };
 }

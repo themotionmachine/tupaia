@@ -150,7 +150,7 @@ describe("[PANEND] view overlay in place", () => {
     expect(prepared.pick.pick(12, 102)?.id).toBe("ocean");
     expect(prepared.pick.pick(252, 102)?.id).toBe("coordinateLabels");
     expect(prepared.frame.fineGlyphs).toBe(null);
-    expect(released).toHaveLength(2);
+    expect(released.filter(Boolean)).toHaveLength(2); // the fine set (no placed set was cut)
     // the next patch compares against the new snapshot
     draw(400);
     expect(

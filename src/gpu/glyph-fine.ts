@@ -156,6 +156,14 @@ function dropFine(frame: Frame, device: GpuDevice): void {
   dropPlaced(frame, device);
 }
 
+// The labels moved in place (view-overlay.ts patches #coordinates): the fine and placed sets and the cached glyph
+// places describe the old positions; the next settle cuts them again.
+export function forgetGlyphs(prepared: Prepared, device: GpuDevice): void {
+  dropFine(prepared.frame, device);
+  dropPlaced(prepared.frame, device);
+  placeCache.delete(prepared);
+}
+
 // The frame's fine resources die with it: wrap its release once (prepare.ts owns the rest of the frame's resources).
 function own(prepared: Prepared, device: GpuDevice): void {
   if (owners.has(prepared)) return;
