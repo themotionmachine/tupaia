@@ -71,6 +71,9 @@ export class BitmapWindows {
   private whole = false; // the committed crops are every source (and detail) image whole
   private token = 0;
   private disposed = false;
+  // bumped by setDetail; the committed crops hold the details of version `committedDetails`
+  private details = 0;
+  private committedDetails = 0;
 
   constructor(
     private device: GpuDevice,
@@ -91,6 +94,26 @@ export class BitmapWindows {
     this.window = null;
     this.whole = false;
     return slot;
+  }
+
+  // Replaces the sharper detail of the source drawn into `slot` (the dense-zoom relief viewport re-rendered at a new
+  // camera, or removed). The committed crops keep drawing the previous detail until the next refresh commits;
+  // detailsStale says one is owed. False when `slot` is not a source of these windows.
+  setDetail(slot: ImageBatch, detail: WindowDetail | null): boolean {
+    const source = this.sources.find(item => item.slot === slot);
+    if (!source || this.disposed) return false;
+    source.detail = detail && {
+      image: detail.image,
+      rect: [...detail.rect] as Rect4,
+      covers: [...detail.covers] as Rect4
+    };
+    this.details++;
+    return true;
+  }
+
+  // A detail changed since the committed crops were cut: a refresh must re-crop, even when the view is still covered.
+  get detailsStale(): boolean {
+    return this.details !== this.committedDetails;
   }
 
   get bytes(): number {
@@ -137,11 +160,19 @@ export class BitmapWindows {
     if (this.disposed) return false;
     const token = ++this.token;
     const sources = [...this.sources];
+    const version = this.details;
+    // the details these crops are cut from: a setDetail during the copy below leaves them to the next refresh
+    const sourceDetails = sources.map(source => source.detail);
     const visibleBudget = Number.isFinite(limit) ? Math.max(0, limit) : this.maxBytes;
     const chosen = this.choose(sources, camera, viewport, Math.min(this.maxBytes, limit), visibleBudget);
     if (!chosen) return false;
     const whole = wholeCrops(sources, chosen.plans, chosen.details);
-    if (whole && this.complete && sources.every(source => source.texture && (!source.detail || source.detailTexture))) {
+    if (
+      whole &&
+      this.complete &&
+      version === this.committedDetails &&
+      sources.every(source => source.texture && (!source.detail || source.detailTexture))
+    ) {
       // PAN: the same whole images are resident already: only the capture box moves (no copy, no upload)
       this.window = chosen.window;
       this.committedMargin = chosen.margin;
@@ -157,7 +188,7 @@ export class BitmapWindows {
         const plan = chosen.plans[i];
         canvases.push(plan && copyPixels(sources[i].image, plan));
         const detailPlan = chosen.details[i];
-        detailCanvases.push(detailPlan && copyPixels(sources[i].detail!.image, detailPlan));
+        detailCanvases.push(detailPlan && copyPixels(sourceDetails[i]!.image, detailPlan));
       }
       await Promise.resolve(); // let a newer refresh/release supersede before allocating GPU memory
       if (!live()) return false;
@@ -183,13 +214,14 @@ export class BitmapWindows {
         source.detailTexture = details[i];
         source.slot.detail =
           detailPlan && details[i]
-            ? { texture: details[i], rect: detailPlan.rect, covers: detailCovers(source.detail!, detailPlan) }
+            ? { texture: details[i], rect: detailPlan.rect, covers: detailCovers(sourceDetails[i]!, detailPlan) }
             : null;
         for (const texture of old) if (texture) this.device.release(texture);
       });
       this.window = chosen.window;
       this.committedMargin = chosen.margin;
       this.whole = whole;
+      this.committedDetails = version;
       return true;
     } catch (error) {
       for (const texture of created) this.device.release(texture);

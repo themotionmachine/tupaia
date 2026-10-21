@@ -405,3 +405,54 @@ describe("BitmapWindows complete", () => {
     expect(tight.complete).toBe(false);
   });
 });
+
+describe("BitmapWindows setDetail", () => {
+  it("re-crops a replaced detail even when the committed whole crops still cover the view", async () => {
+    const { device, live, raw } = fakeDevice();
+    const windows = new BitmapWindows(device, 10);
+    const first = { image: image(40, 40), rect: [10, 10, 20, 20] as Rect4, covers: [10, 10, 20, 20] as Rect4 };
+    const slot = windows.add(image(50, 50), [0, 0, 50, 50], 1, first);
+    expect(await windows.refresh(at(0), view)).toBe(true);
+    expect(windows.complete).toBe(true);
+    expect(slot.detail?.texture).toMatchObject({ width: 40, height: 40 });
+    expect(windows.detailsStale).toBe(false);
+
+    // the dense-zoom viewport re-rendered sharper: the old crops keep drawing until a refresh commits the new one
+    const old = slot.detail!.texture!;
+    const second = { image: image(80, 80), rect: [12, 12, 16, 16] as Rect4, covers: [12, 12, 16, 16] as Rect4 };
+    expect(windows.setDetail(slot, second)).toBe(true);
+    expect(windows.detailsStale).toBe(true);
+    expect(windows.covers(at(0), view)).toBe(true);
+    expect(slot.detail?.texture).toBe(old);
+    const uploads = raw.texture.mock.calls.length;
+    expect(await windows.refresh(at(0), view)).toBe(true); // not the PAN shortcut: copied and uploaded again
+    expect(raw.texture.mock.calls.length).toBe(uploads + 2);
+    expect(slot.detail?.texture).toMatchObject({ width: 80, height: 80 });
+    expect(slot.detail?.rect).toEqual([12, 12, 16, 16]);
+    expect(windows.detailsStale).toBe(false);
+    expect(live.has(old)).toBe(false);
+
+    // the viewport removed: the source alone
+    windows.setDetail(slot, null);
+    expect(await windows.refresh(at(0), view)).toBe(true);
+    expect(slot.detail).toBeNull();
+    expect(windows.detailsStale).toBe(false);
+    expect(windows.setDetail({ ...slot }, first)).toBe(false); // not one of its slots
+  });
+
+  it("commits a refresh with the detail it started from and leaves a later replacement stale", async () => {
+    const { device } = fakeDevice();
+    const windows = new BitmapWindows(device, 10);
+    const first = { image: image(40, 40), rect: [10, 10, 20, 20] as Rect4, covers: [10, 10, 20, 20] as Rect4 };
+    const slot = windows.add(image(50, 50), [0, 0, 50, 50], 1, first);
+    const pending = windows.refresh(at(0), view); // copies synchronously, uploads after a microtask
+    windows.setDetail(slot, { image: image(80, 80), rect: [12, 12, 16, 16], covers: [12, 12, 16, 16] });
+    expect(await pending).toBe(true);
+    expect(slot.detail?.texture).toMatchObject({ width: 40, height: 40 });
+    expect(slot.detail?.covers).toEqual([10, 10, 20, 20]);
+    expect(windows.detailsStale).toBe(true);
+    expect(await windows.refresh(at(0), view)).toBe(true);
+    expect(slot.detail?.texture).toMatchObject({ width: 80, height: 80 });
+    expect(windows.detailsStale).toBe(false);
+  });
+});

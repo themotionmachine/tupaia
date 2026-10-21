@@ -223,6 +223,20 @@ function neutral(record: MutationLike, records: readonly MutationLike[]): boolea
   return false;
 }
 
+// Records that may swap a dense-zoom relief viewport image (relief-viewport.ts replaceChildren / remove, an overlay
+// added or released): pixel-neutral to the revision, but the prepared relief window draws that image as its detail,
+// so the renderer re-reads it (prepare.ts syncReliefDetails, a no-op when the image is unchanged).
+export function denseZoomSwap(records: ArrayLike<MutationLike>): boolean {
+  return Array.from(records).some(
+    record =>
+      record.type === "childList" &&
+      (has(record.target, "data-dense-zoom") ||
+        [...Array.from(record.addedNodes), ...Array.from(record.removedNodes)].some(
+          node => has(node, "data-dense-zoom") || has(node, "data-relief-viewport")
+        ))
+  );
+}
+
 // Root <svg> children prepareFrame never rasterizes as screen overlays (mirrors ignoredRoot in prepare.ts).
 const NOT_OVERLAY = new Set(["defs", "style", "title", "desc", "metadata", "script"]);
 
