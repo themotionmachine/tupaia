@@ -1349,7 +1349,7 @@ const DEFS: Record<string, CheckDef> = {
         metrics: data && {
           errors: data.errors?.length ?? 0,
           adapter: data.contextProperties?.adapter,
-          movingProof: pick(data.movingProof, ["samples", "emblemHits", "mismatches", "restoredMismatches"]),
+          movingProof: pick(data.movingProof, ["samples", "emblemHits", "svgWritesWhileMoving", "paintSuppressed"]),
           recoveryWallMs: data.recoveryProfile?.wallMs,
           restore: data.recoveryProfile?.status?.restore,
           contextLossRestored: data.movingContextLoss?.restored?.state ?? null

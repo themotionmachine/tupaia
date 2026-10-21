@@ -1,5 +1,8 @@
 // Ported from the Codex host harness (control/overnight-native-recovery-20261019.ts). Run it through bench/gate/gate.ts, which holds the
 // host lock and sets GATE_OUT_DIR (evidence directory) and GATE_MAP (shared-v8 fixture). See docs/performance/webgl-rewrite/GATE.md.
+// W4a PAN changed the moving proof's contract: W3 required HiddenEmblemPaint's suppression sheet active mid-gesture; since
+// W4a a gesture writes nothing to the model SVG (#map) and suppresses no paint (toggling that sheet re-layerized the whole
+// document twice a gesture), so the proof now requires exactly that, and context loss mid-gesture still reveals the SVG.
 import { chromium } from "playwright";
 import { createServer } from "node:http";
 import { readFileSync, readdirSync, writeFileSync } from "node:fs";
@@ -93,7 +96,15 @@ page.setDefaultTimeout(90000);
     window.addEventListener("mousemove",event,true);window.addEventListener("wheel",event,true);
     const observer=new PerformanceObserver(list=>{for(const e of list.getEntries())state.tasks.push(e.duration)});
     observer.observe({type:"longtask",buffered:false});
-    state.cleanup=()=>{window.removeEventListener("mousemove",event,true);window.removeEventListener("wheel",event,true);observer.disconnect();};
+    // W4a PAN: every mutation under #map, counted by whether the renderer was moving when it was delivered (the microtask
+    // checkpoint right after the writing callback). The moving proof requires none while moving.
+    const describe=(r:MutationRecord)=>{const e=(r.target.nodeType===1?r.target:r.target.parentElement) as Element|null;return r.type+" "+(e?e.tagName.toLowerCase()+(e.id?"#"+e.id:""):"?")+(r.attributeName?" @"+r.attributeName:"")+(r.type==="childList"?" +"+r.addedNodes.length+"-"+r.removedNodes.length:"");};
+    const writes={moving:0,rest:0,samples:[] as string[]};
+    const tally=(records:MutationRecord[])=>{if(w.gpuRenderer?.moving){writes.moving+=records.length;for(const r of records)if(writes.samples.length<12)writes.samples.push(describe(r));}else writes.rest+=records.length;};
+    const svgWrites=new MutationObserver(tally);
+    svgWrites.observe(document.getElementById("map")!,{subtree:true,childList:true,attributes:true,characterData:true});
+    w.__nativeNavWrites=()=>{tally(svgWrites.takeRecords());svgWrites.disconnect();return writes;};
+    state.cleanup=()=>{window.removeEventListener("mousemove",event,true);window.removeEventListener("wheel",event,true);observer.disconnect();svgWrites.disconnect();delete w.__nativeNavWrites;};
     const tick=(t:number)=>{if(!state.running)return;if(state.previous)state.intervals.push(t-state.previous);state.previous=t;state.frames++;const gpu=w.rendererStatus?.().gpu;if(gpu?.canvasVisible)state.gpuFrames++;const paint=w.gpuRenderer?.emblemCulling?.status?.();if(paint?.paintSuppressed)state.paintFrames++;if(paint?.paintEligible)state.paintEligibleFrames++;state.preparesDuring.push(gpu?.prepares||0);if(gpu?.moving)state.movingFrames++;state.cameras.push([(0,eval)("scale"),(0,eval)("viewX"),(0,eval)("viewY")]);requestAnimationFrame(tick);};
     requestAnimationFrame(tick);
    });
@@ -109,11 +120,12 @@ page.setDefaultTimeout(90000);
     else{const amount=gesture==="pan-near"?60:600;await session.send("Input.dispatchMouseEvent",{type:"mouseMoved",x:640+amount*Math.sin(frame/120*Math.PI*4),y:360+60*Math.sin(frame/120*Math.PI*2),button:"left",buttons:1});}
 
     if(frame===20){
+     // W4a moving proof, mid-gesture: the renderer moves with its canvas on screen; nothing under #map was written while
+     // it moved (no `viewport-culled` flips, no camera, no caravan pose or structure change); no paint suppression rule;
+     // and the SVG under the canvas stays natively hit-testable (emblem samples hit emblems).
      const proof=await page.evaluate(()=>{
-      const w=globalThis as any,manager=w.gpuRenderer?.emblemCulling,paint=manager?.paint;
-      if(!paint?.active)throw Error("Product paint suppression not active during real wheel input");
-      const layer=document.querySelector("#map #emblems")!,map=document.getElementById("map")!,canvas=document.querySelector("canvas[data-gpu-renderer]") as HTMLCanvasElement;
-      const svgBefore=map.outerHTML,pixelsBefore=canvas.toDataURL();
+      const w=globalThis as any,gpu=w.rendererStatus?.().gpu,writes=w.__nativeNavWrites?.();
+      const layer=document.querySelector("#map #emblems")!,canvas=document.querySelector("canvas[data-gpu-renderer]") as HTMLCanvasElement;
       const samples:{x:number,y:number,hit:Element|null}[]=[];
       for(const use of layer.querySelectorAll("use")){
        const r=use.getBoundingClientRect();if(!r.width||!r.height||r.right<0||r.bottom<0||r.left>1280||r.top>720)continue;
@@ -121,22 +133,18 @@ page.setDefaultTimeout(90000);
        if(samples.length>=4000)break;
       }
       const emblemHits=samples.filter(p=>p.hit?.closest("#emblems")).length;
-      let canonicalVisibility="",mismatches=0;
-      try{
-       paint.set(false);canonicalVisibility=getComputedStyle(layer).visibility;
-       mismatches=samples.filter(p=>document.elementFromPoint(p.x,p.y)!==p.hit).length;
-      }finally{paint.set(true);}
-      const restoredMismatches=samples.filter(p=>document.elementFromPoint(p.x,p.y)!==p.hit).length;
-      const result={samples:samples.length,emblemHits,mismatches,restoredMismatches,canonicalVisibility,restoredVisibility:getComputedStyle(layer).visibility,ownRuleActive:paint.active,svgMarkupExact:svgBefore===map.outerHTML,gpuCanvasExact:pixelsBefore===canvas.toDataURL(),moving:w.rendererStatus?.().gpu?.moving};
+      const result={samples:samples.length,emblemHits,moving:gpu?.moving,canvasVisible:gpu?.canvasVisible,paintSuppressed:!!w.gpuRenderer?.emblemCulling?.status?.().paintSuppressed,emblemVisibility:getComputedStyle(layer).visibility,culled:layer.querySelectorAll("use.viewport-culled").length,svgWritesWhileMoving:writes?writes.moving:null,svgWritesAtRest:writes?writes.rest:null,svgWriteSamples:writes?.samples??[]};
       const ext=canvas.getContext("webgl2")?.getExtension("WEBGL_lose_context");
       if(!ext)throw Error("Context-loss extension unavailable");
       w.__movingLossExt=ext;ext.loseContext();return result;
      });
      (report as any).movingProof=proof;
-     if(!proof.samples||!proof.emblemHits||proof.mismatches||proof.restoredMismatches||proof.canonicalVisibility!=="visible"||proof.restoredVisibility!=="hidden"||!proof.ownRuleActive||!proof.svgMarkupExact||!proof.gpuCanvasExact)throw Error("Product moving native parity failed "+JSON.stringify(proof));
+     if(!proof.samples||!proof.emblemHits||proof.moving!==true||proof.canvasVisible!==true||proof.paintSuppressed||proof.emblemVisibility!=="visible"||proof.svgWritesWhileMoving!==0)throw Error("Product moving native parity failed "+JSON.stringify(proof));
      await page.waitForFunction(()=>(globalThis as any).rendererStatus?.().gpu?.state==="lost",{},{timeout:15000});
-     const lost=await page.evaluate(()=>{const w=globalThis as any;return{state:w.rendererStatus?.().gpu?.state,canvasVisible:w.rendererStatus?.().gpu?.canvasVisible,visibility:getComputedStyle(document.querySelector("#map #emblems")!).visibility,culled:document.querySelectorAll("#map #emblems use.viewport-culled").length,paint:w.gpuRenderer?.emblemCulling?.status?.()};});
-     if(lost.state!=="lost"||lost.canvasVisible||lost.visibility!=="visible"||lost.culled||lost.paint?.paintSuppressed)throw Error("Moving context loss did not reveal canonical SVG "+JSON.stringify(lost));
+     // the canonical SVG at once: every emblem revealed, at the camera the gesture reached (hide() writes it), and no
+     // caravan change still held (hide() releases them)
+     const lost=await page.evaluate(()=>{const w=globalThis as any,gpu=w.rendererStatus?.().gpu;return{state:gpu?.state,canvasVisible:gpu?.canvasVisible,visibility:getComputedStyle(document.querySelector("#map #emblems")!).visibility,culled:document.querySelectorAll("#map #emblems use.viewport-culled").length,paint:w.gpuRenderer?.emblemCulling?.status?.(),cameraExact:document.querySelector("#viewbox")?.getAttribute("transform")===`translate(${(0,eval)("viewX")} ${(0,eval)("viewY")}) scale(${(0,eval)("scale")})`,caravansHeld:gpu?.caravans?.held};});
+     if(lost.state!=="lost"||lost.canvasVisible||lost.visibility!=="visible"||lost.culled||lost.paint?.paintSuppressed||!lost.cameraExact||lost.caravansHeld)throw Error("Moving context loss did not reveal canonical SVG "+JSON.stringify(lost));
      await session.send("Profiler.enable");await session.send("Profiler.setSamplingInterval",{interval:500});await session.send("Performance.enable");
      const recoveryMetricsBefore=await session.send("Performance.getMetrics"),recoveryStarted=Date.now();
      await session.send("Profiler.start");
@@ -147,7 +155,7 @@ page.setDefaultTimeout(90000);
      writeFileSync(output+".recovery.cpuprofile",JSON.stringify(recoveryProfile.profile),{flag:"wx"});
      (report as any).recoveryProfile={wallMs:Date.now()-recoveryStarted,before:recoveryMetricsBefore,after:await session.send("Performance.getMetrics"),
        status:await page.evaluate(()=>{const g=(globalThis as any).rendererStatus?.().gpu;return {restore:g?.restore,lastPrepare:g?.lastPrepare,lastPrepareMs:g?.lastPrepareMs};})};
-     (report as any).movingContextLoss={injectedWhileMovingAndPaintSuppressed:true,lost,restored};
+     (report as any).movingContextLoss={injectedWhileMoving:true,lost,restored};
      break;
 
     }
