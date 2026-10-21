@@ -215,7 +215,7 @@ test("judgeCell rejects non-finite metrics", () => {
   assert.throws(() => judgeCell({ metrics: m, census: counts, domDrawables: 1 }), /non-finite/);
 });
 
-// FAINT layers. A layer at 0.008 opacity is 0.18 of a code value at its strongest, so each renderer's rounding decides
+// FAINT layers. A layer at 0.008 opacity is about 1.8 code values at its strongest (223 x 0.00797), so each renderer's rounding decides
 // which of its pixels reach a whole value: the same footprint, a different ink count (legacy-v1.99 ice, 3164 vs 3618).
 // `faintShot(w, eighths)` is the strokes(w) footprint with `eighths` of every 8 pixels rounded to 254 (what the arm's
 // rounding happens to produce) and the rest left at 255.
@@ -230,7 +230,7 @@ const judgeFaint = (s: Rgba, g: Rgba, lifted: Rgba[] | null) =>
   });
 
 test("faint: the contrast is the layer's strongest pixel over both arms, and a normal layer is not faint", () => {
-  assert.equal(FAINT.maxContrast, 3, "changing this is a gate change (golden-metrics.ts FAINT says why)");
+  assert.deepEqual({ ...FAINT }, { maxContrast: 3, liftTo: 0.99, presenceMinContrast: 2 }, "changing these is a gate change (golden-metrics.ts FAINT says why)");
   const faintSvg = image(BW, BH, faintShot(6, 5));
   assert.equal(measureCell(faintSvg, faintSvg, bigWhite).contrast, 1);
   assert.equal(isFaint(measureCell(faintSvg, faintSvg, bigWhite)), true);
@@ -253,7 +253,7 @@ test("faint: rounding alone moves the plain ink ratio below the floor and the li
   const v = judgeFaint(svgFaint, gpuFaint, [image(BW, BH, strokes(6)), image(BW, BH, strokes(6))]);
   assert.equal(v.pass, true, v.failures.join());
   assert.deepEqual(v.faint, { contrast: 1, lifted: true });
-  assert.match(v.notes.join(), /faint layer \(contrast 1 code value\): coverage judged at full opacity/);
+  assert.match(v.notes.join(), /faint layer \(contrast 1 code value\): coverage judged at opacity 0\.99/);
 });
 
 test("faint: a real gap on a faint layer still fails, on the lifted capture", () => {
@@ -262,7 +262,7 @@ test("faint: a real gap on a faint layer still fails, on the lifted capture", ()
   // thinner strokes, a third of the ink gone
   const thin = judgeFaint(svgFaint, gpuFaint, [image(BW, BH, strokes(6)), image(BW, BH, strokes(4))]);
   assert.equal(thin.pass, false);
-  assert.match(thin.failures.join(), /coverage at full opacity: ink 6400 GPU vs 9600 SVG px \(ratio 0\.667 < 0\.9\)/);
+  assert.match(thin.failures.join(), /coverage with the layer lifted to opacity 0\.99: ink 6400 GPU vs 9600 SVG px \(ratio 0\.667 < 0\.9\)/);
   // dropped icons
   const dropped = judgeFaint(svgFaint, gpuFaint, [image(BW, BH, icons(() => true)), image(BW, BH, icons(i => i % 3 !== 0))]);
   assert.equal(dropped.gates.coverageInk, false);
@@ -299,6 +299,44 @@ test("faint: a lifted capture never rescues a normal layer", () => {
   assert.equal(withLift.pass, false, "contrast 215 > 3: the plain capture decides");
   assert.deepEqual(withLift.failures, thin.failures);
   assert.equal(withLift.faint, null);
+});
+
+// a faint SVG shot whose strongest pixel is `level` code values below white, on `strokes(w)`'s footprint
+const faintLevel = (level: number, width = 6) => (x: number, y: number): [number, number, number] =>
+  x % 200 < width ? [255 - level, 255 - level, 255 - level] : [255, 255, 255];
+
+test("faint presence: a GPU that paints nothing at the layer's real opacity fails even though its lifted capture is fine", () => {
+  const lifted = [image(BW, BH, strokes(6)), image(BW, BH, strokes(6))];
+  const svgAt2 = image(BW, BH, faintLevel(2)); // ideal strength 1.5..2.5 levels: the GPU has to show something
+  const gpuNothing = image(BW, BH, () => [255, 255, 255]);
+  const v = judgeFaint(svgAt2, gpuNothing, lifted);
+  assert.equal(v.pass, false);
+  assert.deepEqual(v.faint, { contrast: 2, lifted: true });
+  assert.match(v.failures.join(), /empty in GPU arm at the layer's real opacity \(plain ink 0 px; the SVG arm paints it at 2 code values, lifted ink 9600 px\)/);
+  assert.equal(v.gates.populated, false);
+  assert.equal(v.gates.coverage, true, "the lifted capture is fine: only the presence check sees it");
+  // the same layer, GPU painting it (a different rounding): passes
+  assert.equal(judgeFaint(svgAt2, image(BW, BH, faintLevel(2)), lifted).pass, true);
+  assert.equal(judgeFaint(svgAt2, image(BW, BH, faintShot(6, 5)), lifted).pass, true, "a GPU that rounds some pixels to 1 level is present");
+});
+
+test("faint presence: below 1.5 levels (SVG contrast 1) the GPU may round every pixel to zero", () => {
+  const lifted = [image(BW, BH, strokes(6)), image(BW, BH, strokes(6))];
+  const v = judgeFaint(image(BW, BH, faintLevel(1)), image(BW, BH, () => [255, 255, 255]), lifted);
+  assert.equal(v.pass, true, v.failures.join());
+  // and with no lift the plain empty rule applies as before, whatever the strength
+  assert.match(judgeFaint(image(BW, BH, faintLevel(2)), image(BW, BH, () => [255, 255, 255]), null).failures.join(), /empty in GPU arm \(ink 0 px/);
+});
+
+test("faint presence: only the SVG arm's strength asks for it, a loud GPU is not faint", () => {
+  const lifted = [image(BW, BH, strokes(6)), image(BW, BH, strokes(6))];
+  // SVG arm at 1 level (below the presence floor), GPU at 3: faint (contrast 3), and the SVG strength asks nothing of the GPU
+  const v = judgeFaint(image(BW, BH, faintLevel(1)), image(BW, BH, faintLevel(3)), lifted);
+  assert.equal(v.faint?.contrast, 3);
+  assert.equal(v.failures.some(f => /real opacity/.test(f)), false);
+  // measureCell reports both arms
+  const m = measureCell(image(BW, BH, faintLevel(2)), image(BW, BH, faintLevel(1)), bigWhite);
+  assert.deepEqual({ svg: m.contrastSvg, gpu: m.contrastGpu, both: m.contrast }, { svg: 2, gpu: 1, both: 2 });
 });
 
 test("faint: a faint layer with almost no 8-bit ink is judged populated by its lifted capture; an unpainted one is not lifted", () => {

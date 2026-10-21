@@ -59,9 +59,12 @@
 //                    layer becomes a FAINT one (golden-metrics.ts FAINT) and the lifted capture is exercised on a layer whose
 //                    footprint is known. Unset = the page's own opacities.
 //   FAINT layers: a cell whose strongest pixel (either arm) is at most FAINT.maxContrast code values from its blank is
-//                    recaptured with the family root lifted to opacity 1 (both arms, same camera) and its empty check and
-//                    coverage ink rule are judged there (golden-metrics.ts); the plain capture keeps the whole-frame gates
-//                    and over16-of-ink. cell.faint records both.
+//                    recaptured with the family root lifted to opacity FAINT.liftTo = 0.99 (both arms, same camera; 0.99 and
+//                    not 1 so the GPU keeps its group/compat routing, which switches on < 1) and its empty check and
+//                    coverage ink rule are judged there (golden-metrics.ts); the plain capture keeps the whole-frame gates,
+//                    over16-of-ink and the PRESENCE check (a layer the SVG paints at >= 2 code values must show ink in the GPU's
+//                    plain capture). A root whose opacity is already >= 0.99 has nothing to lift (faint by colour): plain
+//                    judgement, no recapture. cell.faint records the plain and lifted metrics and the lifted census.
 //   GOLDEN_PARAMS    extra gpu-* URL flags for the page, "+"-joined (e.g. gpu-native-shapes=1)  default none
 //   GOLDEN_CAMERAS   fixture | centered: which camera frames a cell. "fixture" (default when GOLDEN_MAP is the parity
 //                    fixture) uses the manifest's recorded presets; "centered" centres the whole map at k
@@ -79,7 +82,7 @@ import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { extname, join, relative, resolve } from "node:path";
 import { type BrowserContext, chromium, type Page } from "playwright";
-import { type CensusCounts, type CellMetrics, COVERAGE, DEFAULT_READING, heatmap, isFaint, judgeCell, measureCell, type Reading } from "../golden-metrics.ts";
+import { type CensusCounts, type CellMetrics, COVERAGE, DEFAULT_READING, FAINT, heatmap, isFaint, judgeCell, measureCell, type Reading } from "../golden-metrics.ts";
 import { decodePng, encodePng } from "../png.ts";
 import { type Family, parsePresets, parseZooms, selectFamilies } from "./golden-families.ts";
 import { isolateLayer, setLayerOpacity } from "./golden-isolation.ts";
@@ -115,7 +118,7 @@ if (urlParams.some(kv => !/^gpu-[a-z0-9-]+=[\w.-]*$/.test(kv))) throw Error("GOL
 if (!/^#[\da-f]{6}$/i.test(bg)) throw Error(`GOLDEN_BG must be #rrggbb, got ${bg}`);
 if (!["over44", "conservative"].includes(reading)) throw Error(`GOLDEN_READING must be conservative|over44`);
 if (!["all", "fail"].includes(keep)) throw Error(`GOLDEN_KEEP must be all|fail`);
-if (!["none", "drop-batch", "thin-stroke", "drop-icon"].includes(breakMode)) throw Error(`GOLDEN_BREAK must be none|drop-batch|thin-stroke|drop-icon`);
+if (!["none", "drop-batch", "thin-stroke", "drop-icon", "drop-layer"].includes(breakMode)) throw Error(`GOLDEN_BREAK must be none|drop-batch|thin-stroke|drop-icon|drop-layer`);
 if (!["canvas", "composite", "probe"].includes(gpuArm)) throw Error(`GOLDEN_GPU_ARM must be canvas|composite|probe`);
 if (dprs.some(d => d !== 1 && d !== 2)) throw Error("GOLDEN_DPR must be 1 and/or 2");
 if (!zooms.length) throw Error("GOLDEN_K is empty");
@@ -218,7 +221,9 @@ interface Cell {
   bitmapVsVector?: { ssim: number; over16OfInk: number; inkBitmap: number; inkVector: number };
   // a FAINT layer (golden-metrics.ts): the plain capture's contrast, whether the lifted (opacity 1) capture revealed the
   // layer and judged its coverage, the lifted metrics, and the synthetic opacity (GOLDEN_FAINT) when one was forced
-  faint?: { contrast: number; lifted: boolean; synthetic?: string; liftedMetrics?: CellMetrics; dropped?: unknown };
+  // liftedCensus is the GPU's routing of the lifted frame (to compare with `census`); skipped is set when the root's
+  // opacity was already at the lift target, so no lift was captured
+  faint?: { contrast: number; lifted: boolean; synthetic?: string; liftedMetrics?: CellMetrics; dropped?: unknown; liftedCensus?: CensusCounts | null; skipped?: string };
 }
 
 const report = {
@@ -477,6 +482,9 @@ async function lateCoas(page: Page): Promise<{ symbols: number; preparesBefore: 
 //   drop-batch:  removes the bottom-most fill/stroke batch (for ocean that is the opaque #oceanBase fill; the largest
 //                batch by count is a poor pick: ocean's is a faint depth ring whose loss stays under one code value)
 //   thin-stroke: halves the width of every stroke batch, including inside groups (thinner borders, rivers, routes)
+//   drop-layer:  removes EVERY batch from the plain frame: a GPU that paints nothing at the layer's real opacity (an alpha
+//                cull). It is deliberately opacity-dependent: the FAINT lifted frame is NOT broken, because the lifted opacity is
+//                where such a cull would not fire; the self-test (faint-drop-layer) needs the PRESENCE check to catch it.
 //   drop-icon:   drops every 4th leaf draw batch (fill, stroke, sprites, glyphs; the icons and small shapes the renderer
 //                draws separately, e.g. goods and zones) and the last quarter of every sprite batch's instances
 const breakFrame = (page: Page, mode: string) =>
@@ -509,6 +517,10 @@ const breakFrame = (page: Page, mode: string) =>
           changed++;
         }
       dropped = changed ? { strokes: changed } : null;
+    } else if (mode === "drop-layer") {
+      const gone = batches.splice(0, batches.length);
+      dropped = gone.length ? { batches: gone.length } : null;
+      changed = gone.length;
     } else if (mode === "drop-icon") {
       // every 4th leaf draw (fill, stroke, sprites, glyphs) in frame order, groups included: the icons and small
       // shapes the renderer draws as separate batches; then the last quarter of each sprite batch's instances
@@ -541,6 +553,16 @@ const breakFrame = (page: Page, mode: string) =>
       framesDrawn: (frames() ?? 0) - (before ?? 0)
     };
   }, mode);
+
+// the family's GPU routing from a readCensus() result
+const censusOf = (family: Family, seen: Awaited<ReturnType<typeof readCensus>>): CensusCounts | null =>
+  family.root
+    ? { native: 0, compat: seen.compatRunElements, skipped: 0 }
+    : seen.layer
+      ? { native: seen.layer.native, compat: seen.layer.compat, skipped: seen.sink?.skipped ?? 0 }
+      : seen.sink
+        ? { native: 0, compat: 0, skipped: seen.sink.skipped }
+        : null;
 
 const readCensus = (page: Page, family: Family) =>
   page.evaluate(
@@ -822,10 +844,12 @@ function classify(cell: Cell, gates: Record<string, boolean>): string {
   return "census";
 }
 
-// FAINT (golden-metrics.ts): the family root at opacity 1 in the live SVG, the GPU following, both arms recaptured at the
-// cell's camera. A break (GOLDEN_BREAK) is applied again to the new frame, since the re-prepare replaced the broken one.
-// The opacity is put back (the page's own, or the synthetic GOLDEN_FAINT one) before the next cell. A lift the GPU never
-// followed is a harness problem, not a verdict: the renderer is expected to re-prepare on a style edit.
+// FAINT (golden-metrics.ts): the family root at opacity FAINT.liftTo (0.99, so the GPU keeps its < 1 group/compat routing)
+// in the live SVG, the GPU following, both arms recaptured at the cell's camera. A break (GOLDEN_BREAK) is applied again to
+// the new frame, since the re-prepare replaced the broken one, except `drop-layer`, which breaks only the plain frame (an
+// alpha cull the lift would not trigger). The opacity is put back (the page's own, or the synthetic GOLDEN_FAINT one)
+// before the next cell. A lift the GPU never followed is a harness problem, not a verdict: the renderer is expected to
+// re-prepare on a style edit. A root already at the lift target (faint by colour) is not touched: `skipped`, no recapture.
 async function captureLifted(
   page: Page,
   family: Family,
@@ -833,10 +857,11 @@ async function captureLifted(
   stem: string,
   blankSvg: ReturnType<typeof decodePng>,
   blankGpu: ReturnType<typeof decodePng>
-): Promise<{ metrics: CellMetrics | null; dropped?: unknown; problem?: string }> {
+): Promise<{ metrics: CellMetrics | null; dropped?: unknown; problem?: string; skipped?: string; census?: CensusCounts | null }> {
   const before = await gpuStamp(page);
-  const set = await page.evaluate(setLayerOpacity, { id: family.id, root: family.root, value: "1" });
+  const set = await page.evaluate(setLayerOpacity, { id: family.id, root: family.root, value: String(FAINT.liftTo), liftOnly: true });
   if (!set.found) return { metrics: null, problem: `lift: no #${family.id} to lift` };
+  if (set.skipped) return { metrics: null, skipped: `#${family.id} is already at opacity ${set.computed} (>= ${FAINT.liftTo}): faint by colour, nothing to lift` };
   try {
     await settleApp(page);
     if (family.root) {
@@ -847,24 +872,25 @@ async function captureLifted(
     } else {
       const deadline = Date.now() + 20000;
       while ((await gpuStamp(page)) === before && Date.now() < deadline) await page.waitForTimeout(100);
-      if ((await gpuStamp(page)) === before) return { metrics: null, problem: `lift: the GPU renderer did not prepare again after #${family.id} was set to opacity 1 (stamp ${before})` };
+      if ((await gpuStamp(page)) === before) return { metrics: null, problem: `lift: the GPU renderer did not prepare again after #${family.id} was set to opacity ${FAINT.liftTo} (stamp ${before})` };
     }
     const status = await waitGpu(page);
     if (status.active !== "gpu" || status.timedOut) return { metrics: null, problem: `lift: GPU ${status.timedOut ? "frame did not settle" : `not active (${status.fallbackReason ?? "no frame"})`}` };
     let dropped: unknown;
-    if (breakMode !== "none") {
+    if (breakMode !== "none" && breakMode !== "drop-layer") {
       const broke = await breakFrame(page, breakMode);
       dropped = broke.dropped;
       if (!broke.dropped) return { metrics: null, dropped, problem: `lift: break=${breakMode} found nothing to break in the lifted frame` };
     }
+    const census = censusOf(family, await readCensus(page, family));
     const shots = await captureArms(page);
-    if (!shots.svgSettled) return { metrics: null, dropped, problem: `lift: the SVG arm was still changing after ${shots.svgShots} shots (${shots.svgMoving})` };
+    if (!shots.svgSettled) return { metrics: null, dropped, census, problem: `lift: the SVG arm was still changing after ${shots.svgShots} shots (${shots.svgMoving})` };
     const svg = decodePng(shots.svg);
     const gpu = decodePng(shots.gpu);
     writeFileSync(join(cellDir, `${stem}-lifted-svg.png`), shots.svg);
     writeFileSync(join(cellDir, `${stem}-lifted-gpu.png`), shots.gpu);
     writeFileSync(join(cellDir, `${stem}-lifted-diff.png`), encodePng(heatmap(svg, gpu)));
-    return { metrics: measureCell(svg, gpu, blankSvg, blankGpu), dropped };
+    return { metrics: measureCell(svg, gpu, blankSvg, blankGpu), dropped, census };
   } finally {
     await page.evaluate(setLayerOpacity, { id: family.id, root: family.root, value: null });
     if (faintOpacity) await page.evaluate(setLayerOpacity, { id: family.id, root: family.root, value: faintOpacity });
@@ -951,13 +977,7 @@ try {
               cell.compatRunElements = seen.compatRunElements;
               cell.compat = seen.compat;
               cell.censusKinds = seen.sink?.kinds ?? null;
-              cell.census = family.root
-                ? { native: 0, compat: seen.compatRunElements, skipped: 0 }
-                : seen.layer
-                  ? { native: seen.layer.native, compat: seen.layer.compat, skipped: seen.sink?.skipped ?? 0 }
-                  : seen.sink
-                    ? { native: 0, compat: 0, skipped: seen.sink.skipped }
-                    : null;
+              cell.census = censusOf(family, seen);
               census.cells[key] = { ...(cell.census ?? { native: 0, compat: 0, skipped: 0 }), kinds: cell.censusKinds };
               cell.expected = expectations?.cells?.[key] ? { native: expectations.cells[key].native, compat: expectations.cells[key].compat, skipped: expectations.cells[key].skipped } : null;
               const shots = await captureArms(page);
@@ -1000,15 +1020,25 @@ try {
               const svg = decodePng(svgPng);
               const gpu = decodePng(shots.gpu);
               cell.metrics = measureCell(svg, gpu, blankSvg, blankGpu);
-              // FAINT: a layer at the 8-bit rounding floor is judged for coverage at full opacity (golden-metrics.ts)
+              // FAINT: a layer at the 8-bit rounding floor is judged for coverage lifted to opacity 0.99 (golden-metrics.ts)
               let lifted: CellMetrics | null = null;
               if (isFaint(cell.metrics) && cell.domDrawables && !dense && cell.renderer?.active === "gpu") {
                 cell.faint = { contrast: cell.metrics.contrast, lifted: false, ...(faintOpacity ? { synthetic: faintOpacity } : {}) };
                 const up = await captureLifted(page, family, cellDir, `${family.name}-k${fmt(k)}${first ? "" : `@${camera.id}`}`, blankSvg, blankGpu);
                 lifted = up.metrics;
                 cell.faint.liftedMetrics = up.metrics ?? undefined;
-                cell.faint.dropped = up.dropped;
+                cell.faint.dropped = breakMode === "drop-layer" ? cell.dropped : up.dropped;
+                cell.faint.liftedCensus = up.census;
+                if (up.skipped) {
+                  cell.faint.skipped = up.skipped;
+                  cell.notes = [...(cell.notes ?? []), `faint layer: ${up.skipped}`];
+                }
                 if (up.problem) cell.failures.push(`harness: ${up.problem}`);
+                // the lift is only evidence about the path the layer ships on if the GPU routed the lifted frame the same way
+                const was = cell.census;
+                const now = up.census;
+                if (now && JSON.stringify(now) !== JSON.stringify(was))
+                  cell.notes = [...(cell.notes ?? []), `faint lift changed the GPU route: ${was ? `native ${was.native}, compat ${was.compat}, skipped ${was.skipped}` : "none"} -> native ${now.native}, compat ${now.compat}, skipped ${now.skipped}`];
               }
               const verdict = judgeCell({ metrics: cell.metrics, census: cell.census, domDrawables: cell.domDrawables, expected: cell.expected, lifted }, reading);
               if (cell.faint) cell.faint.lifted = !!verdict.faint?.lifted;

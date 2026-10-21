@@ -51,9 +51,9 @@ export const COVERAGE = { inkRatioMin: 0.9, over16OfInkMax: 0.2, slackPx: 16 } a
 // per-pixel max-channel delta from its own blank, over BOTH arms) is at most maxContrast code values is below that
 // floor: whether a pixel reaches a whole code value is decided by how Chrome's SVG compositor and the GPU round the same
 // fraction of a level, so the ink count measures rounding, not the layer (legacy-v1.99 ice, group opacity 0.008, is
-// 0.18 of a level at its strongest; its ink differed 12 % between arms while 93 % of the pixels agreed and no pixel
-// differed by more than 1). The cell is then judged for coverage on the SAME layer lifted to full opacity (the family
-// root's opacity forced to 1 in the page, both arms recaptured), where the footprint is plain. Nothing is loosened:
+// ~1.8 levels at its strongest (223 x 0.00797); its ink differed 12 % between arms while 93 % of the pixels agreed and no
+// pixel differed by more than 1). The cell is then judged for coverage on the SAME layer lifted (the family root's
+// opacity forced to FAINT.liftTo in the page, both arms recaptured), where the footprint is plain. Nothing is loosened:
 //   - a layer that paints nothing in either arm (contrast 0) is not faint, it is empty or quiet as before;
 //   - a layer louder than maxContrast, in either arm, never takes this path (a GPU that paints a faint layer at full
 //     strength is far over maxContrast in its own arm, so the plain gates judge it);
@@ -64,11 +64,20 @@ export const COVERAGE = { inkRatioMin: 0.9, over16OfInkMax: 0.2, slackPx: 16 } a
 //     can see; the lifted over16-of-ink is still reported (cell.faint.liftedMetrics);
 //   - a lift that does not reveal the layer (contrast still ≤ maxContrast: white on white, or the opacity sits on
 //     children) falls back to the plain judgement, so those cells are exactly as strict as before;
-//   - the whole-frame gates (SSIM, over16, over44) always read the plain capture.
+//   - the whole-frame gates (SSIM, over16, over44) always read the plain capture;
+//   - PRESENCE: a layer the SVG arm paints at ≥ presenceMinContrast code values (its ideal strength is then ≥ 1.5 levels:
+//     the SVG arm rounds to nearest) must show ink in the GPU arm's PLAIN capture too, so a GPU that paints nothing at the
+//     layer's real opacity (an alpha cull, a group that vanishes below some opacity) fails even though its lifted capture,
+//     where that cull no longer fires, is fine. Below 1.5 levels the GPU may legitimately round every pixel to 0.
+//   - the lift goes to liftTo = 0.99, not 1: every renderer decision on the root's opacity (scene.ts group composite at
+//     < 1, nested group opacity as compat, text.ts, emblem-culling.ts) is `=== 1` / `< 1`, so 0.99 keeps the routing of a
+//     layer that is < 1 and the lifted capture judges the path the layer ships on (the harness records the lifted census
+//     beside the plain one). A root whose opacity is already ≥ liftTo is faint by colour, not by opacity: nothing to lift,
+//     the plain judgement stands.
 // 3 = the largest contrast in the evidence that is noise-bound: the rounding noise between the two arms' own blanks is
 // one code value, and a layer needs about 1 + the noise to have a footprint that survives it. The loudest layer the
 // path was designed for (ice) is at 2.
-export const FAINT = { maxContrast: 3 } as const;
+export const FAINT = { maxContrast: 3, liftTo: 0.99, presenceMinContrast: 2 } as const;
 
 export interface CellMetrics {
   width: number;
@@ -92,6 +101,9 @@ export interface CellMetrics {
   inkRatio: number;
   // the layer's strongest pixel against its own blank, either arm (max-channel code values): FAINT.maxContrast
   contrast: number;
+  // the same per arm: the SVG arm's is the layer's ideal strength to within half a level (FAINT presence check)
+  contrastSvg: number;
+  contrastGpu: number;
 }
 
 // Contrast 0 is not faint: neither arm paints a single pixel of the layer (opacity 0, hidden by the file, nothing to
@@ -109,14 +121,15 @@ export function measureCell(svg: Rgba, gpu: Rgba, blank: Rgba, gpuBlank: Rgba = 
   let inkSvg = 0;
   let inkGpu = 0;
   let inkUnion = 0;
-  let contrast = 0;
+  let contrastSvg = 0;
+  let contrastGpu = 0;
   for (let i = 0; i < svg.data.length; i += 4) {
     const da = delta(svg.data, blank.data, i);
     const db = delta(gpu.data, gpuBlank.data, i);
     const a = da > 0;
     const b = db > 0;
-    if (da > contrast) contrast = da;
-    if (db > contrast) contrast = db;
+    if (da > contrastSvg) contrastSvg = da;
+    if (db > contrastGpu) contrastGpu = db;
     if (a) inkSvg++;
     if (b) inkGpu++;
     if (a || b) inkUnion++;
@@ -138,7 +151,9 @@ export function measureCell(svg: Rgba, gpu: Rgba, blank: Rgba, gpuBlank: Rgba = 
     over16OfInk: inkUnion ? diff.over16 / inkUnion : 0,
     over44OfInk: inkUnion ? diff.over44 / inkUnion : 0,
     inkRatio: Math.max(inkSvg, inkGpu) ? Math.min(inkSvg, inkGpu) / Math.max(inkSvg, inkGpu) : 0,
-    contrast
+    contrast: Math.max(contrastSvg, contrastGpu),
+    contrastSvg,
+    contrastGpu
   };
 }
 
@@ -154,7 +169,7 @@ export interface CellInput {
   census: CensusCounts | null;
   domDrawables: number; // visible drawable SVG elements in the family (SVG arm)
   expected?: CensusCounts | null; // optional census expectation for this cell
-  // the same cell with the layer lifted to full opacity (FAINT). Used only when `metrics` is faint and the lift revealed
+  // the same cell with the layer lifted to FAINT.liftTo (FAINT). Used only when `metrics` is faint and the lift revealed
   // the layer; ignored otherwise, so a caller cannot weaken a normal layer's judgement by passing it.
   lifted?: CellMetrics | null;
 }
@@ -205,15 +220,21 @@ export function judgeCell(input: CellInput, reading: Reading = DEFAULT_READING):
   if (faint)
     notes.push(
       lifted
-        ? `faint layer (contrast ${m.contrast} code value${m.contrast === 1 ? "" : "s"}): coverage judged at full opacity, ink ${lifted.inkGpu} GPU vs ${lifted.inkSvg} SVG px (plain ${m.inkGpu} vs ${m.inkSvg})`
-        : `faint layer (contrast ${m.contrast}) and the lift ${input.lifted ? `revealed nothing (contrast ${input.lifted.contrast})` : "was not captured"}: coverage judged on the plain capture`
+        ? `faint layer (contrast ${m.contrast} code value${m.contrast === 1 ? "" : "s"}): coverage judged at opacity ${FAINT.liftTo}, ink ${lifted.inkGpu} GPU vs ${lifted.inkSvg} SVG px (plain ${m.inkGpu} vs ${m.inkSvg})`
+        : `faint layer (contrast ${m.contrast}) and the lift ${input.lifted ? `revealed nothing (contrast ${input.lifted.contrast})` : "was not captured or not needed"}: coverage judged on the plain capture`
     );
   const routed = input.census ? input.census.native + input.census.compat : 0;
   const svgEmpty = c.inkSvg < MIN_INK_PIXELS || input.domDrawables === 0;
   const gpuEmpty = c.inkGpu < MIN_INK_PIXELS || routed === 0;
   if (svgEmpty) failures.push(`empty in SVG arm (ink ${c.inkSvg} px, ${input.domDrawables} drawables)`);
   if (gpuEmpty) failures.push(`empty in GPU arm (ink ${c.inkGpu} px, ${routed} routed)`);
-  const populated = !svgEmpty && !gpuEmpty;
+  // FAINT presence: the SVG arm paints the layer at ≥ 1.5 levels, so the GPU's plain capture must show ink as well
+  const present = !lifted || m.contrastSvg < FAINT.presenceMinContrast || m.inkGpu >= MIN_INK_PIXELS;
+  if (!present)
+    failures.push(
+      `empty in GPU arm at the layer's real opacity (plain ink ${m.inkGpu} px; the SVG arm paints it at ${m.contrastSvg} code values, lifted ink ${c.inkGpu} px)`
+    );
+  const populated = !svgEmpty && !gpuEmpty && present;
   // the footprint rule reads the lifted capture; over16-of-ink always reads the plain one (see FAINT: lifted, a
   // sub-code-value colour difference would be scaled by 1/opacity, up to ~125x for ice, into a failure nobody can see)
   const cover = { ink: coverageOf(c).ink, over16: coverageOf(m).over16 };
@@ -234,7 +255,7 @@ export function judgeCell(input: CellInput, reading: Reading = DEFAULT_READING):
   if (reading === "conservative" && !gates.conservative)
     failures.push(`conservative: changed ${pct(m.changedFraction)} (max ${pct(D1.conservativeChangedMax)}), maxDelta ${m.maxDelta} (max ${D1.conservativeMaxDelta})`);
   // an empty arm already failed as such; its coverage is reported in `gates` but not listed a second time
-  const at = lifted ? " at full opacity" : "";
+  const at = lifted ? ` with the layer lifted to opacity ${FAINT.liftTo}` : "";
   if (populated && !gates.coverageInk)
     failures.push(`coverage${at}: ink ${c.inkGpu} GPU vs ${c.inkSvg} SVG px (ratio ${c.inkRatio.toFixed(3)} < ${COVERAGE.inkRatioMin})`);
   if (populated && !gates.coverageOver16) failures.push(`coverage: over16 is ${pct(m.over16OfInk)} of the layer's ink (max ${pct(COVERAGE.over16OfInkMax)})`);
