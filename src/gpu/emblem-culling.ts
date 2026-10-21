@@ -325,10 +325,12 @@ export class HiddenEmblemCulling {
       return;
     }
     if (this.coverWanted && this.coverEligible()) {
-      // nothing paints under the cover: culled emblems come back (cheap now), so the model is whole when revealed
+      // nothing paints under the cover: culled emblems come back at rest (cheap now), so the model is whole when
+      // revealed. A held (moving) update writes nothing: the culls of the gesture that armed the cover stay until rest.
+      this.cover!.apply(true);
+      if (!cull) return;
       for (const [element, original] of this.owned) this.restore(element, original);
       this.owned.clear();
-      this.cover!.apply(true);
       return;
     }
     this.uncover();

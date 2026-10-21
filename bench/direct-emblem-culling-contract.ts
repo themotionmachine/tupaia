@@ -46,6 +46,7 @@ let result:any;try{result=await page.evaluate(async()=>{
  manager.reveal();a.revealRestores=!far.classList.contains("viewport-culled")&&!pending.classList.contains("viewport-culled");
  manager.update(camera,view,true);const oldRoot=root;const next=root.cloneNode(true) as SVGSVGElement;manager.reset();for(const e of next.querySelectorAll(".viewport-culled"))e.classList.remove("viewport-culled");root=next;oldRoot.replaceWith(root);manager.update(camera,view,true);a.worldReset=!oldRoot.querySelector(".viewport-culled")&&!!root.querySelector("#far.viewport-culled");
 
+ manager.update(camera,view,true,true,false);a.heldCoverWritesNothing=manager.status().paintSuppressed&&!!root.querySelector("#far.viewport-culled");
  manager.update(camera,view,true,true);
  const layer=root.querySelector("#emblems")!,liveNear=root.querySelector("#near")!,viewbox=root.querySelector("#viewbox")!;
  a.coverSuppressesPaint=manager.status().paintSuppressed&&getComputedStyle(layer).visibility==="hidden"&&getComputedStyle(viewbox).pointerEvents==="painted";
