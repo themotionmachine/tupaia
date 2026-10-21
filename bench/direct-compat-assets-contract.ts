@@ -38,6 +38,17 @@ try{result=await page.evaluate(async({rules})=>{
  const cachedOriginal=cached.outerHTML;let uc=isolate(cached);assertions.cachedFirst=!!cached.querySelector("#burgCOA1")&&!cached.querySelector("#burgCOA2")&&!cached.querySelector("#burgCOA3");uc();
  cached.querySelector("#pick")!.setAttribute("href","#burgCOA2");uc=isolate(cached);assertions.cachedFollowsOutside=!cached.querySelector("#burgCOA1")&&!!cached.querySelector("#burgCOA2")&&!!cached.querySelector("#burgCOA3");uc();
  cached.querySelector("#pick")!.setAttribute("href","#burgCOA1");assertions.cachedExactRestore=cached.outerHTML===cachedOriginal;
+ // W4b HEIGHT: the feature outlines and the #deftemp masks are pruned like an unused COA, followed through mask -> <use>
+ const deftemp='<g id="deftemp"><g id="featurePaths"><path id="feature_1" d="M10 10H60V60H10Z"/><path id="feature_2" d="M70 10H110V60H70Z"/></g><mask id="land"><use href="#feature_1" fill="white"/><use href="#feature_2" fill="white"/></mask><mask id="water"><rect width="120" height="80" fill="white"/><use href="#feature_1" fill="black"/></mask><mask id="fog"><rect width="100%" height="100%" fill="white"/></mask></g>';
+ const masked=make('<defs>'+deftemp+asset(1,'')+'</defs><rect width="120" height="80" fill="red" mask="url(#land)"/>');
+ const maskedOriginal=masked.outerHTML;const um=isolate(masked);
+ assertions.sharedMaskChainRetained=!!masked.querySelector("#land")&&!!masked.querySelector("#featurePaths #feature_2")&&!masked.querySelector("#water")&&!masked.querySelector("#fog")&&!masked.querySelector("#burgCOA1");
+ const maskedPruned=masked.outerHTML;um();assertions.sharedExactRestore=masked.outerHTML===maskedOriginal;
+ const ma=await pixels(maskedOriginal),mb=await pixels(maskedPruned);assertions.sharedMaskPixels=ma.every((v,i)=>v===mb[i])&&ma.some(v=>v!==0);
+ const outline=make('<defs>'+deftemp+'</defs><use href="#feature_2" fill="blue"/>');const uo=isolate(outline);
+ assertions.sharedOutlineRetained=!!outline.querySelector("#featurePaths")&&!outline.querySelector("#land")&&!outline.querySelector("#water");uo();
+ const unused=make('<defs>'+deftemp+'</defs><rect width="20" height="20" fill="green"/>');const uu=isolate(unused);
+ assertions.sharedUnusedRemoved=!unused.querySelector("#featurePaths")&&!unused.querySelector("mask");uu();
  const unknownStyle=make('<style>svg:nth-child(2){fill:red}</style><defs>'+asset(1,'')+asset(2,'')+'</defs>');assertions.unknownStylesFailClosed=unchanged(unknownStyle);
  const escaped=make('<defs>'+asset(1,'')+asset(2,'')+'</defs><g style="fill:url(#bur'+'\\67COA1)"/>');assertions.escapedReferenceFailClosed=unchanged(escaped);
  const smil=make('<defs>'+asset(1,'<animate attributeName="opacity" dur="1s"/>')+asset(2,'')+'</defs>');assertions.smilFailClosed=unchanged(smil);

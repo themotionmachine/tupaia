@@ -207,7 +207,9 @@ export interface CompatReuse {
   retained: boolean; // restored from a frame's retained CPU payload (retainFrame): no scene walk or conversion
   // the layers (#viewbox children, or root overlay ids) whose frame draws a raster reused from the previous frame
   keptLayers: string[];
-  // the level the world loop started at from an earlier frame's bytes (ladderEstimate), when nothing was kept; absent
+  // how the cut runs were cut (WindowStats without its verify block), when the prepare cut any
+  cuts?: WindowStats;
+  // the level the world loop started at from an earlier frame's bytes (ladderHint), when nothing was kept; absent
   // when it started at level 0 or from kept rasters (ladderStart)
   ladderHint?: number;
 }
@@ -697,10 +699,32 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
     compat(draw.element, reason, out, draw.layer);
   };
 
-  const fill = (subpaths: Subpath[], evenOdd: boolean): FillBatch => {
+  // Fill geometry by path data, for this prepare: a feature outline is filled by its #landmass/#lakes <use> and again by
+  // the #land and #water masks that name it, each from the same `d` (W4b HEIGHT: about a third of the parity scene's
+  // tessellation). `key` is the path data the subpaths were flattened from (with the flattening mode); a repeat shares
+  // the first fill's vertex and edge ranges (draws only read them) instead of tessellating again.
+  const fills = new Map<string, FillBatch>();
+  const fill = (subpaths: Subpath[], evenOdd: boolean, key?: string): FillBatch => {
+    const memo = key === undefined ? undefined : `${evenOdd ? "e" : "n"}${key}`;
+    const known = memo === undefined ? undefined : fills.get(memo);
+    if (known) {
+      const { first, count, bounds, edgeFirst, edgeCount, deepWinding } = known;
+      return {
+        kind: "fill",
+        first,
+        count,
+        color: null,
+        tile: null,
+        evenOdd,
+        bounds,
+        edgeFirst,
+        edgeCount,
+        deepWinding
+      };
+    }
     const first = fans.length / 2;
     const edgeFirst = edges.length / 2; // ring points (geometry.ts appendFillEdges)
-    return {
+    const batch: FillBatch = {
       kind: "fill",
       first,
       count: appendStencilMeshes(subpaths, fans, tessellation),
@@ -712,6 +736,8 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
       edgeCount: appendFillEdges(subpaths, edges, evenOdd),
       deepWinding: !evenOdd && mayWindDeep(subpaths)
     };
+    if (memo !== undefined) fills.set(memo, { ...batch, bounds: batch.bounds && [...batch.bounds] });
+    return batch;
   };
 
   const stroke = (
@@ -796,7 +822,8 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
           const thin = refine && thinFill(subpaths);
           const batch = fill(
             thin ? flattenPath(draw.d, fine, { scale: ctx.bucket, fill: true }) : subpaths,
-            style.evenOdd
+            style.evenOdd,
+            `${thin ? "t" : "s"}${draw.d}`
           );
           batch.analytic = analyticShape(tag, subpaths); // SVG draws it analytically or with 4x MSAA
           batch.aliased = aliasedShape(tag, style);
@@ -1000,7 +1027,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
         if (!(await convert(draw.children, children))) return false;
         const mask = draw.mask?.flatMap(item =>
           item.kind === "shape"
-            ? [{ fill: fill(item.subpaths, item.style.evenOdd), white: item.style.fill?.[0] === 1 }]
+            ? [{ fill: fill(item.subpaths, item.style.evenOdd, `s${item.d}`), white: item.style.fill?.[0] === 1 }]
             : []
         );
         out.push({ kind: "group", opacity: draw.opacity, mask: mask ?? null, children });
@@ -1360,6 +1387,8 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
       canvas.width = canvas.height = 0;
     }
     report.worldKept = kept.size;
+    // how this prepare's world and screen runs were cut (compat-bounds.ts WindowStats), for the resume trace
+    report.cuts = { ...windowStats, verify: undefined };
     report.keptLayers = layersOf([...kept, ...[...adopted.keys()].filter(run => run.screen)], viewbox);
     ctx.mark?.("world");
 
