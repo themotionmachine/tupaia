@@ -236,7 +236,9 @@ test("gpuGlyphs (the page-side reader) places glyphs where glyphBaseline does", 
   const atlas = new Map([
     ["normal 400 16px Georgia|0|rgb(0,0,0)|A", { u0: 0, v0: 0, top: -16, height: 20 }],
     ["normal 400 16px Georgia|4|round|4|A", { u0: 0.5, v0: 0, top: -18, height: 24 }],
-    ["normal 400 16px Georgia|0|rgb(0,0,0)||", { u0: 0.25, v0: 0.25, top: -14, height: 18 }]
+    ["normal 400 16px Georgia|0|rgb(0,0,0)||", { u0: 0.25, v0: 0.25, top: -14, height: 18 }],
+    ["normal 400 16px Courier|0|rgb(0,0,0)|B", { u0: 0.75, v0: 0, top: -15, height: 19 }],
+    ["normal 400 16px Courier|0|rgb(0,0,0)|C", { u0: 0.75, v0: 0.5, top: -15, height: 19 }]
   ]);
   // GLYPH_FLOATS = 18: cx cy angle lx ly w h u0 v0 u1 v1 r g b a ascent descent mode
   const instances = [
@@ -244,7 +246,10 @@ test("gpuGlyphs (the page-side reader) places glyphs where glyphBaseline does", 
     // a nested central baseline: the shader adds instanceCentralShift at the view's k
     [120, 60, Math.PI / 2, -4, -2, 6, 9, 0.25, 0.25, 0.3, 0.3, 0, 0, 0, 1, 11.545, 2.757, 2],
     [140, 70, 0.3, -4, -3, 6, 12, 0.5, 0, 0.6, 0.1, 1, 1, 1, 1, 0, 0, 0], // halo pass: skipped
-    [160, 80, 0, -4, -3, 6, 10, 0.9, 0.9, 1, 1, 0, 0, 0, 1, 0, 0, 0] // no atlas entry: unknown
+    [160, 80, 0, -4, -3, 6, 10, 0.9, 0.9, 1, 1, 0, 0, 0, 1, 0, 0, 0], // no atlas entry: unknown
+    // the Mac ascent hack (APPLE_ASCENT): a central baseline (mode 3) and a nested one (mode 4)
+    [180, 90, 0, -4, -3, 6, 10, 0.75, 0, 0.8, 0.1, 0, 0, 0, 1, 0.7, 0.212, 3],
+    [200, 95, 0, -4, -3, 6, 10, 0.75, 0.5, 0.8, 0.6, 0, 0, 0, 1, 0.7, 0.212, 4]
   ];
   const g = globalThis as Record<string, unknown>;
   g.gpuRenderer = { prepared: { payload: { glyphs: new Float32Array(instances.flat()), atlasGeneration: 3 } }, atlas: { glyphs: atlas, generation: 3 }, view: { k: 2, x: 10, y: -5 } };
@@ -252,18 +257,20 @@ test("gpuGlyphs (the page-side reader) places glyphs where glyphBaseline does", 
     const out = gpuGlyphs(2);
     assert.equal(out.error, undefined);
     assert.equal(out.unknown, 1);
-    assert.equal(out.instances, 4);
-    assert.equal(out.glyphs.length, 2);
-    for (const [index, entry] of [
-      [0, "normal 400 16px Georgia|0|rgb(0,0,0)|A"],
-      [1, "normal 400 16px Georgia|0|rgb(0,0,0)||"]
+    assert.equal(out.instances, 6);
+    assert.equal(out.glyphs.length, 4);
+    for (const [index, slot, entry] of [
+      [0, 0, "normal 400 16px Georgia|0|rgb(0,0,0)|A"],
+      [1, 1, "normal 400 16px Georgia|0|rgb(0,0,0)||"],
+      [4, 2, "normal 400 16px Courier|0|rgb(0,0,0)|B"],
+      [5, 3, "normal 400 16px Courier|0|rgb(0,0,0)|C"]
     ] as const) {
       const f32 = Float32Array.from(instances[index]);
       const glyph = atlas.get(entry)!;
       const expected = glyphBaseline(f32, glyph, 2)!;
-      const got = out.glyphs[index];
+      const got = out.glyphs[slot];
       assert.equal(got.char, decodeGlyphKey(entry)!.char);
-      assert.equal(got.font, "normal 400 16px Georgia");
+      assert.equal(got.font, decodeGlyphKey(entry)!.font);
       assert.ok(Math.abs(got.scale - glyph.height / f32[6]) < 1e-9);
       assert.ok(Math.abs(got.x - (expected.x * 2 + 10) * 2) < 1e-6, `x ${got.x}`);
       assert.ok(Math.abs(got.y - (expected.y * 2 - 5) * 2) < 1e-6, `y ${got.y}`);

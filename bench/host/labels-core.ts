@@ -328,8 +328,11 @@ export function gpuGlyphs(dpr: number): Record<string, any> {
     const [ascent, descent, mode] = [data[i + 15], data[i + 16], data[i + 17]];
     let central = 0;
     if (mode > 0.5) {
-      const css = (Math.floor(ascent * view.k + 0.5) - Math.floor(descent * view.k + 0.5)) / 2;
-      central = (mode > 1.5 ? Math.ceil(css - 1e-3) : css) / view.k;
+      // centralShiftAt: a mode above APPLE_ASCENT (2) adds Chromium's Mac ascent hack to the rounded ascent
+      const [a, d] = [Math.floor(ascent * view.k + 0.5), Math.floor(descent * view.k + 0.5)];
+      const css = (a + (mode > 2.5 ? Math.floor((a + d) * 0.15 + 0.5) : 0) - d) / 2;
+      const nested = (mode > 2.5 ? mode - 2 : mode) > 1.5;
+      central = (nested ? Math.ceil(css - 1e-3) : css) / view.k;
     }
     const shift = data[i + 4] - glyph.top / scale + central;
     const angle = data[i + 2];
