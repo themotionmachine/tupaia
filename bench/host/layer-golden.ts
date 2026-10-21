@@ -219,7 +219,9 @@ interface Cell {
   // GOLDEN_COA_LATE: the symbols were held back until the GPU frame was built, then returned
   coaLate?: { symbols: number; preparesBefore: number; preparesAfter: number; reprepared: boolean };
   svgShots?: number;
-  svgVector?: { bitmaps: number };
+  // folded: icon groups whose opacity < 1 was folded into fill/stroke-opacity for the vector shot (see foldGroupOpacity),
+  // and how many of their icons overlap another icon of the same group (where the fold is not exact)
+  svgVector?: { bitmaps: number; folded?: { groups: number; overlaps: number } };
   otherRef?: { ref: string; pass: boolean; failures: string[]; ssim: number; over16Fraction: number; over44Fraction: number; inkSvg: number; inkGpu: number; inkRatio: number; over16OfInk: number };
   bitmapVsVector?: { ssim: number; over16OfInk: number; inkBitmap: number; inkVector: number };
   // a FAINT layer (golden-metrics.ts): the plain capture's contrast, whether the lifted (opacity 1) capture revealed the
@@ -781,6 +783,12 @@ type DenseKind = "burgs" | "cells";
 const DENSE: Record<string, { kind: DenseKind; ref: "vector" | "seen" }> = { icons: { kind: "burgs", ref: "vector" }, cells: { kind: "cells", ref: "seen" } };
 
 // Swaps the bitmap for vectors in the live DOM; returns what it swapped, or null when SVG shows no bitmap here.
+// Burgs: a group with opacity < 1 (darkSeas: 0.7 on every #burgIcons > g) is drawn by Chrome, under the zoomed #viewbox
+// transform, through a transparency layer that comes out ~1 px soft; the GPU draws the icons crisp, and with the same
+// darkness per dot (folded into fill/stroke-opacity, Chrome matches the GPU pixel for pixel). So the shot folds the
+// group's computed opacity into its computed fill-opacity and stroke-opacity and sets opacity 1. The fold is exact
+// unless two icons of one group overlap (the layer blends them once, the fold twice): those icons are counted.
+// restoreBitmap puts the exact original attributes back.
 const vectorize = (page: Page, kind: DenseKind) =>
   page.evaluate(kind => {
     const w = globalThis as any;
@@ -788,7 +796,28 @@ const vectorize = (page: Page, kind: DenseKind) =>
       const bitmaps = [...document.querySelectorAll("svg#map #burgIcons image[data-burg-vectors], svg#map #anchors image[data-burg-vectors]")].filter(i => !i.hasAttribute("data-zoom-hidden"));
       if (!bitmaps.length) return null;
       w.prepareBurgIcons(); // editing mode: restores every group's <use>s and stops the app re-compacting them
-      return { bitmaps: bitmaps.length };
+      const saved: [Element, string, string | null][] = [];
+      let groups = 0, overlaps = 0;
+      for (const g of document.querySelectorAll("svg#map #burgIcons > g, svg#map #anchors > g")) {
+        const cs = getComputedStyle(g);
+        const opacity = parseFloat(cs.opacity);
+        if (!(opacity < 1)) continue;
+        const fill = parseFloat(cs.fillOpacity) * opacity, stroke = parseFloat(cs.strokeOpacity) * opacity;
+        for (const name of ["opacity", "fill-opacity", "stroke-opacity"]) saved.push([g, name, g.getAttribute(name)]);
+        g.setAttribute("opacity", "1");
+        g.setAttribute("fill-opacity", String(fill));
+        g.setAttribute("stroke-opacity", String(stroke));
+        groups++;
+        // icons whose screen boxes overlap another icon of this group, by a sweep along x
+        const boxes = [...g.children].map(c => c.getBoundingClientRect()).filter(r => r.width > 0 && r.height > 0).sort((a, b) => a.left - b.left);
+        const hit = new Set<number>();
+        for (let i = 0; i < boxes.length; i++)
+          for (let j = i + 1; j < boxes.length && boxes[j].left < boxes[i].right; j++)
+            if (boxes[j].top < boxes[i].bottom && boxes[i].top < boxes[j].bottom) hit.add(i).add(j);
+        overlaps += hit.size;
+      }
+      w.__goldenFolded = saved;
+      return { bitmaps: bitmaps.length, folded: groups ? { groups, overlaps } : undefined };
     }
     const group = document.getElementById("cells");
     const image = group?.querySelector<SVGImageElement>("image[data-cell-mesh]");
@@ -811,14 +840,14 @@ const vectorize = (page: Page, kind: DenseKind) =>
   }, kind);
 // The vector-form SVG shot of a dense family (GPU canvas hidden for the shot), then the bitmap is put back and the app
 // and the GPU settle again. null when SVG shows no bitmap here (the burgs above k 4 already show vectors).
-async function captureVector(page: Page, kind: DenseKind): Promise<{ png: Buffer; shots: number; settled: boolean; moving?: string; swapped: number } | null> {
+async function captureVector(page: Page, kind: DenseKind): Promise<{ png: Buffer; shots: number; settled: boolean; moving?: string; swapped: number; folded?: { groups: number; overlaps: number } } | null> {
   const old = await hideCanvas(page);
-  let swapped: { bitmaps: number } | null = null;
+  let swapped: { bitmaps: number; folded?: { groups: number; overlaps: number } } | null = null;
   try {
     swapped = await vectorize(page, kind);
     if (!swapped) return null;
     await twoFrames(page);
-    return { ...(await shootSvg(page)), swapped: swapped.bitmaps };
+    return { ...(await shootSvg(page)), swapped: swapped.bitmaps, folded: swapped.folded };
   } finally {
     await showCanvas(page, old);
     if (swapped) await restoreBitmap(page, kind);
@@ -829,6 +858,12 @@ async function restoreBitmap(page: Page, kind: DenseKind): Promise<void> {
   await page.evaluate(async kind => {
     const w = globalThis as any;
     if (kind === "burgs") {
+      for (const [g, name, value] of w.__goldenFolded ?? []) {
+        if (value === null) g.removeAttribute(name);
+        else g.setAttribute(name, value);
+      }
+      delete w.__goldenFolded;
+      await Promise.resolve(); // the style observer sees the restore while still editing, so it does not compact a second time
       w.finishBurgIcons();
       await w.burgRenderReady;
     } else if (w.__goldenCellImage) {
@@ -1026,7 +1061,8 @@ try {
                   otherPng = ref === "vector" ? shots.svg : vec.png;
                   if (ref === "vector") svgPng = vec.png;
                   cell.svgRef = ref;
-                  cell.svgVector = { bitmaps: vec.swapped };
+                  cell.svgVector = { bitmaps: vec.swapped, ...(vec.folded && { folded: vec.folded }) };
+                  if (vec.folded?.overlaps) cell.notes = [...(cell.notes ?? []), `vector ref folded group opacity in ${vec.folded.groups} groups; ${vec.folded.overlaps} icons overlap, where the fold is not exact`];
                   const g = decodePng(shots.gpu);
                   const m = measureCell(decodePng(otherPng), g, blankSvg, blankGpu);
                   const v = judgeCell({ metrics: m, census: cell.census, domDrawables: cell.domDrawables, expected: null }, reading);
