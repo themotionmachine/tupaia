@@ -334,15 +334,6 @@
    "maxOver44": 0.9
   },
   {
-   "family": "ice",
-   "maps": [
-    "legacy-v1.7",
-    "legacy-v1.99"
-   ],
-   "reason": "legacy-only gap, cause not confirmed: both files carry style=\"opacity: 0.04\" (a jQuery fade caught mid-way by the old version) on #ice next to opacity=\"0.9\" and filter dropShadow05; the SVG honours the style (CSS beats the attribute) and the GPU draws the polygons far stronger (over16 3.8%, whole polygons orange in the diff). Suspect: the scene reads the opacity attribute, not the inline style. Evidence ~/.tupaia-gates/w2-corpus/corpus-20261020T013057-325Z/legacy-v1.7/golden",
-   "maxOver16": 5.1
-  },
-  {
    "family": "texture",
    "maps": [
     "demo-v1.112"

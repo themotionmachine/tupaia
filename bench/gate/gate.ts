@@ -150,6 +150,9 @@ const ARG_SPEC: Record<string, Spec> = {
   // the SVG arm of a family shown as a perf bitmap of its vectors (burg icons, cell mesh): auto = per family, the form the
   // GPU is built to reproduce (vector for burgs, the bitmap as shown for cells); the other is always reported (W3 REF)
   svg_ref: { type: "enum", values: ["auto", "vector", "seen"], default: "auto" },
+  // self-test knob: force this opacity on every captured family's root in both arms, so a normal layer becomes a FAINT one
+  // (golden-metrics.ts FAINT); empty = the page's own opacities
+  faint: { type: "string", default: "", check: text => { if (text && !(Number(text) > 0 && Number(text) <= 1)) throw new UsageError("faint must be an opacity in (0, 1]"); } },
   // ms between SVG-arm shots that must agree before it counts as settled (0 = one shot)
   settle_ms: { type: "int", default: 400 },
   // emblem COA symbols: pre = rendered before the first capture (default), lazy = left to the app, late = held back
@@ -689,6 +692,7 @@ async function goldenCheck(ctx: Ctx): Promise<Partial<Result>> {
     GOLDEN_BREAK: String(ctx.args.break),
     GOLDEN_GPU_ARM: String(ctx.args.gpu_arm),
     GOLDEN_PARAMS: String(ctx.args.params ?? ""),
+    GOLDEN_FAINT: String(ctx.args.faint ?? ""),
     ...goldenRefEnv(ctx)
   };
   if (ctx.args.census) {
@@ -763,11 +767,19 @@ async function coaRaceCheck(ctx: Ctx): Promise<Partial<Result>> {
 //                coverage gate while every whole-frame gate passes: the case D11 exists for;
 //   drop-icon:   goods (15K small native fills: the resource icons) with every 4th leaf batch dropped must fail the
 //                coverage gate (its whole-frame gates fail too: a quarter of goods is 4 % of the frame).
+//   faint-*:     W4 FAINT. The same layers at opacity SELFTEST_FAINT (GOLDEN_FAINT: 2 code values at most, below the
+//                8-bit rounding floor, like legacy-v1.99 ice). faint-clean must pass with the coverage judged on the
+//                lifted (opacity 1) capture (rulers, goods and the scaleBar screen overlay); faint-thin-stroke and faint-drop-icon must FAIL that coverage, on the lifted
+//                capture ("at full opacity"), while every plain whole-frame gate passes: a real gap in a faint layer is
+//                still caught, and only because the lift makes its footprint measurable.
 // A broken arm that breaks nothing, or fails on a harness error instead of a metric, fails the self-test.
 // shared fixture families that pass clean at k 1 and have the batch kinds the breaks need (2026-10-20 survey: relief,
 // markers and burgs are single compat rasters there, and no family draws sprites)
 const SELFTEST_STROKE = "rulers";
 const SELFTEST_ICON = "goods";
+const SELFTEST_FAINT = "0.008";
+// a screen overlay (a child of svg#map, refreshed in place without a prepare): the faint lift must wait for it differently
+const SELFTEST_OVERLAY = "scaleBar";
 async function goldenSelftestCheck(ctx: Ctx): Promise<Partial<Result>> {
   const base = { GOLDEN_MAP: ctx.map(), GOLDEN_K: "1", GOLDEN_DPR: "2", GOLDEN_PRESET: "default", GOLDEN_READING: String(ctx.args.reading), GOLDEN_KEEP: "all" };
   const runs = [
@@ -777,13 +789,16 @@ async function goldenSelftestCheck(ctx: Ctx): Promise<Partial<Result>> {
     { arm: "drop-icon", layers: [SELFTEST_ICON], brk: "drop-icon", gpuArm: "canvas" },
     // W3 REF: the burg icons are shown by the app as a blurry bitmap of their vectors; the golden must judge the GPU against
     // the vector form (this cell passes) and still report the bitmap as shown (which fails the coverage gate at k 2)
-    { arm: "dense-ref", layers: ["burgs"], brk: "none", gpuArm: "canvas", parity: true, k: "2" }
+    { arm: "dense-ref", layers: ["burgs"], brk: "none", gpuArm: "canvas", parity: true, k: "2" },
+    { arm: "faint-clean", layers: [SELFTEST_STROKE, SELFTEST_ICON, SELFTEST_OVERLAY], brk: "none", gpuArm: "canvas", faint: SELFTEST_FAINT },
+    { arm: "faint-thin-stroke", layers: [SELFTEST_STROKE], brk: "thin-stroke", gpuArm: "canvas", faint: SELFTEST_FAINT },
+    { arm: "faint-drop-icon", layers: [SELFTEST_ICON], brk: "drop-icon", gpuArm: "canvas", faint: SELFTEST_FAINT }
   ];
   const arms: Record<string, Json> = {};
   for (const run of runs) {
     const dir = join(ctx.dir, run.arm);
     mkdirSync(dir, { recursive: true });
-    const env = { ...base, ...(run.parity ? { GOLDEN_MAP: resolveNamedFixture("parity"), GOLDEN_K: run.k ?? "1" } : {}), GATE_OUT_DIR: dir, GOLDEN_LAYERS: run.layers.join(","), GOLDEN_BREAK: run.brk, GOLDEN_GPU_ARM: run.gpuArm };
+    const env = { ...base, ...(run.parity ? { GOLDEN_MAP: resolveNamedFixture("parity"), GOLDEN_K: run.k ?? "1" } : {}), GATE_OUT_DIR: dir, GOLDEN_LAYERS: run.layers.join(","), GOLDEN_BREAK: run.brk, GOLDEN_GPU_ARM: run.gpuArm, GOLDEN_FAINT: run.faint ?? "" };
     const code = await exec(nodeScript("bench/host/layer-golden.ts"), ctx.env(env), ctx.log, DEFS["golden-selftest"].timeout, true);
     arms[run.arm] = { code, data: readJson(join(dir, "golden.json")) };
   }
@@ -812,6 +827,27 @@ async function goldenSelftestCheck(ctx: Ctx): Promise<Partial<Result>> {
   broken("drop-batch", "ocean", g => !(g.ssim && g.over16 && g[String(ctx.args.reading)]), "a dropped path");
   broken("thin-stroke", SELFTEST_STROKE, g => g.coverage === false && g.ssim && g.over16 && g[String(ctx.args.reading)], "a thinner stroke the whole-frame gates miss");
   broken("drop-icon", SELFTEST_ICON, g => g.coverage === false, "dropped icons");
+  // FAINT: the clean faint cells pass on the lifted capture; the broken ones fail it, with the plain gates passing
+  const faintClean = arms["faint-clean"];
+  if (faintClean.code !== 0 || !faintClean.data) problems.push(`faint-clean run exit ${faintClean.code}, report ${faintClean.data ? "written" : "missing"}`);
+  else
+    for (const family of runs.find(r => r.arm === "faint-clean")!.layers) {
+      const cell = cellOf("faint-clean", family);
+      if (!cell) problems.push(`faint-clean captured no ${family} cell`);
+      else if (!cell.faint) problems.push(`faint-clean ${family}: not faint (contrast ${cell.metrics?.contrast}): the self-test's opacity no longer makes the layer faint`);
+      else if (!cell.faint.lifted) problems.push(`faint-clean ${family}: the lifted capture was not used (${cell.faint.liftedMetrics ? `lifted contrast ${cell.faint.liftedMetrics.contrast}` : "none captured"}): ${cell.failures?.[0] ?? "no failure recorded"}`);
+      else if (!cell.pass) problems.push(`faint-clean ${family} should pass on the lifted capture and failed: ${cell.failures?.[0] ?? "?"}`);
+    }
+  const brokenFaint = (arm: string, family: string, what: string) => {
+    broken(arm, family, g => g.coverage === false && g.ssim && g.over16 && g[String(ctx.args.reading)], what);
+    const cell = arms[arm].data && cellOf(arm, family);
+    if (!cell || cell.pass) return;
+    if (!cell.faint?.lifted) problems.push(`${arm}: ${family} was not judged on the lifted capture (faint ${JSON.stringify(cell.faint ?? null)})`);
+    else if (!cell.faint.dropped) problems.push(`${arm}: ${family} was not broken in the lifted frame, so the lifted capture proved nothing`);
+    else if (!(cell.failures ?? []).some((f: string) => /at full opacity/.test(f))) problems.push(`${arm}: ${family} failed, but not on the lifted capture: ${cell.failures?.[0]}`);
+  };
+  brokenFaint("faint-thin-stroke", SELFTEST_STROKE, "a thinner stroke in a faint layer");
+  brokenFaint("faint-drop-icon", SELFTEST_ICON, "dropped icons in a faint layer");
   const dense = arms["dense-ref"].data && cellOf("dense-ref", "burgs");
   if (arms["dense-ref"].code !== 0 && !dense) problems.push(`dense-ref run exit ${arms["dense-ref"].code}, no burgs cell`);
   else if (!dense) problems.push("dense-ref run captured no burgs cell");
@@ -830,6 +866,7 @@ async function goldenSelftestCheck(ctx: Ctx): Promise<Partial<Result>> {
       coverage: c.gates?.coverage ?? null,
       showThrough: c.showThrough ?? undefined,
       dropped: c.dropped?.dropped ?? undefined,
+      faint: c.faint ? { contrast: c.faint.contrast, lifted: c.faint.lifted, liftedInkRatio: round(c.faint.liftedMetrics?.inkRatio, 3), liftedContrast: c.faint.liftedMetrics?.contrast } : undefined,
       why: c.failures?.[0] ?? null
     };
   const cells: Record<string, Json> = {};
@@ -1657,7 +1694,7 @@ const DEFS: Record<string, CheckDef> = {
   },
   golden: {
     lock: "shared",
-    keys: ["layers", "k", "coastk", "dpr", "preset", "fixture", "census", "bg", "reading", "keep", "break", "gpu_arm", "params", "svg_ref", "settle_ms", "coa"],
+    keys: ["layers", "k", "coastk", "dpr", "preset", "fixture", "census", "bg", "reading", "keep", "break", "gpu_arm", "params", "svg_ref", "settle_ms", "coa", "faint"],
     spec: { dpr: DPR_LIST },
     timeout: 3600,
     run: goldenCheck

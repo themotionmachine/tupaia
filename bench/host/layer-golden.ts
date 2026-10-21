@@ -55,6 +55,13 @@
 //                    symbols are put back. A renderer that follows #coas re-prepares and the cell passes; one that does
 //                    not keeps the empty frame and the cell fails the D11 coverage gate. Implies GOLDEN_PRECOA=0 for
 //                    the cell. Used by `gate coa-race`.
+//   GOLDEN_FAINT    self-test only: an opacity (e.g. 0.008) forced on every captured family's root in both arms, so a normal
+//                    layer becomes a FAINT one (golden-metrics.ts FAINT) and the lifted capture is exercised on a layer whose
+//                    footprint is known. Unset = the page's own opacities.
+//   FAINT layers: a cell whose strongest pixel (either arm) is at most FAINT.maxContrast code values from its blank is
+//                    recaptured with the family root lifted to opacity 1 (both arms, same camera) and its empty check and
+//                    coverage ink rule are judged there (golden-metrics.ts); the plain capture keeps the whole-frame gates
+//                    and over16-of-ink. cell.faint records both.
 //   GOLDEN_PARAMS    extra gpu-* URL flags for the page, "+"-joined (e.g. gpu-native-shapes=1)  default none
 //   GOLDEN_CAMERAS   fixture | centered: which camera frames a cell. "fixture" (default when GOLDEN_MAP is the parity
 //                    fixture) uses the manifest's recorded presets; "centered" centres the whole map at k
@@ -72,10 +79,10 @@ import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { extname, join, relative, resolve } from "node:path";
 import { type BrowserContext, chromium, type Page } from "playwright";
-import { type CensusCounts, type CellMetrics, COVERAGE, DEFAULT_READING, heatmap, judgeCell, measureCell, type Reading } from "../golden-metrics.ts";
+import { type CensusCounts, type CellMetrics, COVERAGE, DEFAULT_READING, heatmap, isFaint, judgeCell, measureCell, type Reading } from "../golden-metrics.ts";
 import { decodePng, encodePng } from "../png.ts";
 import { type Family, parsePresets, parseZooms, selectFamilies } from "./golden-families.ts";
-import { isolateLayer } from "./golden-isolation.ts";
+import { isolateLayer, setLayerOpacity } from "./golden-isolation.ts";
 import { type CameraPreset, COVERS_BY_FAMILY, resolveFixture } from "./fixtures/index.ts";
 
 const env = process.env;
@@ -96,6 +103,8 @@ const gpuArm = env.GOLDEN_GPU_ARM || "canvas";
 const svgRefArg = env.GOLDEN_SVG_REF || "auto";
 const settleMs = Number(env.GOLDEN_SETTLE_MS ?? 400);
 const coaLate = env.GOLDEN_COA_LATE === "1";
+const faintOpacity = env.GOLDEN_FAINT || null;
+if (faintOpacity && !(Number(faintOpacity) > 0 && Number(faintOpacity) <= 1)) throw Error("GOLDEN_FAINT must be an opacity in (0, 1]");
 const preCoa = (env.GOLDEN_PRECOA ?? "1") !== "0" && !coaLate;
 if (!["auto", "vector", "seen"].includes(svgRefArg)) throw Error("GOLDEN_SVG_REF must be auto|vector|seen");
 if (!Number.isFinite(settleMs) || settleMs < 0) throw Error("GOLDEN_SETTLE_MS must be a number of ms >= 0");
@@ -207,6 +216,9 @@ interface Cell {
   svgVector?: { bitmaps: number };
   otherRef?: { ref: string; pass: boolean; failures: string[]; ssim: number; over16Fraction: number; over44Fraction: number; inkSvg: number; inkGpu: number; inkRatio: number; over16OfInk: number };
   bitmapVsVector?: { ssim: number; over16OfInk: number; inkBitmap: number; inkVector: number };
+  // a FAINT layer (golden-metrics.ts): the plain capture's contrast, whether the lifted (opacity 1) capture revealed the
+  // layer and judged its coverage, the lifted metrics, and the synthetic opacity (GOLDEN_FAINT) when one was forced
+  faint?: { contrast: number; lifted: boolean; synthetic?: string; liftedMetrics?: CellMetrics; dropped?: unknown };
 }
 
 const report = {
@@ -810,6 +822,55 @@ function classify(cell: Cell, gates: Record<string, boolean>): string {
   return "census";
 }
 
+// FAINT (golden-metrics.ts): the family root at opacity 1 in the live SVG, the GPU following, both arms recaptured at the
+// cell's camera. A break (GOLDEN_BREAK) is applied again to the new frame, since the re-prepare replaced the broken one.
+// The opacity is put back (the page's own, or the synthetic GOLDEN_FAINT one) before the next cell. A lift the GPU never
+// followed is a harness problem, not a verdict: the renderer is expected to re-prepare on a style edit.
+async function captureLifted(
+  page: Page,
+  family: Family,
+  cellDir: string,
+  stem: string,
+  blankSvg: ReturnType<typeof decodePng>,
+  blankGpu: ReturnType<typeof decodePng>
+): Promise<{ metrics: CellMetrics | null; dropped?: unknown; problem?: string }> {
+  const before = await gpuStamp(page);
+  const set = await page.evaluate(setLayerOpacity, { id: family.id, root: family.root, value: "1" });
+  if (!set.found) return { metrics: null, problem: `lift: no #${family.id} to lift` };
+  try {
+    await settleApp(page);
+    if (family.root) {
+      // a screen overlay (a child of svg#map: vignette, scaleBar, legend) is refreshed in place, one timer hop after the
+      // style edit, without a prepare (renderer.ts mutated(): the lane never bumps the revision), so there is no stamp to
+      // wait for; the capture below still refuses a frame that changes under it
+      await page.waitForTimeout(400);
+    } else {
+      const deadline = Date.now() + 20000;
+      while ((await gpuStamp(page)) === before && Date.now() < deadline) await page.waitForTimeout(100);
+      if ((await gpuStamp(page)) === before) return { metrics: null, problem: `lift: the GPU renderer did not prepare again after #${family.id} was set to opacity 1 (stamp ${before})` };
+    }
+    const status = await waitGpu(page);
+    if (status.active !== "gpu" || status.timedOut) return { metrics: null, problem: `lift: GPU ${status.timedOut ? "frame did not settle" : `not active (${status.fallbackReason ?? "no frame"})`}` };
+    let dropped: unknown;
+    if (breakMode !== "none") {
+      const broke = await breakFrame(page, breakMode);
+      dropped = broke.dropped;
+      if (!broke.dropped) return { metrics: null, dropped, problem: `lift: break=${breakMode} found nothing to break in the lifted frame` };
+    }
+    const shots = await captureArms(page);
+    if (!shots.svgSettled) return { metrics: null, dropped, problem: `lift: the SVG arm was still changing after ${shots.svgShots} shots (${shots.svgMoving})` };
+    const svg = decodePng(shots.svg);
+    const gpu = decodePng(shots.gpu);
+    writeFileSync(join(cellDir, `${stem}-lifted-svg.png`), shots.svg);
+    writeFileSync(join(cellDir, `${stem}-lifted-gpu.png`), shots.gpu);
+    writeFileSync(join(cellDir, `${stem}-lifted-diff.png`), encodePng(heatmap(svg, gpu)));
+    return { metrics: measureCell(svg, gpu, blankSvg, blankGpu), dropped };
+  } finally {
+    await page.evaluate(setLayerOpacity, { id: family.id, root: family.root, value: null });
+    if (faintOpacity) await page.evaluate(setLayerOpacity, { id: family.id, root: family.root, value: faintOpacity });
+  }
+}
+
 // ------------------------------------------------------------------ run
 
 const fmt = (k: number) => String(k).replace(".", "p");
@@ -855,6 +916,11 @@ try {
               if (cell.pendingCoas) cell.failures.push(`harness: ${cell.pendingCoas} visible emblem(s) still without a COA symbol after 20 s`);
               await settleApp(page);
               await page.evaluate(isolateLayer, { id: family.id, root: family.root, bg });
+              if (faintOpacity) {
+                const set = await page.evaluate(setLayerOpacity, { id: family.id, root: family.root, value: faintOpacity });
+                if (!set.found) cell.failures.push(`harness: GOLDEN_FAINT found no #${family.id} to fade`);
+                await settleApp(page);
+              }
               // params=gpu-refine=0 measures the first frame a camera change commits (prepare.ts firstDetails). Isolation
               // is a DOM revision at the cell's camera, and since W3b RES2 a revision-only prepare (an edit, a toggle)
               // commits on its base rasters without first-frame details: leave the cell's raster bucket and come back,
@@ -934,7 +1000,18 @@ try {
               const svg = decodePng(svgPng);
               const gpu = decodePng(shots.gpu);
               cell.metrics = measureCell(svg, gpu, blankSvg, blankGpu);
-              const verdict = judgeCell({ metrics: cell.metrics, census: cell.census, domDrawables: cell.domDrawables, expected: cell.expected }, reading);
+              // FAINT: a layer at the 8-bit rounding floor is judged for coverage at full opacity (golden-metrics.ts)
+              let lifted: CellMetrics | null = null;
+              if (isFaint(cell.metrics) && cell.domDrawables && !dense && cell.renderer?.active === "gpu") {
+                cell.faint = { contrast: cell.metrics.contrast, lifted: false, ...(faintOpacity ? { synthetic: faintOpacity } : {}) };
+                const up = await captureLifted(page, family, cellDir, `${family.name}-k${fmt(k)}${first ? "" : `@${camera.id}`}`, blankSvg, blankGpu);
+                lifted = up.metrics;
+                cell.faint.liftedMetrics = up.metrics ?? undefined;
+                cell.faint.dropped = up.dropped;
+                if (up.problem) cell.failures.push(`harness: ${up.problem}`);
+              }
+              const verdict = judgeCell({ metrics: cell.metrics, census: cell.census, domDrawables: cell.domDrawables, expected: cell.expected, lifted }, reading);
+              if (cell.faint) cell.faint.lifted = !!verdict.faint?.lifted;
               cell.gates = verdict.gates;
               if (verdict.notes.length) cell.notes = [...(cell.notes ?? []), ...verdict.notes];
               cell.failures.push(...verdict.failures);
@@ -953,6 +1030,7 @@ try {
               cell.pass = false;
               cell.class = "harness";
             }
+            await page.evaluate(setLayerOpacity, { id: null, value: null }).catch(() => undefined);
             cell.seconds = Number(((Date.now() - started) / 1000).toFixed(1));
             const m = cell.metrics;
             log(

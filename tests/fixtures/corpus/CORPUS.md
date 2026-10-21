@@ -103,9 +103,12 @@ Fixed in this packet (`src/io/auto-update.ts`):
   `keepSingleTradeContainer` collapses saved duplicates); the corpus asserts exactly one after every load.
 
 Known fidelity bugs this corpus found, for STROKE/COMPAT (also see `manifest.goldenKnownGaps`):
-- `ice` on v1.7 and v1.99: the file carries `style="opacity: 0.04"` next to `opacity="0.9"`; the SVG honours the inline style and the GPU appears to read
-  the attribute. This can also hit current maps whenever a group has an inline-style opacity (a fade caught mid-way). Evidence:
-  `~/.tupaia-gates/w2-corpus/corpus-20261020T013057-325Z/legacy-v1.7/golden`.
+- `ice` on v1.7 and v1.99 (fixed, no longer a known gap): the files carry an inline `style="opacity: ..."` (a jQuery fade caught mid-way by the old
+  version: 0.04 on v1.7, 0.008 on v1.99) next to `opacity="0.9"`; the SVG honours the style (CSS beats the attribute). RES made the GPU honour it too
+  (`src/io/inline-style.ts`). v1.99's ice then still failed the coverage ink rule (0.875 against 0.9) and that was a metric artifact, not a rendering
+  difference: at opacity 0.008 the layer is 0.18 of a code value at its strongest, so which pixels reach a whole value is a rounding accident of each
+  renderer. Lifted to opacity 1 the two arms have the identical footprint (149 208 ink px each, ratio 1.000). The golden now judges such FAINT layers
+  at full opacity (`FAINT` in `bench/golden-metrics.ts`, GATE.md "Faint layers"). The `ice` known-gap entry was removed from the manifest.
 - v0.9b `#borders` routed 0 when the floor is lowered (evidence `~/.tupaia-gates/w2-corpus/exp09c`).
 
 Observed, not changed:
@@ -120,6 +123,5 @@ Observed, not changed:
 - The `ocean` over16 ~2% failures seen intermittently (v1.4 in one run, v1.123 in another) were not map gaps: the GPU arm of the first golden cell was captured
   while the 7 s "Map is successfully loaded" toast was still showing at the bottom of the frame (diff: a 1400x35 bar). `layer-golden.ts` now clears the main tip after the
   load (a small change in COVER's file), and the `ocean` known gap for v1.4 was dropped from the manifest.
-- Legacy-only golden gaps (scoped known gaps in the manifest, cause not confirmed): `ice` on v1.7 and v1.99 (the files carry `style="opacity: 0.04"` from a
-  fade caught mid-way by the old version, on top of `opacity="0.9"`; the SVG honours the style, the GPU draws the ice far stronger), `texture` on demo.map (a fixed 1280x720 image in a 1680x849 world) and a borderline `rivers` on demo.map (over44 0.57%).
+- Legacy-only golden gaps (scoped known gaps in the manifest, cause not confirmed): `texture` on demo.map (a fixed 1280x720 image in a 1680x849 world) and a borderline `rivers` on demo.map (over44 0.57%).
 - The golden on every legacy map fails the known parity families (cells, states, provinces, coordinates, markets, military, markers).
