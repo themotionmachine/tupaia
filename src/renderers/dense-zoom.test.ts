@@ -1,6 +1,6 @@
 import { quadtree } from "d3";
 import { afterEach, expect, it, vi } from "vitest";
-import { clearDenseZoom } from "./dense-zoom";
+import { clearDenseZoom, terrainAllowsRaster } from "./dense-zoom";
 
 const imageSelector = "image[data-relief],image[data-burg-vectors]";
 let currentRoot: MiniNode | null = null;
@@ -321,4 +321,24 @@ it("releases an enhanced image synchronously when source geometry or opacity cha
     expect(image.style.visibility).toBe("");
     expect(image.hasAttribute("data-zoom-hidden")).toBe(false);
   }
+});
+
+it("keeps the relief raster viewport under an inert #terrain mask, filter or clip-path", () => {
+  const terrain = (attrs: Record<string, string>, style: Record<string, string> = {}) =>
+    ({
+      getAttribute: (name: string) => attrs[name] ?? null,
+      style: { getPropertyValue: (name: string) => style[name] ?? "" }
+    }) as unknown as SVGElement;
+  expect(terrainAllowsRaster(null)).toBe(true);
+  // pale and light write mask="" on #terrain
+  expect(terrainAllowsRaster(terrain({ mask: "" }))).toBe(true);
+  expect(terrainAllowsRaster(terrain({ filter: "none", "clip-path": " None ", class: " " }))).toBe(true);
+  expect(terrainAllowsRaster(terrain({}, { mask: "none" }))).toBe(true);
+  expect(terrainAllowsRaster(terrain({ mask: "url(#land)" }))).toBe(false);
+  expect(terrainAllowsRaster(terrain({ filter: "url(#blur)" }))).toBe(false);
+  expect(terrainAllowsRaster(terrain({}, { "clip-path": "url(#clip)" }))).toBe(false);
+  // "none" is only inert for filter/mask/clip-path: fill="none" hides the glyphs
+  expect(terrainAllowsRaster(terrain({ fill: "none" }))).toBe(false);
+  expect(terrainAllowsRaster(terrain({ class: "relief" }))).toBe(false);
+  expect(terrainAllowsRaster(terrain({ "font-size": "" }, { stroke: "#000" }))).toBe(false);
 });
