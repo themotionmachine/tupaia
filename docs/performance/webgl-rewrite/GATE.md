@@ -323,7 +323,7 @@ Arguments:
     which pixels reach a whole value is a rounding accident of Chrome's SVG compositor and the GPU, so the ink count
     measures the rounding. The runner then lifts the family root to opacity 0.99 (`FAINT.liftTo`; inline style, both arms read it, one
     GPU re-prepare; not 1, because the renderer routes on `opacity < 1`: the lifted frame keeps the group/compat route the
-    layer ships on, and the lifted census is recorded beside the plain one, a mismatch is a note on the cell), recaptures both arms at the same camera and judges the **empty check and the D11 ink (footprint) rule**
+    layer ships on; at exactly 1 the group composite disappears: rulers and goods go from 1 group draw to 0, measured. The lifted census and group-draw count are recorded beside the plain ones, a mismatch is a note on the cell and a faint-clean self-test failure), recaptures both arms at the same camera and judges the **empty check and the D11 ink (footprint) rule**
     on that capture (`cell.faint`, PNGs `*-lifted-{svg,gpu,diff}.png`, a note on the cell); SSIM, over16, over44 and
     over16-of-ink still read the plain capture (lifting scales a colour difference by 1/opacity, up to ~125x for ice,
     so a colour gate there would flag differences nobody can see; the lifted over16-of-ink is reported, not gated). A **presence** check stays on the plain capture: a layer the SVG arm paints at

@@ -850,8 +850,8 @@ async function goldenSelftestCheck(ctx: Ctx): Promise<Partial<Result>> {
       else if (!cell.faint) problems.push(`faint-clean ${family}: not faint (contrast ${cell.metrics?.contrast}): the self-test's opacity no longer makes the layer faint`);
       else if (!cell.faint.lifted) problems.push(`faint-clean ${family}: the lifted capture was not used (${cell.faint.liftedMetrics ? `lifted contrast ${cell.faint.liftedMetrics.contrast}` : "none captured"}): ${cell.failures?.[0] ?? "no failure recorded"}`);
       else if (!cell.pass) problems.push(`faint-clean ${family} should pass on the lifted capture and failed: ${cell.failures?.[0] ?? "?"}`);
-      else if (!cell.faint.liftedCensus || JSON.stringify(cell.faint.liftedCensus) !== JSON.stringify(cell.census))
-        problems.push(`faint-clean ${family}: the lifted frame was routed differently (plain ${JSON.stringify(cell.census)}, lifted ${JSON.stringify(cell.faint.liftedCensus ?? null)}), so it judged another path than the layer ships on`);
+      else if (!cell.faint.liftedCensus || JSON.stringify(cell.faint.liftedCensus) !== JSON.stringify(cell.census) || !cell.faint.liftedFrame || cell.faint.liftedFrame.groups !== cell.frame?.groups)
+        problems.push(`faint-clean ${family}: the lifted frame was routed differently (plain ${JSON.stringify(cell.census)} with ${cell.frame?.groups} group draws, lifted ${JSON.stringify(cell.faint.liftedCensus ?? null)} with ${cell.faint.liftedFrame?.groups ?? "?"}), so it judged another path than the layer ships on`);
     }
   const brokenFaint = (arm: string, family: string, what: string) => {
     broken(arm, family, g => g.coverage === false && g.ssim && g.over16 && g[String(ctx.args.reading)], what);

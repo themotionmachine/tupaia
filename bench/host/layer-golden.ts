@@ -203,6 +203,8 @@ interface Cell {
   domDrawables?: number;
   renderer?: { active: string; fallbackReason?: string; layers?: unknown };
   dropped?: unknown;
+  // the GPU frame's batch count and how many of them are opacity/mask `group` composites (isolated to the family)
+  frame?: { batches: number; groups: number };
   // GPU_ARM=probe: pixels where the composite or the canvas-over-magenta capture differs from the canvas-only one
   showThrough?: { composite: number; magenta: number } | null;
   // emblem COA symbols that were still missing when the cell was captured (async renderGroupCOAs)
@@ -223,7 +225,7 @@ interface Cell {
   // layer and judged its coverage, the lifted metrics, and the synthetic opacity (GOLDEN_FAINT) when one was forced
   // liftedCensus is the GPU's routing of the lifted frame (to compare with `census`); skipped is set when the root's
   // opacity was already at the lift target, so no lift was captured
-  faint?: { contrast: number; lifted: boolean; synthetic?: string; liftedMetrics?: CellMetrics; dropped?: unknown; liftedCensus?: CensusCounts | null; skipped?: string };
+  faint?: { contrast: number; lifted: boolean; synthetic?: string; liftedMetrics?: CellMetrics; dropped?: unknown; liftedCensus?: CensusCounts | null; frame?: { batches: number; groups: number }; liftedFrame?: { batches: number; groups: number }; skipped?: string };
 }
 
 const report = {
@@ -606,7 +608,21 @@ const readCensus = (page: Page, family: Family) =>
             }))
           }
         : null;
-      return { layer, sink, compatRunElements, runsReadable, domDrawables, compat, build: w.__gpuSceneCensus?.last?.build ?? null };
+      // the frame's batch structure (whole frame; the cell is isolated to its family): `group` batches are the offscreen
+      // opacity/mask composites the scene walk emits for opacity < 1 (scene.ts), so a changed group count is a changed route
+      let batches = 0;
+      let groups = 0;
+      const tally = (list: any[]) => {
+        for (const b of list) {
+          batches++;
+          if (b.kind === "group") {
+            groups++;
+            if (Array.isArray(b.children)) tally(b.children);
+          }
+        }
+      };
+      if (Array.isArray(w.gpuRenderer?.prepared?.frame?.batches)) tally(w.gpuRenderer.prepared.frame.batches);
+      return { layer, sink, compatRunElements, runsReadable, domDrawables, compat, frame: { batches, groups }, build: w.__gpuSceneCensus?.last?.build ?? null };
     },
     { id: family.id, root: !!family.root }
   );
@@ -857,7 +873,7 @@ async function captureLifted(
   stem: string,
   blankSvg: ReturnType<typeof decodePng>,
   blankGpu: ReturnType<typeof decodePng>
-): Promise<{ metrics: CellMetrics | null; dropped?: unknown; problem?: string; skipped?: string; census?: CensusCounts | null }> {
+): Promise<{ metrics: CellMetrics | null; dropped?: unknown; problem?: string; skipped?: string; census?: CensusCounts | null; frame?: { batches: number; groups: number } }> {
   const before = await gpuStamp(page);
   const set = await page.evaluate(setLayerOpacity, { id: family.id, root: family.root, value: String(FAINT.liftTo), liftOnly: true });
   if (!set.found) return { metrics: null, problem: `lift: no #${family.id} to lift` };
@@ -882,15 +898,17 @@ async function captureLifted(
       dropped = broke.dropped;
       if (!broke.dropped) return { metrics: null, dropped, problem: `lift: break=${breakMode} found nothing to break in the lifted frame` };
     }
-    const census = censusOf(family, await readCensus(page, family));
+    const seenLifted = await readCensus(page, family);
+    const census = censusOf(family, seenLifted);
+    const frame = seenLifted.frame;
     const shots = await captureArms(page);
-    if (!shots.svgSettled) return { metrics: null, dropped, census, problem: `lift: the SVG arm was still changing after ${shots.svgShots} shots (${shots.svgMoving})` };
+    if (!shots.svgSettled) return { metrics: null, dropped, census, frame, problem: `lift: the SVG arm was still changing after ${shots.svgShots} shots (${shots.svgMoving})` };
     const svg = decodePng(shots.svg);
     const gpu = decodePng(shots.gpu);
     writeFileSync(join(cellDir, `${stem}-lifted-svg.png`), shots.svg);
     writeFileSync(join(cellDir, `${stem}-lifted-gpu.png`), shots.gpu);
     writeFileSync(join(cellDir, `${stem}-lifted-diff.png`), encodePng(heatmap(svg, gpu)));
-    return { metrics: measureCell(svg, gpu, blankSvg, blankGpu), dropped, census };
+    return { metrics: measureCell(svg, gpu, blankSvg, blankGpu), dropped, census, frame };
   } finally {
     await page.evaluate(setLayerOpacity, { id: family.id, root: family.root, value: null });
     if (faintOpacity) await page.evaluate(setLayerOpacity, { id: family.id, root: family.root, value: faintOpacity });
@@ -978,6 +996,7 @@ try {
               cell.compat = seen.compat;
               cell.censusKinds = seen.sink?.kinds ?? null;
               cell.census = censusOf(family, seen);
+              cell.frame = seen.frame;
               census.cells[key] = { ...(cell.census ?? { native: 0, compat: 0, skipped: 0 }), kinds: cell.censusKinds };
               cell.expected = expectations?.cells?.[key] ? { native: expectations.cells[key].native, compat: expectations.cells[key].compat, skipped: expectations.cells[key].skipped } : null;
               const shots = await captureArms(page);
@@ -1029,6 +1048,8 @@ try {
                 cell.faint.liftedMetrics = up.metrics ?? undefined;
                 cell.faint.dropped = breakMode === "drop-layer" ? cell.dropped : up.dropped;
                 cell.faint.liftedCensus = up.census;
+                cell.faint.frame = cell.frame;
+                cell.faint.liftedFrame = up.frame;
                 if (up.skipped) {
                   cell.faint.skipped = up.skipped;
                   cell.notes = [...(cell.notes ?? []), `faint layer: ${up.skipped}`];
@@ -1037,8 +1058,9 @@ try {
                 // the lift is only evidence about the path the layer ships on if the GPU routed the lifted frame the same way
                 const was = cell.census;
                 const now = up.census;
-                if (now && JSON.stringify(now) !== JSON.stringify(was))
-                  cell.notes = [...(cell.notes ?? []), `faint lift changed the GPU route: ${was ? `native ${was.native}, compat ${was.compat}, skipped ${was.skipped}` : "none"} -> native ${now.native}, compat ${now.compat}, skipped ${now.skipped}`];
+                const route = (c: CensusCounts | null | undefined, f: { groups: number } | undefined) => (c ? `native ${c.native}, compat ${c.compat}, skipped ${c.skipped}, ` : "no census, ") + `${f?.groups ?? "?"} group draws`;
+                if (up.metrics && (JSON.stringify(now) !== JSON.stringify(was) || (breakMode !== "drop-layer" && up.frame?.groups !== cell.frame?.groups)))
+                  cell.notes = [...(cell.notes ?? []), `faint lift changed the GPU route: ${route(was, cell.frame)} -> ${route(now, up.frame)}`];
               }
               const verdict = judgeCell({ metrics: cell.metrics, census: cell.census, domDrawables: cell.domDrawables, expected: cell.expected, lifted }, reading);
               if (cell.faint) cell.faint.lifted = !!verdict.faint?.lifted;
