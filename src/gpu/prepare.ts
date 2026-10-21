@@ -819,10 +819,14 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
         const curved = hasCurves(draw.d);
         const fine = curved ? curveTolerance(ctx.bucket, SCENE_CURVE_TOLERANCE) : SCENE_CURVE_TOLERANCE;
         const refine = curved;
+        // Chrome counts its chords at the camera's own device scale, not the bucket's: at k 2.5 the bucket's 4 cut each
+        // curve into ~1.26x as many, off SVG's chords by up to its quarter px (parity coastline k2.5, 0.25 px #sea_island:
+        // 21 % of the ink over Δ16, 5.5 % at the camera's scale). A redraw within the bucket keeps the prepare's camera.
+        const chords = ctx.camera.k * ctx.screen.dpr;
         if (style.fill || style.pattern) {
           const thin = refine && thinFill(subpaths);
           const batch = fill(
-            thin ? flattenPath(draw.d, fine, { scale: ctx.bucket, fill: true }) : subpaths,
+            thin ? flattenPath(draw.d, fine, { scale: chords, fill: true }) : subpaths,
             style.evenOdd,
             `${thin ? "t" : "s"}${draw.d}`
           );
@@ -855,7 +859,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
           // parity world: +4.9k-14k points by bucket, under 0.4 MiB
           const measured = dashed && curved ? measuredSubpaths(draw.d, fine / 4, ctx.bucket) : null;
           const batch = stroke(
-            measured?.subpaths ?? (refine ? flattenPath(draw.d, fine, { scale: ctx.bucket, fill: false }) : subpaths),
+            measured?.subpaths ?? (refine ? flattenPath(draw.d, fine, { scale: chords, fill: false }) : subpaths),
             style,
             measured?.distances
           );
