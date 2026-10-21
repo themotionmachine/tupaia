@@ -3,7 +3,8 @@
 // element's presentation attribute already holds. The style attribute is rewritten with this text, so a property the
 // element's own inline style sets is kept even when the attribute is present too: inline style beats the attribute, and
 // skipping it would fall back to the attribute (legacy maps saved mid-fade carry
-// <g id="ice" opacity="0.9" style="opacity: 0.04">, which the live map shows at 0.04 and exports drew at 0.9).
+// <g id="ice" opacity="0.9" style="opacity: 0.04">, which the live map shows at 0.04 and exports drew at 0.9), also
+// when its value is the baseline's (<g id="vignette" opacity="0.3" style="opacity: 1"> drew at 0.3).
 //
 // `named`: the keys of a for-in over a computed declaration that can name a property (namedKeys), computed once per
 // clone. The for-in also yields every camelCase alias and index (about 1100 keys in Chrome against 83 named ones), and
@@ -19,9 +20,13 @@ export function computedStyleText(
   let style = "";
   const add = (key: string) => {
     if (key === "cursor") return; // cursor should be default
-    if (element.hasAttribute(key) && !own.has(key)) return;
+    const attribute = element.hasAttribute(key);
+    if (attribute && !own.has(key)) return;
     const value = computed.getPropertyValue(key);
-    if (value === baseline(key)) return;
+    // a baseline value adds nothing, unless the element's own inline style sets it over its presentation attribute:
+    // left out, the rewritten style attribute would drop it and the attribute would win (VIG: #vignette
+    // opacity="0.3" style="opacity: 1" rastered at 0.3 on the GPU)
+    if (value === baseline(key) && !(attribute && own.has(key))) return;
     style += `${key}:${value};`;
   };
   for (let i = 0; i < computed.length; i++) add(computed[i]);

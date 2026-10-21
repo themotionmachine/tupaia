@@ -42,6 +42,20 @@ describe("computedStyleText", () => {
     expect(parse(text)).toMatchObject({ opacity: "0.04", fill: "rgb(1, 2, 3)" });
   });
 
+  // VIG: the golden's FAINT lift sets style="opacity: 1" over the vignette's opacity="0.3"; the baseline-valued
+  // inline opacity was skipped, the rewritten style attribute lost it, and the GPU raster drew the vignette at 0.3
+  it("keeps an inline-style value equal to the baseline over the same attribute", () => {
+    const vignette = group({ opacity: "0.3", style: "opacity: 1" });
+    const text = computedStyleText(vignette, computed(vignette, { opacity: "1", fill: "rgb(1, 2, 3)" }), baseline);
+    expect(parse(text)).toEqual({ opacity: "1", fill: "rgb(1, 2, 3)" });
+  });
+
+  it("still skips a baseline value the inline style sets without a competing attribute", () => {
+    const g = group({ style: "opacity: 1; fill: rgb(1, 2, 3)" });
+    const text = computedStyleText(g, computed(g, { opacity: "1", fill: "rgb(1, 2, 3)" }), baseline);
+    expect(parse(text)).toEqual({ fill: "rgb(1, 2, 3)" });
+  });
+
   it("leaves a property the attribute alone sets to the attribute, and skips baseline values and the cursor", () => {
     const ice = group({ opacity: "0.9", style: "fill: red" });
     const text = computedStyleText(
