@@ -801,6 +801,9 @@ export class GpuRenderer {
   // (lifecycle.ts hiddenReason). A replaced #map also drops the frame: a load that fails before map:loaded must never
   // leave the previous world drawn over its partial replacement; the next worldReplaced prepares the new one.
   private active(): boolean {
+    // the watchdog compares against the mode this evaluation saw, so a mode that started and ended between two of its
+    // ticks, while another caller (a settle, a draw) evaluated here, still resumes
+    this.customizationSeen = customizationMode();
     this.suspendedReason = this.editorReason();
     if (!this.suspendedReason) this.resume();
     const reason = this.hiddenReason(this.suspendedReason) || (this.intentHeld() ? "resume hold" : ""); // MODE: D13 hold
