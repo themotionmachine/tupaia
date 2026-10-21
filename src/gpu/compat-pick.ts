@@ -1,6 +1,5 @@
 import { emblemSourceClass } from "../renderers/emblems/transient-classes";
 import { dashPieces, measureContour, parseContours } from "./dash-measure";
-import { withCanonicalEmblemPaint } from "./emblem-paint";
 import { normalizeDashes } from "./geometry";
 // CPU hit-test geometry for compat-rasterized and DOM-laid-out world elements (text labels, marker <svg>, restored
 // burg vectors). The raster has no geometry, so each painted leaf is snapshotted once per prepare, in world space,
@@ -636,31 +635,31 @@ export function compatShapesBatch(
   viewbox: { getScreenCTM?(): Affine | null },
   tolerance = PICK_TOLERANCE
 ): HitShape[][] {
-  return withCanonicalEmblemPaint(() => {
-    const exposed = new Map<Node, string>();
-    try {
-      for (const element of elements) {
-        const leaves = element.closest(LEAVES) === element ? [element] : [...element.querySelectorAll(LEAVES)];
-        for (const leaf of leaves) {
-          const current = leaf.getAttribute?.("class");
-          if (!current?.split(/\s+/).includes("viewport-culled") || !leaf.setAttribute || exposed.has(leaf)) continue;
-          const source = emblemSourceClass(leaf as unknown as Element);
-          const value = source
-            ? source.value
-            : current
-                .split(/\s+/)
-                .filter(c => c !== "viewport-culled")
-                .join(" ");
-          exposed.set(leaf, current);
-          if (value === null && leaf.removeAttribute) leaf.removeAttribute("class");
-          else leaf.setAttribute("class", value ?? "");
-        }
+  // The SVG cover (svg-cover.ts) needs no lift here: under it a leaf reads visibility hidden with pointer-events
+  // painted, which sensitivity() resolves to the same areas as the canonical visible + visiblePainted.
+  const exposed = new Map<Node, string>();
+  try {
+    for (const element of elements) {
+      const leaves = element.closest(LEAVES) === element ? [element] : [...element.querySelectorAll(LEAVES)];
+      for (const leaf of leaves) {
+        const current = leaf.getAttribute?.("class");
+        if (!current?.split(/\s+/).includes("viewport-culled") || !leaf.setAttribute || exposed.has(leaf)) continue;
+        const source = emblemSourceClass(leaf as unknown as Element);
+        const value = source
+          ? source.value
+          : current
+              .split(/\s+/)
+              .filter(c => c !== "viewport-culled")
+              .join(" ");
+        exposed.set(leaf, current);
+        if (value === null && leaf.removeAttribute) leaf.removeAttribute("class");
+        else leaf.setAttribute("class", value ?? "");
       }
-      return elements.map(element => canonicalCompatShapes(element, viewbox, tolerance));
-    } finally {
-      for (const [leaf, value] of exposed) leaf.setAttribute!("class", value);
     }
-  });
+    return elements.map(element => canonicalCompatShapes(element, viewbox, tolerance));
+  } finally {
+    for (const [leaf, value] of exposed) leaf.setAttribute!("class", value);
+  }
 }
 
 // `tolerance`: the flattening chord error in `viewbox` units (pickTolerance for the world).
@@ -669,7 +668,7 @@ export function compatShapes(
   viewbox: { getScreenCTM?(): Affine | null },
   tolerance = PICK_TOLERANCE
 ): HitShape[] {
-  return withCanonicalEmblemPaint(() => canonicalCompatShapes(element, viewbox, tolerance));
+  return canonicalCompatShapes(element, viewbox, tolerance);
 }
 
 function canonicalCompatShapes(

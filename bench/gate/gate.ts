@@ -1367,10 +1367,13 @@ const DEFS: Record<string, CheckDef> = {
   "native-recovery": {
     lock: "exclusive",
     keys: ["dpr", "world", "gesture", "culling", "trace"],
+    // PANEND (W4b): world=parity, the parity fixture with its preamble at k 2 (every layer on, caravans live)
+    spec: { world: { type: "enum", values: ["shared", "100k", "parity"], default: "100k" } },
     timeout: 300,
     run: ctx => {
       const env = {
         SMOKE_NAME: "native-recovery",
+        NAV_PARITY_MAP: resolveNamedFixture("parity"),
         SMOKE_DPR: String(ctx.args.dpr),
         NAV_WORLD: String(ctx.args.world),
         NAV_GESTURE: String(ctx.args.gesture),
@@ -1386,7 +1389,14 @@ const DEFS: Record<string, CheckDef> = {
         metrics: data && {
           errors: data.errors?.length ?? 0,
           adapter: data.contextProperties?.adapter,
-          movingProof: pick(data.movingProof, ["samples", "emblemHits", "svgWritesWhileMoving", "paintSuppressed"]),
+          movingProof: pick(data.movingProof, [
+            "samples",
+            "emblemHits",
+            "hitMismatches",
+            "svgWritesWhileMoving",
+            "paintSuppressed",
+            "coverActive"
+          ]),
           recoveryWallMs: data.recoveryProfile?.wallMs,
           restore: data.recoveryProfile?.status?.restore,
           contextLossRestored: data.movingContextLoss?.restored?.state ?? null

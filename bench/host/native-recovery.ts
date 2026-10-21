@@ -3,6 +3,11 @@
 // W4a PAN changed the moving proof's contract: W3 required HiddenEmblemPaint's suppression sheet active mid-gesture; since
 // W4a a gesture writes nothing to the model SVG (#map) and suppresses no paint (toggling that sheet re-layerized the whole
 // document twice a gesture), so the proof now requires exactly that, and context loss mid-gesture still reveals the SVG.
+// W4b PANEND changed it again: the gesture arms the SVG cover (src/gpu/svg-cover.ts: #viewbox visibility:hidden with
+// pointer-events:painted under the opaque frame), so mid-gesture the cover must be on (off only with culling=off, which
+// detaches the manager that applies it), the model still unwritten, and every native hit sample the same with the
+// cover's rules lifted as with them on; context loss still reveals the SVG (cover off, emblems visible).
+// NAV_WORLD=parity: the parity fixture (NAV_PARITY_MAP) with its preamble, gestures at k NAV_PARITY_K (default 2).
 import { chromium } from "playwright";
 import { createServer } from "node:http";
 import { readFileSync, readdirSync, writeFileSync } from "node:fs";
@@ -10,6 +15,8 @@ import { resolve, extname } from "node:path";
 const root = resolve(import.meta.dirname, "../.."); // repo root: bench/host -> ../..
 const dist = resolve(root, "dist");
 const output = resolve(process.env.GATE_OUT_DIR || process.cwd(), process.env.SMOKE_NAME || "gpu-smoke");
+const PARITY_MAP = resolve(process.env.NAV_PARITY_MAP || resolve(root, "tests/fixtures/parity/parity-v1.map"));
+const PARITY_K = Number(process.env.NAV_PARITY_K || 2);
 const mime = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".woff2": "font/woff2", ".png": "image/png" };
 const server = createServer((request, response) => {
   if(request.method!=="GET")return void response.writeHead(405).end();
@@ -31,6 +38,7 @@ try {
  await context.addInitScript(({origin}) => {if(location.origin!==origin)return;localStorage.setItem("autosaveInterval","0");localStorage.setItem("azgaarAssistant","hide");},{origin});
  const scripts=["bridge.js","bridge-mutations.js",...readdirSync(resolve(root,"mcp/src/bridge-ext")).filter(n=>n.endsWith(".js")).sort().map(n=>"bridge-ext/"+n)];
  await context.addInitScript(scripts.map(n=>readFileSync(resolve(root,"mcp/src",n),"utf8")).join("\n"));
+ await context.addInitScript({path:resolve(import.meta.dirname,"fixtures/parity-page.js")}); // __parity.preamble
  await context.route("**/*",route=>(route.request().method()==="GET"&&new URL(route.request().url()).origin===origin)||(route.request().method()==="GET"&&new URL(route.request().url()).hostname==="fonts.gstatic.com")?route.continue():route.abort());
  (report as any).chargeRequestFailures=[];(report as any).chargeConsoleFailures=0;
  const page=await context.newPage();
@@ -61,6 +69,7 @@ page.setDefaultTimeout(90000);
  const runs=[];
  for(const world of (process.env.NAV_WORLD?[process.env.NAV_WORLD]:["shared","100k"])){
   if(world==="100k")await page.evaluate(async()=>{const w=globalThis as any;await w.__tupaia.fns.generateMap({cells:100000,seed:"7319",template:"continents",width:1280,height:720});await w.__tupaia.call("display",{on:["heightmap","relief"]});await w.__tupaia.settle();await Promise.all([w.reliefRenderReady,w.burgRenderReady]);});
+  if(world==="parity"){page.setDefaultTimeout(600000);await page.evaluate(async text=>{const w=globalThis as any;await w.__tupaia.fns.loadMap({text,timeoutMs:120000});await w.__tupaia.settle();await w.__parity.preamble();await w.__tupaia.settle();await Promise.all([w.reliefRenderReady,w.burgRenderReady]);},readFileSync(PARITY_MAP,"utf8"));}
   await page.evaluate(async()=>{
    const w=globalThis as any;const shown=await w.__tupaia.call("display",{on:["emblems"]});if(!shown.ok)throw Error(JSON.stringify(shown));
    await w.__tupaia.settle();if(!document.querySelector("#emblems use")){w.drawEmblems();await new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)));}
@@ -75,12 +84,15 @@ page.setDefaultTimeout(90000);
   });
   if((report as any).chargeRequestFailures.length||(report as any).chargeConsoleFailures)throw Error("Incomplete COA assets; reject timing");
   for(const gesture of (process.env.NAV_GESTURE?[process.env.NAV_GESTURE]:["pan-near","pan-wide","wheel-zoom"])){
-   const k=gesture==="wheel-zoom"?3.5:8;
+   const k=world==="parity"?PARITY_K:gesture==="wheel-zoom"?3.5:8;
    await page.evaluate(k=>{const w=globalThis as any;w.d3.select("#map").call((0,eval)("zoom").transform,w.d3.zoomIdentity.translate(640-w.graphWidth*k/2,360-w.graphHeight*k/2).scale(k));},k);
    const readyStart=Date.now();
    await page.evaluate(async()=>{const w=globalThis as any;await w.__tupaia.settle();await Promise.all([w.reliefRenderReady,w.burgRenderReady]);});
-   if(arm==="gpu")await page.waitForFunction(()=>{const s=(globalThis as any).rendererStatus?.();return s?.active==="gpu"&&s.gpu?.canvasVisible&&!s.gpu.pending&&!s.gpu.refinementPending;},{},{timeout:30000});
+   if(arm==="gpu")await page.waitForFunction(()=>{const s=(globalThis as any).rendererStatus?.();return s?.active==="gpu"&&s.gpu?.canvasVisible&&!s.gpu.pending&&!s.gpu.refinementPending;},{},{timeout:world==="parity"?600000:30000});
    const readyWaitMs=Date.now()-readyStart;
+   // the press point: a model element that is neither the ruler, the legend nor the scale bar (a drag there moves it,
+   // not the map); the world centre when nothing qualifies
+   const press=await page.evaluate(()=>{for(let r=0;r<400;r+=7)for(let a=0;a<360;a+=r?15:360){const x=Math.round(640+r*Math.cos(a*Math.PI/180)),y=Math.round(360+r*Math.sin(a*Math.PI/180));const el=document.elementFromPoint(x,y);if(el?.closest("#viewbox")&&!el.closest("#ruler, #legend, #scaleBar"))return{x,y};}return{x:640,y:360};});
    const cullingBefore=await page.evaluate(disabled=>{
     const w=globalThis as any,r=w.gpuRenderer;
     w.__nativeCulling=r?.emblemCulling;
@@ -91,7 +103,7 @@ page.setDefaultTimeout(90000);
    const idle=await page.evaluate(()=>new Promise<number[]>(resolve=>{const times:number[]=[];let previous=0;const tick=(t:number)=>{if(previous)times.push(t-previous);previous=t;if(times.length<120)requestAnimationFrame(tick);else resolve(times)};requestAnimationFrame(tick);}));
    await page.evaluate(()=>{
     const w=globalThis as any;
-    const state: any=w.__nativeNav={running:true,intervals:[] as number[],events:[] as number[],tasks:[] as number[],paintFrames:0,paintEligibleFrames:0,gpuFrames:0,frames:0,previous:0,preparesAtStart:w.rendererStatus?.().gpu?.prepares||0,preparesDuring:[] as number[],movingFrames:0,cameras:[] as number[][]};
+    const state: any=w.__nativeNav={running:true,intervals:[] as number[],events:[] as number[],tasks:[] as number[],paintFrames:0,coverEligibleFrames:0,gpuFrames:0,frames:0,previous:0,preparesAtStart:w.rendererStatus?.().gpu?.prepares||0,preparesDuring:[] as number[],movingFrames:0,cameras:[] as number[][]};
     const event=(e:Event)=>{const stamp=e.timeStamp;requestAnimationFrame(()=>state.events.push(performance.now()-stamp));};
     window.addEventListener("mousemove",event,true);window.addEventListener("wheel",event,true);
     const observer=new PerformanceObserver(list=>{for(const e of list.getEntries())state.tasks.push(e.duration)});
@@ -105,10 +117,10 @@ page.setDefaultTimeout(90000);
     svgWrites.observe(document.getElementById("map")!,{subtree:true,childList:true,attributes:true,characterData:true});
     w.__nativeNavWrites=()=>{tally(svgWrites.takeRecords());svgWrites.disconnect();return writes;};
     state.cleanup=()=>{window.removeEventListener("mousemove",event,true);window.removeEventListener("wheel",event,true);observer.disconnect();svgWrites.disconnect();delete w.__nativeNavWrites;};
-    const tick=(t:number)=>{if(!state.running)return;if(state.previous)state.intervals.push(t-state.previous);state.previous=t;state.frames++;const gpu=w.rendererStatus?.().gpu;if(gpu?.canvasVisible)state.gpuFrames++;const paint=w.gpuRenderer?.emblemCulling?.status?.();if(paint?.paintSuppressed)state.paintFrames++;if(paint?.paintEligible)state.paintEligibleFrames++;state.preparesDuring.push(gpu?.prepares||0);if(gpu?.moving)state.movingFrames++;state.cameras.push([(0,eval)("scale"),(0,eval)("viewX"),(0,eval)("viewY")]);requestAnimationFrame(tick);};
+    const tick=(t:number)=>{if(!state.running)return;if(state.previous)state.intervals.push(t-state.previous);state.previous=t;state.frames++;const gpu=w.rendererStatus?.().gpu;if(gpu?.canvasVisible)state.gpuFrames++;const paint=w.gpuRenderer?.emblemCulling?.status?.();if(paint?.paintSuppressed)state.paintFrames++;if(paint?.cover&&!paint.cover.issue)state.coverEligibleFrames++;state.preparesDuring.push(gpu?.prepares||0);if(gpu?.moving)state.movingFrames++;state.cameras.push([(0,eval)("scale"),(0,eval)("viewX"),(0,eval)("viewY")]);requestAnimationFrame(tick);};
     requestAnimationFrame(tick);
    });
-   if(gesture!=="wheel-zoom")await session.send("Input.dispatchMouseEvent",{type:"mousePressed",x:640,y:360,button:"left",buttons:1,clickCount:1});
+   if(gesture!=="wheel-zoom")await session.send("Input.dispatchMouseEvent",{type:"mousePressed",x:press.x,y:press.y,button:"left",buttons:1,clickCount:1});
    let traceDone:Promise<any>|null=null;
    if(process.env.NAV_TRACE==="1"){
     traceDone=new Promise(done=>session.once("Tracing.tracingComplete",done));
@@ -116,13 +128,15 @@ page.setDefaultTimeout(90000);
     await session.send("Tracing.start",{categories:"devtools.timeline,disabled-by-default-devtools.timeline,disabled-by-default-devtools.timeline.frame,blink.user_timing,cc",transferMode:"ReturnAsStream"});
    }
    for(let frame=0;frame<120;frame++){
-    if(gesture==="wheel-zoom")await session.send("Input.dispatchMouseEvent",{type:"mouseWheel",x:640,y:360,deltaX:0,deltaY:frame<60?-8:8});
-    else{const amount=gesture==="pan-near"?60:600;await session.send("Input.dispatchMouseEvent",{type:"mouseMoved",x:640+amount*Math.sin(frame/120*Math.PI*4),y:360+60*Math.sin(frame/120*Math.PI*2),button:"left",buttons:1});}
+    if(gesture==="wheel-zoom")await session.send("Input.dispatchMouseEvent",{type:"mouseWheel",x:press.x,y:press.y,deltaX:0,deltaY:frame<60?-8:8});
+    else{const amount=gesture==="pan-near"?60:600;await session.send("Input.dispatchMouseEvent",{type:"mouseMoved",x:press.x+amount*Math.sin(frame/120*Math.PI*4),y:press.y+60*Math.sin(frame/120*Math.PI*2),button:"left",buttons:1});}
 
     if(frame===20){
-     // W4a moving proof, mid-gesture: the renderer moves with its canvas on screen; nothing under #map was written while
-     // it moved (no `viewport-culled` flips, no camera, no caravan pose or structure change); no paint suppression rule;
-     // and the SVG under the canvas stays natively hit-testable (emblem samples hit emblems).
+     // W4b moving proof, mid-gesture: the renderer moves with its canvas on screen; nothing under #map was written while
+     // it moved (no `viewport-culled` flips, no camera, no caravan pose or structure change); the SVG cover is on (unless
+     // culling=off detached its manager); and native hit testing is unchanged by it: every sample hits the same element
+     // with the cover's rules lifted (in the same task: no caravan or DOM change between the two reads), and emblem
+     // samples hit emblems.
      const proof=await page.evaluate(()=>{
       const w=globalThis as any,gpu=w.rendererStatus?.().gpu,writes=w.__nativeNavWrites?.();
       const layer=document.querySelector("#map #emblems")!,canvas=document.querySelector("canvas[data-gpu-renderer]") as HTMLCanvasElement;
@@ -132,14 +146,26 @@ page.setDefaultTimeout(90000);
        for(let iy=0;iy<9;iy++)for(let ix=0;ix<9;ix++){const x=r.left+r.width*(ix-.5)/7,y=r.top+r.height*(iy-.5)/7;if(x<0||x>=1280||y<0||y>=720)continue;samples.push({x,y,hit:document.elementFromPoint(x,y)});}
        if(samples.length>=4000)break;
       }
+      // plus a coarse grid over the whole view: every layer, not only emblems
+      for(let y=4;y<720;y+=23)for(let x=4;x<1280;x+=23)samples.push({x,y,hit:document.elementFromPoint(x,y)});
       const emblemHits=samples.filter(p=>p.hit?.closest("#emblems")).length;
-      const result={samples:samples.length,emblemHits,moving:gpu?.moving,canvasVisible:gpu?.canvasVisible,paintSuppressed:!!w.gpuRenderer?.emblemCulling?.status?.().paintSuppressed,emblemVisibility:getComputedStyle(layer).visibility,culled:layer.querySelectorAll("use.viewport-culled").length,svgWritesWhileMoving:writes?writes.moving:null,svgWritesAtRest:writes?writes.rest:null,svgWriteSamples:writes?.samples??[]};
+      const status=w.gpuRenderer?.emblemCulling?.status?.();
+      const emblemVisibility=getComputedStyle(layer).visibility;
+      // the cover's rules lifted: the canonical hit of every sample (style recalcs only; nothing is painted in between)
+      const sheet=(document.querySelector("style[data-gpu-renderer='svg-cover']") as HTMLStyleElement|null)?.sheet;
+      const rules=sheet?[...sheet.cssRules].map(rule=>rule.cssText):[];
+      while(sheet?.cssRules.length)sheet.deleteRule(0);
+      const mismatches=samples.flatMap(p=>{const canonical=document.elementFromPoint(p.x,p.y);return canonical===p.hit?[]:[{x:p.x,y:p.y,covered:p.hit?.tagName+"#"+(p.hit?.id||p.hit?.parentElement?.id),canonical:canonical?.tagName+"#"+(canonical?.id||canonical?.parentElement?.id)}];});
+      const canonicalVisibility=getComputedStyle(layer).visibility;
+      rules.forEach((rule,i)=>sheet!.insertRule(rule,i));
+      const result={samples:samples.length,emblemHits,hitMismatches:mismatches.length,mismatchSamples:mismatches.slice(0,8),coverRules:rules.length,moving:gpu?.moving,canvasVisible:gpu?.canvasVisible,paintSuppressed:!!status?.paintSuppressed,coverActive:!!status?.cover?.active,cover:status?.cover??null,emblemVisibility,canonicalVisibility,culled:layer.querySelectorAll("use.viewport-culled").length,svgWritesWhileMoving:writes?writes.moving:null,svgWritesAtRest:writes?writes.rest:null,svgWriteSamples:writes?.samples??[]};
       const ext=canvas.getContext("webgl2")?.getExtension("WEBGL_lose_context");
       if(!ext)throw Error("Context-loss extension unavailable");
       w.__movingLossExt=ext;ext.loseContext();return result;
      });
      (report as any).movingProof=proof;
-     if(!proof.samples||!proof.emblemHits||proof.moving!==true||proof.canvasVisible!==true||proof.paintSuppressed||proof.emblemVisibility!=="visible"||proof.svgWritesWhileMoving!==0)throw Error("Product moving native parity failed "+JSON.stringify(proof));
+     const covering=process.env.NAV_CULLING!=="off";
+     if(!proof.samples||!proof.emblemHits||proof.hitMismatches!==0||proof.moving!==true||proof.canvasVisible!==true||proof.paintSuppressed!==covering||proof.coverActive!==covering||proof.emblemVisibility!==(covering?"hidden":"visible")||proof.canonicalVisibility!=="visible"||proof.svgWritesWhileMoving!==0)throw Error("Product moving native parity failed "+JSON.stringify(proof));
      await page.waitForFunction(()=>(globalThis as any).rendererStatus?.().gpu?.state==="lost",{},{timeout:15000});
      // the canonical SVG at once: every emblem revealed, at the camera the gesture reached (hide() writes it), and no
      // caravan change still held (hide() releases them)
@@ -161,7 +187,7 @@ page.setDefaultTimeout(90000);
     }
     await new Promise(done=>setTimeout(done,8));
    }
-   if(gesture!=="wheel-zoom")await session.send("Input.dispatchMouseEvent",{type:"mouseReleased",x:640,y:360,button:"left",buttons:0,clickCount:1});
+   if(gesture!=="wheel-zoom")await session.send("Input.dispatchMouseEvent",{type:"mouseReleased",x:press.x,y:press.y,button:"left",buttons:0,clickCount:1});
    const data=await page.evaluate(async()=>{await new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)));const s=(globalThis as any).__nativeNav;s.running=false;s.cleanup();delete s.cleanup;return s;});
    if(traceDone){
     const profile=await session.send("Profiler.stop");writeFileSync(output+"-"+world+"-"+gesture+".cpuprofile",JSON.stringify(profile.profile),{flag:"wx"});
@@ -172,7 +198,7 @@ page.setDefaultTimeout(90000);
    await page.waitForTimeout(800);
    await page.evaluate(async()=>{const w=globalThis as any;await w.__tupaia.settle();await Promise.all([w.reliefRenderReady,w.burgRenderReady]);});
    const status=await page.evaluate(()=>{const w=globalThis as any;let hash=2166136261;for(const field of ["h","biome","state","culture","burg","r"])for(const value of w.pack.cells[field]||[])hash=Math.imul(hash^value,16777619);return {worldDigest:hash>>>0,canonicalEmblems:w.__nativeCulling?.status?.(),emblemUses:document.querySelectorAll("#emblems use").length,emblemDefinitions:document.querySelectorAll("#coas > svg").length,renderer:w.rendererStatus?.(),cells:w.pack.cells.i.length,finalCameraExact:document.querySelector("#viewbox")?.getAttribute("transform")===`translate(${(0,eval)("viewX")} ${(0,eval)("viewY")}) scale(${(0,eval)("scale")})`};});
-   runs.push({world,gesture,coaIdentity,cullingBefore,cullingMode:process.env.NAV_CULLING||"on",inputMethod:"cdp-input",injected:true,physicalInput:false,readyWaitMs,deviceScaleFactor:Number(process.env.SMOKE_DPR||1),frame:summarize(data.intervals),idleFrame:summarize(idle),eventToNextRaf:summarize(data.events),longTasks:summarize(data.tasks),paintSuppressedFraction:data.paintFrames/data.frames,paintEligibleFraction:data.paintEligibleFrames/data.frames,gpuPresentedFraction:data.gpuFrames/data.frames,preparesDuringMotion:Math.max(...data.preparesDuring)-data.preparesAtStart,movingFrameFraction:data.movingFrames/data.frames,cameraChanged:new Set(data.cameras.map((v:number[])=>v.join(","))).size>1,...status});
+   runs.push({world,gesture,coaIdentity,cullingBefore,cullingMode:process.env.NAV_CULLING||"on",inputMethod:"cdp-input",injected:true,physicalInput:false,readyWaitMs,deviceScaleFactor:Number(process.env.SMOKE_DPR||1),frame:summarize(data.intervals),idleFrame:summarize(idle),eventToNextRaf:summarize(data.events),longTasks:summarize(data.tasks),paintSuppressedFraction:data.paintFrames/data.frames,coverEligibleFraction:data.coverEligibleFrames/data.frames,gpuPresentedFraction:data.gpuFrames/data.frames,preparesDuringMotion:Math.max(...data.preparesDuring)-data.preparesAtStart,movingFrameFraction:data.movingFrames/data.frames,cameraChanged:new Set(data.cameras.map((v:number[])=>v.join(","))).size>1,...status});
    console.log(JSON.stringify(runs.at(-1)));
    await page.evaluate(()=>{const w=globalThis as any;if(w.__nativeCulling){w.gpuRenderer.emblemCulling=w.__nativeCulling;w.gpuRenderer.emblemCulling.update(w.gpuRenderer.view,w.gpuRenderer.viewport,true);}delete w.__nativeCulling;});
   }

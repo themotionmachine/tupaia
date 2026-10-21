@@ -5,7 +5,7 @@ import {
   TRANSIENT_EMBLEM_CLASS
 } from "../renderers/emblems/transient-classes";
 import type { Camera, Viewport } from "./camera";
-import { HiddenEmblemPaint } from "./emblem-paint";
+import { type CoverStatus, SvgCover } from "./svg-cover";
 
 interface Entry {
   element: SVGGraphicsElement;
@@ -18,10 +18,18 @@ const animated = (element: Element) =>
 // Only the copy underneath an OPAQUE GPU frame is culled. Chrome changes SVG raster/compositor decisions
 // when offscreen <use>s disappear; restoring all classes BEFORE revealing SVG preserves its original pixels.
 // Geometry remains canonical: prepare-time hit extraction temporarily exposes transiently culled leaves.
+// PANEND (W4b): the same conditions (an opaque frame that covers the whole SVG) admit the SVG cover (svg-cover.ts),
+// which stops the model's paint altogether; while it is on, nothing is culled (hidden paint costs nothing to keep).
+// The emblem-only paint suppression this class offered for motion is gone: the renderer never used it (toggling it
+// cost two whole-document layerizes a gesture), and the cover subsumes it.
 export class HiddenEmblemCulling {
-  private paint = new HiddenEmblemPaint();
-  private paintReady = false;
-  private moving = false;
+  private cover: SvgCover | null;
+  private coverWanted = false;
+  private coverDirty = true; // the cover's eligibility must be checked again before it applies
+  // The renderer is moving (its last update passed cull=false): a source change seen meanwhile must not cull either.
+  // Before W4b the queued update re-culled at the gesture-start camera mid-gesture whenever a COA arrived in #coas as
+  // emblems panned into view: hundreds of class writes, a whole-document layerize (~150 ms on parity) during motion.
+  private held = false;
   private root: SVGSVGElement | null = null;
   private layer: Element | null = null;
   private definitions: Element | null = null;
@@ -42,8 +50,10 @@ export class HiddenEmblemCulling {
 
   constructor(
     private svg: () => SVGSVGElement,
-    private canvas: HTMLCanvasElement
+    private canvas: HTMLCanvasElement,
+    coverEnabled = true
   ) {
+    this.cover = coverEnabled ? new SvgCover() : null;
     this.observer = new MutationObserver(records => this.changed(records));
     this.observer.observe(document.documentElement, {
       subtree: true,
@@ -55,11 +65,19 @@ export class HiddenEmblemCulling {
     document.fonts.addEventListener("loadingdone", this.fontChanged);
   }
 
-  status() {
+  status(): {
+    paintSuppressed: boolean;
+    cover: (CoverStatus & { wanted: boolean }) | null;
+    hidden: number;
+    tracked: number;
+    rebuilds: number;
+    enabled: boolean;
+  } {
     return {
-      paintSuppressed: this.paint.active,
-      paintEligible: this.paintReady,
-      paintIssue: this.paint.issue,
+      // the model SVG's paint is suppressed under the canvas (the cover); also the marker
+      // bench/renderer-bundle-boundary.ts looks for in GPU presentation code
+      paintSuppressed: !!this.cover?.active,
+      cover: this.cover && { ...this.cover.status(), wanted: this.coverWanted },
       hidden: this.owned.size,
       tracked: this.entries.length,
       rebuilds: this.rebuilds,
@@ -68,6 +86,8 @@ export class HiddenEmblemCulling {
   }
 
   private changed(records: MutationRecord[]): void {
+    const local: Element[] = []; // what the records touched, for the cover's local check
+    let appeared = false; // nodes or ids anywhere: a reference the cover found unresolved may resolve now
     for (const record of records) {
       const target = record.target as Element;
       if (target === this.canvas) {
@@ -98,19 +118,54 @@ export class HiddenEmblemCulling {
         this.dirty = true;
         if (stylesheet || ancestor || added) this.appearanceDirty = true;
       }
+      // The cover: sheets changed (rescan the rules), or an ancestor's attributes (a class an author rule keys on) need
+      // the full check; an ancestor's children (the export clone's host svg coming and going under <body>) do not
+      const sheets = stylesheet || [...record.addedNodes, ...record.removedNodes].some(sheetNode);
+      if (sheets) this.cover?.sheetsChanged();
+      if (sheets || (ancestor && record.type === "attributes")) this.coverDirty = true;
+      if (record.addedNodes.length || record.attributeName === "id") appeared = true;
+      const kind = this.coverDirty ? "" : coverRecord(record, this.root, id => !!this.cover?.follows(id));
+      if (kind === "full" || (kind === "local" && !this.cover?.active)) this.coverDirty = true;
+      else if (kind === "local") {
+        if (record.type === "attributes") local.push(target);
+        else for (const node of record.addedNodes) if (node instanceof Element) local.push(node);
+      }
     }
-    if (this.dirty) this.paint.set(false);
     // Visibility changes used by canonical previews must reveal the original SVG synchronously at this checkpoint.
     if (this.canvas.style.display === "none" || this.canvas.style.visibility === "hidden" || this.canvas.hidden)
       this.reveal();
-    else if (this.dirty || this.appearanceDirty) this.queue();
+    else {
+      // A change that could make the cover alter a canonical hit (an explicit hidden or visible* pointer-events, a link,
+      // an author rule) ends it here, before any later event is dispatched against the model.
+      if (this.cover?.active) {
+        if (appeared && !this.coverDirty) local.push(...this.cover.resolved());
+        const issue = !this.coverDirty && local.length ? this.cover.checkLocal(local) : "";
+        // an issue stands until a full check clears it; "full" (a new reference) asks for one now
+        if (issue) this.coverDirty = true;
+        if (issue === "full" ? !this.coverEligible() : issue || (this.coverDirty && !this.coverEligible()))
+          this.uncover();
+      }
+      if (this.dirty || this.appearanceDirty || (this.coverDirty && this.coverWanted)) this.queue();
+    }
+  }
+
+  private coverEligible(): boolean {
+    if (!this.coverDirty) return this.cover!.issue === "";
+    this.coverDirty = false;
+    return this.cover!.eligible(this.root ?? this.svg());
+  }
+
+  private uncover(): void {
+    if (!this.cover?.active) return;
+    this.cover.apply(false);
+    this.dirty = true; // culling bounds are not rebuilt while covered
   }
 
   private queue(): void {
     if (!this.opaque || !this.last || this.raf) return;
     this.raf = requestAnimationFrame(() => {
       this.raf = 0;
-      if (this.last) this.update(this.last.camera, this.last.viewport, this.opaque, this.moving);
+      if (this.last) this.update(this.last.camera, this.last.viewport, this.opaque, this.coverWanted, !this.held);
     });
   }
 
@@ -128,7 +183,7 @@ export class HiddenEmblemCulling {
   }
 
   reveal(): void {
-    this.paint.set(false);
+    this.uncover();
     for (const [element, original] of this.owned) this.restore(element, original);
     this.owned.clear();
   }
@@ -140,12 +195,12 @@ export class HiddenEmblemCulling {
     this.entries = [];
     this.dirty = true;
     this.appearanceDirty = true;
+    this.coverDirty = true;
   }
 
   private rebuild(): void {
     this.reveal();
     this.entries = [];
-    this.paintReady = false;
     const root = this.root!;
     this.layer = root.querySelector("#emblems");
     this.definitions = document.getElementById("coas");
@@ -171,7 +226,6 @@ export class HiddenEmblemCulling {
         return;
       if (node === root) break;
     }
-    this.paintReady = this.paint.eligible(root, this.layer, this.definitions);
     for (const element of this.layer.querySelectorAll<SVGGraphicsElement>("use")) {
       if (element.classList.contains(TRANSIENT_EMBLEM_CLASS)) continue; // another controller owns this hidden state
       const href = element.getAttribute("href") ?? element.getAttribute("xlink:href") ?? "";
@@ -213,8 +267,11 @@ export class HiddenEmblemCulling {
     }
   }
 
-  update(camera: Camera, viewport: Viewport, opaque: boolean, moving = false): void {
-    this.moving = moving;
+  // `cover`: the renderer wants the SVG cover (armed by motion: GpuRenderer.camera). `cull`: false while moving, where
+  // only the cover may change (culling writes wait for rest).
+  update(camera: Camera, viewport: Viewport, opaque: boolean, cover = false, cull = true): void {
+    this.coverWanted = cover && !!this.cover;
+    this.held = !cull;
     if (this.last && (this.last.viewport.width !== viewport.width || this.last.viewport.height !== viewport.height))
       this.appearanceDirty = true;
     this.last = { camera: { ...camera }, viewport: { ...viewport } };
@@ -267,6 +324,15 @@ export class HiddenEmblemCulling {
       this.reveal();
       return;
     }
+    if (this.coverWanted && this.coverEligible()) {
+      // nothing paints under the cover: culled emblems come back (cheap now), so the model is whole when revealed
+      for (const [element, original] of this.owned) this.restore(element, original);
+      this.owned.clear();
+      this.cover!.apply(true);
+      return;
+    }
+    this.uncover();
+    if (!cull) return;
     if (this.dirty) {
       try {
         this.rebuild();
@@ -296,17 +362,55 @@ export class HiddenEmblemCulling {
         this.owned.delete(element);
       }
     }
-    this.paint.set(this.paintReady && moving);
   }
 
   dispose(): void {
     cancelAnimationFrame(this.raf);
     this.observer.disconnect();
-    this.paint.dispose();
+    this.cover?.dispose();
     document.fonts.removeEventListener("loadingdone", this.fontChanged);
     this.reveal();
     this.entries = [];
     this.last = null;
     this.opaque = false;
   }
+}
+
+// A stylesheet node, or a subtree holding one (the export clone's host carries none of the model's sheets).
+const sheetNode = (node: Node) => {
+  const element = node as Element;
+  return !!(element.matches?.("style,link") || element.querySelector?.("style,link"));
+};
+
+// Attributes whose change can alter what the cover would hide or make hittable (or what an author rule matches).
+const COVER_ATTRIBUTES = new Set([
+  "visibility",
+  "pointer-events",
+  "style",
+  "class",
+  "id",
+  "tabindex",
+  "contenteditable",
+  "href",
+  "xlink:href"
+]);
+
+// A record that can change the cover's eligibility: an added subtree or a relevant attribute in the model or in a
+// definition outside it (a <use> instantiates those under the cover). Geometry, transforms and text never can.
+// "local": the touched elements alone can tell (SvgCover.checkLocal); "full": an id change can retarget references.
+function coverRecord(
+  record: MutationRecord,
+  root: Element | null,
+  followed: (id: string) => boolean
+): "" | "local" | "full" {
+  const target = record.target as Element;
+  const inside = (!!root && root.contains(target)) || !!target.closest?.("defs, symbol, #defElements");
+  if (!inside) return "";
+  if (record.type === "attributes") {
+    const name = record.attributeName ?? "";
+    // a new id can retarget a reference the last full check followed; any other (d3's append().attr("id")) is local
+    if (name === "id") return followed(target.id) ? "full" : "local";
+    return COVER_ATTRIBUTES.has(name) ? "local" : "";
+  }
+  return record.type === "childList" && record.addedNodes.length > 0 ? "local" : "";
 }

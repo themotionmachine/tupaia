@@ -28,6 +28,10 @@ const pipeline = vi.hoisted(() => ({
   draws: [] as string[],
   panReleases: 0,
   culls: [] as { k: number; x: number; y: number; moving: boolean }[],
+  // PANEND (W4b): every emblem-culling update with whether the SVG cover was wanted and whether it may cull
+  covers: [] as { x: number; cover: boolean; cull: boolean }[],
+  view: "committed" as "committed" | "full",
+  viewRoots: [] as Element[],
   windows: null as null | {
     covered: boolean;
     complete: boolean;
@@ -84,8 +88,18 @@ vi.mock("./framegraph", () => ({
 
 vi.mock("./emblem-culling", () => ({
   HiddenEmblemCulling: class {
-    update(camera: { k: number; x: number; y: number }, _viewport: unknown, _opaque: boolean, moving: boolean) {
-      pipeline.culls.push({ ...camera, moving });
+    update(
+      camera: { k: number; x: number; y: number },
+      _viewport: unknown,
+      _opaque: boolean,
+      cover = false,
+      cull = true
+    ) {
+      pipeline.covers.push({ x: camera.x, cover, cull });
+      if (cull) pipeline.culls.push({ ...camera, moving: false });
+    }
+    status() {
+      return { cover: null };
     }
     reveal() {}
     reset() {}
@@ -94,6 +108,17 @@ vi.mock("./emblem-culling", () => ({
 }));
 
 vi.mock("./compat", () => ({ forgetCompatClone: () => {} }));
+
+// PANEND (W4b): the view-overlay lane answers what the test sets (view-overlay.test.ts covers the patch itself)
+vi.mock("./view-overlay", () => ({
+  snapshotView: (root: Element) => ({ root, nodes: [root], signature: "" }),
+  refreshView: async (_prepared: unknown, before: { root: Element } | undefined, root: Element) => {
+    pipeline.viewRoots.push(root);
+    return before?.root === root && pipeline.view === "committed"
+      ? { outcome: "committed", snapshot: before }
+      : { outcome: "full", why: "test" };
+  }
+}));
 
 vi.mock("./prepare", () => ({
   BudgetError: class extends Error {},
@@ -174,6 +199,9 @@ beforeEach(async () => {
   pipeline.draws.length = 0;
   pipeline.panReleases = 0;
   pipeline.culls.length = 0;
+  pipeline.covers.length = 0;
+  pipeline.view = "committed";
+  pipeline.viewRoots.length = 0;
   pipeline.windows = null;
   document.body.innerHTML = "";
   document.body.append(mapSvg());
@@ -326,15 +354,24 @@ describe("[LIFE] GpuRenderer lifecycle wiring", () => {
     await vi.waitFor(() => expect(pipeline.prepares).toHaveLength(2));
   });
 
-  it("row 5: #coordinates churn is a revision at once (no in-place world-overlay refresh yet), not a lane hop", async () => {
+  it("[PANEND] row 5: #coordinates churn is patched into the frame in place: no revision, picks wait for it", async () => {
     const coordinates = document.getElementById("coordinates")!;
     coordinates.replaceChildren(document.createElementNS(SVG_NS, "g"));
-    coordinates.setAttribute("font-size", "9");
+    expect(renderer.pickStatus()).toBe("overlay refresh pending");
+    await vi.waitFor(() => expect(renderer.telemetry().overlays.views.patched).toBe(1));
+    expect(pipeline.viewRoots).toEqual([coordinates]);
+    expect(renderer.pickStatus()).toBe(null);
+    expect(renderer.telemetry()).toMatchObject({ revision: 0, frameRevision: 0 });
+    expect(pipeline.prepares).toHaveLength(1);
+    expect(pipeline.overlayRoots).toEqual([]); // the screen-overlay lane is not involved
+  });
+
+  it("[PANEND] row 5: #coordinates churn the lane cannot patch becomes a revision", async () => {
+    pipeline.view = "full";
+    document.getElementById("coordinates")!.setAttribute("font-size", "9");
     await vi.waitFor(() => expect(renderer.telemetry().revision).toBe(1));
-    expect(renderer.telemetry().invalidations.last).toBe("view overlay #coordinates");
     await vi.waitFor(() => expect(pipeline.prepares).toHaveLength(2));
-    expect(pipeline.overlayRoots).toEqual([]);
-    expect(renderer.telemetry().overlays.fulls).toBe(0);
+    expect(renderer.telemetry().overlays.views).toMatchObject({ patched: 0, fulls: 1, last: "test" });
   });
 
   it("row 5: a #coordinates redraw during a prepare makes that prepare stale (it never commits the old grid)", async () => {
@@ -803,6 +840,37 @@ describe("[PAN] gestures leave the model SVG alone", () => {
     renderer.camera({ scale: 2, x: 60, y: 0, exact: true });
     expect(pipeline.culls.at(-1)).toEqual({ k: 2, x: 60, y: 0, moving: false });
     expect(pipeline.culls.every(cull => !cull.moving)).toBe(true);
+  });
+
+  it("[PANEND] the first gesture arms the SVG cover: its frames may only cover, and every rest after wants it", async () => {
+    renderer.camera({ scale: 1, x: 0, y: 0, exact: true });
+    expect(pipeline.covers.length).toBeGreaterThan(0);
+    expect(pipeline.covers.every(update => !update.cover)).toBe(true); // exact cameras alone never arm it
+    pipeline.covers.length = 0;
+    renderer.camera({ scale: 2, x: 10, y: 0 });
+    renderer.camera({ scale: 2, x: 20, y: 0 });
+    expect(pipeline.covers).toEqual([
+      { x: 10, cover: true, cull: false },
+      { x: 20, cover: true, cull: false }
+    ]);
+    renderer.camera({ scale: 2, x: 30, y: 0, exact: true });
+    expect(pipeline.covers.at(-1)).toEqual({ x: 30, cover: true, cull: true });
+  });
+
+  it("[PANEND] a committed re-prepare swaps frames without hiding the canvas", async () => {
+    const hidden: string[] = [];
+    const watch = new MutationObserver(() => {
+      if (renderer.canvas.style.display === "none") hidden.push("none");
+    });
+    watch.observe(renderer.canvas, { attributes: true, attributeFilter: ["style"] });
+    const before = pipeline.released;
+    document.getElementById("rivers")!.setAttribute("opacity", "0.5");
+    await vi.waitFor(() => expect(pipeline.prepares).toHaveLength(2));
+    await vi.waitFor(() => expect(pipeline.released).toBe(before + 1));
+    await frames();
+    watch.disconnect();
+    expect(hidden).toEqual([]);
+    expect(visible()).toBe(true);
   });
 
   it("a gesture that never gets its exact update is culled and redrawn in full once the watchdog ends it", async () => {

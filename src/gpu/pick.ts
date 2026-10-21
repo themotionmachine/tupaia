@@ -525,6 +525,26 @@ export class PickIndex {
     }
   }
 
+  // PANEND (W4b, view-overlay.ts): replaces items [from, from + count) in place with the items `build` adds to a scratch
+  // index (handed the layer of the first replaced item), keeping their indices and so their paint order. Nothing
+  // changes, and false is returned, when the range is out of bounds or `build` adds a different number of items.
+  replaceRange(from: number, count: number, build: (index: PickIndex, layer: string) => void): boolean {
+    if (from < 0 || count < 1 || from + count > this.items.length) return false;
+    const scratch = new PickIndex(this.nx * this.cell, this.ny * this.cell, this.cell);
+    build(scratch, this.items[from].layer);
+    if (scratch.items.length !== count) return false;
+    for (let k = 0; k < count; k++) {
+      const index = from + k;
+      this.unbucket(index);
+      this.coords -= itemCoords(this.items[index]);
+      const item = scratch.items[k];
+      this.items[index] = item;
+      this.coords += itemCoords(item);
+      this.bucket(index, true);
+    }
+    return true;
+  }
+
   clear(): void {
     this.items.length = 0;
     this.buckets.clear();
@@ -652,16 +672,40 @@ export class PickIndex {
       maxY: maxY + pad
     };
     this.items.push(item);
+    this.bucket(index, false);
+    return index;
+  }
+
+  // Buckets hold item indices ascending (paint order): an appended item goes last, a replaced one in its place.
+  private bucket(index: number, sorted: boolean): void {
+    const item = this.items[index];
     for (let r = this.row(item.minY); r <= this.row(item.maxY); r++) {
       for (let c = this.col(item.minX); c <= this.col(item.maxX); c++) {
         const key = r * this.nx + c;
         const bucket = this.buckets.get(key);
-        if (bucket) bucket.push(index);
-        else this.buckets.set(key, [index]);
+        if (!bucket) this.buckets.set(key, [index]);
+        else if (!sorted || !bucket.length || bucket[bucket.length - 1] < index) bucket.push(index);
+        else {
+          let at = bucket.length;
+          while (at > 0 && bucket[at - 1] > index) at--;
+          bucket.splice(at, 0, index);
+        }
         this.entries++;
       }
     }
-    return index;
+  }
+
+  private unbucket(index: number): void {
+    const item = this.items[index];
+    for (let r = this.row(item.minY); r <= this.row(item.maxY); r++) {
+      for (let c = this.col(item.minX); c <= this.col(item.maxX); c++) {
+        const bucket = this.buckets.get(r * this.nx + c);
+        const at = bucket ? bucket.lastIndexOf(index) : -1;
+        if (at < 0) continue;
+        bucket!.splice(at, 1);
+        this.entries--;
+      }
+    }
   }
 
   private col(x: number): number {
@@ -744,6 +788,13 @@ function reachOf(x: number, y: number, tolerance: number, pixel: Pixel): number 
 }
 
 // The cell boxes of a square text item: given in the text's space, or (`true`) the boxes of its index-space rings.
+// The coordinates an item holds (PickIndex.bytes): its rings, clip and text cell boxes.
+function itemCoords(item: Item): number {
+  return (
+    item.rings.reduce((n, ring) => n + ring.length, 0) + (item.clip?.length ?? 0) + (item.square?.boxes.length ?? 0)
+  );
+}
+
 function squareCells(square: HitShape["square"], rings: Float64Array[]): Item["square"] {
   if (!square) return null;
   if (square !== true) return { frames: square.frames, boxes: Float64Array.from(square.boxes.flat()) };

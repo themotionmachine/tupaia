@@ -1,14 +1,17 @@
+// The `paint` gate check: HiddenEmblemCulling's culling lifecycle and, since PANEND (W4b), the SVG cover it applies
+// (svg-cover.ts: #viewbox visibility:hidden + pointer-events:painted under an opaque frame, wanted via update()'s
+// fourth argument) in place of the emblem-only motion paint suppression it replaced.
 import { chromium } from "playwright";
 import ts from "typescript";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 const output=process.env.EMBLEM_CULL_OUTPUT!;
 if(!output||existsSync(output))throw Error("Unique EMBLEM_CULL_OUTPUT required");
-const source=readFileSync("src/renderers/emblems/transient-classes.ts","utf8")+"\n"+readFileSync("src/gpu/emblem-paint.ts","utf8")+"\n"+readFileSync("src/gpu/emblem-culling.ts","utf8");
+const source=readFileSync("src/renderers/emblems/transient-classes.ts","utf8")+"\n"+readFileSync("src/gpu/svg-cover.ts","utf8")+"\n"+readFileSync("src/gpu/emblem-culling.ts","utf8");
 const js=ts.transpileModule(source.replace(/^import[\s\S]*?;$/gm,"").replace(/\bexport /g,""),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.None}}).outputText;
 const browser=await chromium.launch({headless:true});const context=await browser.newContext({serviceWorkers:"block"});
 await context.route("**/*",r=>r.abort());const page=await context.newPage();
-await page.addScriptTag({content:"(()=>{"+js+";window.__withCanonicalEmblemPaint=withCanonicalEmblemPaint;window.__HiddenEmblemCulling=HiddenEmblemCulling;window.__emblemSourceClass=emblemSourceClass;window.__restoreHiddenEmblemClasses=restoreHiddenEmblemClasses;})();"});
+await page.addScriptTag({content:"(()=>{"+js+";window.__withCanonicalVisibility=withCanonicalVisibility;window.__HiddenEmblemCulling=HiddenEmblemCulling;window.__emblemSourceClass=emblemSourceClass;window.__restoreHiddenEmblemClasses=restoreHiddenEmblemClasses;})();"});
 let result:any;try{result=await page.evaluate(async()=>{
  const ns="http://www.w3.org/2000/svg";const make=(tag:string)=>document.createElementNS(ns,tag);
  const css=document.createElement("style");css.textContent=".viewport-culled{display:none!important;pointer-events:none!important}";document.head.append(css);
@@ -44,19 +47,20 @@ let result:any;try{result=await page.evaluate(async()=>{
  manager.update(camera,view,true);const oldRoot=root;const next=root.cloneNode(true) as SVGSVGElement;manager.reset();for(const e of next.querySelectorAll(".viewport-culled"))e.classList.remove("viewport-culled");root=next;oldRoot.replaceWith(root);manager.update(camera,view,true);a.worldReset=!oldRoot.querySelector(".viewport-culled")&&!!root.querySelector("#far.viewport-culled");
 
  manager.update(camera,view,true,true);
- a.movingSuppressesPaint=manager.status().paintSuppressed&&getComputedStyle(root.querySelector("#emblems")!).visibility==="hidden";
+ const layer=root.querySelector("#emblems")!,liveNear=root.querySelector("#near")!,viewbox=root.querySelector("#viewbox")!;
+ a.coverSuppressesPaint=manager.status().paintSuppressed&&getComputedStyle(layer).visibility==="hidden"&&getComputedStyle(viewbox).pointerEvents==="painted";
+ a.coverReplacesCulling=!root.querySelector(".viewport-culled");
  manager.update(camera,view,true,false);
- a.settleRestoresPaint=!manager.status().paintSuppressed&&getComputedStyle(root.querySelector("#emblems")!).visibility==="visible";
- const layer=root.querySelector("#emblems")!,liveNear=root.querySelector("#near")!;
+ a.unwantedCoverRestoresPaint=!manager.status().paintSuppressed&&getComputedStyle(layer).visibility==="visible";
  manager.reveal();
  const rect=liveNear.getBoundingClientRect(),x=rect.x+rect.width/2,y=rect.y+rect.height/2;
  canvas.style.pointerEvents="none";
  const beforeHit=document.elementFromPoint(x,y);
  manager.update(camera,view,true,true);
 
- const canonicalRead=(window as any).__withCanonicalEmblemPaint(()=>getComputedStyle(layer).visibility);
+ const canonicalRead=(window as any).__withCanonicalVisibility(()=>getComputedStyle(layer).visibility);
  a.canonicalReadTemporarilyReveals=canonicalRead==="visible"&&manager.status().paintSuppressed;
- let threw=false;try{(window as any).__withCanonicalEmblemPaint(()=>{throw Error("probe");});}catch{threw=true;}
+ let threw=false;try{(window as any).__withCanonicalVisibility(()=>{throw Error("probe");});}catch{threw=true;}
  a.canonicalFailureRestoresPaint=threw&&manager.status().paintSuppressed&&getComputedStyle(layer).visibility==="hidden";
  a.nativePaintedHitPreserved=beforeHit===document.elementFromPoint(x,y)&&!!beforeHit?.closest("#emblems");
  const exportClone=root.cloneNode(true) as SVGSVGElement;exportClone.id="fantasyMap";document.body.append(exportClone);
@@ -68,8 +72,11 @@ let result:any;try{result=await page.evaluate(async()=>{
  a.overflowVisibleRootDisablesPaint=!manager.status().paintSuppressed;
  root.style.overflow="hidden";manager.update(camera,view,true,true);
  a.clippedRootAllowsPaint=manager.status().paintSuppressed;
- const hiddenCharge=coas.querySelector("rect")!;hiddenCharge.setAttribute("visibility","hidden");manager.update(camera,view,true,true);
+ const hiddenCharge=coas.querySelector("rect")!;hiddenCharge.setAttribute("visibility","hidden");
+ await Promise.resolve();a.hiddenSourceImmediatelyDisablesPaint=!manager.status().paintSuppressed;
+ manager.update(camera,view,true,true);
  a.hiddenSourceDisablesPaint=!manager.status().paintSuppressed;hiddenCharge.removeAttribute("visibility");manager.update(camera,view,true,true);
+ a.clearedSourceEnablesPaint=manager.status().paintSuppressed;
  liveNear.setAttribute("pointer-events","visiblePainted");manager.update(camera,view,true,true);
  a.explicitPointerRuleDisablesPaint=!manager.status().paintSuppressed;liveNear.removeAttribute("pointer-events");
  const dynamicStyle=document.createElement("style");dynamicStyle.textContent="#emblems use:hover{pointer-events:visiblePainted}";document.head.append(dynamicStyle);manager.update(camera,view,true,true);
@@ -77,18 +84,29 @@ let result:any;try{result=await page.evaluate(async()=>{
 
  const hoverAnimation=document.createElement("style");hoverAnimation.textContent="#emblems use:hover{animation:customHiddenCharge 1s infinite}@keyframes customHiddenCharge{to{visibility:hidden}}";document.head.append(hoverAnimation);manager.update(camera,view,true,true);
  a.inactiveHoverAnimationDisablesPaint=!manager.status().paintSuppressed;hoverAnimation.remove();
+ // a root effect neither moves hits nor shows: the opaque frame covers the model either way (the renderer forwards
+ // or refuses the root filter itself)
  root.setAttribute("filter","url(#unknownRootEffect)");manager.update(camera,view,true,true);
- a.rootEffectDisablesPaint=!manager.status().paintSuppressed;root.removeAttribute("filter");
+ a.rootEffectKeepsCover=manager.status().paintSuppressed;root.removeAttribute("filter");
  liveNear.setAttribute("tabindex","0");manager.update(camera,view,true,true);
  a.keyboardTargetDisablesPaint=!manager.status().paintSuppressed;liveNear.removeAttribute("tabindex");
+ manager.update(camera,view,true,true);
+ const hiddenLabel=make("text");hiddenLabel.setAttribute("visibility","hidden");hiddenLabel.textContent="hidden";viewbox.append(hiddenLabel);
+ await Promise.resolve();a.addedHiddenContentImmediatelyDisablesPaint=!manager.status().paintSuppressed;
+ hiddenLabel.remove();manager.update(camera,view,true,true);
+ const label=make("text");label.textContent="label";viewbox.append(label);manager.update(camera,view,true,true);
+ a.textStaysVisibleUnderCover=manager.status().paintSuppressed&&getComputedStyle(label).visibility==="visible";label.remove();
 
 
  const emptyUse=make("use");emptyUse.setAttribute("x","15");emptyUse.setAttribute("y","15");emptyUse.setAttribute("width","20");emptyUse.setAttribute("height","20");layer.append(emptyUse);manager.update(camera,view,true,true);
  a.deferredEmptyUseIsUnpainted=(emptyUse as SVGGraphicsElement).getBBox().width===0;
  a.deferredEmptyUseDoesNotDisablePaint=manager.status().paintSuppressed;
+ // an unresolved reference draws and hits nothing: covered, and checked the moment its definition appears
  emptyUse.setAttribute("href","#missingFutureCOA");manager.update(camera,view,true,true);
- a.unresolvedNonemptyUseFailsClosed=!manager.status().paintSuppressed;
- emptyUse.remove();
+ a.unresolvedNonemptyUseKeepsCover=manager.status().paintSuppressed;
+ const future=make("g");future.id="missingFutureCOA";future.innerHTML='<rect width="5" height="5" visibility="hidden"/>';coas.append(future);
+ await Promise.resolve();a.resolvedHiddenDefinitionImmediatelyDisablesPaint=!manager.status().paintSuppressed;
+ future.remove();emptyUse.remove();manager.update(camera,view,true,true);
  const external=make("rect");external.id="externalStateCharge";external.setAttribute("width","20");external.setAttribute("height","20");external.setAttribute("visibility","hidden");defs.querySelector("defs")!.append(external);
  const externalUse=make("use");externalUse.setAttribute("href","#externalStateCharge");coas.querySelector("svg")!.append(externalUse);manager.update(camera,view,true,true);
  a.hiddenReferencedAssetDisablesPaint=!manager.status().paintSuppressed;
@@ -99,9 +117,10 @@ let result:any;try{result=await page.evaluate(async()=>{
  external.removeAttribute("visibility");manager.update(camera,view,true,true);
 
  const externalDefs=external.parentElement!;externalDefs.setAttribute("visibility","hidden");manager.update(camera,view,true,true);
- a.hiddenReferencedAncestorDisablesPaint=!manager.status().paintSuppressed;externalDefs.removeAttribute("visibility");manager.update(camera,view,true,true);
+ // a <use> instance inherits from the <use>, never from its definition's ancestors: the cover changes nothing there
+ a.hiddenReferencedAncestorKeepsCover=manager.status().paintSuppressed;externalDefs.removeAttribute("visibility");manager.update(camera,view,true,true);
  externalUse.setAttribute("href","#missingCharge");manager.update(camera,view,true,true);
- a.unresolvedReferencedAssetDisablesPaint=!manager.status().paintSuppressed;
+ a.unresolvedReferencedAssetKeepsCover=manager.status().paintSuppressed;
  externalUse.remove();external.remove();
  manager.update(camera,view,true,true);a.reenabledAfterAuthorRemoval=manager.status().paintSuppressed;
  canvas.style.visibility="hidden";await new Promise(requestAnimationFrame);
