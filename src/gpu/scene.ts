@@ -1,9 +1,9 @@
 // Read-only extraction of the canonical #viewbox into native GPU draws (DOM order) and explicit compat runs.
 // Nothing here writes to the live SVG; computed styles are read, never set.
 import type { ReliefSprite } from "../renderers/relief-canvas";
-import { withCanonicalEmblemPaint } from "./emblem-paint";
 import { TRADE_LAYER } from "./markers";
 import { SceneCensus } from "./scene-census";
+import { withCanonicalVisibility } from "./svg-cover";
 import { flattenPath, type Subpath } from "./svg-path";
 import { basicShapePath, isIdentityTransform, nearestViewport, type Viewport } from "./svg-shapes";
 import { straightTextReason } from "./text";
@@ -282,7 +282,7 @@ export function buildScene(viewbox: Element, curveTolerance = 0.2, options: Scen
   const nativeShapes = options.nativeShapes ?? flag("gpu-native-shapes") === "1";
   const nativeText = options.nativeText ?? flag("gpu-native-text") !== "0";
   const nativeCells = options.nativeCells ?? flag("gpu-native-cells") === "1";
-  return withCanonicalEmblemPaint(() =>
+  return withCanonicalVisibility(() =>
     canonicalBuildScene(viewbox, curveTolerance, maskRects, nativeShapes, nativeText, nativeCells)
   );
 }

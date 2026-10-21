@@ -304,7 +304,8 @@ export interface Prepared {
   payload: Payload;
   // GLYPHZ (W4a): each natively laid out label and its contiguous instance range in payload.glyphs, in instance order
   // (glyph-fine.ts re-cuts them at the exact device scale on settle); empty for a frame restored from a payload
-  glyphLabels?: { element: SVGTextElement; first: number; count: number }[];
+  // `pick`: the label's hit items in `pick` [from, count] (PANEND view-overlay.ts replaces them in place)
+  glyphLabels?: { element: SVGTextElement; first: number; count: number; pick?: [number, number] }[];
   release(): void;
 }
 
@@ -1008,6 +1009,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
           continue;
         }
         // hit areas are the DOM text's character cells (SVG hit testing), not the glyph-ink quads painted here
+        const pickFrom = pick.size;
         if (picking)
           for (const shape of compatShapes(
             draw.element as unknown as CompatRoot,
@@ -1016,7 +1018,12 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
           ))
             pick.addShape(draw.layer, shape);
         glyphs.push(batch.instances);
-        glyphLabels.push({ element: draw.element, first: glyphCount, count: batch.count });
+        glyphLabels.push({
+          element: draw.element,
+          first: glyphCount,
+          count: batch.count,
+          pick: [pickFrom, pick.size - pickFrom]
+        });
         const last = out[out.length - 1];
         // consecutive labels share one instanced draw; DOM order is preserved because nothing sits between them
         if (last?.kind === "glyphs" && last.first + last.count === glyphCount) last.count += batch.count;

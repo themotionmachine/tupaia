@@ -6,6 +6,7 @@
 import { caravanEnded, caravanTransform } from "../renderers/caravan-poses";
 import type { GpuDevice, TrackedTexture } from "./device";
 import { type Affine, decodeSvg, multiply, parseTransform } from "./raster";
+import { coverHides } from "./svg-cover";
 
 export const TRADE_LAYER = "tradeAnimation";
 // Per instance: origin (2) + u axis (2) + v axis (2), world units.
@@ -114,7 +115,8 @@ function drawn(zoomHidden: boolean, style: Map<string, string>, target: NodeLike
   const parent = target.parentElement as unknown as Element | null;
   if (!parent || typeof getComputedStyle !== "function") return null;
   try {
-    return !["hidden", "collapse"].includes(getComputedStyle(parent).visibility);
+    // PANEND: under the SVG cover (svg-cover.ts) the parent reads hidden; its canonical visibility is visible
+    return !["hidden", "collapse"].includes(getComputedStyle(parent).visibility) || coverHides(parent);
   } catch {
     return null;
   }
@@ -240,7 +242,7 @@ export function overlayRoot(node: NodeLike | null): NodeLike | null {
 // and re-appends the graticule and its edge-pinned labels on each exact position change). Their churn is routed to
 // the overlay lane with the layer as its root instead of a static revision; the lane answers "full" for a root the
 // prepared frame cannot refresh in place, so nothing is ever dropped.
-const VIEW_OVERLAYS = new Set(["coordinates"]);
+export const VIEW_OVERLAYS = new Set(["coordinates"]);
 
 export function viewOverlayRoot(node: NodeLike | null): NodeLike | null {
   for (; node; node = node.parentElement) {

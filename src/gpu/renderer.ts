@@ -52,6 +52,7 @@ import {
   pixelRecords,
   TRADE_LAYER,
   TradeMarkers,
+  VIEW_OVERLAYS,
   withoutMarkerRecords
 } from "./markers";
 import { describeMutation, MOTION_IDLE, prepareStale, prepareStart, settleAction } from "./motion";
@@ -78,7 +79,9 @@ import { RestoreClock, type RestoreTiming } from "./restore-phases";
 import type { Rgba } from "./scene";
 import { SceneCache } from "./scene-cache";
 import { type GlyphInfo, type GpuSelection, type ReliefCandidate, selectAt } from "./selection";
+import type { CoverStatus } from "./svg-cover";
 import { GlyphAtlas } from "./text";
+import { refreshView, snapshotView, type ViewSnapshot } from "./view-overlay";
 
 export interface CameraUpdate {
   scale: number;
@@ -197,7 +200,21 @@ export interface GpuTelemetry {
   pan: PanStats & { enabled: boolean; bytes: number };
   // screen-overlay lane (e.g. #scaleBar redraws): committed in-place batch refreshes, refreshes handed to a full
   // prepare (new/hidden/unsupported overlay or over budget), superseded jobs, pending roots and the last job's outcome
-  overlays: { refreshes: number; fulls: number; stale: number; pending: number; lastMs: number | null; last: string };
+  // views (PANEND W4b, view-overlay.ts): view-overlay changes (#coordinates) patched into the frame in place, ones that
+  // needed a full prepare, and why the last one did
+  overlays: {
+    refreshes: number;
+    fulls: number;
+    stale: number;
+    pending: number;
+    lastMs: number | null;
+    last: string;
+    views: { patched: number; fulls: number; last: string };
+  };
+  // PANEND (W4b) SVG cover (svg-cover.ts): armed by the first gesture under the canvas; active = the model SVG paints
+  // nothing under the canvas now; issue = why it may not ("" = eligible); checks, applied and revealed are cumulative.
+  // null when opted out (?gpu-svg-cover=0).
+  cover: (CoverStatus & { wanted: boolean; armed: boolean }) | null;
   // bounded recent-work trace (performance.now() ms) to attribute main-thread stalls: background jobs with their
   // reason/outcome, static revisions with their record, and browser long tasks (>50 ms) when the API exists
   trace: { now: number; jobs: TraceEntry[]; longTasks: { at: number; ms: number }[] };
@@ -263,6 +280,15 @@ const STAND_IN = new Set([
 const CARAVAN_REACH = 8;
 
 // PAN (W4a): ?gpu-pan-cache=0 draws every moving frame in full (the pan cache off), for A/B comparisons.
+// PANEND (W4b): ?gpu-svg-cover=0 opts out of the SVG cover (the model keeps painting under the canvas).
+function svgCoverFlag(): boolean {
+  try {
+    return new URLSearchParams(globalThis.location?.search ?? "").get("gpu-svg-cover") !== "0";
+  } catch {
+    return true;
+  }
+}
+
 function panCacheFlag(): boolean {
   try {
     return new URLSearchParams(globalThis.location?.search ?? "").get("gpu-pan-cache") !== "0";
@@ -333,6 +359,11 @@ export class GpuRenderer {
   private overlayTimer = 0;
   private overlayJob = false;
   private overlayStats = { refreshes: 0, fulls: 0, stale: 0, lastMs: null as number | null, last: "" };
+  // PANEND (W4b): the view-overlay subtrees (#coordinates) each frame was prepared from (view-overlay.ts), and a counter
+  // bumped by every in-place patch (an in-flight glyph re-cut read the replaced labels)
+  private viewSnapshots = new WeakMap<Prepared, Map<Element, ViewSnapshot>>();
+  private viewEpoch = 0;
+  private viewStats = { patched: 0, fulls: 0, last: "" };
   private jobs: TraceEntry[] = [];
   private longTasks: { at: number; ms: number }[] = [];
   private longTaskObserver: PerformanceObserver | null = null;
@@ -375,6 +406,9 @@ export class GpuRenderer {
   // summed per-query cost split (coarse performance.now; meaningful over many queries): availability vs index
   private pickProfile = { queries: 0, statusMs: 0, indexMs: 0 };
   private emblemCulling: HiddenEmblemCulling | null = null;
+  // PANEND (W4b): the SVG cover is wanted once a gesture has moved the canvas (an inexact camera update while it shows).
+  // Harnesses that only set exact cameras (census, golden, toggles) keep the model painting as it always did.
+  private coverArmed = false;
   private markers: TradeMarkers;
   // --- PAINT (W3b): caravan poses stay out of the SVG while the canvas covers it (caravansPaused) ---
   private detachCaravans: () => void = () => {};
@@ -475,7 +509,8 @@ export class GpuRenderer {
       attributes: true,
       attributeFilter: ["style", "class", "hidden"]
     });
-    this.emblemCulling = new HiddenEmblemCulling(() => this.svg, this.canvas);
+    // before watchCompatInputs: the cover's <style> is in the head before the reuse watcher starts
+    this.emblemCulling = new HiddenEmblemCulling(() => this.svg, this.canvas, svgCoverFlag());
     this.standInUntil = performance.now() + STAND_IN_MS; // no frame yet: the first prepare is a stand-in
     this.detachCaravans = onCaravansMoved(() => this.caravansMoved());
     this.canvasWatch.observe(this.canvas, { attributes: true, attributeFilter: ["style", "hidden"] });
@@ -499,15 +534,20 @@ export class GpuRenderer {
   // Motion is tracked even while the canvas is inactive, so a stale flag can neither block nor admit prepares.
   camera(update: CameraUpdate): boolean {
     this.view = { k: update.scale, x: update.x, y: update.y };
+    if (!update.exact && this.canvas.style.display !== "none") this.coverArmed = true;
     if (update.exact) this.stopped();
     else this.motion();
     if (!this.active()) return false;
     // at rest outside the bitmap window the SVG takes the camera (canvas hidden) until a background refresh covers it
     if (!this.covered()) return false;
     if (!this.moving) this.cullEmblems();
-    // PAN: caravans neither start nor end in the DOM under a moving canvas (released by stopped(), hide() or a canvas
-    // hidden from outside: updateCaravans)
-    else if (this.canvas.style.display !== "none" && this.caravansPaused()) holdCaravanChanges(true);
+    else {
+      // PAN: caravans neither start nor end in the DOM under a moving canvas (released by stopped(), hide() or a canvas
+      // hidden from outside: updateCaravans)
+      if (this.canvas.style.display !== "none" && this.caravansPaused()) holdCaravanChanges(true);
+      // PANEND: the cover goes on at the gesture's first frame (one ~25 ms style recalc); nothing is culled mid-gesture
+      this.emblemCulling?.update(this.view, this.viewport, this.clear[3] === 1, this.coverArmed, false);
+    }
     this.requestDraw();
     return !update.exact;
   }
@@ -723,7 +763,8 @@ export class GpuRenderer {
         margin: windows?.margin ?? 0,
         ...this.windowStats
       },
-      overlays: { ...this.overlayStats, pending: this.pendingOverlays.size },
+      overlays: { ...this.overlayStats, pending: this.pendingOverlays.size, views: { ...this.viewStats } },
+      cover: this.coverTelemetry(),
       pan: { ...this.graph.panStats, enabled: this.panCaching, bytes: this.graph.panBytes },
       trace: {
         now: performance.now(),
@@ -731,6 +772,11 @@ export class GpuRenderer {
         longTasks: this.longTasks.map(entry => ({ ...entry }))
       }
     };
+  }
+
+  private coverTelemetry(): GpuTelemetry["cover"] {
+    const cover = this.emblemCulling?.status().cover;
+    return cover ? { ...cover, armed: this.coverArmed } : null;
   }
 
   // Starts a trace entry; the returned callback closes it with its duration and final detail.
@@ -1011,11 +1057,40 @@ export class GpuRenderer {
       const done = this.traceJob("overlay", "running");
       let outcome: "committed" | "stale" | "full" | "failed" = "failed";
       try {
-        outcome = await refreshOverlayBatches(
-          prepared,
-          { ...this.ctx(generation, prepared, this.refines), stale },
-          roots
-        );
+        outcome = "committed";
+        // PANEND: view overlays (#coordinates) patch the frame in place; screen overlays re-rasterize their batch
+        const views = roots.filter(root => root.parentNode !== this.svg);
+        const screens = roots.filter(root => root.parentNode === this.svg);
+        for (const root of views) {
+          const snapshots = this.viewSnapshots.get(prepared);
+          const result = await refreshView(prepared, snapshots?.get(root), root, {
+            device: this.device,
+            atlas: this.atlas,
+            viewbox: this.svg.querySelector<SVGGraphicsElement>("#viewbox")!,
+            screen: this.viewport,
+            camera: this.view,
+            stale
+          });
+          if (result.outcome !== "committed") {
+            if (result.outcome === "full") {
+              this.viewStats.fulls++;
+              this.viewStats.last = result.why;
+            }
+            outcome = result.outcome;
+            break;
+          }
+          snapshots?.set(root, result.snapshot);
+          this.viewStats.patched++;
+          this.viewEpoch++;
+          this.scenes.clear(); // a cached scene would name the replaced nodes
+          this.scheduleSettle(); // the fine glyph set was dropped: the settle re-cuts it
+        }
+        if (outcome === "committed" && screens.length)
+          outcome = await refreshOverlayBatches(
+            prepared,
+            { ...this.ctx(generation, prepared, this.refines), stale },
+            screens
+          );
       } catch (error) {
         if (!stale()) console.warn(`GPU overlay refresh failed, re-preparing: ${errorText(error)}`);
       } finally {
@@ -1041,6 +1116,14 @@ export class GpuRenderer {
     }, 0);
   }
 
+  // PANEND: snapshots of the view overlays (markers.ts VIEW_OVERLAYS) in the live #viewbox
+  private viewOverlays(): Map<Element, ViewSnapshot> {
+    const out = new Map<Element, ViewSnapshot>();
+    const viewbox = this.svg.querySelector("#viewbox");
+    for (const child of viewbox?.children ?? []) if (VIEW_OVERLAYS.has(child.id)) out.set(child, snapshotView(child));
+    return out;
+  }
+
   private cameraKey(): string {
     const { k, x, y } = this.view;
     const { width, height, dpr } = this.viewport;
@@ -1054,8 +1137,9 @@ export class GpuRenderer {
   // (an exact update, the motion watchdog, a click's camera sync) culls once for the camera then, in the task that
   // writes the SVG camera anyway. A canvas that hides first reveals every emblem (hide below). The paint suppression
   // HiddenEmblemCulling offers for motion is not used: toggling its sheet cost two whole-document layerizes a gesture.
+  // PANEND (W4b): the same update applies the SVG cover (svg-cover.ts) once armed, which then replaces the culling.
   private cullEmblems(): void {
-    this.emblemCulling?.update(this.view, this.viewport, this.clear[3] === 1, false);
+    this.emblemCulling?.update(this.view, this.viewport, this.clear[3] === 1, this.coverArmed);
   }
 
   private hide(): void {
@@ -1290,11 +1374,13 @@ export class GpuRenderer {
       return;
     }
     if (change === "overlay") {
-      // A world-layer overlay root (#coordinates, markers.ts VIEW_OVERLAYS) has no in-place refresh yet: the lane would
-      // answer "full" one timer hop later, and meanwhile neither an in-flight prepare nor a refine would see the change
-      // (the lane never bumps the revision). It is a revision now; only screen overlays (children of svg#map) wait for
-      // the lane. prepare.ts refreshOverlays() needs a world-run path before #coordinates can skip the full prepare.
-      const view = roots.find(root => root.parentNode !== this.svg);
+      // PANEND (W4b): a world-layer overlay root (#coordinates, markers.ts VIEW_OVERLAYS) is patched into the frame in
+      // place (view-overlay.ts) when the frame has a snapshot of it and no prepare is in flight (one would not see the
+      // change: the lane never bumps the revision); otherwise, or when the lane answers "full", it is a revision.
+      const views = roots.filter(root => root.parentNode !== this.svg);
+      if (views.length) this.scenes.clear(); // a cached scene names the replaced nodes
+      const snapshots = this.prepared && this.viewSnapshots.get(this.prepared);
+      const view = views.find(root => this.preparing || !snapshots?.has(root));
       if (view) {
         this.invalidations.last = `view overlay #${view.id}`;
         this.traceJob("revision", this.invalidations.last)();
@@ -1479,6 +1565,8 @@ export class GpuRenderer {
       // per-prepare high-water (old frame + new allocations); the lifetime peak keeps what the reset discards
       this.peaks.lifetime = Math.max(this.peaks.lifetime, this.device.peak());
       this.device.resetPeak();
+      // PANEND: the view overlays as prepareFrame's scene (built in its synchronous prefix, next) sees them
+      const views = this.viewOverlays();
       const next = await prepareFrame(this.svg, {
         device: this.device,
         revision,
@@ -1515,8 +1603,13 @@ export class GpuRenderer {
         next.release();
         return;
       }
-      this.drop();
+      // PANEND (W4b): the new frame replaces the old one in place. The canvas keeps showing the old frame's last image
+      // (same camera, older content: what was on screen) until the requested draw, so the model SVG is never revealed
+      // in between: hiding here cost a whole-document layerize per prepare, and would reveal the SVG cover.
+      this.prepared?.release();
       this.prepared = next;
+      this.viewSnapshots.set(next, views);
+      this.windowMiss = this.edgeMiss = "";
       this.retained = null;
       this.stats.prepares++;
       record.outcome = "committed";
@@ -1622,6 +1715,7 @@ export class GpuRenderer {
     const generation = this.generation;
     const camera = this.glyphCamera();
     const scale = camera.k * camera.dpr;
+    const epoch = this.viewEpoch;
     this.activeRefinements++;
     const done = this.traceJob("glyphs", `fine ${scale.toFixed(3)}`);
     let outcome = "failed";
@@ -1634,6 +1728,7 @@ export class GpuRenderer {
           generation !== this.generation ||
           this.prepared !== prepared ||
           prepared.revision !== this.revision ||
+          epoch !== this.viewEpoch ||
           this.moving ||
           this.view.k !== camera.k ||
           this.view.x !== camera.x ||
