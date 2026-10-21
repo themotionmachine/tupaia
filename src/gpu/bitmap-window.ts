@@ -68,6 +68,7 @@ export class BitmapWindows {
   private sources: Source[] = [];
   private window: Rect4 | null = null; // last committed capture box [x0, y0, x1, y1], unclipped
   private committedMargin = 0;
+  private whole = false; // the committed crops are every source (and detail) image whole
   private token = 0;
   private disposed = false;
 
@@ -88,6 +89,7 @@ export class BitmapWindows {
     this.sources.push({ image, rect: [...rect], slot, texture: null, detail: copy, detailTexture: null });
     this.token++; // an in-flight job never saw this source: supersede it
     this.window = null;
+    this.whole = false;
     return slot;
   }
 
@@ -104,6 +106,13 @@ export class BitmapWindows {
   // CSS-pixel margin the committed window was captured with (0 when visible-only fit the budget, or none committed)
   get margin(): number {
     return this.window ? this.committedMargin : 0;
+  }
+
+  // PAN (W4a): the committed crops hold every source image whole, and its detail whole if it has one (the parity world's
+  // three bitmaps at k <= 2: the margin reaches past the world). They then draw any view exactly, whatever covers()
+  // says of the capture box; a refresh may still re-crop them smaller once the box no longer holds the view.
+  get complete(): boolean {
+    return !!this.window && this.whole;
   }
 
   // Visible world grown by `margin` CSS px lies inside the committed window. Transparent area beyond the images is
@@ -131,6 +140,13 @@ export class BitmapWindows {
     const visibleBudget = Number.isFinite(limit) ? Math.max(0, limit) : this.maxBytes;
     const chosen = this.choose(sources, camera, viewport, Math.min(this.maxBytes, limit), visibleBudget);
     if (!chosen) return false;
+    const whole = wholeCrops(sources, chosen.plans, chosen.details);
+    if (whole && this.complete && sources.every(source => source.texture && (!source.detail || source.detailTexture))) {
+      // PAN: the same whole images are resident already: only the capture box moves (no copy, no upload)
+      this.window = chosen.window;
+      this.committedMargin = chosen.margin;
+      return true;
+    }
 
     const canvases: (HTMLCanvasElement | null)[] = [];
     const detailCanvases: (HTMLCanvasElement | null)[] = [];
@@ -173,6 +189,7 @@ export class BitmapWindows {
       });
       this.window = chosen.window;
       this.committedMargin = chosen.margin;
+      this.whole = whole;
       return true;
     } catch (error) {
       for (const texture of created) this.device.release(texture);
@@ -186,6 +203,7 @@ export class BitmapWindows {
   release(): void {
     this.token++;
     this.window = null;
+    this.whole = false;
     for (const source of this.sources) {
       this.device.release(source.texture);
       this.device.release(source.detailTexture);
@@ -231,6 +249,15 @@ export class BitmapWindows {
     }
     return null;
   }
+}
+
+// Every source cropped whole (a plan from its first to its last pixel), and every detail too where the source has one.
+function wholeCrops(sources: Source[], plans: (CropPlan | null)[], details: (CropPlan | null)[]): boolean {
+  const all = (plan: CropPlan | null, image: HTMLImageElement) =>
+    !!plan && plan.sx === 0 && plan.sy === 0 && plan.sw === image.naturalWidth && plan.sh === image.naturalHeight;
+  return sources.every(
+    (source, i) => all(plans[i], source.image) && (!source.detail || all(details[i], source.detail.image))
+  );
 }
 
 function copyPixels(image: HTMLImageElement, plan: CropPlan): HTMLCanvasElement {

@@ -490,7 +490,14 @@ function smokeMetrics(check: string, data: Json): Json {
       gesture: r.gesture,
       frameP95: round(r.frame?.p95, 2),
       eventToNextRafP95: round(r.eventToNextRaf?.p95, 2),
-      gpuPresentedFraction: round(r.gpuPresentedFraction, 3)
+      gpuPresentedFraction: round(r.gpuPresentedFraction, 3),
+      // W4a PAN: Layerize during the gesture's motion and after it (the exact update writes the model SVG at rest)
+      motionFrameP95: r.motionFrame ? round(r.motionFrame.p95, 2) : undefined,
+      layerizeMotionMsPerFrame: r.layerizeMotion ? round(r.layerizeMotion.msPerFrame, 2) : undefined,
+      layerizeMotionMaxMs: r.layerizeMotion ? round(r.layerizeMotion.maxMs, 1) : undefined,
+      layerizeSettleMaxMs: r.layerizeSettle ? round(r.layerizeSettle.maxMs, 1) : undefined,
+      panCache: r.panCache ?? undefined,
+      targets: r.targets ? { frameP95: r.targets.frameP95, layerizeMax: r.targets.layerizeMax } : undefined
     }));
   }
   return metrics;
@@ -1339,7 +1346,22 @@ const DEFS: Record<string, CheckDef> = {
   smoke: { lock: "shared", keys: [...CAMERA, "layer"], timeout: 900, run: smokeLike("gpu-smoke.ts") },
   fidelity: { lock: "shared", keys: [...CAMERA, "layer"], timeout: 900, run: smokeLike("gpu-fidelity.ts") },
   hatch: { lock: "shared", keys: CAMERA, timeout: 900, run: smokeLike("hatch-motion.ts") },
-  navigation: { lock: "exclusive", keys: CAMERA, timeout: 900, run: smokeLike("native-navigation-pilot.ts") },
+  // W4a PAN: `worlds` adds the parity world (every layer on, pans and wheel zoom at k 2) to shared and 100k
+  navigation: {
+    lock: "exclusive",
+    keys: [...CAMERA, "worlds"],
+    spec: {
+      worlds: {
+        type: "string",
+        default: "shared,100k,parity",
+        check: text => {
+          if (!text.split(",").every(w => ["shared", "100k", "parity"].includes(w))) throw new UsageError("worlds must be a list of shared, 100k, parity");
+        }
+      }
+    },
+    timeout: 1500,
+    run: smokeLike("native-navigation-pilot.ts", ctx => ({ NAV_WORLDS: String(ctx.args.worlds), NAV_PARITY_MAP: resolveNamedFixture("parity") }))
+  },
   context: { lock: "shared", keys: CAMERA, timeout: 900, run: smokeLike("gpu-smoke.ts", () => ({ SMOKE_CONTEXT: "1" })) },
   lifecycle: { lock: "shared", keys: CAMERA, timeout: 900, run: smokeLike("gpu-smoke.ts", () => ({ SMOKE_LIFECYCLE: "1" })) },
   "native-recovery": {
@@ -1364,7 +1386,7 @@ const DEFS: Record<string, CheckDef> = {
         metrics: data && {
           errors: data.errors?.length ?? 0,
           adapter: data.contextProperties?.adapter,
-          movingProof: pick(data.movingProof, ["samples", "emblemHits", "mismatches", "restoredMismatches"]),
+          movingProof: pick(data.movingProof, ["samples", "emblemHits", "svgWritesWhileMoving", "paintSuppressed"]),
           recoveryWallMs: data.recoveryProfile?.wallMs,
           restore: data.recoveryProfile?.status?.restore,
           contextLossRestored: data.movingContextLoss?.restored?.state ?? null

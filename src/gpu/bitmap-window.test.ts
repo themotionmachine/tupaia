@@ -348,3 +348,60 @@ describe("BitmapWindows lifecycle ownership", () => {
     expect(windows.covers(at(0), view)).toBe(false);
   });
 });
+
+// PAN (W4a): crops that hold every image whole draw any view exactly; the renderer then keeps the canvas through a
+// gesture and re-crops at rest only. A refresh that would crop the same whole images again only moves the box.
+describe("BitmapWindows complete", () => {
+  it("is complete while every source is cropped whole and moves only the box when the crops stay whole", async () => {
+    const { device, live, raw } = fakeDevice();
+    const windows = new BitmapWindows(device, 10);
+    const a = windows.add(image(50, 50), [0, 0, 50, 50]);
+    const b = windows.add(image(20, 20), [10, 10, 20, 20]);
+    expect(windows.complete).toBe(false);
+    expect(await windows.refresh(at(0), view)).toBe(true); // window [-10, 110]: both whole
+    expect(windows.complete).toBe(true);
+    expect(raw.texture).toHaveBeenCalledTimes(2);
+    expect(windows.covers(at(-200), view)).toBe(false); // the box no longer holds the view; the images are still whole
+    expect(windows.complete).toBe(true);
+
+    const resident = [a.texture, b.texture];
+    expect(await windows.refresh(at(-5), view)).toBe(true); // window x [-5, 115]: still whole, no copy or upload
+    expect(raw.texture).toHaveBeenCalledTimes(2);
+    expect(draws).toHaveLength(2);
+    expect([a.texture, b.texture]).toEqual(resident);
+    expect(a.rect).toEqual([0, 0, 50, 50]);
+    expect(windows.covers(at(-12), view)).toBe(true); // the committed box moved with the view
+    expect(windows.complete).toBe(true);
+
+    expect(await windows.refresh(at(-45), view)).toBe(true); // window x [35, 155]: a cropped, b outside
+    expect(windows.complete).toBe(false);
+    expect(raw.texture).toHaveBeenCalledTimes(3);
+    expect(b.texture).toBeNull();
+    expect(live).toEqual(new Set([a.texture]));
+
+    expect(await windows.refresh(at(0), view)).toBe(true); // whole again: copied and uploaded again
+    expect(windows.complete).toBe(true);
+    expect(raw.texture).toHaveBeenCalledTimes(5);
+    windows.release();
+    expect(windows.complete).toBe(false);
+    windows.add(image(10, 10), [0, 0, 10, 10]);
+    await windows.refresh(at(0), view);
+    windows.add(image(10, 10), [0, 0, 10, 10]); // a new source has no crop yet
+    expect(windows.complete).toBe(false);
+  });
+
+  it("needs each detail whole too, and is not complete when the detail was dropped to fit", async () => {
+    const detail = { image: image(100, 100), rect: [10, 10, 20, 20] as Rect4, covers: [10, 10, 20, 20] as Rect4 };
+    const roomy = new BitmapWindows(fakeDevice().device, 10);
+    roomy.add(image(50, 50), [0, 0, 50, 50], 1, detail);
+    await roomy.refresh(at(0), view);
+    expect(roomy.complete).toBe(true);
+    // 50² * 4 = 10000 B fits, 10000 + 100² * 4 does not: the source alone
+    const tight = new BitmapWindows(fakeDevice().device, 10, 20000);
+    const slot = tight.add(image(50, 50), [0, 0, 50, 50], 1, detail);
+    expect(await tight.refresh(at(0), view)).toBe(true);
+    expect(slot.texture).toMatchObject({ width: 50, height: 50 });
+    expect(slot.detail).toBeNull();
+    expect(tight.complete).toBe(false);
+  });
+});

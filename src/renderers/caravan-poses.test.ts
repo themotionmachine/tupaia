@@ -1,8 +1,12 @@
 import { afterEach, expect, it, vi } from "vitest";
 import {
+  caravanChange,
+  caravanChangesHeld,
+  caravanEnded,
   caravanNear,
   caravanPauseStats,
   caravanTransform,
+  holdCaravanChanges,
   liveGroups,
   onCaravansMoved,
   recordPose,
@@ -32,6 +36,7 @@ function caravan(transform = "translate(0, 0)"): Group & SVGGElement {
 }
 
 afterEach(() => {
+  holdCaravanChanges(false);
   setCaravanDomPaused(false);
   liveGroups.clear();
 });
@@ -109,4 +114,27 @@ it("a detached listener leaves a newer one in place", () => {
   detachSecond();
   recordPose(caravan(), "translate(2, 2) rotate(0)");
   expect(second).toHaveBeenCalledTimes(1);
+});
+
+it("PAN: a held structural change waits, in order, its group marked ended; unheld ones run at once", () => {
+  const ran: number[] = [];
+  const group = caravan();
+  caravanChange(() => ran.push(0), group);
+  expect(ran).toEqual([0]);
+  expect(caravanEnded(group)).toBe(false);
+  const before = caravanPauseStats().heldChanges;
+  holdCaravanChanges(true);
+  holdCaravanChanges(true);
+  expect(caravanChangesHeld()).toBe(true);
+  const ending = caravan();
+  caravanChange(() => ran.push(1), ending);
+  caravanChange(() => ran.push(2));
+  expect(ran).toEqual([0]);
+  expect(caravanEnded(ending)).toBe(true);
+  expect(caravanPauseStats()).toMatchObject({ held: true, heldChanges: before + 2 });
+  holdCaravanChanges(false);
+  expect(ran).toEqual([0, 1, 2]);
+  holdCaravanChanges(false);
+  expect(ran).toEqual([0, 1, 2]);
+  expect(caravanPauseStats().held).toBe(false);
 });

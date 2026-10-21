@@ -10,11 +10,12 @@ import {
   caravanDomPaused,
   caravanNear,
   caravanPauseStats,
+  holdCaravanChanges,
   onCaravansMoved,
   setCaravanDomPaused,
   syncCaravans
 } from "../renderers/caravan-poses";
-import { canvasAntialias, DETAIL_RESERVE, GPU_BUDGET, windowAllowance } from "./budget";
+import { canvasAntialias, DETAIL_RESERVE, GPU_BUDGET, PEAK_LIMIT, windowAllowance } from "./budget";
 import { type Camera, parseViewboxTransform, screenToWorld, type Viewport } from "./camera";
 import { forgetCompatClone, type Region } from "./compat";
 import { compatDirt, watchCompatInputs } from "./compat-reuse";
@@ -29,7 +30,7 @@ import {
   routeClick
 } from "./editor-dispatch";
 import { HiddenEmblemCulling } from "./emblem-culling";
-import { FrameGraph } from "./framegraph";
+import { FrameGraph, type PanStats } from "./framegraph";
 import { fineGlyphsAt, refineGlyphs, wantsFineGlyphs } from "./glyph-fine";
 import { GpuFrameTimer, type TimingTelemetry, timingRequested } from "./gpu-timer";
 import {
@@ -45,7 +46,14 @@ import {
   ROOT_BACKDROP_FILTER,
   rootFilter
 } from "./lifecycle";
-import { classify, pixelRecords, TRADE_LAYER, TradeMarkers, withoutMarkerRecords } from "./markers";
+import {
+  classify,
+  type MarkerInstances,
+  pixelRecords,
+  TRADE_LAYER,
+  TradeMarkers,
+  withoutMarkerRecords
+} from "./markers";
 import { describeMutation, MOTION_IDLE, prepareStale, prepareStart, settleAction } from "./motion";
 import { NetChange } from "./net-change";
 import { type PickHit, resolveLeaf, worldLocation } from "./pick";
@@ -161,17 +169,32 @@ export interface GpuTelemetry {
   tessellation: Prepared["tessellation"] | null;
   markers: number; // trade markers mirrored into the last frame
   // trade caravan poses kept out of the SVG (caravansPaused): paused now, pauses begun, syncs that wrote poses back
-  // (and how many poses), clicks re-dispatched because a written pose moved them onto or off a caravan
-  caravans: { paused: boolean; pauses: number; syncs: number; written: number; retargets: number };
-  // canonical bitmap viewport crops: "missing" = the view is outside the committed window, SVG shown meanwhile
+  // (and how many poses), clicks re-dispatched because a written pose moved them onto or off a caravan; PAN (W4a):
+  // structural changes held now (a gesture), and how many were held until a gesture's end
+  caravans: {
+    paused: boolean;
+    pauses: number;
+    syncs: number;
+    written: number;
+    retargets: number;
+    held: boolean;
+    heldChanges: number;
+  };
+  // canonical bitmap viewport crops: "missing" = the view is outside the committed window: at rest the SVG is shown
+  // meanwhile, unless the crops are `complete` (every bitmap whole: any view is exact); a moving canvas keeps the camera
+  // (PAN W4a) and `gaps` counts the frames it drew with part of a cropped bitmap layer missing
   windows: {
     coverage: "none" | "covered" | "missing";
+    complete: boolean;
     bytes: number;
     margin: number;
     refreshes: number;
     misses: number;
     detailReleases: number; // refreshes that freed compat detail to fit the canonical crops
+    gaps: number;
   };
+  // PAN (W4a) pan cache (framegraph.ts FrameGraph.pan): cumulative counters, and the bytes it holds now (moving only)
+  pan: PanStats & { enabled: boolean; bytes: number };
   // screen-overlay lane (e.g. #scaleBar redraws): committed in-place batch refreshes, refreshes handed to a full
   // prepare (new/hidden/unsupported overlay or over budget), superseded jobs, pending roots and the last job's outcome
   overlays: { refreshes: number; fulls: number; stale: number; pending: number; lastMs: number | null; last: string };
@@ -239,6 +262,15 @@ const STAND_IN = new Set([
 // radius at most 6) and some slack; plus 2 CSS px at the current zoom.
 const CARAVAN_REACH = 8;
 
+// PAN (W4a): ?gpu-pan-cache=0 draws every moving frame in full (the pan cache off), for A/B comparisons.
+function panCacheFlag(): boolean {
+  try {
+    return new URLSearchParams(globalThis.location?.search ?? "").get("gpu-pan-cache") !== "0";
+  } catch {
+    return true;
+  }
+}
+
 function clearColor(svg: Element): { color: Rgba; own: boolean } {
   const backgrounds: string[] = [];
   for (let node: Element | null = svg; node; node = node.parentElement)
@@ -292,7 +324,11 @@ export class GpuRenderer {
   private windowJob = false;
   private windowMiss = ""; // camera key whose crop could not fit: no retry until the view changes
   private edgeMiss = ""; // same, for a proactive edge refresh while the view was still covered
-  private windowStats = { refreshes: 0, misses: 0, detailReleases: 0 };
+  private windowStats = { refreshes: 0, misses: 0, detailReleases: 0, gaps: 0 };
+  // PAN: moving frames draw through the pan cache (FrameGraph.pan); a committed window refresh bumps the epoch (the
+  // cached pixels may hold a gap the new crops fill)
+  private readonly panCaching = panCacheFlag();
+  private panEpoch = 0;
   private pendingOverlays = new Set<Element>(); // changed screen-overlay roots not yet refreshed in the frame
   private overlayTimer = 0;
   private overlayJob = false;
@@ -466,9 +502,12 @@ export class GpuRenderer {
     if (update.exact) this.stopped();
     else this.motion();
     if (!this.active()) return false;
-    // outside the bitmap window the SVG takes the camera (canvas hidden) until a background refresh covers it
+    // at rest outside the bitmap window the SVG takes the camera (canvas hidden) until a background refresh covers it
     if (!this.covered()) return false;
-    this.emblemCulling?.update(this.view, this.viewport, this.clear[3] === 1, this.moving);
+    if (!this.moving) this.cullEmblems();
+    // PAN: caravans neither start nor end in the DOM under a moving canvas (released by stopped(), hide() or a canvas
+    // hidden from outside: updateCaravans)
+    else if (this.canvas.style.display !== "none" && this.caravansPaused()) holdCaravanChanges(true);
     this.requestDraw();
     return !update.exact;
   }
@@ -546,9 +585,11 @@ export class GpuRenderer {
     return svg.k !== k || svg.x !== x || svg.y !== y;
   }
 
-  // Writes the GPU camera to the canonical SVG (editor fallback: the legacy path then reads a current SVG).
+  // Writes the GPU camera to the canonical SVG (editor fallback: the legacy path then reads a current SVG), with the
+  // emblem culling of that camera (PAN: motion leaves it at the camera the gesture began at).
   syncCanonicalCamera(): void {
     this.syncSvgCamera();
+    if (this.canvas.style.display !== "none") this.cullEmblems();
   }
 
   // Diagnostics for a relief pick instance from prepare-time data only (no DOM read): its href, index and the href's
@@ -677,11 +718,13 @@ export class GpuRenderer {
       caravans: { ...caravanPauseStats(), retargets: this.caravanRetargets },
       windows: {
         coverage: !windows ? "none" : windows.covers(this.view, this.viewport) ? "covered" : "missing",
+        complete: windows?.complete ?? false,
         bytes: windows?.bytes ?? 0,
         margin: windows?.margin ?? 0,
         ...this.windowStats
       },
       overlays: { ...this.overlayStats, pending: this.pendingOverlays.size },
+      pan: { ...this.graph.panStats, enabled: this.panCaching, bytes: this.graph.panBytes },
       trace: {
         now: performance.now(),
         jobs: this.jobs.map(entry => ({ ...entry })),
@@ -855,13 +898,19 @@ export class GpuRenderer {
     return `url("#${ROOT_BACKDROP_FILTER}")`;
   }
 
-  // The prepared bitmap crops cover the current view. Otherwise the canvas hides (SVG shown, never a frame missing
-  // its canonical bitmaps) and a background refresh is scheduled.
+  // The prepared bitmap crops cover the current view. Otherwise a background refresh is scheduled and the canvas hides
+  // (SVG shown, never a settled frame missing its canonical bitmaps), except in two cases (PAN, W4a). Crops that hold
+  // every bitmap whole (BitmapWindows.complete: the parity world at k <= 2) draw any view exactly: the canvas stays,
+  // and the refresh, which only re-crops, waits for rest. And a moving canvas keeps the camera: handing it to the SVG
+  // mid-gesture re-layerized the whole document every frame (PAINT, W3b), so until the refresh lands the uncovered
+  // edge of a cropped bitmap layer is left out of the moving frames (windows.gaps); at rest the SVG covers it again.
   private covered(): boolean {
     const windows = this.prepared?.windows;
     if (!windows || windows.covers(this.view, this.viewport)) return true;
+    const complete = windows.complete;
+    if (!(complete && this.moving)) this.refreshWindows();
+    if (complete || (this.moving && this.canvas.style.display !== "none")) return true;
     this.hide();
-    this.refreshWindows();
     return false;
   }
 
@@ -882,8 +931,15 @@ export class GpuRenderer {
       if (stale()) return;
       this.windowJob = true;
       const done = this.traceJob("window", edge ? "edge" : "miss");
+      // PAN: a moving frame's pan cache is transient (released at rest): it limits the peak room, not the steady share
+      const pan = this.graph.panBytes;
       const refresh = () =>
-        windows.refresh(this.view, this.viewport, stale, windowAllowance(this.device.memory().total, windows.bytes));
+        windows.refresh(
+          this.view,
+          this.viewport,
+          stale,
+          windowAllowance(this.device.memory().total - pan, windows.bytes, GPU_BUDGET, PEAK_LIMIT - pan)
+        );
       try {
         let committed = await refresh();
         // Canonical crops outrank optional compat detail: free it, recompute the allowance and retry once. Settle
@@ -899,6 +955,7 @@ export class GpuRenderer {
         if (committed) {
           this.windowStats.refreshes++;
           this.windowMiss = this.edgeMiss = "";
+          this.panEpoch++;
         } else if (!stale() && key === this.cameraKey()) {
           // over budget even visible-only: retried once the camera changes. Only an uncovered view is a miss (the SVG
           // keeps it); a proactive edge refresh that cannot fit leaves the still-covering crops drawing.
@@ -987,7 +1044,20 @@ export class GpuRenderer {
     return `${k} ${x} ${y} ${width} ${height} ${dpr}`;
   }
 
+  // ---- PAN (W4a): the model SVG under the canvas is written at rest only. Any write to it while the canvas covers it
+  // makes Chrome repaint and re-layerize the whole visible document (PAINT, W3b): ~150 ms a frame on the parity world
+  // with every layer on at k 2, where emblem culling flipped hundreds of `viewport-culled` classes during a pan. Motion
+  // leaves the culling at the camera the gesture began at (the canvas covers every emblem it draws), and the next rest
+  // (an exact update, the motion watchdog, a click's camera sync) culls once for the camera then, in the task that
+  // writes the SVG camera anyway. A canvas that hides first reveals every emblem (hide below). The paint suppression
+  // HiddenEmblemCulling offers for motion is not used: toggling its sheet cost two whole-document layerizes a gesture.
+  private cullEmblems(): void {
+    this.emblemCulling?.update(this.view, this.viewport, this.clear[3] === 1, false);
+  }
+
   private hide(): void {
+    this.graph.releasePan();
+    holdCaravanChanges(false); // the SVG never shows a caravan ended or held back mid-gesture
     this.emblemCulling?.reveal();
     if (this.canvas.style.display !== "none") {
       this.syncSvgCamera();
@@ -1018,7 +1088,9 @@ export class GpuRenderer {
   }
 
   private updateCaravans(): void {
-    setCaravanDomPaused(this.caravansPaused());
+    const paused = this.caravansPaused();
+    setCaravanDomPaused(paused);
+    if (!paused) holdCaravanChanges(false); // PAN: an SVG shown as the map gets its held caravan changes at once
   }
 
   // A paused caravan tick: draw it, at most every CARAVAN_FRAME_MS (CARAVAN_BUSY_MS while background work runs). A
@@ -1272,6 +1344,8 @@ export class GpuRenderer {
     this.motionTimer = window.setTimeout(() => {
       this.motionTimer = 0;
       this.stopped();
+      // no exact update ends this gesture: the frame at rest (full, emblems culled, coverage checked) draws anyway
+      this.requestDraw();
     }, MOTION_IDLE);
   }
 
@@ -1279,6 +1353,8 @@ export class GpuRenderer {
     clearTimeout(this.motionTimer);
     this.motionTimer = 0;
     this.moving = false;
+    this.graph.releasePan(); // before settle, refinement or a prepare measure their room
+    holdCaravanChanges(false); // in the exact update's task: its SVG writes and these share one layerize
     this.refreshOverlays();
     this.scheduleSettle();
   }
@@ -1354,6 +1430,7 @@ export class GpuRenderer {
     }
     this.prepareWanted = false;
     this.preparing = true;
+    this.graph.releasePan(); // PAN: never part of a prepare's room (a frame-less or held renderer draws no pan cache)
     const generation = this.generation;
     const revision = this.revision;
     const job = { generation, revision, hadFrame: !!this.prepared };
@@ -1601,7 +1678,7 @@ export class GpuRenderer {
       const rendering = performance.now();
       timer.begin();
       try {
-        this.graph.render(this.prepared!.frame, this.view, this.viewport, this.frameClear(), markers);
+        this.paint(markers);
       } finally {
         timer.end({
           cpuMs: performance.now() - rendering,
@@ -1610,21 +1687,42 @@ export class GpuRenderer {
           ...this.graph.passes
         });
       }
-    } else this.graph.render(this.prepared!.frame, this.view, this.viewport, this.frameClear(), markers);
+    } else this.paint(markers);
     if (this.canvas.style.display !== "block") this.canvas.style.display = "block";
-    this.emblemCulling?.update(this.view, this.viewport, this.clear[3] === 1, this.moving);
+    if (!this.moving) this.cullEmblems();
     this.lastMarkerDraw = started;
     this.updateCaravans();
     this.stats.frames++;
     this.stats.lastFrameMs = performance.now() - started;
     const windows = this.prepared!.windows;
+    if (windows && !windows.complete && !windows.covers(this.view, this.viewport)) this.windowStats.gaps++;
     const edge = Math.min(WINDOW_EDGE, (windows?.margin ?? 0) / 2);
-    if (windows && edge > 0 && !windows.covers(this.view, this.viewport, edge)) this.refreshWindows(true);
+    // PAN: whole bitmaps need no re-crop while moving: it waits for rest (covered)
+    if (windows && edge > 0 && !(this.moving && windows.complete) && !windows.covers(this.view, this.viewport, edge))
+      this.refreshWindows(true);
     if (this.lostAt) {
       this.losses.lastRestoreMs = performance.now() - this.lostAt;
       this.lostAt = 0;
       this.recovery.drawn();
     }
+  }
+
+  // PAN (W4a): a moving frame draws through the pan cache when it can (FrameGraph.pan), else in full; a frame at rest
+  // always in full, with the cache released.
+  private paint(markers: MarkerInstances | null): void {
+    const frame = this.prepared!.frame;
+    const clear = this.frameClear();
+    if (this.moving && this.panCaching) {
+      const room = (bytes: number) => this.panRoom(bytes);
+      if (this.graph.pan(frame, this.view, this.viewport, clear, markers, this.panEpoch, room)) return;
+    } else this.graph.releasePan();
+    this.graph.render(frame, this.view, this.viewport, clear, markers);
+  }
+
+  // Room for the pan cache texture: within the peak beside everything tracked now, and never while a prepare or a
+  // refinement (whose allowances were measured without it) may still allocate.
+  private panRoom(bytes: number): boolean {
+    return !this.preparing && !this.activeRefinements && this.device.memory().total + bytes <= PEAK_LIMIT;
   }
 
   private resize(): void {

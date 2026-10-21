@@ -2,10 +2,11 @@ import { afterEach, expect, it, vi } from "vitest";
 
 vi.mock("@/lazy-loaders", () => ({ lazy: {} }));
 
-import { caravanTransform, setCaravanDomPaused } from "./caravan-poses";
+import { caravanEnded, caravanTransform, holdCaravanChanges, setCaravanDomPaused } from "./caravan-poses";
 import { clear, draw, keepSingleContainer, stripCloneCaravans } from "./draw-trade-animation";
 
 afterEach(() => {
+  holdCaravanChanges(false);
   setCaravanDomPaused(false);
   vi.unstubAllGlobals();
 });
@@ -332,4 +333,31 @@ it("GPU pause: ticks keep their pose off the DOM until resumed; exports copy and
   expect(group.getAttribute("transform")).toBe("translate(9, 0) rotate(0)");
   ends.at(-1)!();
   expect(caravans()).toHaveLength(0);
+});
+
+it("PAN: during a GPU gesture a caravan that ends stays, ended, and new segments wait; all land at the gesture's end", async () => {
+  ends = [];
+  tweens = [];
+  interrupts = [];
+  const w = world();
+  live(w);
+  const route = [
+    segments[0],
+    { type: "water" as const, points: [[10, 0] as [number, number], [20, 0] as [number, number]] }
+  ];
+  await draw(batch, route);
+  const [first] = caravans();
+  setCaravanDomPaused(true);
+  holdCaravanChanges(true); // the renderer, while its canvas moves the map
+  ends.at(-1)!(); // the first segment ends mid-gesture
+  expect(caravans()).toEqual([first]);
+  expect(caravanEnded(first as unknown as Element)).toBe(true);
+  await draw(batch, segments); // a new caravan would start now
+  expect(caravans()).toEqual([first]);
+  holdCaravanChanges(false); // the gesture's exact update
+  expect(caravans()).toHaveLength(1); // the ended group is gone, the waiting caravan started
+  expect(caravans()[0]).not.toBe(first);
+  await new Promise(resolve => setTimeout(resolve, 0)); // the segment pause
+  expect(caravans()).toHaveLength(2); // the first caravan's next (water) segment
+  expect(caravans()[1].children[0].getAttribute("href")).toBe("#trade-marker-water");
 });

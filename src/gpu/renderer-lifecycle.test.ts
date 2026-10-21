@@ -4,7 +4,14 @@
 // page (hooks, show/hide, which work it schedules), not what it draws. The decisions themselves are in
 // lifecycle.test.ts; these prove they are wired to the events that need them.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { caravanDomPaused, liveGroups, recordPose } from "../renderers/caravan-poses";
+import {
+  caravanChange,
+  caravanChangesHeld,
+  caravanDomPaused,
+  caravanEnded,
+  liveGroups,
+  recordPose
+} from "../renderers/caravan-poses";
 import { EMBLEM_RULES } from "../renderers/emblems/styles";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -15,7 +22,21 @@ const pipeline = vi.hoisted(() => ({
   overlayRoots: [] as Element[][],
   clear: null as number[] | null, // the colour the last frame cleared to
 
-  gate: null as Promise<void> | null // when set, prepareFrame waits on it, then honours ctx.stale() as the real one does
+  gate: null as Promise<void> | null, // when set, prepareFrame waits on it, then honours ctx.stale() as the real one does
+  // PAN (W4a): the frames drawn ("render" in full, "pan" through the pan cache), pan cache releases, the cameras emblem
+  // culling was given, and the bitmap windows the next prepared frame gets (null: none)
+  draws: [] as string[],
+  panReleases: 0,
+  culls: [] as { k: number; x: number; y: number; moving: boolean }[],
+  windows: null as null | {
+    covered: boolean;
+    complete: boolean;
+    refreshes: number;
+    covers(): boolean;
+    refresh(): Promise<boolean>;
+    margin: number;
+    bytes: number;
+  }
 }));
 
 vi.mock("./device", () => ({
@@ -43,8 +64,19 @@ vi.mock("./framegraph", () => ({
     drawBatches = { submitted: 0, culled: 0 };
     state = { counts: { issued: 0, skipped: 0 } };
     passes = {};
+    panStats = {};
+    panBytes = 0;
     render(_frame: unknown, _camera: unknown, _viewport: unknown, clear: number[]) {
       pipeline.clear = [...clear];
+      pipeline.draws.push("render");
+    }
+    pan(_frame: unknown, camera: unknown, _viewport: unknown, clear: number[]) {
+      pipeline.clear = [...clear];
+      pipeline.draws.push("pan");
+      return camera;
+    }
+    releasePan() {
+      pipeline.panReleases++;
     }
     dispose() {}
   }
@@ -52,7 +84,9 @@ vi.mock("./framegraph", () => ({
 
 vi.mock("./emblem-culling", () => ({
   HiddenEmblemCulling: class {
-    update() {}
+    update(camera: { k: number; x: number; y: number }, _viewport: unknown, _opaque: boolean, moving: boolean) {
+      pipeline.culls.push({ ...camera, moving });
+    }
     reveal() {}
     reset() {}
     dispose() {}
@@ -84,7 +118,7 @@ vi.mock("./prepare", () => ({
       revision: ctx.revision,
       bucket: ctx.bucket,
       runs: [],
-      windows: null,
+      windows: pipeline.windows,
       relief: null,
       layers: {},
       compat: { runs: 0, elements: 0, reasons: [], resolution: 1 },
@@ -137,6 +171,10 @@ beforeEach(async () => {
   pipeline.overlayRoots.length = 0;
   pipeline.released = 0;
   pipeline.gate = null;
+  pipeline.draws.length = 0;
+  pipeline.panReleases = 0;
+  pipeline.culls.length = 0;
+  pipeline.windows = null;
   document.body.innerHTML = "";
   document.body.append(mapSvg());
   fallBacks = [];
@@ -726,5 +764,145 @@ describe("[PAINT] trade caravan poses under the canvas", () => {
     renderer = new GpuRenderer(document.getElementById("map") as unknown as SVGSVGElement, reason =>
       fallBacks.push(reason)
     );
+  });
+});
+
+// PAN (W4a): while the canvas covers the model SVG during a gesture, nothing writes the SVG (each write re-layerized the
+// whole document, ~150 ms a frame on the parity world), the camera stays on the canvas, and moving frames draw
+// through the pan cache.
+describe("[PAN] gestures leave the model SVG alone", () => {
+  const frames = () => new Promise(resolve => setTimeout(resolve, 60));
+  const windows = (covered: boolean, complete: boolean) => ({
+    covered,
+    complete,
+    refreshes: 0,
+    covers() {
+      return this.covered;
+    },
+    async refresh() {
+      this.refreshes++;
+      return true;
+    },
+    margin: 640,
+    bytes: 0
+  });
+  const prepareWith = async (bitmaps: NonNullable<typeof pipeline.windows>) => {
+    pipeline.windows = bitmaps;
+    document.getElementById("rivers")!.setAttribute("opacity", "0.5"); // a revision: the next frame has the windows
+    await vi.waitFor(() => expect(pipeline.prepares).toHaveLength(2));
+    await settled();
+  };
+
+  it("emblem culling follows the camera at rest only: the gesture's end culls once, for its last camera", async () => {
+    pipeline.culls.length = 0;
+    for (let x = 1; x <= 5; x++) {
+      expect(renderer.camera({ scale: 2, x: x * 10, y: 0 })).toBe(true);
+      await frames();
+    }
+    expect(pipeline.culls.filter(cull => cull.x !== 0)).toEqual([]);
+    renderer.camera({ scale: 2, x: 60, y: 0, exact: true });
+    expect(pipeline.culls.at(-1)).toEqual({ k: 2, x: 60, y: 0, moving: false });
+    expect(pipeline.culls.every(cull => !cull.moving)).toBe(true);
+  });
+
+  it("a gesture that never gets its exact update is culled and redrawn in full once the watchdog ends it", async () => {
+    renderer.camera({ scale: 2, x: 30, y: 0 });
+    await frames();
+    expect(pipeline.culls.some(cull => cull.x === 30)).toBe(false);
+    expect(pipeline.draws.at(-1)).toBe("pan");
+    await vi.waitFor(() => expect(pipeline.culls.some(cull => cull.x === 30)).toBe(true), { timeout: 2000 });
+    await vi.waitFor(() => expect(pipeline.draws.at(-1)).toBe("render"));
+    expect(renderer.telemetry().moving).toBe(false);
+  });
+
+  it("moving frames draw through the pan cache; the exact update releases it and draws the frame in full", async () => {
+    pipeline.draws.length = 0;
+    renderer.camera({ scale: 1, x: 5, y: 5 });
+    await frames();
+    renderer.camera({ scale: 1, x: 9, y: 7 });
+    await frames();
+    expect(pipeline.draws).toEqual(["pan", "pan"]);
+    const releases = pipeline.panReleases;
+    renderer.camera({ scale: 1, x: 9, y: 7, exact: true });
+    expect(pipeline.panReleases).toBeGreaterThan(releases);
+    await vi.waitFor(() => expect(pipeline.draws.at(-1)).toBe("render"));
+  });
+
+  it("outside cropped bitmap windows a moving canvas keeps the camera; at rest the SVG takes it until the refresh", async () => {
+    const bitmaps = windows(true, false);
+    await prepareWith(bitmaps);
+    const viewbox = document.getElementById("viewbox")!;
+    bitmaps.covered = false;
+    expect(renderer.camera({ scale: 1, x: 40, y: 0 })).toBe(true); // handled by the canvas, the SVG unwritten
+    await frames();
+    expect(visible()).toBe(true);
+    expect(viewbox.getAttribute("transform")).toBe("translate(0 0) scale(1)");
+    expect(renderer.telemetry().windows.gaps).toBeGreaterThan(0);
+    await vi.waitFor(() => expect(bitmaps.refreshes).toBeGreaterThan(0)); // the refresh starts mid-gesture
+    expect(renderer.camera({ scale: 1, x: 40, y: 0, exact: true })).toBe(false);
+    expect(visible()).toBe(false); // at rest the SVG shows the view until crops cover it
+    expect(viewbox.getAttribute("transform")).toBe("translate(40 0) scale(1)");
+    bitmaps.covered = true;
+    renderer.camera({ scale: 1, x: 40, y: 0, exact: true });
+    await settled();
+  });
+
+  it("caravans neither start nor end in the DOM under a moving canvas: held to the exact update, or until it hides", async () => {
+    const group = document.createElementNS(SVG_NS, "g");
+    const ran: string[] = [];
+    expect(caravanChangesHeld()).toBe(false);
+    renderer.camera({ scale: 1, x: 3, y: 0 });
+    expect(caravanChangesHeld()).toBe(true);
+    caravanChange(() => ran.push("end"), group);
+    caravanChange(() => ran.push("start"));
+    expect(ran).toEqual([]);
+    expect(caravanEnded(group)).toBe(true);
+    await frames();
+    expect(ran).toEqual([]);
+    expect(renderer.telemetry().caravans).toMatchObject({ held: true, heldChanges: expect.any(Number) });
+    renderer.camera({ scale: 1, x: 3, y: 0, exact: true });
+    expect(ran).toEqual(["end", "start"]); // in the exact update's task
+    expect(caravanChangesHeld()).toBe(false);
+    caravanChange(() => ran.push("at rest"));
+    expect(ran.at(-1)).toBe("at rest");
+
+    // a canonical preview hides the canvas from outside mid-gesture: the SVG it reveals gets them at once
+    renderer.camera({ scale: 1, x: 4, y: 0 });
+    caravanChange(() => ran.push("preview"));
+    renderer.canvas.style.visibility = "hidden";
+    await Promise.resolve(); // the observer checkpoint
+    expect(ran.at(-1)).toBe("preview");
+    renderer.camera({ scale: 1, x: 5, y: 0 });
+    expect(caravanChangesHeld()).toBe(false);
+    renderer.canvas.style.removeProperty("visibility");
+    await vi.waitFor(() => expect(caravanDomPaused()).toBe(true));
+
+    renderer.camera({ scale: 1, x: 6, y: 0 });
+    caravanChange(() => ran.push("before the SVG shows"));
+    const dialog = document.createElement("div");
+    dialog.className = "ui-dialog";
+    document.body.append(dialog);
+    await vi.waitFor(() => expect(visible()).toBe(false));
+    expect(ran.at(-1)).toBe("before the SVG shows");
+    expect(caravanChangesHeld()).toBe(false);
+    renderer.camera({ scale: 1, x: 9, y: 0 }); // the SVG is the map: nothing is held
+    expect(caravanChangesHeld()).toBe(false);
+    dialog.remove();
+    renderer.camera({ scale: 1, x: 9, y: 0, exact: true });
+    await settled();
+  });
+
+  it("whole bitmaps keep the canvas outside the capture box, and re-crop at rest only", async () => {
+    const bitmaps = windows(true, true);
+    await prepareWith(bitmaps);
+    bitmaps.covered = false;
+    expect(renderer.camera({ scale: 1, x: 40, y: 0 })).toBe(true);
+    await frames();
+    expect(bitmaps.refreshes).toBe(0);
+    expect(renderer.telemetry().windows.gaps).toBe(0);
+    expect(renderer.camera({ scale: 1, x: 40, y: 0, exact: true })).toBe(false);
+    expect(visible()).toBe(true);
+    await vi.waitFor(() => expect(bitmaps.refreshes).toBeGreaterThan(0));
+    expect(visible()).toBe(true);
   });
 });
