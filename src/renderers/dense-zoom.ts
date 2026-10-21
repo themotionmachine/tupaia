@@ -257,6 +257,18 @@ function glyphs(image: SVGImageElement): Glyph[] | undefined {
     }))
     .filter(p => Number.isFinite(p.x) && Number.isFinite(p.y));
 }
+const terrainPaint = ["fill", "stroke", "stroke-width", "font-size", "class", "filter", "mask", "clip-path"];
+/** Whether #terrain's own paint lets relief glyphs come from the raster viewport instead of per-glyph <use> nodes. */
+export function terrainAllowsRaster(terrain: SVGElement | null): boolean {
+  if (!terrain) return true;
+  // An empty or "none" filter/mask/clip-path (the pale and light presets write mask="") paints exactly like no attribute;
+  // only a value that changes the glyphs' look forces the per-glyph <use> fallback.
+  const inert = (name: string, value: string | null | undefined) =>
+    !value?.trim() || (["filter", "mask", "clip-path"].includes(name) && value.trim().toLowerCase() === "none");
+  return terrainPaint.every(
+    name => inert(name, terrain.getAttribute(name)) && inert(name, terrain.style?.getPropertyValue?.(name))
+  );
+}
 function createEntry(image: SVGImageElement): Entry | undefined {
   const unsupportedImage = ["class", "transform", "filter", "mask", "clip-path", "opacity"];
   if (
@@ -281,10 +293,7 @@ function createEntry(image: SVGImageElement): Entry | undefined {
   if (!points) return;
   const overlay = document.createElementNS(namespace, "g");
   overlay.setAttribute("data-dense-zoom", "");
-  const terrain = image.closest("#terrain") as SVGElement | null;
-  const unsupported = ["fill", "stroke", "stroke-width", "font-size", "class", "filter", "mask", "clip-path"];
-  const rasterSupported =
-    !terrain || !unsupported.some(name => terrain.hasAttribute(name) || terrain.style?.getPropertyValue?.(name));
+  const rasterSupported = terrainAllowsRaster(image.closest("#terrain") as SVGElement | null);
   const entry: Entry = {
     image,
     overlay,
