@@ -13,7 +13,7 @@ import {
   wantsFineGlyphs
 } from "./glyph-fine";
 import type { Prepared } from "./prepare";
-import { GLYPH_FLOATS, GlyphAtlas, layoutLabels, PLACED_MODE, PlacedGlyphAtlas } from "./text";
+import { GLYPH_FLOATS, GlyphAtlas, layoutLabels, PLACED_MODE, PlacedGlyphAtlas, placePen } from "./text";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -320,5 +320,27 @@ describe("[GLYPHZ] fine glyph set", () => {
     expect([cell.x0, cell.y0, cell.width, cell.height]).toEqual([43, 37, 27, 19]);
     expect(atlas.add(place, [-40, 40], { width: 100, height: 100 })).toBeNull();
     expect(atlas.add(place, [50, 140], { width: 100, height: 100 })).toBeNull();
+  });
+  it("puts a pen on a device-row tie where Chromium's float32 user-space position puts it", () => {
+    // shared k1.1, 'The Badlands' (Almendra SC 19.09px, nested central baseline: a shift of 8 CSS px): in doubles the
+    // pen is at device y 686.5 exactly and rounds down the screen; the SVG paints from 683.27270508 (float32), a row up
+    const place = {
+      font: "normal 400 42px serif",
+      char: "T",
+      halo: 0,
+      join: "miter" as CanvasLineJoin,
+      miter: 4,
+      ink: "rgb(0,0,0)",
+      x: 1715.284,
+      y: 676,
+      angle: 0,
+      ox: 0,
+      oy: 0,
+      dynamic: [17.92551, 4.79159, 2] as [number, number, number]
+    };
+    const [, y] = placePen(place, { x: -1046.3, y: -408.35, k: 1.1, dpr: 2 });
+    expect(y).toBeLessThan(686.5);
+    expect(y).toBeGreaterThan(686.49);
+    expect(Math.floor(y + 0.5)).toBe(686);
   });
 });
