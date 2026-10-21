@@ -1450,13 +1450,14 @@ async function stepFonts(page: Page, blanks: Blanks, dir: string, world: string)
 //   golden (D1 and D11 coverage, gated). Between powers of two the prepare cuts glyphs at the raster bucket and the
 //   settle re-cuts them at k * dpr (src/gpu/glyph-fine.ts); before that re-cut existed these cameras missed the D11
 //   over16-of-ink cap (W3b GLYPH2 freshD11 22-37%). The cell records which glyph set the frame draws (`fine`), and
-//   pixel-registers the native glyphs (info).
+//   pixel-registers the native glyphs (info). The powers of two at or below the cameras (k 1 and 2) are cells too:
+//   since W4b GLYPH3 the settle also cuts the glyphs in view in place (rotation and sub-pixel phase, glyph-fine.ts),
+//   at a bucket as between buckets, and every cell meets D1 and D11 absolutely. Until then a camera beside a power of
+//   two that missed D11 itself (parity's rotated state label at k 1, 23.7% over16 of ink, D14's cause) was judged
+//   relative to it (FRESH_MARGIN, retired).
 const ZOOM_PARTS = (env.LABELS_ZOOM_PARTS || "shadows,carry,fresh").split(",");
-// fresh-prepare cameras between powers of two (dpr 2: raster buckets 4 and 8)
-// fresh cells judged against their power-of-two control (when the control misses D11 coverage itself): how much worse
-// they may read. Parity native, before the GLYPHZ re-cut: k1.1 over16-of-ink 29.0% vs k1 27.4%, shared k1.1/1.4
-// 25.3/24.9% (control k1 passes); after: 24-28% vs 27.4% on parity, 14.0/11.5% on shared.
-const FRESH_MARGIN = { over16OfInk: 0.03, inkRatio: 0.02 };
+// fresh-prepare cameras between powers of two (dpr 2: raster buckets 4 and 8); the powers of two at or below them
+// (k 1 and 2) are added as control cells
 const ZOOM_FRESH = (env.LABELS_ZOOM_FRESH || "1.1,1.4,1.9,2.8,3.5").split(",").map(Number);
 // [prepared, viewed] zoom pairs within one bucket at dpr 2; [1.5, 1.5] is a fresh prepare between powers of two
 const ZOOM_SHADOW_PAIRS: [number, number][] = [
@@ -1791,16 +1792,15 @@ async function stepZoom(page: Page, dir: string): Promise<Json> {
       write();
     }
     // ---- fresh
-    // controls first: the same view at the power of two at or below each camera (k * dpr on a bucket, so no re-cut)
+    // controls first: the same view at the power of two at or below each camera (k * dpr on a bucket: no scale re-cut,
+    // but the placed cut), gated like the others
     const freshCameras = ZOOM_PARTS.includes("fresh") ? ZOOM_FRESH : [];
     const controlOf = (k: number) => 2 ** Math.floor(Math.log2(k) + 1e-9);
     const controls = [...new Set(freshCameras.map(controlOf))].filter(k => !freshCameras.includes(k));
-    const controlCells = new Map<number, Json>();
     for (const k of [...controls, ...freshCameras]) {
       const control = controls.includes(k);
       const cell: Json = { k, control, bucket: scaleBucket(k * dpr), failures: [] as string[] };
       result.fresh.push(cell);
-      if (control) controlCells.set(k, cell);
       try {
         const at: [number, number] = states ? states.anchors[0].at : [gw / 2, gh / 2];
         const blanks = await captureBlanks(page, centerOn(k, at[0], at[1]));
@@ -1818,7 +1818,8 @@ async function stepZoom(page: Page, dir: string): Promise<Json> {
           // the latest re-cut's trace entry (renderer.ts refineGlyphs: wall ms and outcome), info
           const jobs = (globalThis as any).rendererStatus?.()?.gpu?.trace?.jobs ?? [];
           const cut = [...jobs].reverse().find((j: any) => j.kind === "glyphs");
-          return { scale: Number(scale.toFixed(4)), bucket: p?.bucket ?? null, fineScale: p?.frame?.fineScale ?? null, labels: p?.glyphLabels?.length ?? null, drawn: !!p?.frame?.fineGlyphs && Math.abs((p.frame.fineScale ?? 0) / scale - 1) < 1e-4, cut: cut ? { ms: cut.ms === null ? null : Number(cut.ms.toFixed(1)), detail: cut.detail } : null };
+          const at = (s: number | undefined) => !!s && Math.abs(s / scale - 1) < 1e-4;
+          return { scale: Number(scale.toFixed(4)), bucket: p?.bucket ?? null, fineScale: p?.frame?.fineScale ?? null, labels: p?.glyphLabels?.length ?? null, drawn: !!p?.frame?.fineGlyphs && at(p.frame.fineScale), placed: !!p?.frame?.placedGlyphs && at(p.frame.placedScale), cut: cut ? { ms: cut.ms === null ? null : Number(cut.ms.toFixed(1)), detail: cut.detail } : null };
         });
         const shots = await captureArms(page);
         const svg = decode(shots.svg);
@@ -1830,21 +1831,8 @@ async function stepZoom(page: Page, dir: string): Promise<Json> {
         const judged = judgeGolden(m);
         cell.gates = judged.gates;
         cell.d11 = judged.failures;
-        if (!control) {
-          // D11 absolute; where the power-of-two control misses D11's coverage itself (rotated glyphs resampled from
-          // an atlas cut at phase 0, D14's cause: parity's native state label at k 1), the cell's coverage may not read
-          // worse than the control's by more than FRESH_MARGIN: what this part judges is the octave, not that
-          const base = controlCells.get(controlOf(k));
-          const baseCoverage = base?.metrics && base.d11?.some((f: string) => f.startsWith("coverage"));
-          cell.controlK = base?.k ?? k;
-          if (baseCoverage) {
-            const bm = base!.metrics;
-            cell.vsControl = { over16OfInk: [m.over16OfInk, bm.over16OfInk], inkRatio: [m.inkRatio, bm.inkRatio] };
-            cell.failures.push(...judged.failures.filter(f => !f.startsWith("coverage")));
-            if (m.over16OfInk > bm.over16OfInk + FRESH_MARGIN.over16OfInk) cell.failures.push(`coverage vs k${base!.k} control (itself over the D11 cap): over16 is ${(m.over16OfInk * 100).toFixed(2)}% of the layer's ink vs ${(bm.over16OfInk * 100).toFixed(2)}%`);
-            if (m.inkRatio < bm.inkRatio - FRESH_MARGIN.inkRatio) cell.failures.push(`coverage vs k${base!.k} control (itself over the D11 cap): ink ratio ${m.inkRatio.toFixed(3)} vs ${bm.inkRatio.toFixed(3)}`);
-          } else cell.failures.push(...judged.failures);
-        }
+        // D1 and D11 absolute, controls included (W4b GLYPH3 retired the relative FRESH_MARGIN rule)
+        cell.failures.push(...judged.failures);
         cell.pass = cell.failures.length === 0;
         if (keep === "all" || !cell.pass) cell.images = saveShots(join(dir, "zoom", "fresh"), `k${fmtK(k)}`, shots, svg, gpu);
       } catch (error) {
@@ -1873,7 +1861,7 @@ async function stepZoom(page: Page, dir: string): Promise<Json> {
     // GATED (W4a GLYPHZ): fresh frames between powers of two against the labels golden
     fresh: result.fresh.length,
     freshFail: result.fresh.filter((c: Json) => !c.pass).map((c: Json) => `k${c.k}`),
-    freshOver16OfInk: result.fresh.map((c: Json) => `k${c.k}${c.control ? " (control)" : ""}: ${c.metrics?.over16OfInk ?? "n/a"}${c.fine?.drawn ? " fine" : ""}${c.d11?.length ? " D11 miss" : ""}`)
+    freshOver16OfInk: result.fresh.map((c: Json) => `k${c.k}${c.control ? " (control)" : ""}: ${c.metrics?.over16OfInk ?? "n/a"}${c.fine?.drawn ? " fine" : ""}${c.fine?.placed ? " placed" : ""}${c.d11?.length ? " D11 miss" : ""}`)
   };
   result.failure = failing.length ? `${failing.length} zoom cells failed: ${failing.slice(0, 6).map((c: Json) => `${c.variant ? `shadow ${c.variant}@k${c.kPrepared}->k${c.kViewed}` : c.kViewed !== undefined ? `carry k${c.kPrepared}->k${c.kViewed}` : `fresh k${c.k}`} (${c.failures[0]})`).join("; ")}` : null;
   return result;

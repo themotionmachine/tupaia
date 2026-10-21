@@ -16,7 +16,7 @@ import {
   squareCapDashes
 } from "./geometry";
 import { GlState } from "./gl-state";
-import { fineGlyphsAt } from "./glyph-fine";
+import { fineGlyphsAt, placedGlyphsAt } from "./glyph-fine";
 import { MARKER_FLOATS, type MarkerInstances } from "./markers";
 import { hatchUvAtZoom } from "./raster";
 import type { Rgba } from "./scene";
@@ -178,6 +178,12 @@ export interface Frame {
   fineGlyphs?: TrackedBuffer | null;
   fineAtlas?: TrackedTexture | null;
   fineScale?: number;
+  // GLYPH3 (W4b, glyph-fine.ts): a copy of the instances drawn at `placedScale` with the glyphs in view swapped for
+  // cells cut in place (their rotation and sub-pixel phase at the settled camera, `placedKey`) in `placedAtlas`
+  placedGlyphs?: TrackedBuffer | null;
+  placedAtlas?: TrackedTexture | null;
+  placedScale?: number;
+  placedKey?: string;
 }
 
 // The frame draws a masked group somewhere in its tree: the framegraph then holds a mask coverage attachment beside the
@@ -854,8 +860,10 @@ export class FrameGraph {
 
   private glyphs(frame: Frame, batch: GlyphBatch): void {
     if (!frame.glyphs || !frame.atlas || !batch.count) return;
-    const fine = fineGlyphsAt(frame, this.camera.k * this.viewport.dpr);
-    const glyphs = fine?.glyphs ?? frame.glyphs;
+    const scale = this.camera.k * this.viewport.dpr;
+    const fine = fineGlyphsAt(frame, scale);
+    const placed = placedGlyphsAt(frame, scale);
+    const glyphs = placed?.glyphs ?? fine?.glyphs ?? frame.glyphs;
     const atlas = fine?.atlas ?? frame.atlas;
     const gl = this.device.gl;
     const program = this.use("glyph");
@@ -872,6 +880,13 @@ export class FrameGraph {
     this.state.uniform1i(program.uniforms.u_atlas, 0);
     // the atlas texture holds only the rows the instances use (prepare.ts); their uvs are normalized by the full atlas
     this.state.uniform1f(program.uniforms.u_atlasScale, GLYPH_ATLAS / atlas.height);
+    // GLYPH3: placed cells (baseline mode -1) sample the placed atlas on unit 1; without one, unit 1 repeats unit 0
+    const second = placed?.atlas ?? atlas;
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, second.handle);
+    this.state.uniform1i(program.uniforms.u_placed, 1);
+    this.state.uniform1f(program.uniforms.u_placedScale, GLYPH_ATLAS / second.height);
+    gl.activeTexture(gl.TEXTURE0);
     // GLYPH2: central baselines and text-shadows follow the zoom per frame (shaders.ts glyph)
     this.state.uniform1f(program.uniforms.u_k, this.camera.k);
     // W3c: unrotated glyphs at atlas resolution sit on whole device rows like Skia's (shaders.ts glyph rowSnap)

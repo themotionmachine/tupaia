@@ -31,7 +31,7 @@ import {
 } from "./editor-dispatch";
 import { HiddenEmblemCulling } from "./emblem-culling";
 import { FrameGraph, type PanStats } from "./framegraph";
-import { fineGlyphsAt, refineGlyphs, wantsFineGlyphs } from "./glyph-fine";
+import { type GlyphCamera, glyphRefineWanted, refineGlyphs } from "./glyph-fine";
 import { GpuFrameTimer, type TimingTelemetry, timingRequested } from "./gpu-timer";
 import {
   BACKDROP_ALPHA,
@@ -1576,10 +1576,9 @@ export class GpuRenderer {
       );
     if (!this.active()) return;
     // GLYPHZ: label glyphs at the exact device scale between powers of two (glyph-fine.ts), beside the compat refinement
-    // (also run to free a fine set cut for another scale, e.g. after zooming back onto the bucket's own scale)
-    const scale = this.view.k * this.viewport.dpr;
-    const recut =
-      wantsFineGlyphs(prepared, scale) || (prepared.frame.fineGlyphs && !fineGlyphsAt(prepared.frame, scale));
+    // (also run to free a fine set cut for another scale, e.g. after zooming back onto the bucket's own scale);
+    // GLYPH3: then the glyphs in view cut in place at this camera (rotation and sub-pixel phase)
+    const recut = glyphRefineWanted(prepared, this.glyphCamera());
     if (recut && this.refineHold)
       this.refineHeld = true; // the hold covers the glyph re-cut too
     else if (recut) void this.refineGlyphs(prepared);
@@ -1613,9 +1612,16 @@ export class GpuRenderer {
     }
   }
 
+  private glyphCamera(): GlyphCamera {
+    const { x, y, k } = this.view;
+    const { width, height, dpr } = this.viewport;
+    return { x, y, k, dpr, width, height };
+  }
+
   private async refineGlyphs(prepared: Prepared): Promise<void> {
     const generation = this.generation;
-    const scale = this.view.k * this.viewport.dpr;
+    const camera = this.glyphCamera();
+    const scale = camera.k * camera.dpr;
     this.activeRefinements++;
     const done = this.traceJob("glyphs", `fine ${scale.toFixed(3)}`);
     let outcome = "failed";
@@ -1623,15 +1629,20 @@ export class GpuRenderer {
       outcome = await refineGlyphs(
         prepared,
         this.device,
-        scale,
+        camera,
         () =>
           generation !== this.generation ||
           this.prepared !== prepared ||
           prepared.revision !== this.revision ||
           this.moving ||
-          this.view.k * this.viewport.dpr !== scale
+          this.view.k !== camera.k ||
+          this.view.x !== camera.x ||
+          this.view.y !== camera.y ||
+          this.viewport.dpr !== camera.dpr ||
+          this.viewport.width !== camera.width ||
+          this.viewport.height !== camera.height
       );
-      if (outcome === "cut") this.requestDraw();
+      if (/^cut|placed cut/.test(outcome)) this.requestDraw();
     } catch {
       // optional like the compat detail: the bucket glyphs keep drawing
     } finally {
