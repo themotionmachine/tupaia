@@ -144,7 +144,7 @@ const ARG_SPEC: Record<string, Spec> = {
   // reading, kept available and always reported (golden-metrics.ts)
   reading: { type: "enum", values: ["over44", "conservative"], default: "over44" },
   keep: { type: "enum", values: ["all", "fail"], default: "all" },
-  break: { type: "enum", values: ["none", "drop-batch", "thin-stroke", "drop-icon"], default: "none" },
+  break: { type: "enum", values: ["none", "drop-batch", "thin-stroke", "drop-icon", "drop-layer"], default: "none" },
   // how the golden captures its GPU arm: canvas alone over an opaque cover (default), composite, or probe (both)
   gpu_arm: { type: "enum", values: ["canvas", "composite", "probe"], default: "canvas" },
   // the SVG arm of a family shown as a perf bitmap of its vectors (burg icons, cell mesh): auto = per family, the form the
@@ -776,9 +776,14 @@ async function coaRaceCheck(ctx: Ctx): Promise<Partial<Result>> {
 //                coverage gate (its whole-frame gates fail too: a quarter of goods is 4 % of the frame).
 //   faint-*:     W4 FAINT. The same layers at opacity SELFTEST_FAINT (GOLDEN_FAINT: 2 code values at most, below the
 //                8-bit rounding floor, like legacy-v1.99 ice). faint-clean must pass with the coverage judged on the
-//                lifted (opacity 1) capture (rulers, goods and the scaleBar screen overlay); faint-thin-stroke and faint-drop-icon must FAIL that coverage, on the lifted
-//                capture ("at full opacity"), while every plain whole-frame gate passes: a real gap in a faint layer is
-//                still caught, and only because the lift makes its footprint measurable.
+//                lifted (opacity 0.99) capture (rulers, goods and the scaleBar screen overlay), the lifted frame routed
+//                exactly like the plain one; faint-thin-stroke and faint-drop-icon must FAIL that coverage, on the lifted
+//                capture ("with the layer lifted"). Every plain whole-frame gate passes in both arms, and the plain ink
+//                ratios there are 0.53 and 0.68, so the plain coverage rule would also have seen them: these arms prove
+//                the lifted judgement still catches a real gap, not that the lift is needed (only faint-clean/goods,
+//                plain ink ratio 0.886, shows that). faint-drop-layer (GOLDEN_BREAK=drop-layer) empties the plain frame
+//                only, the way an alpha cull would, so the lifted capture is fine: it must FAIL the PRESENCE check
+//                ("empty in GPU arm at the layer's real opacity") and nothing else.
 // A broken arm that breaks nothing, or fails on a harness error instead of a metric, fails the self-test.
 // shared fixture families that pass clean at k 1 and have the batch kinds the breaks need (2026-10-20 survey: relief,
 // markers and burgs are single compat rasters there, and no family draws sprites)
@@ -799,7 +804,8 @@ async function goldenSelftestCheck(ctx: Ctx): Promise<Partial<Result>> {
     { arm: "dense-ref", layers: ["burgs"], brk: "none", gpuArm: "canvas", parity: true, k: "2" },
     { arm: "faint-clean", layers: [SELFTEST_STROKE, SELFTEST_ICON, SELFTEST_OVERLAY], brk: "none", gpuArm: "canvas", faint: SELFTEST_FAINT },
     { arm: "faint-thin-stroke", layers: [SELFTEST_STROKE], brk: "thin-stroke", gpuArm: "canvas", faint: SELFTEST_FAINT },
-    { arm: "faint-drop-icon", layers: [SELFTEST_ICON], brk: "drop-icon", gpuArm: "canvas", faint: SELFTEST_FAINT }
+    { arm: "faint-drop-icon", layers: [SELFTEST_ICON], brk: "drop-icon", gpuArm: "canvas", faint: SELFTEST_FAINT },
+    { arm: "faint-drop-layer", layers: [SELFTEST_STROKE], brk: "drop-layer", gpuArm: "canvas", faint: SELFTEST_FAINT }
   ];
   const arms: Record<string, Json> = {};
   for (const run of runs) {
@@ -844,6 +850,8 @@ async function goldenSelftestCheck(ctx: Ctx): Promise<Partial<Result>> {
       else if (!cell.faint) problems.push(`faint-clean ${family}: not faint (contrast ${cell.metrics?.contrast}): the self-test's opacity no longer makes the layer faint`);
       else if (!cell.faint.lifted) problems.push(`faint-clean ${family}: the lifted capture was not used (${cell.faint.liftedMetrics ? `lifted contrast ${cell.faint.liftedMetrics.contrast}` : "none captured"}): ${cell.failures?.[0] ?? "no failure recorded"}`);
       else if (!cell.pass) problems.push(`faint-clean ${family} should pass on the lifted capture and failed: ${cell.failures?.[0] ?? "?"}`);
+      else if (!cell.faint.liftedCensus || JSON.stringify(cell.faint.liftedCensus) !== JSON.stringify(cell.census) || !cell.faint.liftedFrame || cell.faint.liftedFrame.groups !== cell.frame?.groups)
+        problems.push(`faint-clean ${family}: the lifted frame was routed differently (plain ${JSON.stringify(cell.census)} with ${cell.frame?.groups} group draws, lifted ${JSON.stringify(cell.faint.liftedCensus ?? null)} with ${cell.faint.liftedFrame?.groups ?? "?"}), so it judged another path than the layer ships on`);
     }
   const brokenFaint = (arm: string, family: string, what: string) => {
     broken(arm, family, g => g.coverage === false && g.ssim && g.over16 && g[String(ctx.args.reading)], what);
@@ -851,10 +859,24 @@ async function goldenSelftestCheck(ctx: Ctx): Promise<Partial<Result>> {
     if (!cell || cell.pass) return;
     if (!cell.faint?.lifted) problems.push(`${arm}: ${family} was not judged on the lifted capture (faint ${JSON.stringify(cell.faint ?? null)})`);
     else if (!cell.faint.dropped) problems.push(`${arm}: ${family} was not broken in the lifted frame, so the lifted capture proved nothing`);
-    else if (!(cell.failures ?? []).some((f: string) => /at full opacity/.test(f))) problems.push(`${arm}: ${family} failed, but not on the lifted capture: ${cell.failures?.[0]}`);
+    else if (!(cell.failures ?? []).some((f: string) => /with the layer lifted/.test(f))) problems.push(`${arm}: ${family} failed, but not on the lifted capture: ${cell.failures?.[0]}`);
   };
   brokenFaint("faint-thin-stroke", SELFTEST_STROKE, "a thinner stroke in a faint layer");
   brokenFaint("faint-drop-icon", SELFTEST_ICON, "dropped icons in a faint layer");
+  // PRESENCE: the plain frame is empty, the lifted one is fine; only the presence check may fail, and on the plain capture
+  {
+    const arm = "faint-drop-layer";
+    const run = arms[arm];
+    const cell = run.data && cellOf(arm, SELFTEST_STROKE);
+    if (run.code !== 0 || !run.data) problems.push(`${arm} run exit ${run.code}, report ${run.data ? "written" : "missing"}`);
+    else if (!cell) problems.push(`${arm} run captured no ${SELFTEST_STROKE} cell`);
+    else if (!cell.dropped?.dropped) problems.push(`${arm}: break=drop-layer changed nothing in ${SELFTEST_STROKE}: the self-test is vacuous`);
+    else if (cell.pass) problems.push(`${arm} passed: the golden can no longer see a faint layer the GPU paints nothing of at its real opacity`);
+    else if ((cell.failures ?? []).some((f: string) => f.startsWith("harness:"))) problems.push(`${arm} failed on a harness error, not a metric: ${cell.failures[0]}`);
+    else if (!cell.faint?.lifted) problems.push(`${arm}: ${SELFTEST_STROKE} was not judged on the lifted capture (faint ${JSON.stringify(cell.faint ?? null)}), so the presence check was not what the arm tests`);
+    else if (!(cell.failures ?? []).some((f: string) => /empty in GPU arm at the layer's real opacity/.test(f))) problems.push(`${arm}: ${SELFTEST_STROKE} failed, but not on the presence check: ${cell.failures?.[0]}`);
+    else if (cell.gates?.coverage === false || cell.gates?.census === false) problems.push(`${arm}: the lifted capture should be fine and was not (gates ${JSON.stringify(cell.gates)}): the arm no longer isolates the presence check`);
+  }
   const dense = arms["dense-ref"].data && cellOf("dense-ref", "burgs");
   if (arms["dense-ref"].code !== 0 && !dense) problems.push(`dense-ref run exit ${arms["dense-ref"].code}, no burgs cell`);
   else if (!dense) problems.push("dense-ref run captured no burgs cell");

@@ -106,9 +106,9 @@ Known fidelity bugs this corpus found, for STROKE/COMPAT (also see `manifest.gol
 - `ice` on v1.7 and v1.99 (fixed, no longer a known gap): the files carry an inline `style="opacity: ..."` (a jQuery fade caught mid-way by the old
   version: 0.04 on v1.7, 0.008 on v1.99) next to `opacity="0.9"`; the SVG honours the style (CSS beats the attribute). RES made the GPU honour it too
   (`src/io/inline-style.ts`). v1.99's ice then still failed the coverage ink rule (0.875 against 0.9) and that was a metric artifact, not a rendering
-  difference: at opacity 0.008 the layer is 0.18 of a code value at its strongest, so which pixels reach a whole value is a rounding accident of each
+  difference: at opacity 0.008 the layer is about 1.8 code values at its strongest (223 x 0.00797), so which pixels reach a whole value is a rounding accident of each
   renderer. Lifted to opacity 1 the two arms have the identical footprint (149 208 ink px each, ratio 1.000). The golden now judges such FAINT layers
-  at full opacity (`FAINT` in `bench/golden-metrics.ts`, GATE.md "Faint layers"). The `ice` known-gap entry was removed from the manifest.
+  lifted to opacity 0.99, plus a plain presence check (`FAINT` in `bench/golden-metrics.ts`, GATE.md "Faint layers"). The `ice` known-gap entry was removed from the manifest.
 - v0.9b `#borders` routed 0 when the floor is lowered (evidence `~/.tupaia-gates/w2-corpus/exp09c`).
 
 Observed, not changed:

@@ -69,17 +69,22 @@ export function isolateLayer(args: IsolateArgs): { target: boolean; hidden: numb
   return { target: !!target, hidden: wanted.size };
 }
 
-// Sets the target family root's inline opacity (FAINT: the golden lifts a faint layer to full opacity, and its self-test
+// Sets the target family root's inline opacity (FAINT: the golden lifts a faint layer to opacity 0.99, and its self-test
 // makes a normal layer faint). Page-side like isolateLayer, self-contained, and it only writes the live SVG, which both
 // arms read. `value: null` puts every opacity this function changed back (the original inline value and priority,
 // removed if there was none); the first change to an element records what was there. The element's `opacity` attribute
 // is left alone: the inline style wins over it, as for the app's own opacity slider.
+// `liftOnly`: only ever raise the opacity. When the element's COMPUTED opacity (inline style, attribute or inherited
+// default) is already at `value` or above, nothing is written and `skipped` is true: the layer is faint by colour, not by
+// opacity, so there is nothing to lift (an unchanged DOM would never make the GPU prepare again, and the caller must not
+// wait for it to).
 export interface OpacityArgs {
   id: string | null;
   root?: boolean;
   value: string | null;
+  liftOnly?: boolean;
 }
-export function setLayerOpacity(args: OpacityArgs): { found: boolean; before: string; after: string } {
+export function setLayerOpacity(args: OpacityArgs): { found: boolean; before: string; after: string; computed?: number; skipped?: boolean } {
   const page = globalThis as any;
   const svg = document.querySelector<SVGSVGElement>("svg#map");
   const view = svg?.querySelector(":scope > #viewbox");
@@ -97,7 +102,9 @@ export function setLayerOpacity(args: OpacityArgs): { found: boolean; before: st
   const target = args.id ? parent.querySelector<SVGElement>(`:scope > #${CSS.escape(args.id)}`) : null;
   if (!target) return { found: false, before: "", after: "" };
   const before = target.style.getPropertyValue("opacity");
+  const computed = Number.parseFloat(getComputedStyle(target).opacity);
+  if (args.liftOnly && computed >= Number(args.value)) return { found: true, before, after: before, computed, skipped: true };
   if (!saved.has(target)) saved.set(target, [before, target.style.getPropertyPriority("opacity")]);
   if (before !== args.value) target.style.setProperty("opacity", args.value);
-  return { found: true, before, after: target.style.getPropertyValue("opacity") };
+  return { found: true, before, after: target.style.getPropertyValue("opacity"), computed };
 }
