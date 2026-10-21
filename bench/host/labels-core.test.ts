@@ -292,4 +292,6 @@ test("instanceCentralShift rounds the scaled ascent and descent to CSS px (text.
   assert.ok(Math.abs(instanceCentralShift(11.545, 2.757, 1, 2) - 8.5 / 2) < 1e-9);
   assert.ok(Math.abs(instanceCentralShift(11.545, 2.757, 2, 2) - 9 / 2) < 1e-9);
   assert.equal(instanceCentralShift(11.545, 2.757, 0, 2), 0);
+  // Courier 2.27 px at k 8 (mode 1 + APPLE_ASCENT): round(13.69) + 3 - round(4.47) = 17 - 4 -> 6.5 CSS px
+  assert.ok(Math.abs(instanceCentralShift(0.754 * 2.27, 0.246 * 2.27, 3, 8) - 6.5 / 8) < 1e-9);
 });

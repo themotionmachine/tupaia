@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { layoutOnPath } from "./geometry";
 import { GLYPH_ATLAS_EDGE, glyph } from "./shaders";
 import {
+  APPLE_ASCENT,
   centralBaselineShift,
   centralNestedShift,
   centralShiftAt,
@@ -528,6 +529,15 @@ describe("centralShiftAt", () => {
     expect(centralShiftAt(0.917 * 12.59, 0.219 * 12.59, 2, 1.3) * 1.3).toBeCloseTo(6);
     expect(centralShiftAt(10, 2, 0, 1.5)).toBe(0);
     expect(centralShiftAt(10, 2, 1, 0)).toBe(0);
+  });
+
+  it("adds Chromium's Mac ascent hack to the rounded ascent for a mode above APPLE_ASCENT", () => {
+    // Courier 2.27 px (#coordinates) at k 8: ascent round(13.69) = 14, descent round(4.47) = 4, plus round(18 * 0.15) =
+    // 3 -> (17 - 4) / 2 = 6.5 CSS px; the canvas box with the hack in it (0.904) would round to 16 and give 6
+    expect(centralShiftAt(0.754 * 2.27, 0.246 * 2.27, 1 + APPLE_ASCENT, 8) * 8).toBeCloseTo(6.5);
+    expect(centralShiftAt(0.904 * 2.27, 0.246 * 2.27, 1, 8) * 8).toBeCloseTo(6);
+    // nested: 6.5 rounds up to 7
+    expect(centralShiftAt(0.754 * 2.27, 0.246 * 2.27, 2 + APPLE_ASCENT, 8) * 8).toBeCloseTo(7);
   });
 
   it("rounds half up, as Skia does", () => {

@@ -10,7 +10,8 @@ import { flattenPath } from "./svg-path";
 // cx cy angle lx ly w h u0 v0 u1 v1 r g b a ascent descent baseline. A soft (shadow) cell, alpha < 0, has cx cy = its
 // top-left corner, angle = the shadow sigma in device px and lx ly = its offset in CSS px (layoutStraight). `baseline`
 // 1 or 2 means a central baseline the glyph shader computes per frame from ascent and descent (user units per CSS px
-// of zoom, centralShiftAt), 2 nested; 0 means any baseline shift is already in ly (shaders.ts glyph).
+// of zoom, centralShiftAt), 2 nested, plus APPLE_ASCENT (3, 4) for a face Chromium adds the Mac ascent hack to; 0 means
+// any baseline shift is already in ly (shaders.ts glyph).
 export const GLYPH_FLOATS = 18;
 const ATLAS = GLYPH_ATLAS_EDGE;
 export const GLYPH_ATLAS = ATLAS; // atlas edge in px; glyph uvs are normalized by it
@@ -1338,7 +1339,7 @@ function baselineShiftFor(
   const box = fontBoxPerPx(style as TextStyle);
   const world = !ctmScale || !worldScale || Math.abs(ctmScale / worldScale - 1) < 1e-4;
   if (box && world) {
-    const mode = nested ? 2 : 1;
+    const mode = (nested ? 2 : 1) + (box.apple ? APPLE_ASCENT : 0);
     const [ascent, descent] = [box.ascent * px, box.descent * px];
     const k = ctmScale ?? scale / devicePixelRatio();
     return { baked: 0, dynamic: [ascent, descent, mode], atPrepare: centralShiftAt(ascent, descent, mode, k) };
@@ -1350,12 +1351,23 @@ function baselineShiftFor(
 }
 
 // The central baseline shift, user units, at CSS px per user unit k (the glyph shader's copy is in shaders.ts glyph):
-// ascent and descent rounded at the scaled font (Skia rounds half up), halved, and for a nested box rounded up to a
-// whole CSS px. 0 for mode 0.
+// ascent and descent rounded at the scaled font (Skia rounds half up), the Mac ascent hack added for a mode above
+// APPLE_ASCENT (fontBoxPerPx), halved, and for a nested box rounded up to a whole CSS px. 0 for mode 0.
 export function centralShiftAt(ascent: number, descent: number, mode: number, k: number): number {
   if (!mode || !(k > 0)) return 0;
-  const css = (Math.floor(ascent * k + 0.5) - Math.floor(descent * k + 0.5)) / 2;
-  return (mode === 2 ? Math.ceil(css - 1e-3) : css) / k;
+  const [a, d] = [Math.floor(ascent * k + 0.5), Math.floor(descent * k + 0.5)];
+  const css = (a + (mode > APPLE_ASCENT ? appleAscentHack(a, d) : 0) - d) / 2;
+  return ((mode > APPLE_ASCENT ? mode - APPLE_ASCENT : mode) === 2 ? Math.ceil(css - 1e-3) : css) / k;
+}
+
+// Chromium on the Mac (FontMetrics::AscentDescentWithHacks) adds 15% of the rounded line box to the rounded ascent of
+// Times, Helvetica and Courier, the faces serif, sans-serif and monospace resolve to there. A central baseline moves
+// half of it: Courier 18.16 px (#coordinates at k 8) has ascent 14 + 3, descent 4, a shift of 6.5 CSS px where the
+// face box measured at 2000 px (0.904, the hack included) rounds to 16 and gives 6. A glyph instance asks for it with
+// its baseline mode plus APPLE_ASCENT.
+export const APPLE_ASCENT = 2;
+export function appleAscentHack(ascent: number, descent: number): number {
+  return Math.floor((ascent + descent) * 0.15 + 0.5);
 }
 
 // W3c: the reference copy of the glyph shader's rowSnap (shaders.ts glyph). Skia draws axis-aligned text with its
@@ -1377,19 +1389,42 @@ export function glyphRowSnap(
 }
 
 // A face's ascent and descent (font box) per px of font size, measured once at a large size; null when unreadable.
+// `apple`: the face's canvas box follows the Mac ascent hack (appleAscentHack) at every size rather than its plain
+// rounding, and `ascent` is then the face's own, without the hack: the hack is a whole px added after rounding, so a
+// box measured once at a large size and scaled down would round it in with the ascent.
 const FONT_BOX_PX = 2000;
-const fontBoxes = new Map<string, { ascent: number; descent: number } | null>();
-function fontBoxPerPx(style: TextStyle): { ascent: number; descent: number } | null {
+const FONT_BOX_PROBES = Array.from({ length: 48 }, (_, i) => 6 + i * 0.73);
+type FontBox = { ascent: number; descent: number; apple: boolean };
+const fontBoxes = new Map<string, FontBox | null>();
+function fontBoxPerPx(style: TextStyle): FontBox | null {
   const key = `${style.fontStyle} ${style.fontWeight} ${style.fontFamily}`;
   if (fontBoxes.has(key)) return fontBoxes.get(key)!;
-  let box: { ascent: number; descent: number } | null = null;
+  let box: FontBox | null = null;
   const c = shapingContext();
   if (c) {
     try {
-      c.font = `${style.fontStyle} ${style.fontWeight} ${FONT_BOX_PX}px ${style.fontFamily}`;
-      const m = c.measureText("H");
-      const [ascent, descent] = [m.fontBoundingBoxAscent / FONT_BOX_PX, m.fontBoundingBoxDescent / FONT_BOX_PX];
-      if (Number.isFinite(ascent) && Number.isFinite(descent) && ascent > 0) box = { ascent, descent };
+      const measure = (size: number) => {
+        c.font = `${style.fontStyle} ${style.fontWeight} ${size}px ${style.fontFamily}`;
+        const m = c.measureText("H");
+        return [m.fontBoundingBoxAscent, m.fontBoundingBoxDescent];
+      };
+      const [boxAscent, boxDescent] = measure(FONT_BOX_PX);
+      const [ascent, descent] = [boxAscent / FONT_BOX_PX, boxDescent / FONT_BOX_PX];
+      if (Number.isFinite(ascent) && Number.isFinite(descent) && ascent > 0) {
+        box = { ascent, descent, apple: false };
+        const own = appleOwnAscent(boxAscent, boxDescent) / FONT_BOX_PX;
+        if (own > 0) {
+          // whichever model reproduces the face's canvas box at more small sizes (the same FontMetrics as the SVG's)
+          let [plain, apple] = [0, 0];
+          for (const size of FONT_BOX_PROBES) {
+            const [a, d] = measure(size);
+            const rounded = [Math.floor(own * size + 0.5), Math.floor(descent * size + 0.5)];
+            if (a === Math.floor(ascent * size + 0.5) && d === rounded[1]) plain++;
+            if (a === rounded[0] + appleAscentHack(rounded[0], rounded[1]) && d === rounded[1]) apple++;
+          }
+          if (apple > plain) box = { ascent: own, descent, apple: true };
+        }
+      }
     } catch {
       box = null;
     }
@@ -1397,6 +1432,13 @@ function fontBoxPerPx(style: TextStyle): { ascent: number; descent: number } | n
   if (fontBoxes.size > 256) fontBoxes.clear();
   fontBoxes.set(key, box);
   return box;
+}
+
+// The ascent without the Mac hack that the hack turns into `ascent` (both whole px at one size), or 0 when none does.
+function appleOwnAscent(ascent: number, descent: number): number {
+  for (let own = Math.floor((ascent - 0.15 * descent) / 1.15) - 2; own <= ascent; own++)
+    if (own + appleAscentHack(own, descent) === ascent) return own;
+  return 0;
 }
 
 // CSS px per world unit (the #viewbox group's screen CTM scale), or null outside a laid-out map.

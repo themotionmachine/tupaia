@@ -264,11 +264,17 @@ export function decodeGlyphKey(key: string): { font: string; halo: number; char:
 }
 
 // The central baseline shift (user units) a glyph instance's last three floats ask the shader for at CSS px per user
-// unit k (src/gpu/text.ts centralShiftAt, shaders.ts glyph): ascent and descent rounded at the scaled font, halved,
-// a nested box (mode 2) rounded up to a whole CSS px; 0 for mode 0 (the shift is in ly).
+// unit k (src/gpu/text.ts centralShiftAt, shaders.ts glyph): ascent and descent rounded at the scaled font, the Mac
+// ascent hack added for modes 3 and 4 (1 and 2 plus APPLE_ASCENT), halved, a nested box (mode 2) rounded up to a whole
+// CSS px; 0 for mode 0 (the shift is in ly).
 export function instanceCentralShift(ascent: number, descent: number, mode: number, k: number): number {
   if (!(mode > 0.5) || !(k > 0)) return 0;
-  const css = (Math.floor(ascent * k + 0.5) - Math.floor(descent * k + 0.5)) / 2;
+  let [a, d] = [Math.floor(ascent * k + 0.5), Math.floor(descent * k + 0.5)];
+  if (mode > 2.5) {
+    a += Math.floor((a + d) * 0.15 + 0.5);
+    mode -= 2;
+  }
+  const css = (a - d) / 2;
   return (mode > 1.5 ? Math.ceil(css - 1e-3) : css) / k;
 }
 
