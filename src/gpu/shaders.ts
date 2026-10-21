@@ -524,7 +524,8 @@ void main() {
 // here per frame from u_k, the camera's CSS px per world unit (one uniform, set by the text pass):
 // - a central baseline (a_baseline = ascent, descent, mode; text.ts centralShiftAt is the reference copy): Chromium
 //   rounds the ascent and descent of the font scaled by k to whole CSS px, so the shift moves with k inside a bucket
-//   (up to 3.5 device px when baked at the prepare's zoom); mode 2 rounds a nested box's shift up to a whole CSS px;
+//   (up to 3.5 device px when baked at the prepare's zoom); mode 2 rounds a nested box's shift up to a whole CSS px,
+//   and modes 3 and 4 (1 and 2 plus text.ts APPLE_ASCENT) add Chromium's Mac ascent hack to the rounded ascent;
 // - a text-shadow, which Chromium paints in CSS px whatever the user-space transform. A soft cell anchors its
 //   top-left corner at the text's pen, holds its Gaussian sigma in device px in the angle slot (soft cells are never
 //   rotated) and its offset in CSS px in (lx, ly). Its mask was blurred at the raster bucket, i.e. with sigma
@@ -564,8 +565,15 @@ flat out vec4 v_cell;
 flat out float v_placed;
 float centralShift() {
   if (a_baseline.z < 0.5) return 0.0;
-  float css = (floor(a_baseline.x * u_k + 0.5) - floor(a_baseline.y * u_k + 0.5)) * 0.5;
-  if (a_baseline.z > 1.5) css = ceil(css - 1e-3);
+  float ascent = floor(a_baseline.x * u_k + 0.5);
+  float descent = floor(a_baseline.y * u_k + 0.5);
+  float mode = a_baseline.z;
+  if (mode > 2.5) {
+    ascent += floor((ascent + descent) * 0.15 + 0.5);
+    mode -= 2.0;
+  }
+  float css = (ascent - descent) * 0.5;
+  if (mode > 1.5) css = ceil(css - 1e-3);
   return css / u_k;
 }
 // W3c: the world y offset that puts an unrotated glyph cell's top on a whole device row, when the cell is drawn at
