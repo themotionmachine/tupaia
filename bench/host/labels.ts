@@ -84,6 +84,7 @@ import { type BrowserContext, chromium, type Page } from "playwright";
 import { type CellMetrics, coverageOf, D1, heatmap, measureCell } from "../golden-metrics.ts";
 import { decodePng, encodePng } from "../png.ts";
 import { isolateLayer } from "./golden-isolation.ts";
+import { HIDE_CHROME } from "./screenshot-chrome.ts";
 import { resolveFixture } from "./fixtures/index.ts";
 import {
   alongNormal,
@@ -353,7 +354,7 @@ const dropCover = (page: Page, on: boolean) =>
 
 async function captureArms(page: Page): Promise<{ gpu: Buffer; svg: Buffer }> {
   await dropCover(page, true);
-  const gpu = await page.screenshot({ animations: "disabled" });
+  const gpu = await page.screenshot({ animations: "disabled", style: HIDE_CHROME });
   await dropCover(page, false);
   const old = await page.evaluate(() => {
     const c = document.querySelector("canvas[data-gpu-renderer]") as HTMLCanvasElement | null;
@@ -363,7 +364,7 @@ async function captureArms(page: Page): Promise<{ gpu: Buffer; svg: Buffer }> {
     return value;
   });
   await page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
-  const svg = await page.screenshot({ animations: "disabled" });
+  const svg = await page.screenshot({ animations: "disabled", style: HIDE_CHROME });
   await page.evaluate(value => {
     const c = document.querySelector("canvas[data-gpu-renderer]") as HTMLCanvasElement | null;
     if (c) c.style.visibility = value || "";

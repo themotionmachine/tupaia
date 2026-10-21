@@ -56,6 +56,7 @@ import {
 import { beginStep, endStep, installReplay } from "./editor-replay-page.ts";
 import { decodePng } from "../png.ts";
 import { resolveFixture } from "./fixtures/index.ts";
+import { HIDE_CHROME } from "./screenshot-chrome.ts";
 import { adapterMatches, launcherFrom, launchOptions, probeAdapter } from "./launcher.ts";
 
 const env = process.env;
@@ -333,7 +334,7 @@ async function runStep(page: Page, arm: Arm, step: Step, index: number, frozen: 
 }
 
 async function staleCanvasEvidence(page: Page, name: string) {
-  const shown = await page.screenshot({ animations: "disabled" });
+  const shown = await page.screenshot({ animations: "disabled", style: HIDE_CHROME });
   const old = await page.evaluate(() => {
     const c = document.querySelector("canvas[data-gpu-renderer]") as HTMLCanvasElement | null;
     const value = c?.style.visibility ?? "";
@@ -341,7 +342,7 @@ async function staleCanvasEvidence(page: Page, name: string) {
     return value;
   });
   await page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
-  const svg = await page.screenshot({ animations: "disabled" });
+  const svg = await page.screenshot({ animations: "disabled", style: HIDE_CHROME });
   await page.evaluate(value => {
     const c = document.querySelector("canvas[data-gpu-renderer]") as HTMLCanvasElement | null;
     if (c) c.style.visibility = value;

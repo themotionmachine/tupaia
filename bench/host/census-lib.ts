@@ -21,6 +21,7 @@ import { decodePng } from "../png.ts";
 import { FAMILIES } from "./golden-families.ts";
 import { adapterMatches, type Launcher, launcherFrom, launchOptions, probeAdapter } from "./launcher.ts";
 import { resolveFixture } from "./fixtures/index.ts";
+import { HIDE_CHROME } from "./screenshot-chrome.ts";
 
 export const ROOT = resolve(import.meta.dirname, "../..");
 export const DIST = resolve(ROOT, "dist");
@@ -230,8 +231,6 @@ export interface Arms {
 }
 
 /** GPU arm (canvas shown) then SVG arm (canvas visibility hidden) from one DOM state, at device resolution. */
-// The Navigate/Edit pill (gpu page only) animates and changes with the mode; it is chrome, not map, in both arms.
-const HIDE_CHROME = "#renderModeIndicator { visibility: hidden !important; }";
 export async function captureArms(page: Page): Promise<Arms> {
   const gpu = await page.screenshot({ animations: "disabled", style: HIDE_CHROME });
   const old = await page.evaluate(() => {
