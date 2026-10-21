@@ -685,6 +685,32 @@ describe("transient viewport culling preserves world hit geometry", () => {
     expect(b.node.attrs.class).toBe("selected viewport-culled extra");
   });
 
+  // W4b HEIGHT: a layer of anonymous siblings converted one root each (marker resume, gpu-select) rebuilt the parent's
+  // child index for every root, quadratic in the layer; one memo per batch reads it once.
+  it("indexes a shared parent's children once per batch, with each leaf's own path", () => {
+    const leaves = Array.from({ length: 6 }, (_, i) =>
+      el("rect", "", [], { attrs: { x: String(i), y: "0", width: "1", height: "1" }, ctm: at(0, 0) })
+    );
+    const layer = wrap(el("g", "anonymousLayer", leaves));
+    let reads = 0;
+    const children = Object.getOwnPropertyDescriptor(layer, "children")!.get!;
+    Object.defineProperty(layer, "children", {
+      get() {
+        reads++;
+        return children.call(layer);
+      }
+    });
+    const roots = leaves.map(wrap);
+    const single = roots.map(root => compatShapes(root, viewbox));
+    // leafPath reads `children` once to test it and once more to index it, per call without a shared memo
+    expect(reads).toBe(2 * roots.length);
+    reads = 0;
+    const batched = compatShapesBatch(roots, viewbox);
+    expect(reads).toBe(roots.length + 1); // the index is built once for the batch
+    expect(batched).toEqual(single);
+    expect(batched.map(shapes => shapes[0].path)).toEqual([[0], [1], [2], [3], [4], [5]]);
+  });
+
   it("restores every separate root when a later root throws", () => {
     const a = culledUse(),
       b = culledUse(false, true);
