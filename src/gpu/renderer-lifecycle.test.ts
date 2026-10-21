@@ -344,6 +344,33 @@ describe("[LIFE] GpuRenderer lifecycle wiring", () => {
     expect(renderer.telemetry().sourceCurrent).toBe(true);
   });
 
+  it("W4c BOOT: an app renderer created before main.js ran prepares nothing until the first world", async () => {
+    renderer.dispose();
+    pipeline.prepares.length = 0;
+    delete global.customization; // the deferred classic main.js has not executed yet (slow network)
+    renderer = new GpuRenderer(
+      document.getElementById("map") as unknown as SVGSVGElement,
+      reason => fallBacks.push(reason),
+      true,
+      true
+    );
+    // nothing that schedules a prepare reaches one: not a resize, a font arrival, a DOM revision or a camera settle
+    window.dispatchEvent(new Event("resize"));
+    vi.spyOn(GlyphAtlas.prototype, "fontsArrived").mockReturnValue(true);
+    fonts.dispatchEvent(new Event("loadingdone"));
+    document.getElementById("rivers")!.setAttribute("opacity", "0.5");
+    renderer.camera({ scale: 1.5, x: 0, y: 0, exact: true });
+    await new Promise(resolve => setTimeout(resolve, 300));
+    expect(pipeline.prepares).toHaveLength(0);
+    expect(renderer.telemetry()).toMatchObject({ state: "waiting", canvasVisible: false });
+    // main.js ran and generated: map:generated -> router.worldReplaced
+    global.customization = 0;
+    renderer.worldReplaced(1);
+    await settled();
+    expect(pipeline.prepares).toHaveLength(1);
+    expect(renderer.telemetry().state).toBe("active");
+  });
+
   it("row 41: 'loadingdone' re-prepares only when a face a label was missing has arrived", async () => {
     const arrived = vi.spyOn(GlyphAtlas.prototype, "fontsArrived").mockReturnValue(false);
     fonts.dispatchEvent(new Event("loadingdone"));

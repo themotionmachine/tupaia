@@ -345,6 +345,8 @@ export class GpuRenderer {
   private neutralMutations = 0;
   private preparesWhileMoving = { starts: 0, commits: 0 };
   private prepareReason: PrepareReason = "initial"; // reason of the scheduled (not yet started) prepare
+  // false from construction (awaitWorld) until the first worldReplaced: the app has no map and main.js may not have run
+  private worldReady: boolean;
   private lastPrepare: GpuTelemetry["lastPrepare"] = null;
   private swapDrops = 0;
   private activeRefinements = 0;
@@ -464,8 +466,10 @@ export class GpuRenderer {
   constructor(
     private svg: SVGSVGElement,
     private fallBack: (reason: string) => void,
-    private readonly pickingEnabled = true
+    private readonly pickingEnabled = true,
+    awaitWorld = false
   ) {
+    this.worldReady = !awaitWorld;
     const style = this.canvas.style;
     Object.assign(style, { position: "fixed", pointerEvents: "none", display: "none" });
     this.canvas.dataset.gpuRenderer = "";
@@ -530,7 +534,7 @@ export class GpuRenderer {
     this.idleWatch = window.setInterval(this.watchIdle, IDLE_WATCH_MS);
     this.applyRootFilter();
     this.resize();
-    this.schedulePrepare(0, "initial");
+    if (this.worldReady) this.schedulePrepare(0, "initial");
   }
 
   // main.js camera hook. true = handled by uniforms (SVG transform write skipped). Exact updates return false so the
@@ -662,6 +666,7 @@ export class GpuRenderer {
     this.emblemCulling?.reset();
     this.standInUntil = performance.now() + STAND_IN_MS; // the new world's first prepare
     this.world = world;
+    this.worldReady = true;
     this.generation++;
     this.worldEpoch++;
     this.scenes.clear();
@@ -1534,6 +1539,9 @@ export class GpuRenderer {
   }
 
   private async prepare(): Promise<void> {
+    // W4c BOOT: an app renderer waits for the first world. Before it the deferred classic main.js may not have run
+    // (slow network): the export clone then reads undeclared globals (`customization`) and the prepare would fall back.
+    if (!this.worldReady) return;
     // a replaced #map waits for worldReplaced (map:loaded); a load that failed half way never re-prepares the old world
     if (!this.sourceCurrent() || !this.svg.querySelector("#viewbox")) return;
     // Keep navigation on the drawable frame: hover/style/resize work waits for the next settle (motion.ts). A replaced
@@ -1972,11 +1980,14 @@ function errorText(error: unknown): string {
 
 let detachRecover: (() => void) | null = null;
 
+// The app's renderer (renderer-mode.ts lazyGpuBackend) is created at module load, which on a slow network is before the
+// deferred classic main.js has run and long before a map exists. It prepares nothing until the router's first
+// worldReplaced (map:generated / map:loaded), which lazyGpuBackend replays at once when a world already arrived.
 export function createGpuRenderer(fallBack: (reason: string) => void): GpuRenderer {
   const svg = document.getElementById("map");
   if (!(svg instanceof SVGSVGElement)) throw new Error("missing <svg id=map>");
   const gpuSelection = new URLSearchParams(location.search).has("gpu-select");
-  const renderer = new GpuRenderer(svg, fallBack, gpuSelection);
+  const renderer = new GpuRenderer(svg, fallBack, gpuSelection, true);
   page.gpuRenderer = renderer;
   page.gpuPick = (x, y, tolerance) => renderer.pick(x, y, tolerance);
   // canvas fallbacks are read per call: their modules may load after the renderer. Read-only: the relief leg peeks

@@ -360,7 +360,8 @@ export async function prepareMapClone(type: string, options: GetMapURLOptions = 
 
     normalizeZoneHatching(clone.node()!, fullMap);
     if (type === "svg") removeUnusedElements(clone);
-    if (customization && type === "mesh") updateMeshCells(clone);
+    // `customization` is a top-level `let` of the classic main.js: undeclared until it runs (the GPU compat clone, W4c BOOT)
+    if (typeof customization !== "undefined" && customization && type === "mesh") updateMeshCells(clone);
     inlineStyle(clone);
     // Computed styles are now captured. The remaining asset/font work only reads attributes and builds defs;
     // keep that asynchronous work detached so the browser never paints a second full map while it awaits assets.
