@@ -51,9 +51,12 @@ export class GlyphAtlas {
   // bumped by every clear(): a frame records the generation its glyph instances index (prepare.ts retainFrame)
   generation = 0;
 
-  constructor() {
+  // `rows`: the canvas height (a fine cut's atlas, glyph-fine.ts, holds fewer rows than the renderer's); uvs stay
+  // normalized by the full GLYPH_ATLAS edge either way
+  constructor(rows = ATLAS) {
     this.canvas = document.createElement("canvas");
-    this.canvas.width = this.canvas.height = ATLAS;
+    this.canvas.width = ATLAS;
+    this.canvas.height = Math.max(1, Math.min(ATLAS, Math.ceil(rows)));
     const context = this.canvas.getContext("2d", { willReadFrequently: false });
     if (!context) throw new Error("Canvas2D unavailable");
     this.context = context;
@@ -138,7 +141,7 @@ export class GlyphAtlas {
     const height = Math.ceil(m.actualBoundingBoxDescent + extra) - top;
     if (width > ATLAS || height > ATLAS) return null;
     if (this.x + width > ATLAS) [this.x, this.y, this.row] = [0, this.y + this.row, 0];
-    if (this.y + height > ATLAS) return null;
+    if (this.y + height > this.canvas.height) return null;
     c.save();
     c.translate(this.x - left, this.y - top);
     c.fillStyle = c.strokeStyle = ink;
@@ -187,7 +190,7 @@ export class GlyphAtlas {
   }
 
   clear(): void {
-    this.context.clearRect(0, 0, ATLAS, ATLAS);
+    this.context.clearRect(0, 0, this.canvas.width, this.canvas.height);
     this.glyphs.clear();
     this.fontIssues.clear();
     this.x = this.y = this.row = 0;

@@ -30,6 +30,7 @@ import {
 } from "./editor-dispatch";
 import { HiddenEmblemCulling } from "./emblem-culling";
 import { FrameGraph } from "./framegraph";
+import { fineGlyphsAt, refineGlyphs, wantsFineGlyphs } from "./glyph-fine";
 import { GpuFrameTimer, type TimingTelemetry, timingRequested } from "./gpu-timer";
 import {
   BACKDROP_ALPHA,
@@ -180,7 +181,7 @@ export interface GpuTelemetry {
 }
 
 export interface TraceEntry {
-  kind: "prepare" | "overlay" | "window" | "refine" | "revision";
+  kind: "prepare" | "overlay" | "window" | "refine" | "revision" | "glyphs";
   at: number;
   ms: number | null; // null while running, or for an instantaneous event
   detail: string;
@@ -1491,7 +1492,13 @@ export class GpuRenderer {
         0,
         this.prepareWanted ? "settle-wanted" : prepared.revision !== this.revision ? "settle-revision" : "settle-bucket"
       );
-    if (action === "none" || !this.active()) return;
+    if (!this.active()) return;
+    // GLYPHZ: label glyphs at the exact device scale between powers of two (glyph-fine.ts), beside the compat refinement
+    // (also run to free a fine set cut for another scale, e.g. after zooming back onto the bucket's own scale)
+    const scale = this.view.k * this.viewport.dpr;
+    if (wantsFineGlyphs(prepared, scale) || (prepared.frame.fineGlyphs && !fineGlyphsAt(prepared.frame, scale)))
+      void this.refineGlyphs(prepared);
+    if (action === "none") return;
     if (this.refineHold) {
       this.refineHeld = true;
       return;
@@ -1515,6 +1522,33 @@ export class GpuRenderer {
       if (refined && this.prepared === prepared) this.requestDraw();
     } catch {
       // detail is optional: the base compat raster keeps drawing
+    } finally {
+      this.activeRefinements--;
+      done(outcome);
+    }
+  }
+
+  private async refineGlyphs(prepared: Prepared): Promise<void> {
+    const generation = this.generation;
+    const scale = this.view.k * this.viewport.dpr;
+    this.activeRefinements++;
+    const done = this.traceJob("glyphs", `fine ${scale.toFixed(3)}`);
+    let outcome = "failed";
+    try {
+      outcome = await refineGlyphs(
+        prepared,
+        this.device,
+        scale,
+        () =>
+          generation !== this.generation ||
+          this.prepared !== prepared ||
+          prepared.revision !== this.revision ||
+          this.moving ||
+          this.view.k * this.viewport.dpr !== scale
+      );
+      if (outcome === "cut") this.requestDraw();
+    } catch {
+      // optional like the compat detail: the bucket glyphs keep drawing
     } finally {
       this.activeRefinements--;
       done(outcome);

@@ -516,7 +516,9 @@ void main() {
 // pixels than the SVG); Lanczos-3 keeps the edge as sharp as the mask (exact at texel centres), and the 3% coverage
 // floor drops the faint ringing and fringe it leaves where Skia's own coverage is already zero. Where the bucket
 // oversamples the screen by more than 10% (zoom between powers of two), the mask is box-filtered over the pixel
-// footprint instead (four bilinear taps), which a fixed-size kernel would alias.
+// footprint instead (four bilinear taps), which a fixed-size kernel would alias. Since GLYPHZ (W4a) a settled frame
+// between powers of two draws a fine set re-cut at k * dpr (glyph-fine.ts), so the box filter serves gestures (a
+// carried frame) and frames whose re-cut was skipped (budget, a label laid out differently, k * dpr above 16).
 //
 // GLYPH2 (W3b): two things Chromium does per zoom, which a glyph baked at the raster bucket cannot follow, are done
 // here per frame from u_k, the camera's CSS px per world unit (one uniform, set by the text pass):

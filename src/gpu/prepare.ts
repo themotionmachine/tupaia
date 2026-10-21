@@ -292,6 +292,9 @@ export interface Prepared {
   // with ?gpu-restore-retain=0 (read when a restore prepares): the restore bench switches arms in the page
   // (history.replaceState) without a new prepare, so a frame committed under the opt-out arm must still be retainable.
   payload: Payload;
+  // GLYPHZ (W4a): each natively laid out label and its contiguous instance range in payload.glyphs, in instance order
+  // (glyph-fine.ts re-cuts them at the exact device scale on settle); empty for a frame restored from a payload
+  glyphLabels?: { element: SVGTextElement; first: number; count: number }[];
   release(): void;
 }
 
@@ -616,6 +619,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
   const edges = new F32(1 << 14); // fill anti-aliasing edges (framegraph fringe)
   const sprites = new F32(1 << 10);
   const glyphs: Float32Array[] = [];
+  const glyphLabels: NonNullable<Prepared["glyphLabels"]> = [];
   let glyphCount = 0;
   const pick = retained?.pick ?? new PickIndex(ctx.world.width, ctx.world.height);
   let relief: Prepared["relief"] = retained?.relief ?? null;
@@ -974,6 +978,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
           ))
             pick.addShape(draw.layer, shape);
         glyphs.push(batch.instances);
+        glyphLabels.push({ element: draw.element, first: glyphCount, count: batch.count });
         const last = out[out.length - 1];
         // consecutive labels share one instanced draw; DOM order is preserved because nothing sits between them
         if (last?.kind === "glyphs" && last.first + last.count === glyphCount) last.count += batch.count;
@@ -1418,6 +1423,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
       cpuBytes: pick.bytes() + overlays.bytes() + atlasBytes + payloadHeld,
       tessellation: payload.tessellation,
       payload,
+      glyphLabels: retained ? [] : glyphLabels,
       release
     };
     // The first frame's sharp runs at device density (firstDetails), for a load or a camera bucket only: an edit's
