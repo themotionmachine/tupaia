@@ -628,7 +628,18 @@ export function installReplay(config: { arm: string; editors: string[] }) {
       lastPrepareMs: g?.lastPrepareMs ?? null,
       lastPrepare: g?.lastPrepare ? { ...g.lastPrepare, reuse: g.lastPrepare.reuse ?? undefined } : null,
       steadyBytes: refinedAt != null && g?.memory?.gpu ? g.memory.gpu.total : null,
-      budget: g?.memory?.budget ?? null
+      budget: g?.memory?.budget ?? null,
+      // the renderer's recent-work trace from the close input on (ms since it): what the resume waited for
+      trace: g?.trace
+        ? {
+            jobs: g.trace.jobs
+              .filter((job: { at: number }) => job.at >= t0)
+              .map((job: { at: number; ms: number | null }) => ({ ...job, at: Math.round(job.at - t0), ms: job.ms == null ? null : Math.round(job.ms) })),
+            longTasks: g.trace.longTasks
+              .filter((task: { at: number }) => task.at >= t0)
+              .map((task: { at: number; ms: number }) => ({ at: Math.round(task.at - t0), ms: Math.round(task.ms) }))
+          }
+        : null
     };
   };
   // DOM quiet for `ms` (editors finish async work), bounded

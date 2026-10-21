@@ -30,6 +30,7 @@ import {
   cropRaster,
   LADDER_HEADROOM,
   LADDER_STEPS,
+  ladderEstimate,
   ladderFit,
   ladderScale,
   ladderStart,
@@ -135,6 +136,10 @@ export interface PrepareContext {
   // the prepare gave up because the live DOM changed under it without a revision bump (a run element was detached):
   // the caller must prepare again once it ends
   sourceChanged?(): void;
+  // a prepare whose frame nobody sees until it commits, so it commits on the base rasters and the settle refinement
+  // sharpens it (firstDetails skips, D12: the world first, the detail after): "restore" recovers from a context loss
+  // (renderer.ts restored()), "resume hold" runs behind the canonical SVG after an editor changed the model (D13)
+  behind?: "restore" | "resume hold";
 }
 
 // The scene curve tolerance; buildScene's own default, passed explicitly so the cache key cannot drift from it.
@@ -202,6 +207,9 @@ export interface CompatReuse {
   retained: boolean; // restored from a frame's retained CPU payload (retainFrame): no scene walk or conversion
   // the layers (#viewbox children, or root overlay ids) whose frame draws a raster reused from the previous frame
   keptLayers: string[];
+  // the level the world loop started at from an earlier frame's bytes (ladderEstimate), when nothing was kept; absent
+  // when it started at level 0 or from kept rasters (ladderStart)
+  ladderHint?: number;
 }
 
 // Hit shapes of a root overlay in the root <svg>'s user space (SVG-local CSS px: #map has no viewBox).
@@ -244,7 +252,7 @@ export interface PrepareMemory {
   steady: number;
   budget: number;
   overrun: number;
-  firstDetails: "cut" | "off" | "revision only" | "none sharp" | "no room" | "skipped";
+  firstDetails: "cut" | "off" | "revision only" | "restore" | "resume hold" | "none sharp" | "no room" | "skipped";
 }
 
 export interface Prepared {
@@ -355,6 +363,9 @@ interface Payload {
   atlasGeneration: number;
   recipes: Map<TrackedTexture, Recipe>;
   windows: WindowSource[];
+  // the world rasters' base resolution, ladder level and bytes (null: no world run): where the next prepare of this
+  // world, or the restore of this payload, starts its world loop (compat.ts ladderEstimate)
+  ladder?: { base: number; level: number; bytes: number } | null;
 }
 
 export interface RetainedFrame extends Payload {
@@ -1281,6 +1292,20 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
       const bytes = previous.runs.reduce((n, run) => (run.screen ? n : n + rgba(run.slot.texture)), 0);
       level = ladderStart(previous.compat.level, bytes, budget - sum(true) - share);
       resolution = base * ladderScale(level);
+    } else if (ladder) {
+      // Nothing kept, but an earlier frame of this world (the one on screen, or the payload a context loss left) says
+      // how many bytes its world rasters took: start where those fit instead of at level 0 (W4 RESUME). A different
+      // world (size, epoch) or base resolution says nothing.
+      const before = previous?.payload;
+      const hint =
+        before?.key.world === payloadAt.world && before.key.worldEpoch === payloadAt.worldEpoch
+          ? before.ladder
+          : (retained?.ladder ?? null);
+      if (hint && hint.base === base && hint.bytes > 0 && worldRuns.length) {
+        level = ladderEstimate(hint.level, hint.bytes, budget - sum(true) - share);
+        resolution = base * ladderScale(level);
+        report.ladderHint = level;
+      }
     }
     // World rasters in run order at the current level. Whenever their bytes exceed the room, the level steps down to
     // one that fits under LADDER_HEADROOM of it: every held fresh raster is resampled to it (scaleRaster), later runs
@@ -1387,7 +1412,10 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
       atlasCopy: !!retained,
       atlasGeneration: ctx.atlas.generation === atlasGeneration ? atlasGeneration : -1,
       recipes,
-      windows: windowSources.map(item => ({ ...item }))
+      windows: windowSources.map(item => ({ ...item })),
+      ladder: worldRuns.length
+        ? { base, level, bytes: worldRuns.reduce((n, run) => n + rgba(run.slot.texture), 0) }
+        : null
     };
     const overlays = indexOverlays(runs, ctx.screen);
     // tracker entries older than every raster this frame or the previous one still draws can no longer matter
@@ -1500,7 +1528,11 @@ export function detailShare(
 // footprint first, so markers and icons before the precipitation field); runs whose base is already as dense as the
 // screen are skipped. Detail is optional: a failure leaves the base. "stale" only when the job went stale. Not for a
 // revision-only prepare (`editOnly`, an edit on the same camera bucket): the orchestrator's W3b call, so an edit's
-// frame is not held back by up to FIRST_DETAIL_MS (its settle refinement sharpens it right after).
+// frame is not held back by up to FIRST_DETAIL_MS (its settle refinement sharpens it right after). Nor for a prepare
+// behind the SVG (`ctx.behind`, W4 RESUME): the recovery from a context loss (0.7-1 s of the 100k restore was this pass)
+// and the resume hold after an editor changed the model (0.15-0.2 s of the heightmap editor's resume), where the
+// canonical SVG shows until the frame is current. The frame presents the world first and the settle refinement cuts
+// the same details right after it.
 export async function firstDetails(
   prepared: Prepared,
   ctx: PrepareContext,
@@ -1509,6 +1541,7 @@ export async function firstDetails(
 ): Promise<PrepareMemory["firstDetails"] | "stale"> {
   if (!firstDetailEnabled()) return "off";
   if (editOnly) return "revision only";
+  if (ctx.behind) return ctx.behind;
   if (!prepared.runs.some(run => run.sharp && !run.screen && run.slot.texture)) return "none sharp";
   const { device } = ctx;
   // everything the frame holds, carried-over settle details included (they are tracked, and a detail this pass drops
@@ -1639,7 +1672,8 @@ function adoptRuns(device: GpuDevice, svg: SVGSVGElement, runs: CompatRun[], pre
       !!style.structural,
       closures.map(closure => closure.ids),
       style.references,
-      closures.map(closure => [...closure.externals.values()])
+      closures.map(closure => [...closure.externals.values()]),
+      id => styleReach(svg, style.scopes.get(id), pairs, closures)
     );
     pairs.forEach(({ run, old }, i) => {
       // a live element the run paints through (the states halo clips by #stateN paths): watched by the tracker while
@@ -1728,6 +1762,36 @@ function adoptRuns(device: GpuDevice, svg: SVGSVGElement, runs: CompatRun[], pre
     }
   };
   return result;
+}
+
+// Which paired runs a change to a stylesheet-named definition can reach (CompatDirt.evaluate styleReach): those with an
+// element, or a live element they paint through (referenceClosure externals), that is, contains or sits inside an
+// element the naming rules match now. null (every run) when the rules are unknown (an at-rule names the id), their
+// selectors do not parse, or one matches inside a definition or outside svg#map: content reached through a reference
+// (a <use> of a matched path) is not followed here.
+const DEFINITION_ANCESTOR = "defs, symbol, pattern, marker, clipPath, mask, filter, linearGradient, radialGradient";
+function styleReach(
+  svg: SVGSVGElement,
+  selectors: readonly string[] | null | undefined,
+  pairs: readonly { run: CompatRun }[],
+  closures: readonly { externals: Map<string, ReuseNode> }[]
+): ((run: number) => boolean) | null {
+  if (!selectors?.length) return null;
+  let matched: Element[];
+  try {
+    matched = [...svg.ownerDocument.querySelectorAll(selectors.join(","))];
+  } catch {
+    return null;
+  }
+  if (matched.some(element => !svg.contains(element) || element.closest(DEFINITION_ANCESTOR))) return null;
+  if (!matched.length) return () => false;
+  return i => {
+    const reached = [
+      ...pairs[i].run.elements,
+      ...(closures[i].externals.values() as Iterable<unknown> as Iterable<Element>)
+    ];
+    return reached.some(element => matched.some(target => target.contains(element) || element.contains(target)));
+  };
 }
 
 // Settle-time sharper raster of world compat runs for the visible region at backing resolution, alpha-cropped and kept

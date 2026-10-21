@@ -1420,7 +1420,9 @@ export class GpuRenderer {
         worldEpoch: this.worldEpoch,
         picking: this.pickingEnabled,
         previous: this.prepared,
-        retained: this.retained
+        retained: this.retained,
+        // W4 RESUME: nobody sees this frame before it commits; the world first, the settle refinement sharpens it
+        behind: recovering ? "restore" : this.holding() ? "resume hold" : undefined
       });
       if (next) record.reuse = next.compat.reuse;
       if (!next) {

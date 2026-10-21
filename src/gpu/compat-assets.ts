@@ -12,21 +12,119 @@ const neutralStyles = new Set([
   ".viewport-culled{display:none!important;pointer-events:none!important}"
 ]);
 
+// A stylesheet's verdict, kept per <style> element while its text is the same: the export clone embeds the map's fonts
+// as one large @font-face sheet, and parsing it again for every raster cost about 20 ms a cut on the 100k world.
+const styleVerdicts = new WeakMap<Element, { text: string; safe: boolean }>();
+
+function safeStyle(style: Element): boolean {
+  const text = style.textContent || "";
+  if (neutralStyles.has(text)) return true;
+  const known = styleVerdicts.get(style);
+  if (known?.text === text) return known.safe;
+  let safe = true;
+  try {
+    const sheet = new CSSStyleSheet();
+    sheet.replaceSync(text);
+    // Font declarations cannot select siblings or depend on the number/order of definitions.
+    if (!sheet.cssRules.length || [...sheet.cssRules].some(rule => rule.type !== CSSRule.FONT_FACE_RULE)) safe = false;
+  } catch {
+    safe = false;
+  }
+  styleVerdicts.set(style, { text, safe });
+  return safe;
+}
+
 function safeStyles(root: Element): boolean {
-  for (const style of root.querySelectorAll("style")) {
-    const text = style.textContent || "";
-    if (neutralStyles.has(text)) continue;
+  for (const style of root.querySelectorAll("style")) if (!safeStyle(style)) return false;
+  return true;
+}
+
+// What the candidates (generated COA <svg>s) hold, which depends on nothing outside them: built once per root and set of
+// candidates (W4 RESUME). The export clone is cut many times per revision and its definitions never change in between
+// (isolation only detaches and reinserts nodes outside <defs>), and walking every element of every COA for each cut cost
+// up to 25 ms a raster on the 100k world. `bail`: a candidate id outside `identifier`, so every cut keeps the tree.
+// `edges`: the candidates each candidate's own subtree names; `unknown`: candidates whose subtree holds a reference
+// this scan cannot read (an escape, a malformed encoding), which keeps the tree once such a candidate is retained.
+interface CandidateGraph {
+  candidates: Element[];
+  bail: boolean;
+  ids: Map<string, Set<Element>>;
+  edges: Map<Element, Set<Element>>;
+  unknown: Set<Element>;
+  styled: Element[]; // candidates holding a stylesheet: always retained
+}
+const graphs = new WeakMap<Element, CandidateGraph>();
+
+// The candidate owners `text` names through a #fragment, into `out`; false when the text cannot be read safely.
+function referencesIn(
+  text: string,
+  ids: ReadonlyMap<string, Set<Element>>,
+  out: (candidate: Element) => void
+): boolean {
+  if (text.includes("\\")) return false;
+  if (!text.includes("#") && !text.includes("%")) return true; // nothing to name (an encoded # is %23)
+  const strings = [text];
+  if (/%[\da-f]{2}/i.test(text)) {
+    // A geometry value such as 100% is not an encoded reference. Preserve ordinary percent signs when
+    // an attribute also contains an encoded fragment (e.g. a CSS variable URL alongside a percentage).
     try {
-      const sheet = new CSSStyleSheet();
-      sheet.replaceSync(text);
-      // Font declarations cannot select siblings or depend on the number/order of definitions.
-      if (!sheet.cssRules.length || [...sheet.cssRules].some(rule => rule.type !== CSSRule.FONT_FACE_RULE))
-        return false;
+      strings.push(decodeURIComponent(text.replace(/%(?![\da-f]{2})/gi, "%25")));
     } catch {
       return false;
     }
   }
+  for (const value of strings)
+    for (const match of value.matchAll(/#([\w.:-]+)/g)) for (const candidate of ids.get(match[1]) || []) out(candidate);
   return true;
+}
+
+// The references an element's attributes (and a <style>'s text) make; false when one cannot be read safely.
+function scanElement(element: Element, ids: ReadonlyMap<string, Set<Element>>, out: (candidate: Element) => void) {
+  for (const attribute of element.attributes) if (!referencesIn(attribute.value, ids, out)) return false;
+  if (element.tagName.toLowerCase() === "style" && !referencesIn(element.textContent || "", ids, out)) return false;
+  return true;
+}
+
+function candidateGraph(root: Element, candidates: Element[]): CandidateGraph {
+  const cached = graphs.get(root);
+  if (
+    cached &&
+    cached.candidates.length === candidates.length &&
+    cached.candidates.every((c, i) => c === candidates[i])
+  )
+    return cached;
+  const graph: CandidateGraph = {
+    candidates,
+    bail: false,
+    ids: new Map(),
+    edges: new Map(),
+    unknown: new Set(),
+    styled: []
+  };
+  graphs.set(root, graph);
+  for (const candidate of candidates)
+    for (const element of [candidate, ...candidate.querySelectorAll("*")]) {
+      if (!element.id) continue;
+      if (!identifier.test(element.id)) {
+        graph.bail = true;
+        return graph;
+      }
+      const owners = graph.ids.get(element.id) || new Set<Element>();
+      owners.add(candidate);
+      graph.ids.set(element.id, owners);
+    }
+  for (const candidate of candidates) {
+    const named = new Set<Element>();
+    const add = (target: Element) => named.add(target);
+    for (const element of [candidate, ...candidate.querySelectorAll("*")])
+      if (!scanElement(element, graph.ids, add)) {
+        graph.unknown.add(candidate);
+        break;
+      }
+    graph.edges.set(candidate, named);
+    if (candidate.querySelector("style,link,font,font-face")) graph.styled.push(candidate);
+  }
+  return graph;
 }
 
 // Returns an exact restoration function. The caller must restore synchronously before yielding/reusing the clone.
@@ -39,18 +137,8 @@ export function isolateEmblemDefinitions(root: Element): () => void {
   for (const candidate of candidates)
     for (let parent = candidate.parentElement; parent; parent = parent.parentElement)
       if (candidateSet.has(parent)) return unchanged;
-  const owner = new Map<Element, Element>();
-  const ids = new Map<string, Set<Element>>();
-  for (const candidate of candidates) {
-    for (const element of [candidate, ...candidate.querySelectorAll("*")]) {
-      owner.set(element, candidate);
-      if (!element.id) continue;
-      if (!identifier.test(element.id)) return unchanged;
-      const owners = ids.get(element.id) || new Set<Element>();
-      owners.add(candidate);
-      ids.set(element.id, owners);
-    }
-  }
+  const graph = candidateGraph(root, candidates);
+  if (graph.bail) return unchanged;
   const retained = new Set<Element>();
   const queue: Element[] = [];
   const retain = (candidate: Element) => {
@@ -58,39 +146,19 @@ export function isolateEmblemDefinitions(root: Element): () => void {
     retained.add(candidate);
     queue.push(candidate);
   };
-  let unknown = false;
-  const references = (text: string) => {
-    if (text.includes("\\")) {
-      unknown = true;
-      return;
-    }
-    const strings = [text];
-    if (/%[\da-f]{2}/i.test(text)) {
-      // A geometry value such as 100% is not an encoded reference. Preserve ordinary percent signs when
-      // an attribute also contains an encoded fragment (e.g. a CSS variable URL alongside a percentage).
-      try {
-        strings.push(decodeURIComponent(text.replace(/%(?![\da-f]{2})/gi, "%25")));
-      } catch {
-        unknown = true;
-        return;
-      }
-    }
-    for (const value of strings)
-      for (const match of value.matchAll(/#([\w.:-]+)/g))
-        for (const candidate of ids.get(match[1]) || []) retain(candidate);
-  };
-  const scan = (element: Element) => {
-    for (const attribute of element.attributes) references(attribute.value);
-    if (element.tagName.toLowerCase() === "style") references(element.textContent || "");
-  };
   // Every stylesheet stays in its original owner/location, including the final shared canonical COA sheet.
-  for (const candidate of candidates) if (candidate.querySelector("style,link,font,font-face")) retain(candidate);
-  for (const element of [root, ...root.querySelectorAll("*")]) if (!owner.has(element)) scan(element);
-  while (queue.length && !unknown) {
+  for (const candidate of graph.styled) retain(candidate);
+  // every element outside the candidates (their subtrees are the graph's), in document order
+  const walker = root.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, {
+    acceptNode: node => (candidateSet.has(node as Element) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT)
+  });
+  for (let node: Node | null = root; node; node = walker.nextNode())
+    if (!scanElement(node as Element, graph.ids, retain)) return unchanged;
+  while (queue.length) {
     const candidate = queue.pop()!;
-    for (const element of [candidate, ...candidate.querySelectorAll("*")]) scan(element);
+    if (graph.unknown.has(candidate)) return unchanged;
+    for (const target of graph.edges.get(candidate) ?? []) retain(target);
   }
-  if (unknown) return unchanged;
   const removed: [Element, Element, Node | null][] = [];
   for (const candidate of candidates) {
     if (retained.has(candidate) || !candidateSet.has(candidate) || !candidate.parentElement) continue;

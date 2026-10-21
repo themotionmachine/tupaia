@@ -234,7 +234,8 @@ export class CompatDirt {
   // Why each run is dirty ("" when clean). `structural`: a stylesheet rule can make a map element depend on its
   // siblings, so a change outside the runs can still reach them. `references[i]`: the ids run i paints through
   // (referenceClosure); a run without one is dirtied by any definition change. `styleReferences`: the ids the
-  // stylesheets name (StyleState.references); a change to one of them dirties every run. `watched[i]`: live map
+  // stylesheets name (StyleState.references); a change to one of them dirties every run, or with `styleReach` only the
+  // runs it says the rules naming that id reach (null: unknown, every run). `watched[i]`: live map
   // elements outside the definitions that run i paints through (referenceClosure externals, the states halo's
   // <clipPath><use href="#state1">): a change in one's subtree dirties the run. Which element each id resolves to is
   // the caller's to compare (a replaced or removed target is not a change the tracker can attribute).
@@ -243,23 +244,26 @@ export class CompatDirt {
     structural: boolean,
     references?: readonly (ReadonlySet<string> | null | undefined)[],
     styleReferences?: ReadonlySet<string>,
-    watched?: readonly (readonly ReuseNode[] | null | undefined)[]
+    watched?: readonly (readonly ReuseNode[] | null | undefined)[],
+    styleReach?: (id: string) => ((run: number) => boolean) | null
   ): string[] {
     const why = runs.map(run => (run.stamp < this.globalAt ? `global: ${this.globalWhy}` : ""));
     const live = runs.flatMap((_, i) => (why[i] ? [] : [i]));
     if (!live.length) return why;
     const floor = Math.min(...live.map(i => runs[i].stamp));
     if (this.defined.size) {
-      let everyAt = 0;
-      let everyWhy = "";
+      // changed definitions a stylesheet names, latest first, each with the runs its rules reach (W4 RESUME: the land
+      // mask that drawFeatures rewrites on a heightmap edit is named by `#landmass, #texture, #statesBody ...` rules,
+      // and used to dirty every run, the vignette and the legend included)
+      const styled: { id: string; at: number; why: string; reach: ((run: number) => boolean) | null }[] = [];
       for (const [id, { at, why: reason }] of this.defined)
-        if (at > floor && at > everyAt && styleReferences?.has(id)) {
-          everyAt = at;
-          everyWhy = `${reason} (#${id} named by a stylesheet)`;
-        }
+        if (at > floor && styleReferences?.has(id))
+          styled.push({ id, at, why: `${reason} (#${id} named by a stylesheet)`, reach: styleReach?.(id) ?? null });
+      styled.sort((a, b) => b.at - a.at);
       for (const i of live) {
-        if (everyAt > runs[i].stamp) {
-          why[i] = everyWhy;
+        const hit = styled.find(entry => entry.at > runs[i].stamp && (!entry.reach || entry.reach(i)));
+        if (hit) {
+          why[i] = hit.why;
           continue;
         }
         const named = references?.[i];
@@ -532,6 +536,9 @@ export interface StyleState {
   key: string; // everything the rules can contribute to a clone raster
   structural: string; // a sibling-dependent selector that can match a map element ("" when none)
   references: Set<string>; // the ids the rules name (url(#id)): a change to one can reach any run
+  // per named id, the selectors of the plain style rules that name it, or null when another rule names it too (an
+  // at-rule, a nested rule): a change to the id reaches only what those selectors match (styleReach), when known
+  scopes: Map<string, string[] | null>;
 }
 
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -548,6 +555,16 @@ export function styleState(
     media?.mediaText ? ` @holds ${matches(media.mediaText)}` : "";
   let key = "";
   let structural = "";
+  const scopes = new Map<string, string[] | null>();
+  const scope = (rule: RuleLike) => {
+    const plain = rule.selectorText !== undefined && !rule.cssRules?.length;
+    for (const match of rule.cssText.matchAll(URL_REFERENCE)) {
+      const id = match[1];
+      const known = scopes.get(id);
+      if (!plain) scopes.set(id, null);
+      else if (known !== null) scopes.set(id, [...(known ?? []), rule.selectorText!]);
+    }
+  };
   const visit = (rules: ArrayLike<RuleLike>) => {
     for (let i = 0; i < rules.length; i++) {
       const rule = rules[i];
@@ -558,6 +575,7 @@ export function styleState(
       if (rule.selectorText !== undefined) {
         const selectors = split(rule.selectorText, ",");
         if (selectors.every(selector => MAP_SCOPED.test(selector))) continue;
+        scope(rule);
         if (!structural)
           for (const selector of selectors)
             if (STRUCTURAL.test(selector) && !MAP_SCOPED.test(selector) && applies(subject(selector))) {
@@ -565,6 +583,8 @@ export function styleState(
               break;
             }
       }
+      // an at-rule holding no rules of its own (@font-face, @property): what it names has no selector to follow
+      if (rule.selectorText === undefined && !rule.cssRules) scope(rule);
       if (rule.cssRules && rule.selectorText === undefined) {
         key += `${rule.cssText.slice(0, rule.cssText.indexOf("{"))}${holds(rule.media)}{`;
         visit(rule.cssRules);
@@ -602,7 +622,9 @@ export function styleState(
   key = out;
   const references = new Set<string>();
   for (const match of key.matchAll(URL_REFERENCE)) references.add(match[1]);
-  return { key, structural, references };
+  // a named id no rule was seen naming (a disabled svg sheet's text, a sheet keyed from elsewhere): unknown reach
+  for (const id of references) if (!scopes.has(id)) scopes.set(id, null);
+  return { key, structural, references, scopes };
 }
 
 // services/fonts.ts `fonts`: the families the export clone may embed (null when unavailable).
