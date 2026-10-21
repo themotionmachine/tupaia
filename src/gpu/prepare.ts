@@ -30,8 +30,8 @@ import {
   cropRaster,
   LADDER_HEADROOM,
   LADDER_STEPS,
-  ladderEstimate,
   ladderFit,
+  ladderHint,
   ladderScale,
   ladderStart,
   type Region,
@@ -364,7 +364,7 @@ interface Payload {
   recipes: Map<TrackedTexture, Recipe>;
   windows: WindowSource[];
   // the world rasters' base resolution, ladder level and bytes (null: no world run): where the next prepare of this
-  // world, or the restore of this payload, starts its world loop (compat.ts ladderEstimate)
+  // world, or the restore of this payload, starts its world loop (compat.ts ladderHint)
   ladder?: { base: number; level: number; bytes: number } | null;
 }
 
@@ -1302,7 +1302,7 @@ export async function prepareFrame(svg: SVGSVGElement, ctx: PrepareContext): Pro
           ? before.ladder
           : (retained?.ladder ?? null);
       if (hint && hint.base === base && hint.bytes > 0 && worldRuns.length) {
-        level = ladderEstimate(hint.level, hint.bytes, budget - sum(true) - share);
+        level = ladderHint(hint.level, hint.bytes, budget - sum(true) - share);
         resolution = base * ladderScale(level);
         report.ladderHint = level;
       }
