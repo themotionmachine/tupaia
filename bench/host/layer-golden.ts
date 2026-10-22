@@ -44,7 +44,8 @@
 //                    is waited out or fails as a harness error. LIMIT: a reference that changes by no more than
 //                    SETTLE_NOISE_PX pixels per interval counts as settled, so a slow drift under that count (about
 //                    0.007 % of a dpr 2 frame) is not seen. The count is 16 px per dpr squared (64 px at dpr 2, 16 at
-//                    dpr 1) so the share of the frame stays the same at both ratios.
+//                    dpr 1) so the share of the frame stays the same at both ratios. A shot bit-identical to an earlier,
+//                    non-adjacent one also counts as settled (raster variants, see shootSvg).
 //   GOLDEN_PRECOA    1 (default): render every emblem COA symbol before the first capture. 0: leave them lazy, as the app
 //                    does, so the cell catches the GPU/lazy-COA race (gate.ts `coa-race` is its own check, not a golden-selftest arm;
 //                    it uses GOLDEN_COA_LATE below, the deterministic form of the race).
@@ -673,7 +674,7 @@ const countDiff = (a: Buffer, b: Buffer) => {
 // the shots would mean the arms are not the same frame, so it is an error.
 async function captureArms(
   page: Page
-): Promise<{ gpu: Buffer; svg: Buffer; svgShots: number; svgSettled: boolean; svgMoving?: string; showThrough: { composite: number; magenta: number } | null; probe: Record<string, Buffer> }> {
+): Promise<{ gpu: Buffer; svg: Buffer; svgShots: number; svgSettled: boolean; svgMoving?: string; svgRepeat?: string; showThrough: { composite: number; magenta: number } | null; probe: Record<string, Buffer> }> {
   const stamp = await gpuStamp(page);
   let gpu: Buffer;
   let showThrough: { composite: number; magenta: number } | null = null;
@@ -705,7 +706,7 @@ async function captureArms(
   await showCanvas(page, old);
   const after = await gpuStamp(page);
   if (after !== stamp) throw Error(`GPU frame changed while the arms were captured (prepares/revision/visible ${stamp} → ${after})`);
-  return { gpu, svg: settle.png, svgShots: settle.shots, svgSettled: settle.settled, svgMoving: settle.moving, showThrough, probe };
+  return { gpu, svg: settle.png, svgShots: settle.shots, svgSettled: settle.settled, svgMoving: settle.moving, svgRepeat: settle.repeat, showThrough, probe };
 }
 
 const hideCanvas = (page: Page) =>
@@ -733,9 +734,22 @@ const showCanvas = (page: Page, value: string | null) =>
 const SETTLE_NOISE_PX_PER_DPR2 = 16;
 const settleNoisePx = (png: Buffer) => SETTLE_NOISE_PX_PER_DPR2 * (png.readUInt32BE(16) / VIEWPORT_WIDTH) ** 2; // PNG IHDR width / CSS width = dpr
 const SETTLE_SHOTS = 10;
-async function shootSvg(page: Page): Promise<{ png: Buffer; shots: number; settled: boolean; moving?: string }> {
+// RASTER VARIANTS: under GPU rasterization (the Metal launch below) Chromium re-rasters svg#map from time to time
+// although nothing in the page changes, and each raster of the same DOM comes out as one of a few fixed images.
+// Measured on d2/goods/k1 (dozens of drop-shadowed goods <use> icons; cyberpunk and default alike): no DOM mutation,
+// no running animation, no GPU prepare between shots, yet shots cycled through ~6 bit-exact variants (the same PNG
+// hashes in every run), 57-145 px apart (mostly +-1 code value on icon edges, a few px more), e.g. A B A B ... at
+// 80 px, over the 64 px noise count: the cell failed as "still changing" about 1 run in 3. Not a product repaint, and
+// not timing: back-to-back shots switch variants too, and under --disable-gpu-rasterization every shot is identical.
+// CPU raster is not the fix: it changes the reference of every cell (default d2 k 1,4: 12 of 74 cells failed under
+// it, 0 under GPU raster). So a shot bit-identical to an earlier, non-adjacent shot settles the reference: the raster
+// is cycling between variants of one frame, not moving towards a new one (a lazy raster or a refinement never returns
+// to an exact earlier frame). LIMIT: a page that really flickers between two exact frames (a blink) settles the same
+// way; the SVG map has none.
+async function shootSvg(page: Page): Promise<{ png: Buffer; shots: number; settled: boolean; moving?: string; repeat?: string }> {
   let png = await page.screenshot({ animations: "disabled", style: HIDE_CHROME });
   if (settleMs === 0) return { png, shots: 1, settled: true };
+  const seen = [png];
   let moving: string | undefined;
   // patient on a loaded host: five shots settleMs apart, then up to five more 1.5 s apart (a 12-20 load average made the
   // page lag by seconds in the presets run) before the reference counts as moving
@@ -746,6 +760,9 @@ async function shootSvg(page: Page): Promise<{ png: Buffer; shots: number; settl
     png = next;
     if (change.n <= settleNoisePx(next)) return { png, shots, settled: true };
     moving = change.where;
+    const earlier = seen.slice(0, -1).findIndex(shot => shot.equals(next));
+    if (earlier >= 0) return { png, shots, settled: true, repeat: `shot ${shots} repeats shot ${earlier + 1} bit for bit (raster variants; ${moving} from shot ${shots - 1})` };
+    seen.push(next);
   }
   return { png, shots: SETTLE_SHOTS, settled: false, moving };
 }
@@ -1049,6 +1066,7 @@ try {
               }
               cell.svgShots = shots.svgShots;
               if (!shots.svgSettled) cell.failures.push(`harness: the SVG arm was still changing after ${shots.svgShots} shots ${settleMs} ms apart (${shots.svgMoving})`);
+              if (shots.svgRepeat) cell.notes = [...(cell.notes ?? []), `SVG arm settled on a repeat: ${shots.svgRepeat}`];
               // dense bitmap families: the vector form is the reference (GOLDEN_SVG_REF), the shown bitmap is reported
               let svgPng = shots.svg;
               let otherPng: Buffer | null = null; // the dense family's other SVG reference
