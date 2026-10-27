@@ -53,7 +53,7 @@ const script: EditorScript = {
 
 describe("arms", () => {
   it("maps arms to URL flags and requires the svg recording arm", () => {
-    assert.equal(armQuery("svg"), "");
+    assert.equal(armQuery("svg"), "&renderer=svg");
     assert.equal(armQuery("gpu"), "&renderer=gpu");
     assert.equal(armQuery("gpu-select"), "&renderer=gpu&gpu-select");
     assert.deepEqual(parseArms(undefined), ["svg", "gpu", "gpu-select"]);
@@ -164,6 +164,15 @@ describe("checkGpuStep", () => {
     assert.deepEqual(checkGpuStep({ ...idle({ settledMs: null }), op: "display" }, "gpu", 1000), []);
     // with an editor open the suspended/hidden checks speak for it
     assert.deepEqual(checkGpuStep(step({ gpu: gpu({ settledMs: null }) }), "gpu", 1000), []);
+  });
+  it("[W5] judges a click with the canvas shown under the svg-cover, wherever it applies", () => {
+    const cover = (over = {}) => ({ gpu: true, canvasShown: true, optedOut: false, armed: true, active: true, wanted: true, enabled: true, issue: "", viewboxVisibility: "hidden", ...over });
+    const click = (c: ReturnType<typeof cover>) => step({ gpu: gpu(), cover: c });
+    assert.deepEqual(checkGpuStep(click(cover()), "gpu", 1000), []);
+    assert.match(checkGpuStep(click(cover({ active: false })), "gpu", 1000).join(), /svg-cover: applies .* not active/);
+    assert.match(checkGpuStep(click(cover({ armed: false, active: false })), "gpu-select", 1000).join(), /not armed/);
+    assert.deepEqual(checkGpuStep(click(cover({ canvasShown: false, active: false })), "gpu", 1000), []); // editor open
+    assert.deepEqual(checkGpuStep(click(cover({ issue: "focus inside the model", active: false })), "gpu", 1000), []);
   });
   it("requires a measured, refined resume after the close", () => {
     const closed = (resume: any) => step({ op: "close", dialogs: [], gpu: gpu({ state: "active", suspendedReason: null, canvasVisible: true }), resume });

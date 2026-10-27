@@ -25,9 +25,15 @@ function fakeBackend(log: string[], failOn?: "worldReplaced" | "dispose"): Rende
 }
 
 describe("parseRendererPreference", () => {
-  it("defaults to svg without a flag", () => {
-    expect(parseRendererPreference("")).toEqual({ requested: "svg", source: "default", raw: null });
-    expect(parseRendererPreference("?seed=1&reliefWorker=1")).toMatchObject({ requested: "svg", source: "default" });
+  it("defaults to gpu without a flag (W5), with no warning", () => {
+    expect(parseRendererPreference("")).toEqual({ requested: "gpu", source: "default", raw: null });
+    const plain = { requested: "gpu", source: "default", raw: null };
+    expect(parseRendererPreference("?seed=1&reliefWorker=1")).toEqual(plain);
+    expect(parseRendererPreference("?gpu-select")).toMatchObject({ requested: "gpu", source: "default" });
+  });
+
+  it("opts out to svg with ?renderer=svg", () => {
+    expect(parseRendererPreference("?renderer=svg")).toEqual({ requested: "svg", source: "query", raw: "svg" });
   });
 
   it("accepts svg and gpu with surrounding whitespace and any case", () => {
@@ -85,10 +91,10 @@ describe("probeWebGL2", () => {
 });
 
 describe("RendererRouter", () => {
-  it("never probes or builds a GPU backend for the default svg path", () => {
+  it("never probes or builds a GPU backend for the ?renderer=svg opt-out", () => {
     const calls: string[] = [];
     const router = new RendererRouter({
-      search: "",
+      search: "?renderer=svg",
       probe: () => {
         calls.push("probe");
         return { webgl2: true };
@@ -99,6 +105,32 @@ describe("RendererRouter", () => {
       }
     });
     expect(router.start()).toMatchObject({ requested: "svg", active: "svg", fallbackReason: "", capabilities: null });
+    expect(calls).toEqual([]);
+  });
+
+  it("probes and builds the GPU backend by default", () => {
+    const router = new RendererRouter({ search: "", probe: webgl2, gpuBackend: () => fakeBackend([]) });
+    expect(router.start()).toMatchObject({ requested: "gpu", active: "gpu", fallbackReason: "", warnings: [] });
+  });
+
+  it("falls back to svg by default when WebGL2 is missing", () => {
+    const router = new RendererRouter({ search: "", probe: () => ({ webgl2: false, reason: "no gl" }) });
+    expect(router.start()).toMatchObject({ requested: "gpu", active: "svg", fallbackReason: "no gl" });
+  });
+
+  it.each(["?renderer=webgl", "?renderer=gpu&renderer=svg"])("never probes for %s (svg with a warning)", search => {
+    const calls: string[] = [];
+    const router = new RendererRouter({
+      search,
+      probe: () => {
+        calls.push("probe");
+        return { webgl2: true };
+      },
+      gpuBackend: () => fakeBackend([])
+    });
+    const status = router.start();
+    expect(status).toMatchObject({ requested: "svg", active: "svg" });
+    expect(status.warnings).toHaveLength(1);
     expect(calls).toEqual([]);
   });
 
@@ -187,8 +219,10 @@ describe("RendererRouter", () => {
 });
 
 describe("module wiring", () => {
-  it("exposes an svg status for the page without a renderer flag", () => {
-    expect(rendererStatus()).toMatchObject({ requested: "svg", active: "svg", started: true, disposed: false });
+  it("requests gpu for the page without a renderer flag, and falls back to svg where WebGL2 is missing", () => {
+    // the node test environment has no canvas: the default GPU request falls back at start
+    expect(rendererStatus()).toMatchObject({ requested: "gpu", active: "svg", started: true, disposed: false });
+    expect(rendererStatus().fallbackReason).not.toBe("");
     expect(window.rendererStatus).toBe(rendererStatus);
   });
 });

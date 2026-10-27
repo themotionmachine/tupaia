@@ -1,6 +1,8 @@
-// Renderer routing behind ?renderer=svg|gpu. SVG is the default: it never probes WebGL, loads GPU code or allocates
-// GPU resources. A gpu request is probed, then the P1 backend module is loaded lazily; any init, load, prepare or
-// restore failure falls back to the canonical SVG, which save/export always use.
+// Renderer routing behind ?renderer=svg|gpu. GPU is the default display (W5); the hidden SVG stays the editable model
+// (D9). ?renderer=svg opts out: it never probes WebGL, loads GPU code or allocates GPU resources, and an unknown or
+// conflicting value is treated the same way, with a warning. A gpu request (default or explicit) is probed, then the
+// P1 backend module is loaded lazily; no WebGL2, or any init, load, prepare or restore failure, falls back to the
+// canonical SVG, which save/export always use.
 import type { GpuRenderer } from "../gpu/renderer";
 
 export type RendererKind = "svg" | "gpu";
@@ -47,7 +49,7 @@ export const GPU_UNAVAILABLE_REASON = "No GPU backend registered";
 
 export function parseRendererPreference(search: string): RendererPreference {
   const values = new URLSearchParams(search).getAll("renderer");
-  if (!values.length) return { requested: "svg", source: "default", raw: null };
+  if (!values.length) return { requested: "gpu", source: "default", raw: null };
   const raw = values[values.length - 1],
     normalized = new Set(values.map(value => value.trim().toLowerCase()));
   if (normalized.size > 1)
@@ -236,7 +238,10 @@ const router = new RendererRouter({
   gpuBackend: lazyGpuBackend
 });
 const status = router.start();
-if (status.requested !== "svg" || status.warnings.length)
+// Diagnostics only when something did not go as asked: a GPU request that fell back at start, or a warning (an unknown
+// or conflicting ?renderer=). The normal default-GPU load and an explicit ?renderer=svg log nothing. Later fallbacks
+// (load, prepare, restore) are logged by RendererRouter.fallBack.
+if (status.active !== status.requested || status.warnings.length)
   console.warn("Renderer:", status.active, status.fallbackReason, ...status.warnings);
 if (typeof window.addEventListener === "function")
   for (const event of ["map:generated", "map:loaded", "map:resampled"])

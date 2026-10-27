@@ -12,12 +12,12 @@ async function waitForMapLoad(page: Page) {
 test.describe("Tour Prompt Button", () => {
   test.beforeEach(async ({ context, page }) => {
     await context.clearCookies();
-    await page.goto("/");
+    await page.goto("/?renderer=svg");
     await page.evaluate(() => {
       localStorage.clear();
       sessionStorage.clear();
     });
-    await page.goto("/?seed=test-tour-prompt&width=1280&height=720");
+    await page.goto("/?seed=test-tour-prompt&width=1280&height=720&renderer=svg");
     await waitForMapLoad(page);
   });
 

@@ -52,7 +52,7 @@ try {
   const pageErrors: string[] = [];
   page.on("pageerror", error => pageErrors.push(error.message));
   page.on("dialog", dialog => dialog.dismiss());
-  await page.goto(`${origin}/?local&seed=7319&width=1280&height=720`);
+  await page.goto(`${origin}/?local&seed=7319&width=1280&height=720&renderer=svg`); // the SVG model, as before W5
   await page.evaluate(async () => {
     const runtime = (
       globalThis as unknown as { __tupaia: { call: (name: string, args: object) => Promise<{ ok: boolean }> } }

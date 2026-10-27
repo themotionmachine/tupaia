@@ -28,9 +28,10 @@ export function parseRendererEnv(value: string | undefined): RendererKind | unde
   throw new Error("Invalid BENCH_RENDERER: " + value);
 }
 
-// Unset renderer leaves the benchmark URL byte-identical to earlier runs.
+// An unset renderer is the SVG baseline, as it always was: since W5 made GPU the app's default display, that baseline
+// has to ask for svg explicitly (results still record `renderer` unset, so they pair with earlier unset runs).
 export function rendererQuery(renderer: RendererKind | undefined): string {
-  return renderer ? "&renderer=" + renderer : "";
+  return "&renderer=" + (renderer ?? "svg");
 }
 
 export interface FixtureIdentity {

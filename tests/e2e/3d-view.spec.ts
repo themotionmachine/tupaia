@@ -11,7 +11,7 @@ test.describe("3D view with eroded terrain", () => {
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(`pageerror: ${error.message}`));
 
-    await page.goto("/");
+    await page.goto("/?renderer=svg");
     // mapId is set at the very end of map generation in showStatistics()
     await page.waitForFunction(() => (window as any).mapId !== undefined, {
       timeout: 120000,

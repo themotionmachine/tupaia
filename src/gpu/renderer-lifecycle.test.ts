@@ -99,7 +99,7 @@ vi.mock("./emblem-culling", () => ({
       if (cull) pipeline.culls.push({ ...camera, moving: false });
     }
     status() {
-      return { cover: null };
+      return { cover: { active: false, wanted: false } }; // GpuRenderer adds `armed`
     }
     reveal() {}
     reset() {}
@@ -870,10 +870,34 @@ describe("[PAN] gestures leave the model SVG alone", () => {
     expect(pipeline.culls.every(cull => !cull.moving)).toBe(true);
   });
 
-  it("[PANEND] the first gesture arms the SVG cover: its frames may only cover, and every rest after wants it", async () => {
-    renderer.camera({ scale: 1, x: 0, y: 0, exact: true });
+  it("[W5] the first full frame at rest arms the SVG cover and applies it in the same update", async () => {
+    // beforeEach waited for the first frame: the culling update that showed it already wanted the cover
     expect(pipeline.covers.length).toBeGreaterThan(0);
-    expect(pipeline.covers.every(update => !update.cover)).toBe(true); // exact cameras alone never arm it
+    expect(pipeline.covers.every(update => update.cover && update.cull)).toBe(true);
+    expect(renderer.telemetry()).toMatchObject({ moving: false, cover: { armed: true } });
+    pipeline.covers.length = 0;
+    renderer.camera({ scale: 1, x: 0, y: 0, exact: true }); // an exact camera at rest keeps wanting it
+    expect(pipeline.covers.at(-1)).toEqual({ x: 0, cover: true, cull: true });
+  });
+
+  it("[W5] a canvas that never showed a frame never arms the cover", async () => {
+    renderer.dispose();
+    pipeline.covers.length = 0;
+    pipeline.gate = new Promise(() => {}); // the first prepare never lands
+    document.body.innerHTML = "";
+    document.body.append(mapSvg());
+    renderer = new GpuRenderer(document.getElementById("map") as unknown as SVGSVGElement, reason =>
+      fallBacks.push(reason)
+    );
+    renderer.camera({ scale: 1, x: 0, y: 0, exact: true });
+    await frames();
+    expect(visible()).toBe(false);
+    expect(pipeline.covers.every(update => !update.cover)).toBe(true);
+    expect(renderer.telemetry().cover).toMatchObject({ armed: false });
+  });
+
+  it("[PANEND] a gesture's frames may only cover, and every rest after wants it", async () => {
+    renderer.camera({ scale: 1, x: 0, y: 0, exact: true });
     pipeline.covers.length = 0;
     renderer.camera({ scale: 2, x: 10, y: 0 });
     renderer.camera({ scale: 2, x: 20, y: 0 });

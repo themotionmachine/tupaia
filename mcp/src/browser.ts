@@ -106,12 +106,13 @@ function listExtBridges(dir: string): string[] {
 const JSON_ARGS_MIN = 32 * 1024;
 
 /**
- * The page the MCP browser opens: `/?local`, plus `&renderer=svg|gpu` when TUPAIA_RENDERER names one (the app's
- * ?renderer= switch; default svg). Anything else is refused loudly, so a typo cannot silently test the wrong arm.
+ * The page the MCP browser opens: `/?local&renderer=svg|gpu`, the arm TUPAIA_RENDERER names (the app's ?renderer=
+ * switch). Unset is svg, pinned explicitly: the app's own default became gpu in W5, and the MCP's screenshots and
+ * hit tests stay on the SVG it always drove. Anything else is refused loudly, so a typo cannot test the wrong arm.
  */
 export function bootPath(renderer: string | undefined): string {
   const wanted = renderer?.trim().toLowerCase();
-  if (!wanted) return "/?local";
+  if (!wanted) return "/?local&renderer=svg";
   if (wanted !== "svg" && wanted !== "gpu") throw new ToolError("BAD_ARGS", `TUPAIA_RENDERER must be svg or gpu, got "${renderer}"`);
   return `/?local&renderer=${wanted}`;
 }

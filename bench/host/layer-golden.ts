@@ -88,6 +88,7 @@ import { decodePng, encodePng } from "../png.ts";
 import { type Family, parsePresets, parseZooms, selectFamilies } from "./golden-families.ts";
 import { emptyInBothArms } from "./census-core.ts";
 import { isolateLayer, setLayerOpacity } from "./golden-isolation.ts";
+import { type CoverState, coverApplies, coverProblems, readCover } from "./cover-state.ts";
 import { HIDE_CHROME } from "./screenshot-chrome.ts";
 import { type CameraPreset, COVERS_BY_FAMILY, resolveFixture } from "./fixtures/index.ts";
 
@@ -210,6 +211,8 @@ interface Cell {
   frame?: { batches: number; groups: number };
   // GPU_ARM=probe: pixels where the composite or the canvas-over-magenta capture differs from the canvas-only one
   showThrough?: { composite: number; magenta: number } | null;
+  // W5: the svg-cover around the shots (cover-state.ts): GPU arm under it (where it applies), SVG arm never
+  cover?: { gpuActive: boolean; armed: boolean; applies: boolean; issue: string; svgActive: boolean };
   // emblem COA symbols that were still missing when the cell was captured (async renderGroupCOAs)
   pendingCoas?: number;
   images?: Record<string, string>;
@@ -410,17 +413,20 @@ const applyZoomStyling = (page: Page) =>
   page.evaluate(async () => {
     const w = globalThis as any;
     w.invokeActiveZooming?.();
+    // W5: canonical visibility (renderer.ts gpuCanonicalVisibility lifts the svg-cover for the read): under the cover,
+    // armed at rest, every emblem reads hidden and this wait would end at once with nothing waited for
+    const canonical = (w.gpuCanonicalVisibility ?? ((read: () => any) => read())) as <T>(read: () => T) => T;
     // checkVisibility() is not reliable for SVG content here (it reported uses inside display:none groups as visible)
     const shown = (element: Element) => {
       for (let node: Element | null = element; node && node.id !== "map"; node = node.parentElement) if (getComputedStyle(node).display === "none") return false;
       return getComputedStyle(element).visibility === "visible";
     };
     const missing = () =>
-      [...document.querySelectorAll("svg#map #emblems use")].filter(use => {
+      canonical(() => [...document.querySelectorAll("svg#map #emblems use")].filter(use => {
         if (!shown(use)) return false;
         const href = use.getAttribute("href") ?? use.getAttribute("xlink:href") ?? "";
         return !href.startsWith("#") || !document.getElementById(href.slice(1));
-      }).length;
+      }).length);
     const deadline = performance.now() + 20000;
     while (missing() && performance.now() < deadline) await new Promise(done => setTimeout(done, 50));
     return missing();
@@ -594,9 +600,13 @@ const readCensus = (page: Page, family: Family) =>
         if (v === undefined) hidden.set(node, (v = getComputedStyle(node).display !== "none" && displayed(node.parentElement)));
         return v;
       };
+      // W5: canonical visibility, the svg-cover (armed at rest) lifted for the read (renderer.ts gpuCanonicalVisibility)
+      const canonical = (w.gpuCanonicalVisibility ?? ((read: () => any) => read())) as <T>(read: () => T) => T;
       if (target)
-        for (const e of target.querySelectorAll("path,polygon,polyline,rect,circle,ellipse,line,text,use,image"))
-          if (displayed(e) && getComputedStyle(e).visibility === "visible") domDrawables++;
+        canonical(() => {
+          for (const e of target.querySelectorAll("path,polygon,polyline,rect,circle,ellipse,line,text,use,image"))
+            if (displayed(e) && getComputedStyle(e).visibility === "visible") domDrawables++;
+        });
       const density = (texture: any, rect: any) => (texture && rect?.[2] > 0 ? +(texture.width / rect[2]).toFixed(3) : null);
       const mine = (runsReadable ? runs : []).filter((run: any) => (run.elements ?? []).some((e: Element) => target && (e === target || target.contains(e))));
       const compat = status?.gpu?.compat
@@ -672,10 +682,14 @@ const countDiff = (a: Buffer, b: Buffer) => {
 
 // The GPU arm (see GOLDEN_GPU_ARM), then the SVG arm (canvas hidden), from one DOM state. A GPU re-prepare between
 // the shots would mean the arms are not the same frame, so it is an error.
+// W5: the GPU arm is shot under the svg-cover (armed at rest) wherever it applies, and the SVG arm with the canvas hidden,
+// which reveals the model first; `cover` records both states and coverProblems() judges them (cover-state.ts).
 async function captureArms(
   page: Page
-): Promise<{ gpu: Buffer; svg: Buffer; svgShots: number; svgSettled: boolean; svgMoving?: string; svgRepeat?: string; showThrough: { composite: number; magenta: number } | null; probe: Record<string, Buffer> }> {
+): Promise<{ gpu: Buffer; svg: Buffer; svgShots: number; svgSettled: boolean; svgMoving?: string; svgRepeat?: string; showThrough: { composite: number; magenta: number } | null; probe: Record<string, Buffer>; cover: { gpu: CoverState; svg: CoverState } }> {
   const stamp = await gpuStamp(page);
+  await twoFrames(page); // a canvas shown again by the previous capture re-applies the cover on its next frame
+  const coverGpu = await readCover(page);
   let gpu: Buffer;
   let showThrough: { composite: number; magenta: number } | null = null;
   let probe: Record<string, Buffer> = {};
@@ -702,11 +716,12 @@ async function captureArms(
   }
   const old = await hideCanvas(page);
   await twoFrames(page);
+  const coverSvg = await readCover(page);
   const settle = await shootSvg(page);
   await showCanvas(page, old);
   const after = await gpuStamp(page);
   if (after !== stamp) throw Error(`GPU frame changed while the arms were captured (prepares/revision/visible ${stamp} → ${after})`);
-  return { gpu, svg: settle.png, svgShots: settle.shots, svgSettled: settle.settled, svgMoving: settle.moving, svgRepeat: settle.repeat, showThrough, probe };
+  return { gpu, svg: settle.png, svgShots: settle.shots, svgSettled: settle.settled, svgMoving: settle.moving, svgRepeat: settle.repeat, showThrough, probe, cover: { gpu: coverGpu, svg: coverSvg } };
 }
 
 const hideCanvas = (page: Page) =>
@@ -858,14 +873,15 @@ const vectorize = (page: Page, kind: DenseKind) =>
   }, kind);
 // The vector-form SVG shot of a dense family (GPU canvas hidden for the shot), then the bitmap is put back and the app
 // and the GPU settle again. null when SVG shows no bitmap here (the burgs above k 4 already show vectors).
-async function captureVector(page: Page, kind: DenseKind): Promise<{ png: Buffer; shots: number; settled: boolean; moving?: string; swapped: number; folded?: { groups: number; overlaps: number } } | null> {
+async function captureVector(page: Page, kind: DenseKind): Promise<{ png: Buffer; shots: number; settled: boolean; moving?: string; swapped: number; folded?: { groups: number; overlaps: number }; coverProblems: string[] } | null> {
   const old = await hideCanvas(page);
   let swapped: { bitmaps: number; folded?: { groups: number; overlaps: number } } | null = null;
   try {
     swapped = await vectorize(page, kind);
     if (!swapped) return null;
     await twoFrames(page);
-    return { ...(await shootSvg(page)), swapped: swapped.bitmaps, folded: swapped.folded };
+    const cover = coverProblems(null, await readCover(page));
+    return { ...(await shootSvg(page)), swapped: swapped.bitmaps, folded: swapped.folded, coverProblems: cover };
   } finally {
     await showCanvas(page, old);
     if (swapped) await restoreBitmap(page, kind);
@@ -1054,6 +1070,8 @@ try {
               census.cells[key] = { ...(cell.census ?? { native: 0, compat: 0, skipped: 0 }), kinds: cell.censusKinds };
               cell.expected = expectations?.cells?.[key] ? { native: expectations.cells[key].native, compat: expectations.cells[key].compat, skipped: expectations.cells[key].skipped } : null;
               const shots = await captureArms(page);
+              cell.cover = { gpuActive: shots.cover.gpu.active, armed: shots.cover.gpu.armed, applies: coverApplies(shots.cover.gpu), issue: shots.cover.gpu.issue, svgActive: shots.cover.svg.active };
+              if (cell.renderer?.active === "gpu") for (const problem of coverProblems(shots.cover.gpu, shots.cover.svg)) cell.failures.push(`harness: ${problem}`);
               if (gpuArm === "probe") {
                 cell.showThrough = shots.showThrough;
                 const t = shots.showThrough;
@@ -1077,6 +1095,7 @@ try {
                 const vec = await captureVector(page, dense.kind);
                 if (vec) {
                   if (!vec.settled) cell.failures.push(`harness: the vector-form SVG arm was still changing after ${vec.shots} shots (${vec.moving})`);
+                  for (const problem of vec.coverProblems) cell.failures.push(`harness: vector form: ${problem}`);
                   otherPng = ref === "vector" ? shots.svg : vec.png;
                   if (ref === "vector") svgPng = vec.png;
                   cell.svgRef = ref;
@@ -1186,6 +1205,13 @@ try {
     // cells the default (over44) reading passes and the strict (conservative) reading would fail
     strictOnly: report.cells.filter(c => c.pass && c.gates && !c.gates.conservative).length,
     byFamily,
+    // W5: GPU arms shot under an active svg-cover / where the cover did not apply (fail-closed: filter, transparency,
+    // an ineligible model, ?gpu-svg-cover=0)
+    cover: {
+      active: report.cells.filter(c => c.cover?.gpuActive).length,
+      notApplied: report.cells.filter(c => c.cover && !c.cover.gpuActive).length,
+      issues: [...new Set(report.cells.filter(c => c.cover && !c.cover.gpuActive).map(c => c.cover!.issue || (c.cover!.applies ? "?" : "not applicable")))].slice(0, 8)
+    },
     table: Object.fromEntries(Object.entries(table).map(([k, v]) => [k, v.join(" ")]))
   };
   const validation = report.warnings.some(w => /GL_INVALID_|Feedback loop/i.test(w));

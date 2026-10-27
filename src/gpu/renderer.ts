@@ -1,5 +1,6 @@
-// P1 GPU backend (loaded lazily behind ?renderer=gpu). A WebGL2 canvas sits directly above <svg id="map"> with
-// pointer-events:none; the SVG stays underneath as the d3.zoom gesture owner and the canonical, exportable document.
+// P1 GPU backend: the default display since W5 (loaded lazily by renderer-mode.ts; ?renderer=svg opts out). A WebGL2
+// canvas sits directly above <svg id="map"> with pointer-events:none; the SVG stays underneath as the d3.zoom gesture
+// owner and the canonical, exportable document (D9).
 // During motion the camera only changes uniforms; exact (settled) updates still write the canonical SVG, after which
 // the frame is re-prepared from it. Whenever the GPU cannot show a correct frame the canvas is hidden, never blank.
 // Between inexact and exact updates, hover still sees the previous SVG transform. Clicks synchronize and re-hit-test
@@ -81,7 +82,7 @@ import { RestoreClock, type RestoreTiming } from "./restore-phases";
 import type { Rgba } from "./scene";
 import { SceneCache } from "./scene-cache";
 import { type GlyphInfo, type GpuSelection, type ReliefCandidate, selectAt } from "./selection";
-import type { CoverStatus } from "./svg-cover";
+import { type CoverStatus, withCanonicalVisibility } from "./svg-cover";
 import { GlyphAtlas } from "./text";
 import { refreshView, snapshotView, type ViewSnapshot } from "./view-overlay";
 
@@ -213,9 +214,9 @@ export interface GpuTelemetry {
     last: string;
     views: { patched: number; fulls: number; last: string };
   };
-  // PANEND (W4b) SVG cover (svg-cover.ts): armed by the first gesture under the canvas; active = the model SVG paints
-  // nothing under the canvas now; issue = why it may not ("" = eligible); checks, applied and revealed are cumulative.
-  // null when opted out (?gpu-svg-cover=0).
+  // PANEND (W4b) SVG cover (svg-cover.ts): armed by the first full frame at rest (W5) or the first gesture under the
+  // canvas; active = the model SVG paints nothing under the canvas now; issue = why it may not ("" = eligible);
+  // checks, applied and revealed are cumulative. null when opted out (?gpu-svg-cover=0).
   cover: (CoverStatus & { wanted: boolean; armed: boolean }) | null;
   // bounded recent-work trace (performance.now() ms) to attribute main-thread stalls: background jobs with their
   // reason/outcome, static revisions with their record, and browser long tasks (>50 ms) when the API exists
@@ -255,6 +256,9 @@ interface Globals {
   peekRelief?: (x: number, y: number) => ReliefCandidate | null;
   gpuClickRoute?: ((event: MouseEvent) => RoutedEvent | false | null) | null;
   gpuClickTelemetry?: ClickTelemetry | null;
+  // W5: a synchronous read of the model's canonical computed visibility with any SVG cover lifted (svg-cover.ts), for
+  // harnesses and diagnostics that census the DOM while the canvas shows (the cover is armed at rest since W5)
+  gpuCanonicalVisibility?: (<T>(read: () => T) => T) | null;
 }
 const page = globalThis as unknown as Globals;
 const PREPARE_DELAY = 120;
@@ -412,8 +416,10 @@ export class GpuRenderer {
   // summed per-query cost split (coarse performance.now; meaningful over many queries): availability vs index
   private pickProfile = { queries: 0, statusMs: 0, indexMs: 0 };
   private emblemCulling: HiddenEmblemCulling | null = null;
-  // PANEND (W4b): the SVG cover is wanted once a gesture has moved the canvas (an inexact camera update while it shows).
-  // Harnesses that only set exact cameras (census, golden, toggles) keep the model painting as it always did.
+  // PANEND (W4b): the SVG cover is wanted once the canvas has shown a full frame at rest (W5: from first load, so the
+  // first DOM write at rest no longer pays a whole-document Layerize, ~155 ms on parity) or a gesture has moved it (an
+  // inexact camera update while it shows). HiddenEmblemCulling still decides whether it applies (an opaque frame
+  // covering the whole SVG, an eligible model, ?gpu-svg-cover=0 opts out); a hidden canvas reveals the model.
   private coverArmed = false;
   private markers: TradeMarkers;
   // --- PAINT (W3b): caravan poses stay out of the SVG while the canvas covers it (caravansPaused) ---
@@ -1182,7 +1188,8 @@ export class GpuRenderer {
   // (an exact update, the motion watchdog, a click's camera sync) culls once for the camera then, in the task that
   // writes the SVG camera anyway. A canvas that hides first reveals every emblem (hide below). The paint suppression
   // HiddenEmblemCulling offers for motion is not used: toggling its sheet cost two whole-document layerizes a gesture.
-  // PANEND (W4b): the same update applies the SVG cover (svg-cover.ts) once armed, which then replaces the culling.
+  // PANEND (W4b): the same update applies the SVG cover (svg-cover.ts) once armed (W5: by the first frame at rest),
+  // which then replaces the culling.
   private cullEmblems(): void {
     this.emblemCulling?.update(this.view, this.viewport, this.clear[3] === 1, this.coverArmed);
   }
@@ -1852,7 +1859,12 @@ export class GpuRenderer {
       }
     } else this.paint(markers);
     if (this.canvas.style.display !== "block") this.canvas.style.display = "block";
-    if (!this.moving) this.cullEmblems();
+    if (!this.moving) {
+      // W5: a full frame at rest arms the cover (coverArmed), applied by this same culling update: in the task that
+      // shows the canvas, not on the first gesture
+      this.coverArmed = true;
+      this.cullEmblems();
+    }
     this.lastMarkerDraw = started;
     this.updateCaravans();
     this.stats.frames++;
@@ -1989,6 +2001,7 @@ export function createGpuRenderer(fallBack: (reason: string) => void): GpuRender
   const gpuSelection = new URLSearchParams(location.search).has("gpu-select");
   const renderer = new GpuRenderer(svg, fallBack, gpuSelection, true);
   page.gpuRenderer = renderer;
+  page.gpuCanonicalVisibility = withCanonicalVisibility;
   page.gpuPick = (x, y, tolerance) => renderer.pick(x, y, tolerance);
   // canvas fallbacks are read per call: their modules may load after the renderer. Read-only: the relief leg peeks
   // (no glyph materialization); committing a relief selection stays pickRelief's job.
@@ -2063,4 +2076,5 @@ export function detachGpuGlobals(renderer: GpuRenderer): void {
   page.gpuSelect = null;
   page.gpuClickRoute = null;
   page.gpuClickTelemetry = null;
+  page.gpuCanonicalVisibility = null;
 }

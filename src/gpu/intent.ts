@@ -1,4 +1,4 @@
-// Navigate/Edit interaction mode under ?renderer=gpu (decision D10). Pure: no DOM, timers or GL; unit-tested in
+// Navigate/Edit interaction mode under the GPU renderer (decision D10). Pure: no DOM, timers or GL; unit-tested in
 // intent.test.ts. The controller (controllers/render-mode.ts) feeds it the renderer's intentProbe() and key events.
 //
 // Navigate: the GPU canvas shows the map (rendering-only fast path; clicks still recover through the canonical SVG).

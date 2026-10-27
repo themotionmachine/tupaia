@@ -69,12 +69,12 @@ async function advanceSteps(page: Page, count: number) {
 test.describe("UI Tour", () => {
   test.beforeEach(async ({ context, page }) => {
     await context.clearCookies();
-    await page.goto("/");
+    await page.goto("/?renderer=svg");
     await page.evaluate(() => {
       localStorage.clear();
       sessionStorage.clear();
     });
-    await page.goto("/?seed=test-tour&width=1280&height=720");
+    await page.goto("/?seed=test-tour&width=1280&height=720&renderer=svg");
     await waitForMapLoad(page);
   });
 

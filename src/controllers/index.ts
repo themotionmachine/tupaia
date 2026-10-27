@@ -5,6 +5,7 @@ import { initializeCommandPalette } from "./command-palette";
 
 initializeCommandPalette();
 
-// Navigate/Edit mode (D10) exists only under ?renderer=gpu; the default SVG renderer never loads it.
+// Navigate/Edit mode (D10) exists whenever the GPU renderer is requested (the default since W5); ?renderer=svg never
+// loads it.
 if (parseRendererPreference(location.search).requested === "gpu")
   void import("./render-mode").then(module => module.installForPage());
