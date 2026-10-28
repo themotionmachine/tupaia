@@ -5,7 +5,7 @@ test.describe("Map loading", () => {
   test.beforeEach(async ({context, page}) => {
     await context.clearCookies();
 
-    await page.goto("/");
+    await page.goto("/?renderer=svg");
     await page.evaluate(() => {
       localStorage.clear();
       sessionStorage.clear();

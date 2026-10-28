@@ -1,14 +1,16 @@
 // Node-side, browser-free part of the G-E editor replay (PROOF-PLAN §5; bench/host/editor-replay.ts runs it): the
 // script vocabulary, script validation, and the comparison of a replayed arm against the SVG recording. Pure, so
 // `node --test bench/host/editor-replay-core.test.ts` pins the verdict rules without a browser.
+import { type CoverState, coverProblems } from "./cover-state.ts";
 
 export const ARMS = ["svg", "gpu", "gpu-select"] as const;
 export type Arm = (typeof ARMS)[number];
 
-// The query string each arm adds to the app URL. svg is the stock renderer (no flag); gpu is rendering-only (clicks
-// hit the canonical SVG natively); gpu-select also routes clicks through the GPU pick index (editor-dispatch.ts).
+// The query string each arm adds to the app URL. svg is the SVG renderer (explicit: GPU is the app's default since
+// W5); gpu is rendering-only (clicks hit the canonical SVG natively); gpu-select also routes clicks through the GPU
+// pick index (editor-dispatch.ts).
 export function armQuery(arm: Arm): string {
-  return arm === "svg" ? "" : arm === "gpu" ? "&renderer=gpu" : "&renderer=gpu&gpu-select";
+  return arm === "svg" ? "&renderer=svg" : arm === "gpu" ? "&renderer=gpu" : "&renderer=gpu&gpu-select";
 }
 
 export function parseArms(text: string | undefined): Arm[] {
@@ -223,6 +225,8 @@ export interface StepObservation {
   /** gpu-select: click-route outcomes during the step (routed/resynced/dropped/legacy deltas). */
   routes?: Record<string, number>;
   resume?: Resume;
+  /** W5: the svg-cover just before a pointer action (click, drag) in a GPU arm (cover-state.ts). */
+  cover?: CoverState;
   ms: number;
 }
 
@@ -300,6 +304,9 @@ export function checkGpuStep(step: StepObservation, arm: Arm, resumeLimitMs: num
     else if (resume.refinedMs == null) out.push(`${tag}: GPU resumed but did not refine within ${resumeLimitMs} ms`);
     if (gpu.suspendedReason) out.push(`${tag}: still suspended after close: ${gpu.suspendedReason}`);
   }
+  // W5: the cover is armed at rest from the first GPU frame, so a pointer action on the map with the canvas shown is
+  // judged under it wherever it applies (native hits stay canonical through pointer-events:painted)
+  if ((step.op === "click" || step.op === "drag") && step.cover) for (const problem of coverProblems(step.cover, null)) out.push(`${tag}: ${problem}`);
   if (arm === "gpu-select" && step.routes) {
     const total = Object.values(step.routes).reduce((a, b) => a + b, 0);
     if (total > 1) out.push(`${tag}: ${total} click-route outcomes for one action ${JSON.stringify(step.routes)}`);
@@ -392,6 +399,8 @@ export interface ArmVerdict {
   steps: number;
   /** RES2: maxSteadyBytes over the replayed steps (null on the svg arm). */
   maxSteadyBytes: number | null;
+  /** W5: pointer actions (click, drag) taken with the svg-cover active (null on the svg arm). */
+  coveredPointerSteps: number | null;
 }
 
 export function judgeArm(script: EditorScript, arm: Arm, recorded: StepObservation[], replayed: StepObservation[], resumeLimitMs: number): ArmVerdict {
@@ -411,6 +420,7 @@ export function judgeArm(script: EditorScript, arm: Arm, recorded: StepObservati
     failures,
     resume: closing?.resume ?? null,
     steps: replayed.length,
-    maxSteadyBytes: arm === "svg" ? null : maxSteadyBytes(replayed)
+    maxSteadyBytes: arm === "svg" ? null : maxSteadyBytes(replayed),
+    coveredPointerSteps: arm === "svg" ? null : replayed.filter(s => (s.op === "click" || s.op === "drag") && s.cover?.active).length
   };
 }

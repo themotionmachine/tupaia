@@ -1,5 +1,5 @@
-// Host gate for the opt-in WebGL renderer (?renderer=gpu). One CLI for every check the Codex harness ran from
-// outside git (control/tupaia-checks-v15.py and control/opt-in-run-check.py), plus three tiers.
+// Host gate for the WebGL renderer (the default display since W5; ?renderer=svg opts out). One CLI for every check
+// the Codex harness ran from outside git (control/tupaia-checks-v15.py and control/opt-in-run-check.py), plus three tiers.
 //
 //   node bench/gate/gate.ts <check|tier> [key=value ...]      (npm run gate -- <check> ...)
 //
@@ -1354,7 +1354,8 @@ const DEFS: Record<string, CheckDef> = {
           "bench/host/editor-replay-core.test.ts",
           "bench/host/census-core.test.ts",
           "bench/host/labels-core.test.ts",
-          "bench/host/reuse-fidelity-core.test.ts"
+          "bench/host/reuse-fidelity-core.test.ts",
+          "bench/host/cover-state.test.ts"
         ],
         {},
         null,
@@ -1420,6 +1421,8 @@ const DEFS: Record<string, CheckDef> = {
             "paintSuppressed",
             "coverActive"
           ]),
+          // W5: the cover on at rest before the gesture, native hits unchanged under it
+          restProof: pick(data.restProofs?.[0], ["samples", "modelHits", "hitMismatches", "armed", "coverActive"]),
           recoveryWallMs: data.recoveryProfile?.wallMs,
           restore: data.recoveryProfile?.status?.restore,
           contextLossRestored: data.movingContextLoss?.restored?.state ?? null

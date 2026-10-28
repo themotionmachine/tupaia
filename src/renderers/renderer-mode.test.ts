@@ -6,7 +6,8 @@ import {
   type RendererBackend,
   type RendererHost,
   RendererRouter,
-  rendererStatus
+  rendererStatus,
+  renderModeWanted
 } from "./renderer-mode";
 
 const webgl2 = () => ({ webgl2: true });
@@ -25,9 +26,15 @@ function fakeBackend(log: string[], failOn?: "worldReplaced" | "dispose"): Rende
 }
 
 describe("parseRendererPreference", () => {
-  it("defaults to svg without a flag", () => {
-    expect(parseRendererPreference("")).toEqual({ requested: "svg", source: "default", raw: null });
-    expect(parseRendererPreference("?seed=1&reliefWorker=1")).toMatchObject({ requested: "svg", source: "default" });
+  it("defaults to gpu without a flag (W5), with no warning", () => {
+    expect(parseRendererPreference("")).toEqual({ requested: "gpu", source: "default", raw: null });
+    const plain = { requested: "gpu", source: "default", raw: null };
+    expect(parseRendererPreference("?seed=1&reliefWorker=1")).toEqual(plain);
+    expect(parseRendererPreference("?gpu-select")).toMatchObject({ requested: "gpu", source: "default" });
+  });
+
+  it("opts out to svg with ?renderer=svg", () => {
+    expect(parseRendererPreference("?renderer=svg")).toEqual({ requested: "svg", source: "query", raw: "svg" });
   });
 
   it("accepts svg and gpu with surrounding whitespace and any case", () => {
@@ -76,6 +83,67 @@ describe("probeWebGL2", () => {
     expect(lost).toBe(true);
   });
 
+  // a context whose debug extension names `renderer` (null: the extension is absent); records the attributes asked for
+  const glNamed = (renderer: string | null, log: { attributes?: unknown; lost?: boolean } = {}) =>
+    (() => ({
+      getContext: (_id: string, attributes?: unknown) => {
+        log.attributes = attributes;
+        return {
+          getExtension: (name: string) =>
+            name === "WEBGL_lose_context"
+              ? {
+                  loseContext: () => {
+                    log.lost = true;
+                  }
+                }
+              : name === "WEBGL_debug_renderer_info" && renderer !== null
+                ? { UNMASKED_RENDERER_WEBGL: 0x9246 }
+                : null,
+          getParameter: (pname: number) => (pname === 0x9246 ? renderer : null)
+        };
+      }
+    })) as unknown as () => HTMLCanvasElement;
+
+  it.each([
+    "Google SwiftShader",
+    "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) (0x0000C0DE)), SwiftShader driver)",
+    "llvmpipe (LLVM 15.0.7, 256 bits)",
+    "softpipe",
+    "Microsoft Basic Render Driver",
+    "Software Rasterizer"
+  ])("hardwareOnly refuses the software renderer %s, and still releases the probe context", name => {
+    const log: { attributes?: unknown; lost?: boolean } = {};
+    const result = probeWebGL2(glNamed(name, log), { hardwareOnly: true });
+    expect(result.webgl2).toBe(false);
+    expect(result.reason).toMatch(/^Software WebGL renderer/);
+    expect(result.reason).toContain(name);
+    expect(log).toEqual({ attributes: { failIfMajorPerformanceCaveat: true }, lost: true });
+  });
+
+  it("hardwareOnly accepts a hardware renderer, or one it cannot name (no debug extension)", () => {
+    const log: { attributes?: unknown } = {};
+    expect(
+      probeWebGL2(glNamed("ANGLE (Apple, ANGLE Metal Renderer: Apple M2, Unspecified Version)", log), {
+        hardwareOnly: true
+      })
+    ).toEqual({ webgl2: true });
+    expect(log.attributes).toEqual({ failIfMajorPerformanceCaveat: true });
+    expect(probeWebGL2(glNamed(null), { hardwareOnly: true })).toEqual({ webgl2: true });
+  });
+
+  it("hardwareOnly reports a context refused for a major performance caveat", () => {
+    const result = probeWebGL2(() => ({ getContext: () => null }) as unknown as HTMLCanvasElement, {
+      hardwareOnly: true
+    });
+    expect(result).toEqual({ webgl2: false, reason: expect.stringMatching(/major performance caveat/) });
+  });
+
+  it("without hardwareOnly (an explicit ?renderer=gpu) takes software WebGL2 and asks for no caveat check", () => {
+    const log: { attributes?: unknown } = {};
+    expect(probeWebGL2(glNamed("Google SwiftShader", log))).toEqual({ webgl2: true });
+    expect(log.attributes).toBeUndefined();
+  });
+
   it("turns probe exceptions into a reason instead of throwing", () => {
     const result = probeWebGL2(() => {
       throw new Error("blocked");
@@ -85,10 +153,10 @@ describe("probeWebGL2", () => {
 });
 
 describe("RendererRouter", () => {
-  it("never probes or builds a GPU backend for the default svg path", () => {
+  it("never probes or builds a GPU backend for the ?renderer=svg opt-out", () => {
     const calls: string[] = [];
     const router = new RendererRouter({
-      search: "",
+      search: "?renderer=svg",
       probe: () => {
         calls.push("probe");
         return { webgl2: true };
@@ -99,6 +167,57 @@ describe("RendererRouter", () => {
       }
     });
     expect(router.start()).toMatchObject({ requested: "svg", active: "svg", fallbackReason: "", capabilities: null });
+    expect(calls).toEqual([]);
+  });
+
+  it("probes and builds the GPU backend by default", () => {
+    const router = new RendererRouter({ search: "", probe: webgl2, gpuBackend: () => fakeBackend([]) });
+    expect(router.start()).toMatchObject({ requested: "gpu", active: "gpu", fallbackReason: "", warnings: [] });
+  });
+
+  it("asks the probe for hardware only by default; an explicit ?renderer=gpu skips that guard", () => {
+    const asked: unknown[] = [];
+    const probe = (options: unknown) => {
+      asked.push(options);
+      return { webgl2: true };
+    };
+    new RendererRouter({ search: "", probe, gpuBackend: () => fakeBackend([]) }).start();
+    new RendererRouter({ search: "?renderer=gpu", probe, gpuBackend: () => fakeBackend([]) }).start();
+    expect(asked).toEqual([{ hardwareOnly: true }, { hardwareOnly: false }]);
+  });
+
+  it("falls back to svg by default on a software renderer, with the probe's reason", () => {
+    const router = new RendererRouter({
+      search: "",
+      probe: ({ hardwareOnly }) =>
+        hardwareOnly ? { webgl2: false, reason: "Software WebGL renderer (Google SwiftShader)" } : { webgl2: true },
+      gpuBackend: () => fakeBackend([])
+    });
+    expect(router.start()).toMatchObject({
+      requested: "gpu",
+      active: "svg",
+      fallbackReason: "Software WebGL renderer (Google SwiftShader)"
+    });
+  });
+
+  it("falls back to svg by default when WebGL2 is missing", () => {
+    const router = new RendererRouter({ search: "", probe: () => ({ webgl2: false, reason: "no gl" }) });
+    expect(router.start()).toMatchObject({ requested: "gpu", active: "svg", fallbackReason: "no gl" });
+  });
+
+  it.each(["?renderer=webgl", "?renderer=gpu&renderer=svg"])("never probes for %s (svg with a warning)", search => {
+    const calls: string[] = [];
+    const router = new RendererRouter({
+      search,
+      probe: () => {
+        calls.push("probe");
+        return { webgl2: true };
+      },
+      gpuBackend: () => fakeBackend([])
+    });
+    const status = router.start();
+    expect(status).toMatchObject({ requested: "svg", active: "svg" });
+    expect(status.warnings).toHaveLength(1);
     expect(calls).toEqual([]);
   });
 
@@ -186,9 +305,20 @@ describe("RendererRouter", () => {
   });
 });
 
+describe("renderModeWanted", () => {
+  it("installs the mode controller only where the GPU renderer started", () => {
+    expect(renderModeWanted({ requested: "gpu", active: "gpu" })).toBe(true);
+    expect(renderModeWanted({ requested: "gpu", active: "svg" })).toBe(false); // no (hardware) WebGL2 at start
+    expect(renderModeWanted({ requested: "svg", active: "svg" })).toBe(false);
+  });
+});
+
 describe("module wiring", () => {
-  it("exposes an svg status for the page without a renderer flag", () => {
-    expect(rendererStatus()).toMatchObject({ requested: "svg", active: "svg", started: true, disposed: false });
+  it("requests gpu for the page without a renderer flag, and falls back to svg where WebGL2 is missing", () => {
+    // the node test environment has no canvas: the default GPU request falls back at start
+    expect(rendererStatus()).toMatchObject({ requested: "gpu", active: "svg", started: true, disposed: false });
+    expect(rendererStatus().fallbackReason).not.toBe("");
     expect(window.rendererStatus).toBe(rendererStatus);
+    expect(renderModeWanted(rendererStatus())).toBe(false); // so no mode chip either
   });
 });

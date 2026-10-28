@@ -1,7 +1,7 @@
 # Host gate for the GPU renderer
 
-`bench/gate/gate.ts` is the single entry point for every check that proves the opt-in WebGL renderer
-(`?renderer=gpu`). It replaces the harness Codex ran from outside git
+`bench/gate/gate.ts` is the single entry point for every check that proves the WebGL renderer, the default display
+since W5 (`?renderer=svg` opts out; `?renderer=gpu` still names it explicitly). It replaces the harness Codex ran from outside git
 (`tupaia-webgl-rewrite-2026-10-13/control/tupaia-checks-v15.py` and `opt-in-run-check.py`). It keeps the same
 check names and argument rules, and adds tiers, a blocking host lock with shared and exclusive tiers, and evidence
 that lives outside the repo.
@@ -14,6 +14,37 @@ node bench/gate/gate.ts golden layers=ocean,borders k=1,4 fixture=shared   # per
 node bench/gate/gate.ts browser skip=palette
 node bench/gate/gate.ts help             # every check and its arguments
 ```
+
+## W5: GPU by default, svg-cover at rest
+
+Since W5 a page with no `renderer` parameter gets the GPU renderer, and the svg-cover (`src/gpu/svg-cover.ts`) is
+armed by the first full GPU frame at rest, not by the first gesture. What that means for every harness:
+
+- **No URL may rely on "no parameter = SVG".** Every SVG arm, SVG baseline and SVG-only tool names
+  `renderer=svg`: `editor-replay-core.ts armQuery("svg")`, `package-smoke.ts`, `renderer-ab.ts rendererQuery` (an
+  unset `BENCH_RENDERER` is the SVG baseline, now explicit; results still record it unset), `bench/map.ts`, the
+  parity and corpus fixture builders, the MCP browser (`mcp/src/browser.ts bootPath`: unset `TUPAIA_RENDERER` is
+  `/?local&renderer=svg`) and the Playwright e2e specs. GPU arms already named `renderer=gpu`.
+- **Every same-page GPU-vs-SVG comparison now runs under the cover.** Hiding the canvas (inline `visibility` or
+  `display`) reveals the model synchronously (HiddenEmblemCulling's observer), so the SVG arm stays the SVG.
+  `bench/host/cover-state.ts` makes that a checked fact: `readCover(page)` before each shot and `coverProblems()`
+  require the GPU arm under an armed, active cover wherever it applies (an opaque frame covering the whole SVG, an
+  eligible model, no `?gpu-svg-cover=0`) and the SVG arm never under it. A cover that does not apply (a filtered or
+  transparent canvas, an ineligible model) is the renderer failing closed and is not a failure. Wired into
+  `golden` (and so `presets`, `coa-race`, the corpus golden and `golden-selftest`: a cell failure `harness:
+  svg-cover: ...`, and `summary.cover` counts cells shot under the active cover), the census `captureArms`
+  (`toggles`, `customization`, `resize-print`, `reuse-fidelity`), `labels`, `stroke-probe` and `smoke` (each throws
+  or fails on a problem).
+- **DOM census reads lift the cover.** Under it the computed visibility of all of `#viewbox` is `hidden`, which a
+  census would read as "nothing drawn". `layerFacts` (census-lib), the golden's `readCensus` and its emblem COA wait
+  read through `window.gpuCanonicalVisibility` (the renderer's `withCanonicalVisibility`: the cover lifted for one
+  synchronous read).
+- **Picking under the cover.** `picking` records the cover per view and fails a view whose cover applies but is not
+  active before its samples (the oracle's `elementFromPoint` runs under it: `pointer-events:painted` keeps native
+  hits canonical). `replay` records the cover before every click and drag of the GPU arms (`gpu`, `gpu-select`) and
+  fails the step on a problem (`summary.coveredPointerSteps` counts the pointer actions taken under it).
+  `native-recovery` adds a rest proof before each gesture (cover on at rest, every grid hit the same with its rules
+  lifted) and requires the restored frame to put the cover back after the context loss.
 
 Node runs the `.ts` file directly (type stripping), as the rest of `bench/` does. The gate needs `python3` for the
 lock helper, plus `node_modules` and the Playwright Chromium that `npm install` provides.
@@ -140,7 +171,7 @@ The runtimes are typical M1 Max wall times, without lock wait.
 | `lifecycle` | shared | Smoke plus 20 map reloads with forced GC. Reports JS heap growth and context loss/restore. | ~3 min |
 | `hatch` | shared | `bench/host/hatch-motion.ts`: hatch pitch and phase stay stable across camera-only zoom and pan, with no re-prepare. | ~30 s |
 | `navigation` | exclusive | `bench/host/native-navigation-pilot.ts`: CDP-injected pan-near, pan-wide and wheel-zoom on shared and 100k (k 8, wheel from 3.5) and, since W4a, the parity world with its preamble (every layer on, trade live, all at k 2; `worlds=shared,100k,parity` picks). Reports frame p95 (whole gesture and motion only), event-to-rAF p95, the GPU-presented fraction, the pan-cache and bitmap-window counters, and from a Chrome trace the main thread's Layerize split at the last input event: during motion and after it (the exact update writing the model SVG at rest). The parity pans also report the W4a targets (frame p95 <= 16.7 ms, no motion Layerize over 16 ms) as `targets`, and `layerizeMotionWorst` names when the longest motion Layerize over 16 ms came and the main-thread work before it (run the script with `NAV_TRACE_INVALIDATIONS=1` for the invalidation records that caused it; diagnosis only, it slows invalidation). Fails only on errors or a gesture that did not move the camera; timings are descriptive. | ~6–10 min |
-| `native-recovery` | exclusive | `bench/host/native-recovery.ts`: moving proof, recovery CPU profile and context loss while moving (defaults to world 100k, gesture wheel-zoom). Since W4a the moving proof requires no write under `#map` while the renderer moves, with emblems still natively hit-testable; since W4b (PANEND) it requires the SVG cover (`src/gpu/svg-cover.ts`) on mid-gesture (off only with `culling=off`, which detaches the manager that applies it; W4a required no suppression, W3 the emblem-only sheet), the model's emblems computed hidden but canonically visible, and every native hit sample (emblem boxes plus a 23 px grid over the view) the same element with the cover's rules lifted as with them on. Context loss mid-gesture must reveal every emblem (cover off) at the camera the gesture reached, with no caravan change held. `world=parity` (W4b) runs it on the parity fixture with its preamble at k 2. | ~1–2 min (parity ~5 min) |
+| `native-recovery` | exclusive | `bench/host/native-recovery.ts`: moving proof, recovery CPU profile and context loss while moving (defaults to world 100k, gesture wheel-zoom). Since W4a the moving proof requires no write under `#map` while the renderer moves, with emblems still natively hit-testable; since W4b (PANEND) it requires the SVG cover (`src/gpu/svg-cover.ts`) on mid-gesture (off only with `culling=off`, which detaches the manager that applies it; W4a required no suppression, W3 the emblem-only sheet), the model's emblems computed hidden but canonically visible, and every native hit sample (emblem boxes plus a 23 px grid over the view) the same element with the cover's rules lifted as with them on. Context loss mid-gesture must reveal every emblem (cover off) at the camera the gesture reached, with no caravan change held. `world=parity` (W4b) runs it on the parity fixture with its preamble at k 2. W5: a rest proof before each gesture requires the cover already on at rest (armed by the first frame) with every 23 px grid hit the same with its rules lifted, and after the moving context loss the restored frame must put the cover back on (`culling=on`). | ~1–2 min (parity ~5 min) |
 | `restore` | exclusive | `bench/host/restore-timing.ts`: WebGL context loss **at rest** on a settled camera (world `100k` generated, or `shared`), restored `reps` times per arm. Reads the renderer's restore clock (`lossToDrawMs`, `prepareMs`, prepare steps) and hover event-to-rAF while restoring, and diffs the settled frame before the loss against the one after (over16 count). `arms` is a comma list of URL-parameter sets applied with `history.replaceState` and interleaved ABBA, e.g. `arms=gpu-restore-retain=0,base` or `arms=gpu-slice-ms=12,gpu-slice-ms=50`; `cold=1` bumps the DOM revision right before each loss. Timings are descriptive; it fails only on errors or a restore that does not draw. | ~4–8 min |
 | `trade-live` | exclusive | `bench/host/trade-live.ts` (W3b PAINT): the parity fixture with its preamble (every layer on) at `dpr` (default 2), two arms alternated `reps` times (default 3): trade caravans **live** (`TradeAnimation.restart()`, 30 concurrent) and **frozen** (`__cons.freezeTrade()`). Per arm: 2 s idle (fps, frame p95, main-thread Layerize/Paint from a Chrome trace, GPU frames, caravans moved as the GPU mirrors them, caravan transform attributes written to the SVG) and a forced re-prepare (`gpuRenderer.invalidate()`) timed to the new revision on screen (`currentMs`) and to the end of its refinement (`refinedMs`). **Fails** when the live median `currentMs` exceeds 2x the frozen median, when the live arm has no moving caravans, on page errors or a fallback to SVG. Evidence: `trade-live.json`. | ~3 min |
 | `metrics` | shared | G-C fidelity (PROOF-PLAN §4). By default (`manifest=fresh`) it captures the 8 dpr×zoom cells from the current `dist/` with the smoke harness, then runs `bench/fidelity-metrics-run.ts`. It **fails if any pair misses SSIM ≥ 0.95**. over16 and the conservative reference gate are reported but do not fail it (the P2 baseline is 5/8 over16). `manifest=<path>` re-measures existing captures. | ~6–9 min |
@@ -149,7 +180,7 @@ The runtimes are typical M1 Max wall times, without lock wait.
 | `timing` / `profile` / `gpu-timing` | exclusive | `bench/navigation.ts`, `profile-navigation.ts` or `timer-navigation.ts` on the shared and 100k worlds at dpr 2 (`arm`, `headless`, `trace`). `profile` adds the top self-time CPU frames. | 2–10 min |
 | `paint` | shared | `bench/direct-emblem-culling-contract.ts`: synthetic emblem-culling lifecycle contract and, since W4b, the SVG cover's (eligibility fails closed on explicit hidden content, visible* pointer-events, links and focus targets, matching author rules, hidden definitions a `<use>` instantiates, including one that appears later; canonical reads lift it; the export clone never matches it; a hidden canvas reveals synchronously). | ~5 s |
 | `boot-order` | shared | `bench/host/boot-order.ts` (W4c BOOT): serves the built `dist/` with `main.js` delayed (`delay=` ms, default 1500; the production network race), loads `?renderer=gpu` `reps=` times (default 3), and requires every load to reach an active, visible GPU frame with no fallback, no `Renderer fallback` warning and no page error. Before the fix the renderer prepared before `main.js` ran and fell back with `customization is not defined`. | ~4 s a rep |
-| `package-smoke` | shared | `bench/host/package-smoke.ts`: the packaged `dist/` boots in default SVG with no WebGL request, and lazy save/export imports resolve. | ~20 s |
+| `package-smoke` | shared | `bench/host/package-smoke.ts`: the packaged `dist/` boots under `?renderer=svg` with no WebGL request, and lazy save/export imports resolve (and under `?renderer=gpu` to an active GPU frame). | ~20 s |
 | `boundary-after` | no | `bench/renderer-bundle-boundary.ts`: the static module graph for default boot and save/export contains no GPU presentation code (the GPU stays lazy). | ~1 s |
 | `boundary-before` | no | The same analysis, but expects GPU code to be **present**. Run it only against a pre-split baseline build; it fails on current builds by design. | ~1 s |
 | `golden` | shared | `bench/host/layer-golden.ts`: the per-layer golden (D1, D5). See "Per-layer golden" below. | ~3–4 min for all families at k {1,4}, dpr 2 |

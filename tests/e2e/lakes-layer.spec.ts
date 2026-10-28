@@ -4,13 +4,13 @@ test.describe("Lakes layer", () => {
   test.beforeEach(async ({ context, page }) => {
     await context.clearCookies();
 
-    await page.goto("/");
+    await page.goto("/?renderer=svg");
     await page.evaluate(() => {
       localStorage.clear();
       sessionStorage.clear();
     });
 
-    await page.goto("/?seed=test-seed&width=1280&height=720");
+    await page.goto("/?seed=test-seed&width=1280&height=720&renderer=svg");
 
     // Wait for map generation to complete
     await page.waitForFunction(() => (window as any).mapId !== undefined, {

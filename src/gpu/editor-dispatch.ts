@@ -1,4 +1,5 @@
-// Canonical SVG click recovery for ?renderer=gpu; GPU selection is separately opt-in with &gpu-select.
+// Canonical SVG click recovery for the GPU renderer (the default display; not under ?renderer=svg); GPU selection is
+// separately opt-in with &gpu-select.
 // public/modules/ui/editors.js clicked() asks window.gpuClickRoute(d3.event) first:
 //   null   -> legacy: clicked() dispatches the native event unchanged (the default for everything below)
 //   false  -> dropped: the click is swallowed after the canonical camera is synced (fail-closed)

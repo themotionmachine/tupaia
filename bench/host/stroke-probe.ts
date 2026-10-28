@@ -58,6 +58,7 @@ import { chromium, type Page } from "playwright";
 import { COVERAGE } from "../golden-metrics.ts";
 import { decodePng, type DecodedPng } from "../png.ts";
 import { isolateLayer } from "./golden-isolation.ts";
+import { coverProblems, readCover } from "./cover-state.ts";
 import { HIDE_CHROME } from "./screenshot-chrome.ts";
 
 const env = process.env;
@@ -360,18 +361,26 @@ async function waitGpu(page: Page): Promise<string> {
   });
 }
 
+// W5: the GPU arm under the svg-cover (armed at rest) wherever it applies, the SVG arm never (cover-state.ts); either
+// broken is a harness error
 async function captureArms(page: Page): Promise<{ gpu: Buffer; svg: Buffer }> {
+  // a canvas shown again by the previous capture re-applies the cover on its next frame
+  await page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
+  const coverGpu = await readCover(page);
   const gpu = await page.screenshot({ animations: "disabled", style: HIDE_CHROME });
   await page.evaluate(() => {
     const c = document.querySelector("canvas[data-gpu-renderer]") as HTMLCanvasElement | null;
     if (c) c.style.visibility = "hidden";
   });
   await page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
+  const coverSvg = await readCover(page);
   const svg = await page.screenshot({ animations: "disabled", style: HIDE_CHROME });
   await page.evaluate(() => {
     const c = document.querySelector("canvas[data-gpu-renderer]") as HTMLCanvasElement | null;
     if (c) c.style.visibility = "";
   });
+  const problems = coverProblems(coverGpu, coverSvg);
+  if (problems.length) throw Error(`captureArms: ${problems.join("; ")}`);
   return { gpu, svg };
 }
 

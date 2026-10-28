@@ -107,7 +107,8 @@ function actionCandidates(ready: boolean): PaletteCandidate[] {
   return [label, route, whole, ...modeCandidates()];
 }
 
-// Navigate/Edit mode commands exist only while controllers/render-mode.ts is installed (?renderer=gpu).
+// Navigate/Edit mode commands exist only while controllers/render-mode.ts is installed (the GPU renderer;
+// not under ?renderer=svg).
 function modeCandidates(): PaletteCandidate[] {
   const mode = window.renderMode?.state();
   if (!mode) return [];

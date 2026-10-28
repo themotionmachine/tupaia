@@ -7,6 +7,8 @@
 // pointer-events:painted under the opaque frame), so mid-gesture the cover must be on (off only with culling=off, which
 // detaches the manager that applies it), the model still unwritten, and every native hit sample the same with the
 // cover's rules lifted as with them on; context loss still reveals the SVG (cover off, emblems visible).
+// W5 arms the cover at rest from the first GPU frame: a rest proof before each gesture requires it on (gpu arm) with the
+// same native hits as with its rules lifted, and the restored frame must put it back on.
 // NAV_WORLD=parity: the parity fixture (NAV_PARITY_MAP) with its preamble, gestures at k NAV_PARITY_K (default 2).
 import { chromium } from "playwright";
 import { createServer } from "node:http";
@@ -93,6 +95,25 @@ page.setDefaultTimeout(90000);
    // the press point: a model element that is neither the ruler, the legend nor the scale bar (a drag there moves it,
    // not the map); the world centre when nothing qualifies
    const press=await page.evaluate(()=>{for(let r=0;r<400;r+=7)for(let a=0;a<360;a+=r?15:360){const x=Math.round(640+r*Math.cos(a*Math.PI/180)),y=Math.round(360+r*Math.sin(a*Math.PI/180));const el=document.elementFromPoint(x,y);if(el?.closest("#viewbox")&&!el.closest("#ruler, #legend, #scaleBar"))return{x,y};}return{x:640,y:360};});
+   // W5 rest proof, before the gesture: the svg-cover is armed at rest from the first GPU frame, so it is already on
+   // (gpu arm, culling on: culling=off detaches the manager that applies it) and every native hit sample is the same
+   // with its rules lifted as with them on: a click at rest is judged under the cover
+   if(arm==="gpu"&&process.env.NAV_CULLING!=="off"){
+    await page.waitForFunction(()=>{const g=(globalThis as any).rendererStatus?.().gpu;return !!g&&!g.moving&&g.canvasVisible;},{},{timeout:10000});
+    const rest=await page.evaluate(()=>{
+     const w=globalThis as any,gpu=w.rendererStatus?.().gpu,status=w.gpuRenderer?.emblemCulling?.status?.();
+     const samples:{x:number,y:number,hit:Element|null}[]=[];
+     for(let y=4;y<720;y+=23)for(let x=4;x<1280;x+=23)samples.push({x,y,hit:document.elementFromPoint(x,y)});
+     const sheet=(document.querySelector("style[data-gpu-renderer='svg-cover']") as HTMLStyleElement|null)?.sheet;
+     const rules=sheet?[...sheet.cssRules].map(rule=>rule.cssText):[];
+     while(sheet?.cssRules.length)sheet.deleteRule(0);
+     const mismatches=samples.filter(p=>document.elementFromPoint(p.x,p.y)!==p.hit).length;
+     rules.forEach((rule,i)=>sheet!.insertRule(rule,i));
+     return {samples:samples.length,modelHits:samples.filter(p=>p.hit?.closest("#viewbox")).length,hitMismatches:mismatches,coverRules:rules.length,moving:gpu?.moving,canvasVisible:gpu?.canvasVisible,armed:!!gpu?.cover?.armed,coverActive:!!status?.cover?.active,cover:status?.cover??null,enabled:!!status?.enabled};
+    });
+    ((report as any).restProofs??=[]).push({world,gesture,...rest});
+    if(!rest.samples||!rest.modelHits||rest.hitMismatches!==0||rest.moving!==false||rest.canvasVisible!==true||!rest.armed||!rest.coverActive||!rest.coverRules)throw Error("Product rest native parity under the svg-cover failed "+JSON.stringify(rest));
+   }
    const cullingBefore=await page.evaluate(disabled=>{
     const w=globalThis as any,r=w.gpuRenderer;
     w.__nativeCulling=r?.emblemCulling;
@@ -177,6 +198,9 @@ page.setDefaultTimeout(90000);
      await page.evaluate(()=>{const w=globalThis as any;w.__movingLossExt.restoreContext();delete w.__movingLossExt;});
      await page.waitForFunction(()=>{const s=(globalThis as any).rendererStatus?.();return s?.active==="gpu"&&s.gpu?.canvasVisible&&!s.gpu.pending&&!s.gpu.refinementPending;},{},{timeout:30000});
      const restored=await page.evaluate(()=>{const w=globalThis as any;return{state:w.rendererStatus?.().gpu?.state,restoreMs:w.rendererStatus?.().gpu?.lastRestoreMs,visibility:getComputedStyle(document.querySelector("#map #emblems")!).visibility,paint:w.gpuRenderer?.emblemCulling?.status?.()};});
+     // W5: the cover stays armed through the loss, so the restored frame covers the SVG again (at its first frame at
+     // rest, or the next camera update while moving), unless culling=off detached the manager that applies it
+     if(process.env.NAV_CULLING!=="off")await page.waitForFunction(()=>!!(globalThis as any).gpuRenderer?.emblemCulling?.status?.().cover?.active,{},{timeout:5000}).catch(()=>{throw Error("Restored frame did not re-apply the svg-cover "+JSON.stringify(restored));});
      const recoveryProfile=await session.send("Profiler.stop");
      writeFileSync(output+".recovery.cpuprofile",JSON.stringify(recoveryProfile.profile),{flag:"wx"});
      (report as any).recoveryProfile={wallMs:Date.now()-recoveryStarted,before:recoveryMetricsBefore,after:await session.send("Performance.getMetrics"),

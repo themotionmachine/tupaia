@@ -1,6 +1,6 @@
-// Navigate/Edit mode UI under ?renderer=gpu (decision D10): the mode indicator, the \ and Esc keys and the
-// window.renderMode API the command palette uses. Loaded only when the GPU renderer was requested
-// (controllers/index.ts); the default SVG renderer never imports it. The state machine is src/gpu/intent.ts; the
+// Navigate/Edit mode UI under the GPU renderer (the default display since W5; decision D10): the mode indicator, the
+// \ and Esc keys and the window.renderMode API the command palette uses. Loaded only when the GPU renderer was
+// requested (controllers/index.ts); ?renderer=svg never imports it. The state machine is src/gpu/intent.ts; the
 // renderer side is GpuRenderer.setIntent()/intentProbe() (the MODE block in src/gpu/renderer.ts).
 import {
   type Intent,

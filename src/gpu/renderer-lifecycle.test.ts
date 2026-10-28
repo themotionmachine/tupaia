@@ -31,6 +31,11 @@ const pipeline = vi.hoisted(() => ({
   // PANEND (W4b): every emblem-culling update with whether the SVG cover was wanted and whether it may cull
   covers: [] as { x: number; cover: boolean; cull: boolean }[],
   view: "committed" as "committed" | "full",
+  // W5 hardening: the device's context reads as lost (before webglcontextlost), a resize that clears the canvas buffer
+  // (GpuDevice.resize returned true), and how often the culling revealed the model (hide)
+  contextLost: false,
+  resizeClears: false,
+  reveals: 0,
   viewRoots: [] as Element[],
   windows: null as null | {
     covered: boolean;
@@ -45,7 +50,7 @@ const pipeline = vi.hoisted(() => ({
 
 vi.mock("./device", () => ({
   GpuDevice: class {
-    gl = { isContextLost: () => false };
+    gl = { isContextLost: () => pipeline.contextLost };
     lost = false;
     disposed = false;
     maxTextureSize = 4096;
@@ -56,7 +61,9 @@ vi.mock("./device", () => ({
       return 0;
     }
     resetPeak() {}
-    resize() {}
+    resize() {
+      return pipeline.resizeClears;
+    }
     dispose() {
       this.disposed = true;
     }
@@ -99,9 +106,11 @@ vi.mock("./emblem-culling", () => ({
       if (cull) pipeline.culls.push({ ...camera, moving: false });
     }
     status() {
-      return { cover: null };
+      return { cover: { active: false, wanted: false } }; // GpuRenderer adds `armed`
     }
-    reveal() {}
+    reveal() {
+      pipeline.reveals++;
+    }
     reset() {}
     dispose() {}
   }
@@ -202,6 +211,9 @@ beforeEach(async () => {
   pipeline.culls.length = 0;
   pipeline.covers.length = 0;
   pipeline.view = "committed";
+  pipeline.contextLost = false;
+  pipeline.resizeClears = false;
+  pipeline.reveals = 0;
   pipeline.viewRoots.length = 0;
   pipeline.windows = null;
   document.body.innerHTML = "";
@@ -870,10 +882,71 @@ describe("[PAN] gestures leave the model SVG alone", () => {
     expect(pipeline.culls.every(cull => !cull.moving)).toBe(true);
   });
 
-  it("[PANEND] the first gesture arms the SVG cover: its frames may only cover, and every rest after wants it", async () => {
-    renderer.camera({ scale: 1, x: 0, y: 0, exact: true });
+  it("[W5] the first full frame at rest arms the SVG cover and applies it in the same update", async () => {
+    // beforeEach waited for the first frame: the culling update that showed it already wanted the cover
     expect(pipeline.covers.length).toBeGreaterThan(0);
-    expect(pipeline.covers.every(update => !update.cover)).toBe(true); // exact cameras alone never arm it
+    expect(pipeline.covers.every(update => update.cover && update.cull)).toBe(true);
+    expect(renderer.telemetry()).toMatchObject({ moving: false, cover: { armed: true } });
+    pipeline.covers.length = 0;
+    renderer.camera({ scale: 1, x: 0, y: 0, exact: true }); // an exact camera at rest keeps wanting it
+    expect(pipeline.covers.at(-1)).toEqual({ x: 0, cover: true, cull: true });
+  });
+
+  it("[W5] a canvas that never showed a frame never arms the cover", async () => {
+    renderer.dispose();
+    pipeline.covers.length = 0;
+    pipeline.gate = new Promise(() => {}); // the first prepare never lands
+    document.body.innerHTML = "";
+    document.body.append(mapSvg());
+    renderer = new GpuRenderer(document.getElementById("map") as unknown as SVGSVGElement, reason =>
+      fallBacks.push(reason)
+    );
+    renderer.camera({ scale: 1, x: 0, y: 0, exact: true });
+    await frames();
+    expect(visible()).toBe(false);
+    expect(pipeline.covers.every(update => !update.cover)).toBe(true);
+    expect(renderer.telemetry().cover).toMatchObject({ armed: false });
+  });
+
+  it("[W5] a resize that clears the canvas buffer redraws the frame in the same task (no blank frame over the cover)", () => {
+    const draws = pipeline.draws.length;
+    pipeline.covers.length = 0;
+    pipeline.resizeClears = true;
+    window.dispatchEvent(new Event("resize"));
+    // synchronously: the cleared buffer is never presented, and the cover is re-applied by the same draw
+    expect(pipeline.draws.length).toBe(draws + 1);
+    expect(visible()).toBe(true);
+    expect(pipeline.covers.at(-1)).toEqual({ x: 0, cover: true, cull: true });
+  });
+
+  it("[W5] a cleared buffer that cannot be redrawn shows the model at once, until the next draw", async () => {
+    const draws = pipeline.draws.length;
+    pipeline.resizeClears = true;
+    pipeline.contextLost = true; // the draw is refused: the context went before webglcontextlost
+    window.dispatchEvent(new Event("resize"));
+    expect(pipeline.draws.length).toBe(draws);
+    expect(visible()).toBe(false); // hidden synchronously, with the culling (and its cover) revealed
+    expect(pipeline.reveals).toBeGreaterThan(0);
+    pipeline.contextLost = false;
+    pipeline.resizeClears = false;
+    window.dispatchEvent(new Event("resize"));
+    await settled();
+    expect(pipeline.covers.at(-1)).toMatchObject({ cover: true, cull: true });
+  });
+
+  it("[W5] a draw that finds the context lost before webglcontextlost reveals the model", async () => {
+    pipeline.contextLost = true;
+    const reveals = pipeline.reveals;
+    window.dispatchEvent(new Event("resize")); // an unchanged size: requests a draw for the next frame
+    await vi.waitFor(() => expect(visible()).toBe(false));
+    expect(pipeline.reveals).toBeGreaterThan(reveals);
+    pipeline.contextLost = false;
+    window.dispatchEvent(new Event("resize"));
+    await settled();
+  });
+
+  it("[PANEND] a gesture's frames may only cover, and every rest after wants it", async () => {
+    renderer.camera({ scale: 1, x: 0, y: 0, exact: true });
     pipeline.covers.length = 0;
     renderer.camera({ scale: 2, x: 10, y: 0 });
     renderer.camera({ scale: 2, x: 20, y: 0 });

@@ -11,8 +11,9 @@ function restoreDefaultEvents() {
   svg.call(zoom);
 }
 
-// handle viewbox click. EXPERIMENTAL ?renderer=gpu&gpu-select (src/gpu/editor-dispatch.ts): while the GPU camera runs
-// ahead of the SVG, the click is re-targeted once (false: swallowed); otherwise the native event is used unchanged
+// handle viewbox click. GPU renderer (the default; EXPERIMENTAL &gpu-select, src/gpu/editor-dispatch.ts): while the
+// GPU camera runs ahead of the SVG, the click is re-targeted once (false: swallowed); otherwise the native event is
+// used unchanged
 function clicked() {
   const route = window.gpuClickRoute?.(d3.event);
   if (route === false) return;

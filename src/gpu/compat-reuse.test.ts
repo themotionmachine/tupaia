@@ -433,6 +433,18 @@ describe("compat reuse: stylesheets", () => {
       styleState([sheet([rule("#labels text"), rule("svg#map #emblems", "visibility: hidden")])], applies).key
     ).toBe(base);
     expect(styleState([sheet([rule("#labels text")], { disabled: true })], applies).key).not.toBe(base);
+    // the svg-cover's rules sit in `@media screen` (svg-cover.ts): applied or not, they key as nothing
+    const cover = {
+      cssText:
+        "@media screen { svg#map > #viewbox { visibility: hidden; } svg#map > #viewbox text { visibility: visible; } }",
+      media: { mediaText: "screen" },
+      cssRules: [
+        rule("svg#map > #viewbox", "visibility: hidden"),
+        rule("svg#map > #viewbox text", "visibility: visible")
+      ]
+    };
+    const covered = [sheet([rule("#labels text")]), sheet([cover])];
+    expect(styleState(covered, applies).key).toBe(styleState([sheet([rule("#labels text")]), sheet([])], applies).key);
   });
 
   it("keys consecutive identical sheets as one (an emblem generated on zoom), and nothing else", () => {

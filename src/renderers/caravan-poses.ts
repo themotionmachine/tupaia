@@ -1,10 +1,11 @@
-// Live trade caravan poses: draw-trade-animation.ts animates them; gpu/markers.ts and gpu/renderer.ts read them.
-// ?renderer=gpu (W3b PAINT): while the GPU canvas presents the map, a caravan's per-frame pose stays here instead of
-// being written to its SVG group. Chrome re-paints and re-layerizes the whole visible document for any SVG attribute
-// write, even under the canvas: on the parity world with every layer on that is ~115 ms a frame (9 fps with the
-// default 30 caravans) for a copy no one sees. The GPU mirrors these poses; the SVG is brought up to date whenever it
-// is shown (setCaravanDomPaused(false)), clicked (syncCaravans), interrupted (settlePose) or exported (export clones
-// copy the live poses). Only the GPU renderer pauses: in SVG mode every tick is written, exactly as before.
+// Live trade caravan poses: draw-trade-animation.ts animates them; gpu/markers.ts and gpu/renderer.ts read them. GPU
+// renderer (W3b PAINT; the default display since W5): while the GPU canvas presents the map, a caravan's per-frame pose
+// stays here instead of being written to its SVG group. Chrome re-paints and re-layerizes the whole visible document
+// for any SVG attribute write, even under the canvas: on the parity world with every layer on that is ~115 ms a frame
+// (9 fps with the default 30 caravans) for a copy no one sees. The GPU mirrors these poses; the SVG is brought up to
+// date whenever it is shown (setCaravanDomPaused(false)), clicked (syncCaravans), interrupted (settlePose) or exported
+// (export clones copy the live poses). Only the GPU renderer pauses: in SVG mode every tick is written, exactly as
+// before.
 
 // Every caravan group still in flight, wherever it was appended: a load replaces the container, so clear() cannot
 // reach groups drawn into the previous world through the current `tradeAnimation` selection

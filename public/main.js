@@ -187,7 +187,8 @@ let zoomWorld = null;
 const navigationUpdates = new window.ZoomUpdateScheduler({
   valid: () => zoomWorld === grid,
   camera(update) {
-    // ?renderer=gpu: in-motion frames move the GPU camera uniforms only; the exact settle frame still writes the SVG
+    // GPU renderer (the default; not ?renderer=svg): in-motion frames move the GPU camera uniforms only; the exact
+    // settle frame still writes the SVG
     if (window.gpuRenderer?.camera(update)) return;
     viewbox.attr("transform", `translate(${viewX} ${viewY}) scale(${scale})`);
     if (customization === 1) {

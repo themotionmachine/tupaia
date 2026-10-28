@@ -83,7 +83,8 @@ async function openPage(origin: string, browser: Awaited<ReturnType<typeof chrom
   const errors: string[] = [];
   page.on("pageerror", e => errors.push(e.message));
   page.on("dialog", d => void d.dismiss());
-  await page.goto(`${origin}/?local&seed=${C.seed}&width=${C.width}&height=${C.height}`);
+  // renderer=svg: the fixture is built as before W5 made GPU the default display (save output never depends on it)
+  await page.goto(`${origin}/?local&seed=${C.seed}&width=${C.width}&height=${C.height}&renderer=svg`);
   await page.evaluate(async () => {
     const t = (globalThis as any).__tupaia;
     const ready = await t.call("ready", { timeoutMs: 120000 });

@@ -18,13 +18,13 @@ import {
   unsupportedGpuCapture
 } from "./renderer-ab.ts";
 
-test("BENCH_RENDERER accepts only svg/gpu and leaves the URL unchanged when unset", () => {
+test("BENCH_RENDERER accepts only svg/gpu and pins the svg baseline when unset", () => {
   assert.equal(parseRendererEnv(undefined), undefined);
   assert.equal(parseRendererEnv(""), undefined);
   assert.equal(parseRendererEnv("gpu"), "gpu");
   assert.throws(() => parseRendererEnv("GPU"), /Invalid BENCH_RENDERER/);
   assert.throws(() => parseRendererEnv("webgl"), /Invalid BENCH_RENDERER/);
-  assert.equal(rendererQuery(undefined), "");
+  assert.equal(rendererQuery(undefined), "&renderer=svg"); // the app's default is gpu since W5
   assert.equal(rendererQuery("svg"), "&renderer=svg");
 });
 

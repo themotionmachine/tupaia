@@ -33,7 +33,9 @@ const browser = await chromium.launch({ headless: true, channel: "chromium", arg
 const results: unknown[] = [];
 let failure: string | null = null;
 try {
-  for (const mode of ["svg", "gpu"]) {
+  // W5: "default" is the page with no renderer parameter, which must boot the GPU renderer like ?renderer=gpu
+  for (const run of ["svg", "gpu", "default"]) {
+    const mode = run === "svg" ? "svg" : "gpu";
     const context = await browser.newContext({ viewport: { width: 1280, height: 720 }, deviceScaleFactor: 2,
       serviceWorkers: "block", acceptDownloads: false });
     await context.addInitScript((localOrigin: string) => {
@@ -62,7 +64,7 @@ try {
       const url = new URL(response.url());
       if (url.origin === origin && url.pathname.endsWith(".js")) modules.push(url.pathname);
     });
-    const url = "/?local&seed=7319&width=1280&height=720" + (mode === "gpu" ? "&renderer=gpu" : "");
+    const url = "/?local&seed=7319&width=1280&height=720" + (run === "default" ? "" : "&renderer=" + run);
     await page.goto(origin + url);
     await page.waitForFunction((mode: string) => {
       const w = globalThis as any, status = w.rendererStatus?.();
@@ -80,12 +82,13 @@ try {
         canvas: document.querySelectorAll("canvas[data-gpu-renderer]").length,
         canonicalClickHook: typeof w.gpuClickRoute === "function", fallbackReason: status.fallbackReason };
     });
-    const row = { mode, url, state, errors, modules };
+    const row = { mode: run, url, state, errors, modules };
     results.push(row);
     if (errors.length || state.fallbackReason || (mode === "svg" &&
       (state.webglRequests !== 0 || state.canvas !== 0 || state.canonicalClickHook ||
         modules.some(name => /^\/renderer-[^/]+\.js$/.test(name)))) ||
-      (mode === "gpu" && (state.webglRequests < 1 || state.canvas !== 1 || !state.canonicalClickHook)))
+      (mode === "gpu" && (state.webglRequests < 1 || state.canvas !== 1 || !state.canonicalClickHook)) ||
+      state.requested !== mode)
       throw new Error("Packaged mode invariant failed: " + JSON.stringify(row));
     await context.close();
   }
@@ -96,7 +99,7 @@ try {
   await browser.close();
   await new Promise<void>(done => server.close(() => done()));
 }
-writeFileSync(output, JSON.stringify({ scope: "Packaged clean build boot and default SVG lazy save/export imports only",
+writeFileSync(output, JSON.stringify({ scope: "Packaged clean build boot (svg, gpu, and the default: gpu since W5) and SVG lazy save/export imports only",
   results, missing, failure, pass: !failure }, null, 2), { flag: "wx" });
 console.log(JSON.stringify({ output, pass: !failure, failure, results }));
 if (failure) process.exitCode = 1;

@@ -22,7 +22,8 @@ It is a separate Node package. Nothing here is imported by the app or shipped in
   (below).
 - Startup registers 28 tools and 3 resources and opens no browser and no network. The first
   tool call starts a loopback static server over `<repo>/dist`, connects to shared Chromium
-  (Playwright 1.60.0) and opens an isolated context/page at `/?local`. A private loopback browser
+  (Playwright 1.60.0) and opens an isolated context/page at `/?local&renderer=svg` (the SVG renderer,
+  pinned since the app's default display became GPU; `TUPAIA_RENDERER=gpu` selects it). A private loopback browser
   owner is reused across processes in the same checkout and launch mode; it retires after 60 s
   without clients. Closing a session closes its context only. `TUPAIA_BROWSER_POOL=0` selects
   dedicated process ownership for lifecycle diagnostics.

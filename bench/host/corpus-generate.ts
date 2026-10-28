@@ -67,7 +67,7 @@ try {
     const errors: string[] = [];
     page.on("pageerror", e => errors.push(e.message));
     page.on("dialog", d => d.dismiss());
-    await page.goto(`${origin}/?seed=${seed}`);
+    await page.goto(`${origin}/?seed=${seed}&renderer=svg`); // generated as before W5 made GPU the default display
     await page.waitForFunction(() => (0, eval)("typeof pack !== 'undefined' && pack?.cells?.i?.length > 0"), null, { timeout: 120000 });
     const info = await page.evaluate(
       async ([wantCells, stepFor]) => {

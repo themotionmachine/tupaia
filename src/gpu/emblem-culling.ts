@@ -267,8 +267,8 @@ export class HiddenEmblemCulling {
     }
   }
 
-  // `cover`: the renderer wants the SVG cover (armed by motion: GpuRenderer.camera). `cull`: false while moving, where
-  // only the cover may change (culling writes wait for rest).
+  // `cover`: the renderer wants the SVG cover (armed by its first frame at rest or by motion: GpuRenderer.coverArmed).
+  // `cull`: false while moving, where only the cover may change (culling writes wait for rest).
   update(camera: Camera, viewport: Viewport, opaque: boolean, cover = false, cull = true): void {
     this.coverWanted = cover && !!this.cover;
     this.held = !cull;

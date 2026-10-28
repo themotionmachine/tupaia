@@ -3,7 +3,7 @@
 // (exclusive lock: the resume latency as a timing).
 //
 // Each script in editor-scripts/ is a list of editor interactions (camera, click, input, button, drag/brush, close).
-// The SVG arm (stock renderer) RECORDS it: targets resolve to frozen client points and camera transforms, and every
+// The SVG arm (?renderer=svg) RECORDS it: targets resolve to frozen client points and camera transforms, and every
 // step's outcome is observed. The GPU arms (?renderer=gpu rendering-only, ?renderer=gpu&gpu-select) REPLAY the frozen
 // actions with real Playwright input and must observe the same thing, step by step:
 //   - pack/grid/notes section hashes after the step, and which sections the step changed;
@@ -12,6 +12,8 @@
 //   - the canonical SVG element under the pointer before each pointer action;
 //   - dispatchClick and editor-global call counts (more than recorded = double dispatch);
 //   - open editor dialogs; no camera move during any pointer action (drag, brush stroke), d3 zoom or GPU camera;
+//   - GPU arms: every click and drag on the map with the canvas shown is taken under the svg-cover wherever it applies
+//     (W5: armed at rest from the first frame; cover-state.ts);
 //   - GPU arms: suspended with the canvas hidden while the editor is open, and resumed after the close. The resume is
 //     timed from the trusted close click to the first current GPU frame and to the first refined frame (D4). After a
 //     session that changed the model, no GPU frame older than the latest DOM revision may be on screen (D13).
@@ -56,6 +58,7 @@ import {
 import { beginStep, endStep, installReplay } from "./editor-replay-page.ts";
 import { decodePng } from "../png.ts";
 import { resolveFixture } from "./fixtures/index.ts";
+import { type CoverState, readCover } from "./cover-state.ts";
 import { HIDE_CHROME } from "./screenshot-chrome.ts";
 import { adapterMatches, launcherFrom, launchOptions, probeAdapter } from "./launcher.ts";
 
@@ -207,6 +210,7 @@ async function runStep(page: Page, arm: Arm, step: Step, index: number, frozen: 
   await page.evaluate(beginStep, { index, seed: 7919 * (index + 1) });
   let point: { x: number; y: number } | undefined;
   let hitKey: string | null | undefined;
+  let cover: CoverState | undefined; // W5: the svg-cover just before a pointer action (GPU arms)
   const aim = async (target: unknown) => {
     if (arm === "svg") {
       const resolved = await page.evaluate(t => (globalThis as any).__rp.resolve(t), target);
@@ -235,6 +239,7 @@ async function runStep(page: Page, arm: Arm, step: Step, index: number, frozen: 
     case "click": {
       hitKey = await aim(step.target);
       point = frozen.point;
+      if (arm !== "svg") cover = await readCover(page);
       await page.mouse.click(point!.x, point!.y);
       break;
     }
@@ -272,6 +277,7 @@ async function runStep(page: Page, arm: Arm, step: Step, index: number, frozen: 
     case "drag": {
       hitKey = await aim(step.target);
       point = frozen.point;
+      if (arm !== "svg") cover = await readCover(page);
       const { x, y } = point!;
       await page.mouse.move(x, y);
       await page.mouse.down();
@@ -326,7 +332,7 @@ async function runStep(page: Page, arm: Arm, step: Step, index: number, frozen: 
     }, breaks);
   }
   const observed = await page.evaluate(endStep);
-  const result = { index, op: step.op, note: step.note, point, hitKey, ...observed, resume, ms: Date.now() - t0 } as StepObservation;
+  const result = { index, op: step.op, note: step.note, point, hitKey, ...observed, resume, cover, ms: Date.now() - t0 } as StepObservation;
   // Evidence for "editor open but the GPU canvas is still on screen": what the user sees against the edited SVG
   // under it (canvas hidden for the second shot), and how many device pixels differ.
   if (arm !== "svg" && result.dialogs.length && result.gpu?.canvasVisible) (result as any).staleCanvas = await staleCanvasEvidence(page, `${arm}-${(page as any).__script}-step${index}`);
@@ -470,6 +476,10 @@ report.summary = {
   scripts: report.scripts.map((s: any) => [s.name, Object.fromEntries(Object.entries(s.verdicts).map(([arm, v]: [string, any]) => [arm, v.pass ? "PASS" : "FAIL"]))]),
   resume: Object.fromEntries(arms.filter(a => a !== "svg").map(arm => [arm, resumeSummary(arm)])),
   maxSteadyMiB: Object.fromEntries(arms.filter(a => a !== "svg").map(arm => [arm, steadySummary(arm)])),
+  // W5: clicks and drags taken under the active svg-cover, per GPU arm (judged per step in checkGpuStep)
+  coveredPointerSteps: Object.fromEntries(
+    arms.filter(a => a !== "svg").map(arm => [arm, report.scripts.reduce((n: number, s: any) => n + (s.verdicts[arm]?.coveredPointerSteps ?? 0), 0)])
+  ),
   seconds: Math.round((Date.now() - started) / 1000)
 };
 report.verdicts = Object.fromEntries(

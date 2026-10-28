@@ -3,8 +3,23 @@
 Acceptance receipt for W4 (PHASE1-PLAN.md): "The PARITY-LEDGER is updated from those receipts."
 
 Scope is D9: GPU is the default display and the hidden SVG stays the editable model. P3 (SceneDocument ownership)
-and P4 (removing the SVG display path) are deferred. Navigate/Edit modes are D10. The default flip is **not yet
-approved**; SVG is still the production default and `?renderer=gpu` is opt-in.
+and P4 (removing the SVG display path) are deferred. Navigate/Edit modes are D10.
+
+**W5 (2026-10-27): the default flip is approved and implemented on `gpu/w5-default`, pending its gate run and
+deploy.** A page without a `renderer` parameter now requests the GPU renderer; `?renderer=svg` opts out, an unknown
+or conflicting value still falls back to SVG with a warning, and no WebGL2 or any failure falls back to SVG as
+before. Save and export still use the SVG. The receipts below are from `04ec9040` / `8c5986f9`, where SVG was the
+default and `?renderer=gpu` the opt-in; the production check describes that deploy.
+
+## Decisions (Ryan, W5)
+
+| Decision | Status | Where |
+|---|---|---|
+| GPU becomes the default display | Approved; implemented in W5, pending gate run and deploy | `src/renderers/renderer-mode.ts` |
+| The PANEND svg-cover is armed at rest from the first full GPU frame (no ~155 ms first-write Layerize before any gesture), with pixel and pick gate coverage for the armed state | Approved; implemented in W5, pending gate run | `GpuRenderer.draw` (`src/gpu/renderer.ts`), `bench/host/cover-state.ts`, GATE.md "W5" |
+| Heightmap editor resume of about 2 s (known gap 1) | Accepted | `replay-resume` row below |
+| The four coat-of-arms visibility assertions PANEND rewrote (known gap 11) | Acknowledged | `paint` (`bench/direct-emblem-culling-contract.ts`) |
+| Chord count follows the zoom at which a bucket was prepared (known gap 5) | Accepted 2026-10-21 | |
 
 Status words: **PASS**, **PASS with known gap** (the gate passes, a stated limit remains), **GAP** (not proven or
 failing).
@@ -64,7 +79,7 @@ Golden thresholds are D1/D11: SVG arm against GPU arm of the same build on the i
 | Trade layer live | PASS | `trade-live` | 30/30 caravans moved on GPU, 0 DOM writes, p95 16 ms vs 9 ms frozen, 119 fps | `trade-live-20261021T221514-913Z` |
 | Context-loss restore | PASS | `restore world=100k` | loss to draw 1115 ms; restored to draw 951 ms; prepare 915 ms; same revision, payload retained 3/3 | `restore-20261021T221603-320Z` |
 | Native recovery | PASS | `native-recovery` x4 | recovery wall: wheel 100k 3332 ms, pan-wide 2176 ms, pan-near 1931 ms, parity wheel 3292 ms; 0 failed prepares; 0 hit mismatches and 0 SVG writes while moving | `native-recovery-20261021T221634-461Z`, `...T221700-006Z`, `...T221723-526Z`, `...T221746-591Z` |
-| Editor resume (D12) | PASS with known gap | `replay-resume` Metal, 39 scripts | worst current frame: `heightmap` 1840 ms (gpu), 1874 ms (gpu-select); `goods` 1764 / 1977 ms; refined worst 2653 / 2870 ms (`goods`). Browser-tier `replay` run: worst current 1940 ms (gpu), 2242 ms (gpu-select). Target is 2 s to the first current frame | `replay-resume-20261021T231534-753Z`, `replay-20261021T212126-181Z` |
+| Editor resume (D12) | PASS, gap accepted (W5) | `replay-resume` Metal, 39 scripts | worst current frame: `heightmap` 1840 ms (gpu), 1874 ms (gpu-select); `goods` 1764 / 1977 ms; refined worst 2653 / 2870 ms (`goods`). Browser-tier `replay` run: worst current 1940 ms (gpu), 2242 ms (gpu-select). Target is 2 s to the first current frame | `replay-resume-20261021T231534-753Z`, `replay-20261021T212126-181Z` |
 
 ## Production check
 
@@ -72,18 +87,25 @@ Deployed `gpu/integrate` `04ec9040` as Worker `d43c7f46-6f66-4ce7-9c8c-58bf013b9
 `93b5c879`, then `d2c61040`, then `5224b113`.
 
 Live check: `?renderer=gpu` was active on 10 of 10 loads; the shared map loaded with 47,885 cells; 0 page errors;
-writes blocked. SVG remains the default.
+writes blocked. SVG was still the default in that deploy; the W5 flip is not deployed yet.
 
 ## Known gaps and follow-ups
 
 1. **Editor resume near the 2 s target.** Heightmap and `goods` resume reach 1.8-2.0 s to the current frame (up to
-   2.2 s in the browser-tier run, gpu-select arm); refined frames take up to 2.9 s. Thin or no margin.
+   2.2 s in the browser-tier run, gpu-select arm); refined frames take up to 2.9 s. Thin or no margin. **Accepted
+   by Ryan (W5)** for the heightmap editor's ~2 s resume.
 2. **Wheel-zoom frame budget.** Shared and 100k hold p95 8.7-8.8 ms but eventToNextRaf p95 is 16.6-16.7 ms against
    16.7. On the parity world frame p95 is 16.1 ms and eventToNextRaf p95 31.4 ms.
-3. **First DOM write before any gesture.** It still costs about 155 ms of Layerize, because the svg-cover arms only
-   on the first gesture. Decision pending with Ryan.
-4. **No pixel or pick gate runs under an armed svg-cover.** Moving-proof checks (`native-recovery`) cover hit
-   agreement and write counts only.
+3. **First DOM write before any gesture.** Addressed in W5, pending measurement: the svg-cover now arms at the
+   first full GPU frame at rest and is applied in that same culling update, so the first write at rest (culling, the
+   camera, `#coordinates`, a caravan) lands under the cover instead of costing about 155 ms of Layerize. Fail-closed
+   as before: an ineligible model, a filtered or transparent canvas, a canvas hidden outside the bitmap window, an
+   editor, print, context loss, a fallback and `?gpu-svg-cover=0` all leave the model painting.
+4. **Pixel and pick gates under an armed svg-cover.** Addressed in W5, pending the gate run: with the cover armed
+   at rest every same-page GPU-vs-SVG check now runs its GPU arm under it, and `bench/host/cover-state.ts` asserts
+   it (golden and presets, the census checks, labels, stroke-probe, smoke; picking per view; replay per click and
+   drag in `gpu` and `gpu-select`; a `native-recovery` rest proof) while requiring every SVG arm uncovered. DOM
+   census reads lift the cover (`window.gpuCanonicalVisibility`). See GATE.md "W5".
 5. **Chord count follows the zoom at which a bucket was prepared.** Accepted by Ryan 2026-10-21.
 6. **`dpr-change-backing`** (resize-print): backing store stays at the larger size after a DPR drop.
 7. **15 shared-fixture layers are empty in both arms** at the shared-map cameras (lakes, compass, provinces,
@@ -93,8 +115,10 @@ writes blocked. SVG remains the default.
 9. **Toggle on-state golden** fails for `burgs`, `scaleBar`, `vignette` (3 of 31) and is reported, not gated.
 10. **Picking:** semantic mismatches (up to 5 on 100k) and two strict cohort misses (relief, river) are reported
     under D3; several cohorts have too few samples.
-11. **Coat-of-arms visibility contract.** Four assertions were changed by PANEND. Pending Ryan's acknowledgement.
+11. **Coat-of-arms visibility contract.** Four assertions were changed by PANEND. **Acknowledged by Ryan (W5).**
 12. **D14 retired.** GLYPH3 (W4b) cuts placed glyphs at their real rotation and sub-pixel phase; `PRESET_EXCEPTIONS` is
     empty and cyberpunk labels pass the presets gate with no exception.
 13. **Hardware (D6):** second GPU family, Windows/iGPU at DPR 1 and 60 Hz, second OS.
-14. **Default flip not yet approved.** P3 and P4 remain deferred until a measured need appears.
+14. **Default flip approved (W5)**, implemented on `gpu/w5-default`; pending its gate run and the production
+    deploy. Every harness SVG arm and the MCP browser now name `renderer=svg` explicitly. P3 and P4 remain deferred
+    until a measured need appears.

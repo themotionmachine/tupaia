@@ -84,6 +84,7 @@ import { type BrowserContext, chromium, type Page } from "playwright";
 import { type CellMetrics, coverageOf, D1, heatmap, measureCell } from "../golden-metrics.ts";
 import { decodePng, encodePng } from "../png.ts";
 import { isolateLayer } from "./golden-isolation.ts";
+import { coverProblems, readCover } from "./cover-state.ts";
 import { HIDE_CHROME } from "./screenshot-chrome.ts";
 import { resolveFixture } from "./fixtures/index.ts";
 import {
@@ -352,7 +353,12 @@ async function waitGpu(page: Page): Promise<{ active: string; fallbackReason?: s
 const dropCover = (page: Page, on: boolean) =>
   breakMode === "drop" ? page.evaluate(show => void ((document.getElementById("labels-harness-drop") as HTMLElement).style.display = show ? "block" : "none"), on) : Promise.resolve();
 
+// W5: the GPU arm under the svg-cover (armed at rest) wherever it applies, the SVG arm never (cover-state.ts); either
+// broken is a harness error
 async function captureArms(page: Page): Promise<{ gpu: Buffer; svg: Buffer }> {
+  // a canvas shown again by the previous capture re-applies the cover on its next frame
+  await page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
+  const coverGpu = await readCover(page);
   await dropCover(page, true);
   const gpu = await page.screenshot({ animations: "disabled", style: HIDE_CHROME });
   await dropCover(page, false);
@@ -364,11 +370,14 @@ async function captureArms(page: Page): Promise<{ gpu: Buffer; svg: Buffer }> {
     return value;
   });
   await page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
+  const coverSvg = await readCover(page);
   const svg = await page.screenshot({ animations: "disabled", style: HIDE_CHROME });
   await page.evaluate(value => {
     const c = document.querySelector("canvas[data-gpu-renderer]") as HTMLCanvasElement | null;
     if (c) c.style.visibility = value || "";
   }, old);
+  const problems = coverProblems(coverGpu, coverSvg);
+  if (problems.length) throw Error(`captureArms: ${problems.join("; ")}`);
   return { gpu, svg };
 }
 

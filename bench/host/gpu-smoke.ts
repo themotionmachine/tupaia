@@ -5,6 +5,7 @@ import { createServer } from "node:http";
 import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { resolve, extname } from "node:path";
 import { isolateLayer } from "./golden-isolation.ts";
+import { coverProblems, readCover } from "./cover-state.ts";
 const root = resolve(import.meta.dirname, "../.."); // repo root: bench/host -> ../..
 const dist = resolve(root, "dist");
 const output = resolve(process.env.GATE_OUT_DIR || process.cwd(), process.env.SMOKE_NAME || "gpu-smoke");
@@ -97,10 +98,16 @@ try {
   },Number(process.env.SMOKE_GROUP_SAMPLES));
   report.status=await page.evaluate(()=>(globalThis as any).rendererStatus?.());
  }
+ // W5: the GPU arm under the svg-cover (armed at rest from the first frame) wherever it applies, the SVG arm never
+ const coverGpu=await readCover(page);
  const gpu=await page.screenshot({path:output+"-gpu.png",animations:"disabled"});
  const old=await page.evaluate(()=>{const c=document.querySelector("canvas[data-gpu-renderer]") as HTMLCanvasElement | null;if(!c)return null;const old=c.style.visibility;c.style.visibility="hidden";return old;});
+ const coverSvg=await readCover(page);
  const svg=await page.screenshot({path:output+"-svg.png",animations:"disabled"});
  await page.evaluate(old=>{const c=document.querySelector("canvas[data-gpu-renderer]") as HTMLCanvasElement | null;if(c)c.style.visibility=old||"";},old);
+ (report as any).cover={gpu:coverGpu,svg:coverSvg};
+ const coverIssues=coverProblems(coverGpu,coverSvg);
+ if(coverIssues.length)report.failure??=coverIssues.join("; ");
  report.diff=await page.evaluate(async images=>{const pixels=[];for(const data of images){const i=new Image();i.src="data:image/png;base64,"+data;await i.decode();const c=document.createElement("canvas");c.width=i.width;c.height=i.height;const x=c.getContext("2d")!;x.drawImage(i,0,0);pixels.push(x.getImageData(0,0,c.width,c.height));}const [a,b]=pixels;let changed=0,over16=0,max=0,sum=0;for(let p=0;p<a.data.length;p+=4){let delta=0;for(let j=0;j<3;j++)delta=Math.max(delta,Math.abs(a.data[p+j]-b.data[p+j]));if(delta)changed++;if(delta>16)over16++;max=Math.max(max,delta);sum+=delta;}return {width:a.width,height:a.height,changedFraction:changed/(a.width*a.height),over16Fraction:over16/(a.width*a.height),maxDelta:max,meanMaxChannelDelta:sum/(a.width*a.height)};},[gpu.toString("base64"),svg.toString("base64")]);
 
  // Marker-crop pixel check (TRADE). The camera is zoomed onto each frozen marker so it spans tens of pixels. "Ink" = pixels differing >16 from the

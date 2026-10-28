@@ -21,6 +21,7 @@ import { decodePng } from "../png.ts";
 import { FAMILIES } from "./golden-families.ts";
 import { adapterMatches, type Launcher, launcherFrom, launchOptions, probeAdapter } from "./launcher.ts";
 import { resolveFixture } from "./fixtures/index.ts";
+import { type CoverState, coverProblems, readCover } from "./cover-state.ts";
 import { HIDE_CHROME } from "./screenshot-chrome.ts";
 
 export const ROOT = resolve(import.meta.dirname, "../..");
@@ -228,10 +229,19 @@ export async function waitCurrent(page: Page, timeout = 120000, refined = true):
 export interface Arms {
   gpu: Buffer;
   svg: Buffer;
+  // W5: the svg-cover around the two shots (cover-state.ts); the GPU arm runs under it wherever it applies
+  cover: { gpu: CoverState; svg: CoverState };
 }
 
-/** GPU arm (canvas shown) then SVG arm (canvas visibility hidden) from one DOM state, at device resolution. */
+/**
+ * GPU arm (canvas shown) then SVG arm (canvas visibility hidden) from one DOM state, at device resolution. W5: the GPU
+ * arm is shot under the armed svg-cover (wherever it applies) and hiding the canvas reveals the model before the SVG
+ * shot; either broken is a harness error (coverProblems), not a verdict: a covered SVG arm is no reference at all.
+ */
 export async function captureArms(page: Page): Promise<Arms> {
+  // a canvas shown again by the previous capture re-applies the cover on its next frame
+  await page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
+  const coverGpu = await readCover(page);
   const gpu = await page.screenshot({ animations: "disabled", style: HIDE_CHROME });
   const old = await page.evaluate(() => {
     const c = document.querySelector("canvas[data-gpu-renderer]") as HTMLCanvasElement | null;
@@ -241,12 +251,15 @@ export async function captureArms(page: Page): Promise<Arms> {
     return value;
   });
   await page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
+  const coverSvg = await readCover(page);
   const svg = await page.screenshot({ animations: "disabled", style: HIDE_CHROME });
   await page.evaluate(value => {
     const c = document.querySelector("canvas[data-gpu-renderer]") as HTMLCanvasElement | null;
     if (c) c.style.visibility = value || "";
   }, old);
-  return { gpu, svg };
+  const problems = coverProblems(coverGpu, coverSvg);
+  if (problems.length) throw Error(`captureArms: ${problems.join("; ")}`);
+  return { gpu, svg, cover: { gpu: coverGpu, svg: coverSvg } };
 }
 
 export const decode = (buffer: Buffer): Rgba => decodePng(buffer);
@@ -358,13 +371,20 @@ export function layerFacts(args: { id: string; root?: boolean }): any {
   const parent = args.root ? svg : svg.querySelector("#viewbox")!;
   const target = parent.querySelector(`:scope > #${CSS.escape(args.id)}`) as SVGElement | null;
   if (!target) return { present: false };
-  const style = getComputedStyle(target);
-  let drawables = 0;
-  let any = 0;
-  for (const e of target.querySelectorAll("path,polygon,polyline,rect,circle,ellipse,line,text,use,image")) {
-    any++;
-    if ((e as any).checkVisibility ? (e as any).checkVisibility({ visibilityProperty: true }) : true) drawables++;
-  }
+  // W5: canonical visibility (the svg-cover lifted for the read, renderer.ts gpuCanonicalVisibility): under the armed cover
+  // the computed visibility of the whole #viewbox is hidden, which would read as "nothing drawn"
+  const canonical = (w.gpuCanonicalVisibility ?? ((read: () => any) => read())) as <T>(read: () => T) => T;
+  const { style, drawables, any } = canonical(() => {
+    const css = getComputedStyle(target);
+    const style = { display: css.display, visibility: css.visibility, opacity: css.opacity };
+    let drawables = 0;
+    let any = 0;
+    for (const e of target.querySelectorAll("path,polygon,polyline,rect,circle,ellipse,line,text,use,image")) {
+      any++;
+      if ((e as any).checkVisibility ? (e as any).checkVisibility({ visibilityProperty: true }) : true) drawables++;
+    }
+    return { style, drawables, any };
+  });
   const status = w.rendererStatus?.();
   const layer = status?.gpu?.layers?.[args.id] ?? null;
   let compatRunElements = 0;

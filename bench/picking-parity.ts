@@ -36,6 +36,7 @@ import { readFileSync, readdirSync, writeFileSync, existsSync } from "node:fs";
 import { resolve, extname } from "node:path";
 import { adapterMatches, launcherFrom, launchOptions, probeAdapter } from "./host/launcher.ts";
 import { resolveFixture } from "./host/fixtures/index.ts";
+import { coverApplies, coverProblems, readCover } from "./host/cover-state.ts";
 import {
   bisectorDistance,
   type ChainDesc,
@@ -1021,6 +1022,10 @@ try {
       });
       return { sampled, unmatched, fallbacks, diagnostics };
       };
+      // W5: the svg-cover is armed at rest from the first GPU frame, so the oracle's elementFromPoint runs under it
+      // (pointer-events:painted keeps native hits canonical): the gate must see that it did, wherever it applies
+      view.cover = await readCover(page);
+      for (const problem of coverProblems(view.cover, null)) view.errors.push(problem);
       let result: Awaited<ReturnType<typeof passes>>;
       let guardAfter: Awaited<ReturnType<typeof teardown>>;
       try {
@@ -1504,6 +1509,7 @@ const summary = {
       sceneGuard: v.sceneGuard && { valid: v.sceneGuard.valid, changes: v.sceneGuard.changes, mutations: v.sceneGuard.mutations },
       oracleAligned: v.oracleCamera?.aligned,
       gpuReady: v.gpuReady,
+      cover: v.cover && { active: v.cover.active, armed: v.cover.armed, applies: coverApplies(v.cover), issue: v.cover.issue },
       pickP95Ms: v.query?.pickMs?.p95,
       selectP95Ms: v.query?.selectMs?.p95,
       errors: v.errors
