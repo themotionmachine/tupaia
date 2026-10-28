@@ -5,18 +5,20 @@ Acceptance receipt for W4 (PHASE1-PLAN.md): "The PARITY-LEDGER is updated from t
 Scope is D9: GPU is the default display and the hidden SVG stays the editable model. P3 (SceneDocument ownership)
 and P4 (removing the SVG display path) are deferred. Navigate/Edit modes are D10.
 
-**W5 (2026-10-27): the default flip is approved and implemented on `gpu/w5-default`, pending its gate run and
-deploy.** A page without a `renderer` parameter now requests the GPU renderer; `?renderer=svg` opts out, an unknown
+**W5 (2026-10-27/28): GPU is the default display in production** (`gpu/integrate` `d8db534c`, Worker
+`fdb558c5`; W5 receipts and production check below). A page without a `renderer` parameter now requests the GPU renderer; `?renderer=svg` opts out, an unknown
 or conflicting value still falls back to SVG with a warning, and no WebGL2 or any failure falls back to SVG as
-before. Save and export still use the SVG. The receipts below are from `04ec9040` / `8c5986f9`, where SVG was the
-default and `?renderer=gpu` the opt-in; the production check describes that deploy.
+before. Save and export still use the SVG. Hardware WebGL only: with no parameter a software renderer (SwiftShader,
+llvmpipe; `failIfMajorPerformanceCaveat`) falls back to SVG, and `?renderer=gpu` forces it. The W4 receipts below are
+from `04ec9040` / `8c5986f9`, where SVG was the default and `?renderer=gpu` the opt-in; the W5 receipts rerun the
+browser tier and the T2 checks on the flipped default with the cover armed at rest.
 
 ## Decisions (Ryan, W5)
 
 | Decision | Status | Where |
 |---|---|---|
-| GPU becomes the default display | Approved; implemented in W5, pending gate run and deploy | `src/renderers/renderer-mode.ts` |
-| The PANEND svg-cover is armed at rest from the first full GPU frame (no ~155 ms first-write Layerize before any gesture), with pixel and pick gate coverage for the armed state | Approved; implemented in W5, pending gate run | `GpuRenderer.draw` (`src/gpu/renderer.ts`), `bench/host/cover-state.ts`, GATE.md "W5" |
+| GPU becomes the default display | Done; deployed 2026-10-28 (Worker `fdb558c5`) | `src/renderers/renderer-mode.ts` |
+| The PANEND svg-cover is armed at rest from the first full GPU frame (no ~155 ms first-write Layerize before any gesture), with pixel and pick gate coverage for the armed state | Done; parity settle Layerize 152-156 ms -> 0.2 ms (`navigation`, W5 receipt) | `GpuRenderer.draw` (`src/gpu/renderer.ts`), `bench/host/cover-state.ts`, GATE.md "W5" |
 | Heightmap editor resume of about 2 s (known gap 1) | Accepted | `replay-resume` row below |
 | The four coat-of-arms visibility assertions PANEND rewrote (known gap 11) | Acknowledged | `paint` (`bench/direct-emblem-culling-contract.ts`) |
 | Chord count follows the zoom at which a bucket was prepared (known gap 5) | Accepted 2026-10-21 | |
@@ -28,6 +30,8 @@ failing).
 
 | Receipt | Build | Result | Evidence |
 |---|---|---|---|
+| W5 quick + browser tier (shared lock), every GPU arm under an asserted cover | `77bbff27` | PASS, 4487 s | `~/.tupaia-gates/w5-harden/browser-20261028T001142-005Z` |
+| W5 T2: package-smoke (svg, gpu, default), navigation, native-recovery x4, restore, context, trade-live, golden shared, presets, golden cyberpunk, replay-resume all | `77bbff27` | all PASS | `~/.tupaia-gates/w5-harden/<check>-20261028T*` |
 | Browser tier (shared lock) | `04ec9040` | PASS, 4572 s | `~/.tupaia-gates/gpu-main/browser-20261021T205750-812Z` |
 | T2 timing and census runs (below) | `04ec9040` | all PASS | `~/.tupaia-gates/gpu-main/<check>-20261021T22*` and `T23*` |
 | Nightly matrix (shared lock) | `04ec9040` | 1 harness flake, then PASS on rerun | `~/.tupaia-gates/gpu-main/nightly-20261021T234530-294Z` |
@@ -83,11 +87,20 @@ Golden thresholds are D1/D11: SVG arm against GPU arm of the same build on the i
 
 ## Production check
 
+W5: deployed `gpu/integrate` `d8db534c` (tree of `77bbff27`) as Worker `fdb558c5-6f05-4048-81b5-78ca95bf6e81` on
+2026-10-28; rollback is `d43c7f46` (SVG default), then the W4 chain below. HTML and entry chunk hashes match `dist`.
+Live check (Metal, writes blocked): no parameter -> GPU active, cover armed and active, mode chip shown, on 10 of 10
+loads; `?renderer=svg` -> SVG, no chip, model visible; `&gpu-select` -> GPU; SwiftShader with no parameter -> SVG with
+the software-renderer reason and no chip; SwiftShader with `?renderer=gpu` -> GPU (cover not yet armed: model
+visible). 47,885 cells and 0 page errors on every load.
+
+W4:
+
 Deployed `gpu/integrate` `04ec9040` as Worker `d43c7f46-6f66-4ce7-9c8c-58bf013b9bbe` on 2026-10-21. Rollback chain:
 `93b5c879`, then `d2c61040`, then `5224b113`.
 
 Live check: `?renderer=gpu` was active on 10 of 10 loads; the shared map loaded with 47,885 cells; 0 page errors;
-writes blocked. SVG was still the default in that deploy; the W5 flip is not deployed yet.
+writes blocked. SVG was still the default in that deploy.
 
 ## Known gaps and follow-ups
 
@@ -96,12 +109,13 @@ writes blocked. SVG was still the default in that deploy; the W5 flip is not dep
    by Ryan (W5)** for the heightmap editor's ~2 s resume.
 2. **Wheel-zoom frame budget.** Shared and 100k hold p95 8.7-8.8 ms but eventToNextRaf p95 is 16.6-16.7 ms against
    16.7. On the parity world frame p95 is 16.1 ms and eventToNextRaf p95 31.4 ms.
-3. **First DOM write before any gesture.** Addressed in W5, pending measurement: the svg-cover now arms at the
+3. **First DOM write before any gesture.** Closed in W5 (`navigation` parity settle Layerize max 0.2 ms, was
+   152-156 ms): the svg-cover now arms at the
    first full GPU frame at rest and is applied in that same culling update, so the first write at rest (culling, the
    camera, `#coordinates`, a caravan) lands under the cover instead of costing about 155 ms of Layerize. Fail-closed
    as before: an ineligible model, a filtered or transparent canvas, a canvas hidden outside the bitmap window, an
    editor, print, context loss, a fallback and `?gpu-svg-cover=0` all leave the model painting.
-4. **Pixel and pick gates under an armed svg-cover.** Addressed in W5, pending the gate run: with the cover armed
+4. **Pixel and pick gates under an armed svg-cover.** Closed in W5 (browser tier and T2 PASS): with the cover armed
    at rest every same-page GPU-vs-SVG check now runs its GPU arm under it, and `bench/host/cover-state.ts` asserts
    it (golden and presets, the census checks, labels, stroke-probe, smoke; picking per view; replay per click and
    drag in `gpu` and `gpu-select`; a `native-recovery` rest proof) while requiring every SVG arm uncovered. DOM
@@ -119,6 +133,5 @@ writes blocked. SVG was still the default in that deploy; the W5 flip is not dep
 12. **D14 retired.** GLYPH3 (W4b) cuts placed glyphs at their real rotation and sub-pixel phase; `PRESET_EXCEPTIONS` is
     empty and cyberpunk labels pass the presets gate with no exception.
 13. **Hardware (D6):** second GPU family, Windows/iGPU at DPR 1 and 60 Hz, second OS.
-14. **Default flip approved (W5)**, implemented on `gpu/w5-default`; pending its gate run and the production
-    deploy. Every harness SVG arm and the MCP browser now name `renderer=svg` explicitly. P3 and P4 remain deferred
+14. **Default flip done (W5)**, deployed 2026-10-28. Every harness SVG arm and the MCP browser now name `renderer=svg` explicitly. P3 and P4 remain deferred
     until a measured need appears.

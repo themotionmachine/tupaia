@@ -61,3 +61,13 @@ Published the frozen P2 checkpoint to https://map.activationlayer.org.
 - Remaining fidelity, picking/editor, context recovery and Windows gaps remain as documented. No default flip or claim of full rewrite completion.
 
 The source/dist used for this deployment was frozen before resuming isolated parity work. Later edits are not automatically deployed.
+
+# Deployment — October 28, 2026 (GPU default)
+
+Ryan approved GPU as the default display (W5). Published `gpu/integrate` `d8db534c` to https://map.activationlayer.org.
+
+- Worker fmg-map version: fdb558c5-6f05-4048-81b5-78ca95bf6e81. Rollback: d43c7f46-6f66-4ce7-9c8c-58bf013b9bbe (W4c, SVG default), then 93b5c879, d2c61040, 5224b113.
+- Earlier opt-in GPU deploys not recorded above: d2c61040 and 93b5c879 (W4b/W4c), d43c7f46 (W4c BOOT, build 04ec9040).
+- Production HTML and /index-Cyfc0Dma.js hashes match `dist`.
+- No parameter: GPU on hardware WebGL2, svg-cover armed at rest, Navigate/Edit chip. `?renderer=svg` opts out. Software WebGL (SwiftShader, llvmpipe) and no WebGL2 fall back to SVG; `?renderer=gpu` forces GPU.
+- Gates and live check: docs/performance/webgl-rewrite/PARITY-LEDGER.md (W5 receipts, production check).
