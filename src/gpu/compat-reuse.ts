@@ -586,9 +586,14 @@ export function styleState(
       // an at-rule holding no rules of its own (@font-face, @property): what it names has no selector to follow
       if (rule.selectorText === undefined && !rule.cssRules) scope(rule);
       if (rule.cssRules && rule.selectorText === undefined) {
+        const before = key;
         key += `${rule.cssText.slice(0, rule.cssText.indexOf("{"))}${holds(rule.media)}{`;
+        const opened = key;
         visit(rule.cssRules);
-        key += "}";
+        // an @media block left empty (every rule in it scoped to the live #map: the svg-cover's `@media screen`) styles
+        // no clone element, so it keys as nothing; other empty blocks (@layer) still matter for the cascade order
+        if (key === opened && rule.media) key = before;
+        else key += "}";
       } else key += `${rule.cssText}\n`;
     }
   };

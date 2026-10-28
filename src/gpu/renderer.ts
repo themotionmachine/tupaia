@@ -1831,8 +1831,14 @@ export class GpuRenderer {
   }
 
   private draw(): void {
+    if (!this.active() || !this.covered()) return;
     // The context can be lost before `webglcontextlost` fires (device.lost still false); targets would be incomplete.
-    if (!this.active() || !this.covered() || this.device.gl.isContextLost()) return;
+    // A lost context also presents an empty buffer: reveal the model now (hide lifts the svg-cover) rather than leave a
+    // blank canvas over a hidden #viewbox until the event arrives (lost() then drops the frame as usual).
+    if (this.device.gl.isContextLost()) {
+      this.hide();
+      return;
+    }
     const started = performance.now();
     const markers = this.markers.collect(this.svg.querySelector(`#viewbox > #${TRADE_LAYER}`));
     if (this.markers.issue) {
@@ -1914,11 +1920,29 @@ export class GpuRenderer {
     const changed = rect.width !== this.viewport.width || rect.height !== this.viewport.height;
     const dprChanged = Math.min(dpr, 2) !== this.viewport.dpr;
     this.viewport = { width: Math.max(1, rect.width), height: Math.max(1, rect.height), dpr: Math.min(dpr, 2) };
-    if (!this.device.lost) this.device.resize(this.viewport.width, this.viewport.height, dpr);
+    // W5: a new backing store size clears the canvas buffer, and ResizeObserver callbacks run after this frame's rAF,
+    // so the cleared buffer would be presented once (a blank map: the svg-cover hides #viewbox under the canvas).
+    const cleared = !this.device.lost && this.device.resize(this.viewport.width, this.viewport.height, dpr);
     // screen-space compat runs are rasterized at viewport size
     if ((changed || dprChanged) && this.prepared?.runs.some(run => run.screen))
       this.schedulePrepare(PREPARE_DELAY, "resize");
-    this.requestDraw();
+    if (cleared && this.canvas.style.display !== "none") this.redrawCleared();
+    else this.requestDraw();
+  }
+
+  // A shown canvas whose buffer was just cleared: draw the frame again in this same task, before anything is presented;
+  // whatever stops that draw (no frame, a hidden reason, a window miss, a lost context) has the model shown instead
+  // (hide: the cover lifted, the canvas hidden) until the next successful draw re-applies it.
+  private redrawCleared(): void {
+    const frames = this.stats.frames;
+    cancelAnimationFrame(this.raf);
+    this.raf = 0;
+    this.draw();
+    // a fallback raised by the draw disposed the renderer: dispose() already showed the model
+    if (this.stats.frames === frames && !this.device.disposed) {
+      this.hide();
+      this.requestDraw();
+    }
   }
 
   // Miss keys belong to the dropped frame's crops: a re-prepared, replaced or restored frame retries at the same camera.

@@ -39,6 +39,14 @@ describe("coverProblems", () => {
     assert.match(coverProblems(gpuArm(), svgArm({ viewboxVisibility: "hidden" })).join(), /SVG arm/);
   });
 
+  it("fails an active cover with the canvas not shown, in either arm (a blank map)", () => {
+    const blank = { canvasShown: false, active: true, viewboxVisibility: "hidden" };
+    assert.match(coverProblems(gpuArm(blank), svgArm()).join(), /active with the canvas not shown in the GPU arm/);
+    assert.match(coverProblems(gpuArm(), svgArm(blank)).join(), /active with the canvas not shown in the SVG arm/);
+    // a hidden canvas with the cover lifted is the honest SVG arm
+    assert.deepEqual(coverProblems(gpuArm(), svgArm({ canvasShown: false, active: false })), []);
+  });
+
   it("judges nothing on an svg page", () => {
     const page = { ...svgArm(), gpu: false, armed: false };
     assert.deepEqual(coverProblems(page, page), []);

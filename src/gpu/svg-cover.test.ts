@@ -36,12 +36,20 @@ describe("[PANEND] SvgCover", () => {
     cover.apply(true);
     expect(cover.active).toBe(true);
     const sheet = document.head.querySelector<HTMLStyleElement>("style[data-gpu-renderer='svg-cover']")!.sheet!;
-    expect([...sheet.cssRules].map(rule => rule.cssText.replace(/\s+/g, " "))).toEqual([
+    // one `@media screen` block (print never sees a hidden map), holding both rules
+    expect(sheet.cssRules.length).toBe(1);
+    const media = sheet.cssRules[0] as CSSMediaRule;
+    expect(media.media.mediaText).toBe("screen");
+    expect([...media.cssRules].map(rule => rule.cssText.replace(/\s+/g, " "))).toEqual([
       expect.stringMatching(
         /^svg#map > #viewbox \{ ?visibility: hidden ?!important; ?pointer-events: painted ?!important;? ?\}$/
       ),
       expect.stringMatching(/^svg#map > #viewbox text \{ ?visibility: visible;? ?\}$/)
     ]);
+    // toggled again (withCanonicalVisibility lifts and re-applies): still exactly one block
+    cover.set(false);
+    cover.set(true);
+    expect(sheet.cssRules.length).toBe(1);
     cover.apply(false);
     expect(sheet.cssRules.length).toBe(0);
     expect(cover.status()).toMatchObject({ applied: 1, revealed: 1, checks: 1 });

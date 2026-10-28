@@ -11,11 +11,15 @@
 // closed): no explicit hidden visibility the inherited `painted` would make hittable, no explicit visible* pointer-events
 // (hidden + visiblePainted would no longer hit), no links, focus targets, SMIL or running animations, and no author rule
 // that would do the same. The selectors start with `svg#map`, so the export and compat clones (svg#fantasyMap) never
-// match them and compat-reuse's MAP_SCOPED style key ignores the sheet; the rules are inserted and deleted rather than
-// the sheet disabled (the reuse key includes the disabled flag).
+// match them and compat-reuse's MAP_SCOPED style key ignores the sheet (an @media block left empty keys as nothing);
+// the rules are inserted and deleted rather than the sheet disabled (the reuse key includes the disabled flag).
+// `@media screen`: print shows the canonical SVG. beforeprint lifts the cover (GpuRenderer hide), but a print path
+// that skips the event (a headless printToPDF, an embedder) must never print a hidden map.
 const COVER_RULES = [
-  "svg#map > #viewbox {visibility:hidden!important;pointer-events:painted!important}",
-  "svg#map > #viewbox text {visibility:visible}"
+  "@media screen {" +
+    "svg#map > #viewbox {visibility:hidden!important;pointer-events:painted!important}" +
+    "svg#map > #viewbox text {visibility:visible}" +
+    "}"
 ];
 
 // pointer-events values whose hit area needs visibility:visible (SVG2 §15.6): an element that sets one of them stops
@@ -107,6 +111,7 @@ export class SvgCover {
       this.on = false;
       return;
     }
+    // top-level rules only (the one @media block): deleting it takes its nested rules along
     while (sheet.cssRules.length) sheet.deleteRule(0);
     if (on) for (const [i, rule] of COVER_RULES.entries()) sheet.insertRule(rule, i);
     this.on = on;

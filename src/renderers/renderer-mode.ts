@@ -1,8 +1,9 @@
 // Renderer routing behind ?renderer=svg|gpu. GPU is the default display (W5); the hidden SVG stays the editable model
 // (D9). ?renderer=svg opts out: it never probes WebGL, loads GPU code or allocates GPU resources, and an unknown or
 // conflicting value is treated the same way, with a warning. A gpu request (default or explicit) is probed, then the
-// P1 backend module is loaded lazily; no WebGL2, or any init, load, prepare or restore failure, falls back to the
-// canonical SVG, which save/export always use.
+// P1 backend module is loaded lazily; no WebGL2 (for the default, no hardware WebGL2: a software rasterizer is refused
+// unless ?renderer=gpu names it), or any init, load, prepare or restore failure, falls back to the canonical SVG, which
+// save/export always use.
 import type { GpuRenderer } from "../gpu/renderer";
 
 export type RendererKind = "svg" | "gpu";
@@ -59,8 +60,22 @@ export function parseRendererPreference(search: string): RendererPreference {
   return { requested: "svg", source: "query", raw, warning: `Unknown renderer "${raw}"; using svg` };
 }
 
+export interface ProbeOptions {
+  // W5 default display only: a software WebGL2 (SwiftShader, llvmpipe, Microsoft Basic Render Driver...) would make the
+  // default map slower than the SVG it replaces, so it is refused. An explicit ?renderer=gpu skips this guard: the
+  // bench and headless harnesses (some on SwiftShader) name it on purpose.
+  hardwareOnly?: boolean;
+}
+
+// Renderer names (WEBGL_debug_renderer_info) of software rasterizers.
+export const SOFTWARE_RENDERER = /swiftshader|llvmpipe|softpipe|software|basic render/i;
+const UNMASKED_RENDERER_WEBGL = 0x9246; // WEBGL_debug_renderer_info.UNMASKED_RENDERER_WEBGL
+
 // The probe context is released immediately; the canvas is never attached to the document.
-export function probeWebGL2(createCanvas?: () => HTMLCanvasElement | OffscreenCanvas): RendererCapabilities {
+export function probeWebGL2(
+  createCanvas?: () => HTMLCanvasElement | OffscreenCanvas,
+  { hardwareOnly = false }: ProbeOptions = {}
+): RendererCapabilities {
   try {
     const canvas =
       createCanvas?.() ??
@@ -70,13 +85,35 @@ export function probeWebGL2(createCanvas?: () => HTMLCanvasElement | OffscreenCa
           ? document.createElement("canvas")
           : null);
     if (!canvas) return { webgl2: false, reason: "No canvas implementation" };
-    const gl = (canvas as { getContext(id: "webgl2"): unknown }).getContext("webgl2") as WebGL2RenderingContext | null;
-    if (!gl) return { webgl2: false, reason: "WebGL2 context unavailable" };
+    // failIfMajorPerformanceCaveat: the browser itself reports a software or blocklisted-GPU context as unavailable
+    const gl = (canvas as { getContext(id: "webgl2", options?: WebGLContextAttributes): unknown }).getContext(
+      "webgl2",
+      hardwareOnly ? { failIfMajorPerformanceCaveat: true } : undefined
+    ) as WebGL2RenderingContext | null;
+    if (!gl)
+      return {
+        webgl2: false,
+        reason: hardwareOnly
+          ? "WebGL2 unavailable without a major performance caveat (no hardware GPU)"
+          : "WebGL2 context unavailable"
+      };
+    // Browsers that do not flag the caveat still name the rasterizer, when they expose the (deprecated) extension.
+    const software = hardwareOnly ? softwareRenderer(gl) : "";
     gl.getExtension("WEBGL_lose_context")?.loseContext();
+    if (software)
+      return { webgl2: false, reason: `Software WebGL renderer (${software}); add ?renderer=gpu to force it` };
     return { webgl2: true };
   } catch (error) {
     return { webgl2: false, reason: `WebGL2 probe failed: ${errorText(error)}` };
   }
+}
+
+// The unmasked renderer name when it is a software rasterizer, else "" (also when the extension is absent).
+function softwareRenderer(gl: WebGL2RenderingContext): string {
+  const info = gl.getExtension("WEBGL_debug_renderer_info");
+  if (!info) return "";
+  const name = gl.getParameter(UNMASKED_RENDERER_WEBGL);
+  return typeof name === "string" && SOFTWARE_RENDERER.test(name) ? name : "";
 }
 
 const svgBackend = (): RendererBackend => ({
@@ -98,7 +135,7 @@ function disposeQuietly(backend: RendererBackend | null): string {
 
 export interface RendererRouterOptions {
   search: string;
-  probe?: () => RendererCapabilities;
+  probe?: (options: ProbeOptions) => RendererCapabilities;
   gpuBackend?: RendererBackendFactory;
 }
 
@@ -157,7 +194,9 @@ export class RendererRouter {
   }
 
   private tryGpu(): RendererBackend | null {
-    const capabilities = (this.options.probe ?? probeWebGL2)();
+    // the default display refuses software WebGL; an explicit ?renderer=gpu takes whatever WebGL2 there is
+    const options: ProbeOptions = { hardwareOnly: this.preference.source === "default" };
+    const capabilities = this.options.probe ? this.options.probe(options) : probeWebGL2(undefined, options);
     this.status.capabilities = capabilities;
     if (!capabilities.webgl2) {
       this.status.fallbackReason = capabilities.reason || "WebGL2 unavailable";
@@ -249,6 +288,12 @@ if (typeof window.addEventListener === "function")
 
 export function rendererStatus(): RendererStatus {
   return router.snapshot();
+}
+
+// Whether the page gets the Navigate/Edit mode controller (controllers/index.ts): GPU requested and active, read at
+// start-up, after the router's synchronous start. A start-time fallback (no hardware WebGL2, init failure) means none.
+export function renderModeWanted(status: Pick<RendererStatus, "requested" | "active">): boolean {
+  return status.requested === "gpu" && status.active === "gpu";
 }
 
 declare global {

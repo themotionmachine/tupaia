@@ -60,6 +60,11 @@ export function coverApplies(state: CoverState): boolean {
  */
 export function coverProblems(gpu: CoverState | null, svg: CoverState | null): string[] {
   const problems: string[] = [];
+  // Either arm: an active cover with no canvas shown hides #viewbox with nothing over it, a blank map. The renderer
+  // reveals the model synchronously whenever the canvas hides (HiddenEmblemCulling), so this is never fail-closed.
+  for (const [arm, state] of [["GPU", gpu], ["SVG", svg]] as const)
+    if (state?.gpu && state.active && !state.canvasShown)
+      problems.push(`svg-cover: active with the canvas not shown in the ${arm} arm (a blank map)`);
   if (gpu?.gpu && gpu.canvasShown && !gpu.optedOut) {
     if (!gpu.armed) problems.push("svg-cover: not armed at rest under a shown GPU frame (W5 arms it at the first frame)");
     else if (coverApplies(gpu) && !gpu.active) problems.push("svg-cover: applies (opaque frame, eligible model) but is not active in the GPU arm");
